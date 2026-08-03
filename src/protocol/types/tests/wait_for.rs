@@ -827,6 +827,39 @@ fn batch_result_with_trace_serializes_correctly() {
 }
 
 // ============================================================
+// inspectContextPreparation / contextPreparationProbeResult
+// ============================================================
+
+#[test]
+fn context_preparation_probe_wire_contract_is_explicit_and_redacted() {
+    let request: crate::protocol::Message = serde_json::from_value(serde_json::json!({
+        "type": "inspectContextPreparation",
+        "requestId": "safe001-probe",
+        "fixtureId": "acceptedOversizedJson",
+    }))
+    .expect("parse context preparation probe request");
+    assert!(matches!(
+        request,
+        crate::protocol::Message::InspectContextPreparation {
+            ref request_id,
+            ref fixture_id,
+        } if request_id == "safe001-probe" && fixture_id == "acceptedOversizedJson"
+    ));
+
+    let response = crate::protocol::Message::ContextPreparationProbeResult {
+        request_id: "safe001-probe".to_string(),
+        receipt: serde_json::json!({
+            "classification": "runtimeConfirmed",
+            "payloadChars": 321,
+        }),
+    };
+    let serialized = serde_json::to_value(response).expect("serialize probe response");
+    assert_eq!(serialized["type"], "contextPreparationProbeResult");
+    assert_eq!(serialized["receipt"]["payloadChars"], 321);
+    assert!(!serialized.to_string().contains("promptPrefix"));
+}
+
+// ============================================================
 // resetAgentChatTestProbe / getAgentChatTestProbe / agent_chatTestProbeResult
 // ============================================================
 

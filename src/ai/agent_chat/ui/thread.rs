@@ -2378,7 +2378,7 @@ impl AgentChatThread {
         let mut prompt_blocks = Vec::new();
         let mut failures = Vec::new();
 
-        for part in parts {
+        for (part_index, part) in parts.iter().enumerate() {
             let mut resolved_as_special_block = false;
 
             match special_block_resolver(part) {
@@ -2386,8 +2386,7 @@ impl AgentChatThread {
                     tracing::info!(
                         target: "script_kit::tab_ai",
                         event = "agent_chat_context_part_resolved_to_special_block",
-                        source = %part.source(),
-                        label = %part.label(),
+                        source_kind = ?part.source_kind(),
                     );
                     blocks.push(block);
                     resolved_as_special_block = true;
@@ -2397,9 +2396,8 @@ impl AgentChatThread {
                     tracing::warn!(
                         target: "script_kit::tab_ai",
                         event = "agent_chat_context_special_block_capture_failed",
-                        source = %part.source(),
-                        label = %part.label(),
-                        error = %error,
+                        source_kind = ?part.source_kind(),
+                        error_len = error.len(),
                     );
                 }
             }
@@ -2408,31 +2406,35 @@ impl AgentChatThread {
                 continue;
             }
 
-            match crate::ai::message_parts::resolve_context_part_to_prompt_block(part, &[], &[]) {
+            match crate::ai::message_parts::resolve_context_item_to_prompt_block(
+                part,
+                crate::ai::message_parts::ContextPreparationRole::Supplemental,
+                &[],
+                &[],
+            ) {
                 Ok(block) => {
                     if block.trim().is_empty() {
                         tracing::info!(
                             target: "script_kit::tab_ai",
                             event = "agent_chat_context_part_prompt_block_empty",
-                            source = %part.source(),
-                            label = %part.label(),
+                            source_kind = ?part.source_kind(),
                         );
                         continue;
                     }
                     prompt_blocks.push(block);
                 }
-                Err(err) => {
+                Err(failure) => {
                     tracing::warn!(
                         target: "script_kit::tab_ai",
                         event = "agent_chat_context_part_prompt_resolution_failed",
-                        source = %part.source(),
-                        label = %part.label(),
-                        error = %err,
+                        source_kind = ?part.source_kind(),
+                        failure_code = ?failure.failure.code,
                     );
                     failures.push(crate::ai::message_parts::ContextResolutionFailure {
-                        label: part.label().to_string(),
-                        source: part.source().to_string(),
-                        error: format!("{err:#}"),
+                        part_id: format!("context-{part_index:04}"),
+                        source_kind: part.source_kind(),
+                        role: crate::ai::message_parts::ContextPreparationRole::Supplemental,
+                        failure,
                     });
                 }
             }
@@ -2824,23 +2826,17 @@ impl AgentChatThread {
             return;
         }
 
-        let labels: Vec<&str> = receipt
+        let source_kinds = receipt
             .failures
             .iter()
-            .map(|failure| failure.label.as_str())
-            .collect();
-        let sources: Vec<&str> = receipt
-            .failures
-            .iter()
-            .map(|failure| failure.source.as_str())
-            .collect();
+            .map(|failure| failure.source_kind)
+            .collect::<Vec<_>>();
 
         self.context_bootstrap_note = Some(
             format!(
-                "{} context attachment{} unavailable \u{00b7} {}",
+                "{} context attachment{} unavailable",
                 receipt.failures.len(),
                 if receipt.failures.len() == 1 { "" } else { "s" },
-                labels.join(", "),
             )
             .into(),
         );
@@ -2849,8 +2845,7 @@ impl AgentChatThread {
             target: "script_kit::tab_ai",
             event = "agent_chat_context_resolution_partial_failure",
             failure_count = receipt.failures.len(),
-            labels = ?labels,
-            sources = ?sources,
+            source_kinds = ?source_kinds,
         );
     }
 

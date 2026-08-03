@@ -4462,6 +4462,114 @@ impl ScriptListApp {
                 }
             }
 
+            PromptMessage::InspectContextPreparation {
+                request_id,
+                fixture_id,
+            } => {
+                use crate::ai::message_parts::{
+                    prepare_user_message, AiContextPart, ContextPreparationItem,
+                };
+
+                if std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() != Some("1") {
+                    let response = Message::ContextPreparationProbeResult {
+                        request_id,
+                        receipt: serde_json::json!({
+                            "schemaVersion": 1,
+                            "fixtureId": fixture_id,
+                            "classification": "fixtureUnavailable",
+                        }),
+                    };
+                    if let Some(ref sender) = self.response_sender {
+                        let _ = sender.try_send(response);
+                    }
+                    return;
+                }
+
+                let base64_canary = "SAFE001_BASE64_CANARY".repeat(10_000);
+                let nonbinary_canary = "SAFE001_NONBINARY_SURVIVES";
+                let (authored, items) = match fixture_id.as_str() {
+                    "acceptedOversizedJson" => (
+                        "Inspect the attached synthetic context.",
+                        vec![ContextPreparationItem::supplemental(
+                            AiContextPart::TextBlock {
+                                label: "Synthetic oversized JSON".to_string(),
+                                source: "fixture://safe001/oversized".to_string(),
+                                text: serde_json::json!({
+                                    "selectedText": nonbinary_canary,
+                                    "nested": {
+                                        "image": {
+                                            "mimeType": "image/png",
+                                            "base64Data": base64_canary,
+                                        }
+                                    }
+                                })
+                                .to_string(),
+                                mime_type: Some("text/plain".to_string()),
+                            },
+                        )],
+                    ),
+                    "missingPrimary" => (
+                        "Authored text must not bypass required context.",
+                        vec![ContextPreparationItem::primary(AiContextPart::FilePath {
+                            path: "/missing/SAFE001_RAW_PATH_CANARY".to_string(),
+                            label: "Required context".to_string(),
+                        })],
+                    ),
+                    "missingSupplemental" => (
+                        "The authored message remains sendable.",
+                        vec![ContextPreparationItem::supplemental(
+                            AiContextPart::FilePath {
+                                path: "/missing/SAFE001_RAW_PATH_CANARY".to_string(),
+                                label: "Optional attachment".to_string(),
+                            },
+                        )],
+                    ),
+                    _ => {
+                        let response = Message::ContextPreparationProbeResult {
+                            request_id,
+                            receipt: serde_json::json!({
+                                "schemaVersion": 1,
+                                "fixtureId": fixture_id,
+                                "classification": "fixtureUnknown",
+                            }),
+                        };
+                        if let Some(ref sender) = self.response_sender {
+                            let _ = sender.try_send(response);
+                        }
+                        return;
+                    }
+                };
+
+                let prepared = prepare_user_message(authored, &items, &[], &[]);
+                let final_content = &prepared.final_user_content;
+                let serialized_receipt = serde_json::to_string(&prepared.receipt)
+                    .unwrap_or_else(|_| "{}".to_string());
+                let private_checks = serde_json::json!({
+                    "payloadChars": final_content.chars().count(),
+                    "nonbinaryFieldPreserved": final_content.contains(nonbinary_canary),
+                    "base64CanaryAbsent": !final_content.contains("SAFE001_BASE64_CANARY"),
+                    "binaryOmissionMarkerPresent": final_content.contains("[binary omitted:"),
+                    "receiptRawCanariesAbsent": !serialized_receipt.contains("SAFE001_RAW_PATH_CANARY")
+                        && !serialized_receipt.contains("SAFE001_BASE64_CANARY")
+                        && !serialized_receipt.contains(nonbinary_canary),
+                    "canSendMessage": prepared.can_send_message(),
+                    "unresolvedCount": prepared.unresolved_parts().len(),
+                });
+                let response = Message::ContextPreparationProbeResult {
+                    request_id,
+                    receipt: serde_json::json!({
+                        "schemaVersion": 1,
+                        "fixtureId": fixture_id,
+                        "classification": "runtimeConfirmed",
+                        "preparation": prepared.receipt,
+                        "privateChecks": private_checks,
+                    }),
+                };
+                if let Some(ref sender) = self.response_sender {
+                    let _ = sender.try_send(response);
+                }
+            }
+
             PromptMessage::ResetAgentChatTestProbe { request_id, target } => {
                 tracing::info!(
                     category = "AGENT_CHAT_PROBE",
@@ -8515,6 +8623,17 @@ impl ScriptListApp {
                         crate::protocol::AiContextPartInput::FilePath { path, label } => {
                             crate::ai::AiContextPart::FilePath { path, label }
                         }
+                        crate::protocol::AiContextPartInput::TextBlock {
+                            label,
+                            source,
+                            text,
+                            mime_type,
+                        } => crate::ai::AiContextPart::TextBlock {
+                            label,
+                            source,
+                            text,
+                            mime_type,
+                        },
                     })
                     .collect();
 

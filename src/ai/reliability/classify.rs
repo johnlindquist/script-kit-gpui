@@ -103,6 +103,9 @@ pub fn primary_message_for_failure(failure: &AiFailure) -> &'static str {
         AiFailureCode::MessageTooLarge | AiFailureCode::ContextLimitExceeded => {
             "This request is too large. Shorten it or remove some context."
         }
+        AiFailureCode::ContextUnavailable => {
+            "This context could not be prepared. Retry or remove it before sending."
+        }
         AiFailureCode::Unknown => {
             "The AI request did not finish. Your work is saved; try again or view details."
         }
@@ -358,6 +361,21 @@ pub fn quick_ai_deadline_failure(
         presentation: presentation(&FailureContext::default(), &failure),
         failure,
     }
+}
+
+/// Construct a typed context-preparation failure while retaining the raw
+/// adapter/OS detail only in the diagnostic vault.
+pub fn classify_context_unavailable(
+    context: &FailureContext,
+    detail: &str,
+    diagnostics: &DiagnosticVault,
+) -> AppFailureRecord {
+    record(
+        context,
+        detail,
+        diagnostics,
+        AiFailureKind::Input(InputFailure::ContextUnavailable),
+    )
 }
 
 /// Classify a runtime process that failed to spawn, keeping its cause (S11).
@@ -625,6 +643,9 @@ fn presentation(context: &FailureContext, failure: &AiFailure) -> FailurePresent
         | AiFailureCode::ToolDenied => ("ai.permission_required", "ai.permission_required.detail"),
         AiFailureCode::MessageTooLarge | AiFailureCode::ContextLimitExceeded => {
             ("ai.input_too_large", "ai.input_too_large.detail")
+        }
+        AiFailureCode::ContextUnavailable => {
+            ("ai.context_unavailable", "ai.context_unavailable.detail")
         }
         AiFailureCode::ProfileUnavailable => {
             ("ai.profile_unavailable", "ai.profile_unavailable.detail")

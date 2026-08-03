@@ -319,6 +319,7 @@ pub enum AiFailureCode {
     UserDeniedTool,
     MessageTooLarge,
     ContextLimitExceeded,
+    ContextUnavailable,
     Unknown,
 }
 
@@ -379,6 +380,7 @@ impl AiFailureCode {
             AiFailureKind::Input(failure) => match failure {
                 InputFailure::MessageTooLarge => Self::MessageTooLarge,
                 InputFailure::ContextLimitExceeded => Self::ContextLimitExceeded,
+                InputFailure::ContextUnavailable => Self::ContextUnavailable,
             },
             AiFailureKind::Unknown => Self::Unknown,
         }
@@ -540,6 +542,7 @@ pub enum PermissionFailure {
 pub enum InputFailure {
     MessageTooLarge,
     ContextLimitExceeded,
+    ContextUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

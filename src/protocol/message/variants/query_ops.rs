@@ -655,6 +655,26 @@ macro_rules! protocol_message_variants_query_ops {
     },
 
     // ============================================================
+    // Agent Chat CONTEXT PREPARATION PROBE
+    // ============================================================
+    /// Run a bounded synthetic context-preparation fixture inside the real app.
+    #[serde(rename = "inspectContextPreparation")]
+    InspectContextPreparation {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "fixtureId")]
+        fixture_id: String,
+    },
+
+    /// Privacy-safe result from the canonical context-preparation boundary.
+    #[serde(rename = "contextPreparationProbeResult")]
+    ContextPreparationProbeResult {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        receipt: serde_json::Value,
+    },
+
+    // ============================================================
     // Agent Chat TEST PROBE
     // ============================================================
     /// Reset the Agent Chat test probe ring buffer, clearing prior events.

@@ -257,6 +257,9 @@ pub fn recovery_plan_for(
                     RecoveryRole::Secondary,
                 ),
             ],
+            InputFailure::ContextUnavailable => {
+                vec![manual_retry_option(failure, retry, RecoveryRole::Primary)]
+            }
         },
         AiFailureKind::Unknown => vec![manual_retry_option(failure, retry, RecoveryRole::Primary)],
     };
@@ -638,6 +641,7 @@ fn backoff_class(failure: &AiFailure) -> BackoffClass {
         | AiFailureCode::UserDeniedTool
         | AiFailureCode::MessageTooLarge
         | AiFailureCode::ContextLimitExceeded
+        | AiFailureCode::ContextUnavailable
         | AiFailureCode::Unknown => BackoffClass::Immediate,
     }
 }

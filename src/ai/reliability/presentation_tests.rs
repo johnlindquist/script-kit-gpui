@@ -207,6 +207,10 @@ fn representative_failures() -> Vec<AiFailure> {
             AiFailureKind::Input(InputFailure::ContextLimitExceeded),
             never,
         ),
+        AiFailure::new(
+            AiFailureKind::Input(InputFailure::ContextUnavailable),
+            never,
+        ),
         AiFailure::new(AiFailureKind::Unknown, never),
     ]
 }

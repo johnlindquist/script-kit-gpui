@@ -252,6 +252,18 @@ fn typed_classifiers_never_return_unknown_and_their_copy_is_not_evidence() {
             AiFailureCode::RuntimeClosed,
         ),
         (
+            "context unavailable",
+            classify_context_unavailable(
+                &FailureContext {
+                    component,
+                    ..FailureContext::default()
+                },
+                "SAFE001_RAW_CONTEXT_ERROR_CANARY",
+                &vault,
+            ),
+            AiFailureCode::ContextUnavailable,
+        ),
+        (
             "child exited",
             classify_process_failure(
                 &FailureContext {
@@ -286,7 +298,9 @@ fn typed_classifiers_never_return_unknown_and_their_copy_is_not_evidence() {
         );
         let debug = format!("{record:?}");
         assert!(
-            !debug.contains("os error") && !debug.contains("login required"),
+            !debug.contains("os error")
+                && !debug.contains("login required")
+                && !debug.contains("SAFE001_RAW_CONTEXT_ERROR_CANARY"),
             "{label}: the raw cause must not survive in the record itself"
         );
 

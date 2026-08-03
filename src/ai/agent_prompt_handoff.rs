@@ -372,16 +372,23 @@ pub(crate) fn compile_handoff_payload_from_spine_plan(
 
     let scripts: Vec<std::sync::Arc<crate::scripts::Script>> = Vec::new();
     let scriptlets: Vec<std::sync::Arc<crate::scripts::Scriptlet>> = Vec::new();
-    let prepared = crate::ai::message_parts::prepare_user_message_with_receipt(
+    let preparation_items = context_parts
+        .iter()
+        .cloned()
+        .map(crate::ai::message_parts::ContextPreparationItem::primary)
+        .collect::<Vec<_>>();
+    let prepared = crate::ai::message_parts::prepare_user_message(
         &normalized_prompt,
-        &context_parts,
+        &preparation_items,
         &scripts,
         &scriptlets,
     );
     if prepared.decision == PreparedMessageDecision::Blocked {
         return Err(AgentPromptHandoffError::UnsupportedPrompt(
             prepared
+                .receipt
                 .user_error
+                .clone()
                 .unwrap_or_else(|| "context preparation was blocked".to_string()),
         ));
     }
@@ -1735,7 +1742,7 @@ with open(os.environ["TARGET_RECEIPT"], "w") as handle:
         );
 
         assert!(
-            matches!(result, Err(AgentPromptHandoffError::UnsupportedPrompt(ref reason)) if reason.contains("Failed to resolve context")),
+            matches!(result, Err(AgentPromptHandoffError::UnsupportedPrompt(ref reason)) if reason == "This context could not be prepared. Retry or remove it before sending." && !reason.contains("script-kit-handoff.txt")),
             "missing context should block handoff like normal submit: {result:?}"
         );
     }

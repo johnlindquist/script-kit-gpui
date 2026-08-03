@@ -482,6 +482,10 @@ fn failure_copy(failure: &AiFailure) -> FailureCopy {
                 title: "Conversation is too large",
                 body: "Trim older context before retrying this request.",
             },
+            InputFailure::ContextUnavailable => FailureCopy {
+                title: "Context could not be prepared",
+                body: "Retry or remove the unavailable context before sending.",
+            },
         },
         AiFailureKind::Unknown => FailureCopy {
             title: "AI request did not finish",

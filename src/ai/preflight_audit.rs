@@ -9,15 +9,16 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-pub const AI_PREFLIGHT_AUDIT_SCHEMA_VERSION: u32 = 2;
+pub const AI_PREFLIGHT_AUDIT_SCHEMA_VERSION: u32 = 3;
 pub const AI_PREFLIGHT_AUDIT_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const AI_PREFLIGHT_AUDIT_COMPACT_KEEP: usize = 2_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionableContextFailure {
-    pub label: String,
-    pub source: String,
+    pub part_id: String,
+    pub source_kind: super::message_parts::ContextSourceKind,
+    pub role: super::message_parts::ContextPreparationRole,
     pub code: String,
     pub message: String,
     pub remediation: String,
@@ -36,8 +37,10 @@ pub struct AiPreflightAudit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
     pub decision: PreparedMessageDecision,
-    pub raw_content: String,
-    pub authored_content: String,
+    #[serde(default)]
+    pub raw_content_chars: usize,
+    #[serde(default)]
+    pub authored_content_chars: usize,
     pub has_pending_image: bool,
     pub has_context_parts: bool,
     pub receipt: PreparedMessageReceipt,
@@ -63,10 +66,14 @@ impl AiPreflightAudit {
         );
 
         let actionable_failures = receipt
-            .context
-            .failures
+            .outcomes
             .iter()
-            .map(actionable_context_failure)
+            .filter(|outcome| {
+                outcome.kind == super::message_parts::ContextPartPreparationOutcomeKind::Failed
+            })
+            .map(|outcome| {
+                actionable_context_fields(&outcome.part_id, outcome.source_kind, outcome.role)
+            })
             .collect();
 
         Self {
@@ -77,8 +84,8 @@ impl AiPreflightAudit {
             chat_id: chat_id.as_str(),
             message_id: None,
             decision: receipt.decision.clone(),
-            raw_content: raw_content.to_string(),
-            authored_content: authored_content.to_string(),
+            raw_content_chars: raw_content.chars().count(),
+            authored_content_chars: authored_content.chars().count(),
             has_pending_image,
             has_context_parts,
             receipt,
@@ -223,64 +230,45 @@ pub fn compact_preflight_audits_if_needed(path: &Path) -> anyhow::Result<()> {
 }
 
 pub fn actionable_context_failure(failure: &ContextResolutionFailure) -> ActionableContextFailure {
-    let source = failure.source.as_str();
+    actionable_context_fields(&failure.part_id, failure.source_kind, failure.role)
+}
 
-    if source.contains("browserUrl=1") {
-        return ActionableContextFailure {
-            label: failure.label.clone(),
-            source: failure.source.clone(),
-            code: "browser_url_unavailable".to_string(),
-            message: "Couldn't capture the focused browser tab URL.".to_string(),
-            remediation:
-                "Focus a supported browser tab and retry, or use /window if URL is not required."
-                    .to_string(),
-        };
-    }
-
-    if source.contains("selectedText=1") {
-        return ActionableContextFailure {
-            label: failure.label.clone(),
-            source: failure.source.clone(),
-            code: "selected_text_unavailable".to_string(),
-            message: "Couldn't read a non-empty text selection.".to_string(),
-            remediation:
-                "Select text in the target app and retry, or switch to /context or /window."
-                    .to_string(),
-        };
-    }
-
-    if source.contains("focusedWindow=1") {
-        return ActionableContextFailure {
-            label: failure.label.clone(),
-            source: failure.source.clone(),
-            code: "focused_window_unavailable".to_string(),
-            message: "Couldn't capture focused window metadata.".to_string(),
-            remediation:
-                "Bring the target window to the front and retry, then inspect kit://context?diagnostics=1 if it still fails."
-                    .to_string(),
-        };
-    }
-
-    if source.contains("kit://context") {
-        return ActionableContextFailure {
-            label: failure.label.clone(),
-            source: failure.source.clone(),
-            code: "context_resource_unavailable".to_string(),
-            message: "A desktop context resource could not be resolved.".to_string(),
-            remediation:
-                "Retry after refocusing the target app, or inspect kit://context?diagnostics=1 for field-level status."
-                    .to_string(),
-        };
-    }
-
+fn actionable_context_fields(
+    part_id: &str,
+    source_kind: super::message_parts::ContextSourceKind,
+    role: super::message_parts::ContextPreparationRole,
+) -> ActionableContextFailure {
+    let (code, message, remediation) = match source_kind {
+        super::message_parts::ContextSourceKind::Resource => (
+            "context_resource_unavailable",
+            "A desktop context resource could not be prepared.",
+            "Refocus the target app and retry, or remove this context item.",
+        ),
+        super::message_parts::ContextSourceKind::File
+        | super::message_parts::ContextSourceKind::Skill => (
+            "attachment_unavailable",
+            "An attachment could not be prepared.",
+            "Verify the source still exists and retry, or remove this attachment.",
+        ),
+        super::message_parts::ContextSourceKind::FocusedTarget => (
+            "focused_context_unavailable",
+            "The focused item could not be prepared.",
+            "Select the item again and retry, or remove this context item.",
+        ),
+        super::message_parts::ContextSourceKind::Ambient
+        | super::message_parts::ContextSourceKind::Text => (
+            "context_unavailable",
+            "A context item could not be prepared.",
+            "Retry or remove this context item before sending.",
+        ),
+    };
     ActionableContextFailure {
-        label: failure.label.clone(),
-        source: failure.source.clone(),
-        code: "attachment_unavailable".to_string(),
-        message: "An attachment could not be resolved.".to_string(),
-        remediation:
-            "Verify the source still exists and retry, or remove the attachment and send the message without it."
-                .to_string(),
+        part_id: part_id.to_string(),
+        source_kind,
+        role,
+        code: code.to_string(),
+        message: message.to_string(),
+        remediation: remediation.to_string(),
     }
 }
 
@@ -293,12 +281,7 @@ pub fn build_actionable_preflight_error(audit: &AiPreflightAudit) -> Option<Stri
         audit
             .actionable_failures
             .iter()
-            .map(|failure| {
-                format!(
-                    "{}: {} {}",
-                    failure.label, failure.message, failure.remediation
-                )
-            })
+            .map(|failure| format!("{} {}", failure.message, failure.remediation))
             .collect::<Vec<_>>()
             .join(" "),
     )
@@ -315,10 +298,10 @@ pub fn log_preflight_audit(audit: &AiPreflightAudit, stage: &str) {
         decision = ?audit.decision,
         attempted = audit.receipt.context.attempted,
         resolved = audit.receipt.context.resolved,
-        failure_count = audit.receipt.context.failures.len(),
+        failure_count = audit.receipt.context.failed,
         has_pending_image = audit.has_pending_image,
         has_context_parts = audit.has_context_parts,
-        final_user_content_len = audit.receipt.final_user_content.len(),
+        final_user_content_len = audit.receipt.final_content_chars,
         "ai_preflight_audit"
     );
 }
@@ -327,32 +310,45 @@ pub fn log_preflight_audit(audit: &AiPreflightAudit, stage: &str) {
 mod tests {
     use super::*;
     use crate::ai::message_parts::{
-        ContextResolutionFailure, ContextResolutionReceipt, PreparedMessageDecision,
-        PreparedMessageReceipt,
+        ContextPreparationRole, ContextPreparationSummary, ContextResolutionFailure,
+        ContextSourceKind, PreparedMessageDecision, PreparedMessageReceipt,
     };
 
-    #[test]
-    fn test_build_actionable_preflight_error_for_browser_failure() {
-        let receipt = PreparedMessageReceipt {
-            schema_version: 1,
+    fn failed_context(part_id: &str, source_kind: ContextSourceKind) -> ContextResolutionFailure {
+        ContextResolutionFailure {
+            part_id: part_id.to_string(),
+            source_kind,
+            role: ContextPreparationRole::Primary,
+            failure: crate::ai::reliability::context_unavailable_failure("TEST_ERROR_CANARY"),
+        }
+    }
+
+    fn receipt_with_failure() -> PreparedMessageReceipt {
+        PreparedMessageReceipt {
+            schema_version: crate::ai::message_parts::AI_MESSAGE_PREPARATION_SCHEMA_VERSION,
             decision: PreparedMessageDecision::Blocked,
-            raw_content: "Summarize this page".to_string(),
-            final_user_content: "Summarize this page".to_string(),
-            context: ContextResolutionReceipt {
+            authored_content_chars: 19,
+            final_content_chars: 19,
+            context: ContextPreparationSummary {
                 attempted: 1,
                 resolved: 0,
-                failures: vec![ContextResolutionFailure {
-                    label: "Browser URL".to_string(),
-                    source: "kit://context?browserUrl=1".to_string(),
-                    error: "No browser detected".to_string(),
-                }],
-                prompt_prefix: String::new(),
+                failed: 1,
+                primary_failed: 1,
+                supplemental_failed: 0,
             },
             assembly: None,
             outcomes: Vec::new(),
-            unresolved_parts: Vec::new(),
-            user_error: None,
-        };
+            user_error: Some(
+                "This context could not be prepared. Retry or remove it before sending."
+                    .to_string(),
+            ),
+        }
+    }
+
+    #[test]
+    fn test_build_actionable_preflight_error_for_browser_failure() {
+        let failure = failed_context("context-0000", ContextSourceKind::Resource);
+        let receipt = receipt_with_failure();
 
         let audit = AiPreflightAudit {
             schema_version: AI_PREFLIGHT_AUDIT_SCHEMA_VERSION,
@@ -362,75 +358,59 @@ mod tests {
             chat_id: "chat-1".to_string(),
             message_id: None,
             decision: PreparedMessageDecision::Blocked,
-            raw_content: "Summarize this page".to_string(),
-            authored_content: "Summarize this page".to_string(),
+            raw_content_chars: 19,
+            authored_content_chars: 19,
             has_pending_image: false,
             has_context_parts: true,
-            actionable_failures: vec![actionable_context_failure(&receipt.context.failures[0])],
+            actionable_failures: vec![actionable_context_failure(&failure)],
             receipt,
             created_at: "2026-03-21T18:32:13Z".to_string(),
         };
 
         let error = build_actionable_preflight_error(&audit).expect("expected actionable error");
         assert!(
-            error.contains("Focus a supported browser tab and retry"),
+            error.contains("Refocus the target app and retry"),
             "Expected remediation guidance in error, got: {error}"
         );
         assert!(
-            error.contains("Couldn't capture the focused browser tab URL"),
+            error.contains("desktop context resource could not be prepared"),
             "Expected user-facing message in error, got: {error}"
         );
+        assert!(!error.contains("TEST_ERROR_CANARY"));
     }
 
     #[test]
-    fn test_actionable_failure_codes_for_known_sources() {
+    fn test_actionable_failure_codes_for_safe_source_kinds() {
         let cases = vec![
-            ("kit://context?browserUrl=1", "browser_url_unavailable"),
+            (ContextSourceKind::Resource, "context_resource_unavailable"),
+            (ContextSourceKind::File, "attachment_unavailable"),
+            (ContextSourceKind::Skill, "attachment_unavailable"),
             (
-                "kit://context?selectedText=1&frontmostApp=0",
-                "selected_text_unavailable",
+                ContextSourceKind::FocusedTarget,
+                "focused_context_unavailable",
             ),
-            (
-                "kit://context?focusedWindow=1&browserUrl=0",
-                "focused_window_unavailable",
-            ),
-            (
-                "kit://context?profile=minimal",
-                "context_resource_unavailable",
-            ),
-            ("/tmp/missing.txt", "attachment_unavailable"),
+            (ContextSourceKind::Text, "context_unavailable"),
         ];
 
-        for (source, expected_code) in cases {
-            let failure = ContextResolutionFailure {
-                label: "Test".to_string(),
-                source: source.to_string(),
-                error: "test error".to_string(),
-            };
+        for (source_kind, expected_code) in cases {
+            let failure = failed_context("context-0000", source_kind);
             let actionable = actionable_context_failure(&failure);
-            assert_eq!(
-                actionable.code, expected_code,
-                "source={source} should map to code={expected_code}"
-            );
+            assert_eq!(actionable.code, expected_code);
+            let serialized = serde_json::to_string(&actionable).expect("serialize safe failure");
+            assert!(!serialized.contains("TEST_ERROR_CANARY"));
         }
     }
 
     #[test]
     fn test_no_actionable_error_when_no_failures() {
         let receipt = PreparedMessageReceipt {
-            schema_version: 1,
+            schema_version: crate::ai::message_parts::AI_MESSAGE_PREPARATION_SCHEMA_VERSION,
             decision: PreparedMessageDecision::Ready,
-            raw_content: "Hello".to_string(),
-            final_user_content: "Hello".to_string(),
-            context: ContextResolutionReceipt {
-                attempted: 0,
-                resolved: 0,
-                failures: Vec::new(),
-                prompt_prefix: String::new(),
-            },
+            authored_content_chars: 5,
+            final_content_chars: 5,
+            context: ContextPreparationSummary::default(),
             assembly: None,
             outcomes: Vec::new(),
-            unresolved_parts: Vec::new(),
             user_error: None,
         };
 
@@ -442,8 +422,8 @@ mod tests {
             chat_id: "chat-2".to_string(),
             message_id: None,
             decision: PreparedMessageDecision::Ready,
-            raw_content: "Hello".to_string(),
-            authored_content: "Hello".to_string(),
+            raw_content_chars: 5,
+            authored_content_chars: 5,
             has_pending_image: false,
             has_context_parts: false,
             actionable_failures: Vec::new(),
@@ -457,19 +437,17 @@ mod tests {
     #[test]
     fn test_serde_roundtrip_camel_case() {
         let failure = ActionableContextFailure {
-            label: "Browser URL".to_string(),
-            source: "kit://context?browserUrl=1".to_string(),
-            code: "browser_url_unavailable".to_string(),
-            message: "Couldn't capture the focused browser tab URL.".to_string(),
-            remediation: "Focus a supported browser tab and retry.".to_string(),
+            part_id: "context-0000".to_string(),
+            source_kind: ContextSourceKind::Resource,
+            role: ContextPreparationRole::Primary,
+            code: "context_resource_unavailable".to_string(),
+            message: "A context resource could not be prepared.".to_string(),
+            remediation: "Retry or remove it.".to_string(),
         };
 
         let json = serde_json::to_string(&failure).expect("serialize");
-        assert!(json.contains("\"label\""), "fields should be camelCase");
-        assert!(
-            !json.contains("\"label_\""),
-            "should not have snake_case fields"
-        );
+        assert!(json.contains("\"partId\""), "fields should be camelCase");
+        assert!(!json.contains("kit://"));
 
         let deserialized: ActionableContextFailure =
             serde_json::from_str(&json).expect("deserialize");

@@ -235,6 +235,21 @@ fn init_ai_db_at(db_path: PathBuf) -> Result<()> {
     )
     .context("Failed to create source index")?;
 
+    // SAFE-001 migration: v1/v2 audit rows persisted raw authored/model-bound
+    // content. Preserve the redacted JSON compatibility record while removing
+    // those legacy content-bearing columns.
+    conn.execute(
+        "UPDATE message_preparation_audits \
+         SET raw_content = '', authored_content = '' \
+         WHERE CASE \
+             WHEN json_valid(audit_json) \
+             THEN COALESCE(json_extract(audit_json, '$.schemaVersion'), 0) < 3 \
+             ELSE 1 \
+         END",
+        [],
+    )
+    .context("Failed to redact legacy message preparation audits")?;
+
     info!(db_path = %db_path.display(), "AI chats database initialized");
 
     // ai-chats.sqlite stores full conversation history. Keep it and its
@@ -1750,7 +1765,9 @@ pub fn insert_mock_data() -> Result<()> {
 // Message Preparation Audit Operations
 // ============================================================================
 
-/// Persist a full message-preparation audit as JSON.
+/// Persist a privacy-safe message-preparation receipt as JSON.
+/// Legacy content columns receive decimal character counts only; raw/authored
+/// message bytes never cross this audit boundary.
 /// Safe to call multiple times for the same correlation_id; later calls upsert.
 pub fn save_message_preparation_audit(audit: &crate::ai::AiPreflightAudit) -> Result<()> {
     let db = get_db()?;
@@ -1792,9 +1809,9 @@ pub fn save_message_preparation_audit(audit: &crate::ai::AiPreflightAudit) -> Re
             format!("{:?}", audit.decision),
             audit.receipt.context.attempted as i64,
             audit.receipt.context.resolved as i64,
-            audit.receipt.context.failures.len() as i64,
-            audit.raw_content.as_str(),
-            audit.authored_content.as_str(),
+            audit.receipt.context.failed as i64,
+            audit.raw_content_chars.to_string(),
+            audit.authored_content_chars.to_string(),
             audit_json,
             audit.created_at.as_str(),
         ],
@@ -2354,10 +2371,9 @@ mod tests {
     #[test]
     fn test_message_preparation_audit_round_trip() {
         use crate::ai::message_parts::{
-            ContextResolutionFailure, ContextResolutionReceipt, PreparedMessageDecision,
-            PreparedMessageReceipt,
+            prepare_user_message, AiContextPart, ContextPreparationItem, PreparedMessageDecision,
         };
-        use crate::ai::preflight_audit::{actionable_context_failure, AiPreflightAudit};
+        use crate::ai::preflight_audit::AiPreflightAudit;
 
         init_test_db();
 
@@ -2375,52 +2391,41 @@ mod tests {
         };
         create_chat(&chat).expect("Should create parent chat");
 
-        // Build a receipt with a failure
-        let receipt = PreparedMessageReceipt {
-            schema_version: 1,
-            decision: PreparedMessageDecision::Partial,
-            raw_content: "Summarize this page".to_string(),
-            final_user_content: "<context>...</context>\n\nSummarize this page".to_string(),
-            context: ContextResolutionReceipt {
-                attempted: 2,
-                resolved: 1,
-                failures: vec![ContextResolutionFailure {
-                    label: "Browser URL".to_string(),
-                    source: "kit://context?browserUrl=1".to_string(),
-                    error: "No browser detected".to_string(),
-                }],
-                prompt_prefix: "<context>...</context>".to_string(),
-            },
-            assembly: None,
-            outcomes: Vec::new(),
-            unresolved_parts: Vec::new(),
-            user_error: None,
-        };
-
-        let mut audit = AiPreflightAudit {
-            schema_version: crate::ai::preflight_audit::AI_PREFLIGHT_AUDIT_SCHEMA_VERSION,
-            correlation_id: format!("test-roundtrip-{}", std::process::id()),
-            preflight_generation: 1,
-            draft_fingerprint: Some("raw:19:authored:19".to_string()),
-            chat_id: chat_id.as_str(),
-            message_id: None,
-            decision: PreparedMessageDecision::Partial,
-            raw_content: "Summarize this page".to_string(),
-            authored_content: "Summarize this page".to_string(),
-            has_pending_image: false,
-            has_context_parts: true,
-            actionable_failures: receipt
-                .context
-                .failures
-                .iter()
-                .map(actionable_context_failure)
-                .collect(),
-            receipt,
-            created_at: chrono::Utc::now().to_rfc3339(),
-        };
+        let prepared = prepare_user_message(
+            "Summarize this page",
+            &[ContextPreparationItem::primary(AiContextPart::FilePath {
+                path: "/missing/PATH_CANARY.txt".to_string(),
+                label: "Missing attachment".to_string(),
+            })],
+            &[],
+            &[],
+        );
+        assert_eq!(prepared.decision, PreparedMessageDecision::Blocked);
+        let mut audit = AiPreflightAudit::new(
+            &chat_id,
+            "Summarize this page",
+            "Summarize this page",
+            false,
+            true,
+            prepared.receipt,
+        );
+        audit.correlation_id = format!("test-roundtrip-{}", std::process::id());
+        audit.preflight_generation = 1;
 
         // Save
         save_message_preparation_audit(&audit).expect("Should save audit");
+        {
+            let db = get_db().expect("database");
+            let conn = db.lock().expect("database lock");
+            let persisted: (String, String) = conn
+                .query_row(
+                    "SELECT raw_content, authored_content FROM message_preparation_audits WHERE correlation_id = ?1",
+                    params![audit.correlation_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("read redacted compatibility columns");
+            assert_eq!(persisted, ("19".to_string(), "19".to_string()));
+        }
 
         // Load back
         let loaded = get_last_message_preparation_audit(&chat_id)
@@ -2431,14 +2436,14 @@ mod tests {
         assert_eq!(loaded.correlation_id, audit.correlation_id);
         assert_eq!(loaded.chat_id, audit.chat_id);
         assert_eq!(loaded.decision, audit.decision);
-        assert_eq!(loaded.receipt.context.attempted, 2);
-        assert_eq!(loaded.receipt.context.resolved, 1);
-        assert_eq!(loaded.receipt.context.failures.len(), 1);
+        assert_eq!(loaded.receipt.context.attempted, 1);
+        assert_eq!(loaded.receipt.context.resolved, 0);
+        assert_eq!(loaded.receipt.context.failed, 1);
         assert_eq!(loaded.actionable_failures.len(), 1);
-        assert_eq!(
-            loaded.actionable_failures[0].code,
-            "browser_url_unavailable"
-        );
+        assert_eq!(loaded.actionable_failures[0].code, "attachment_unavailable");
+        let serialized = serde_json::to_string(&loaded).expect("serialize loaded receipt");
+        assert!(!serialized.contains("PATH_CANARY"));
+        assert!(!serialized.contains("Summarize this page"));
         assert_eq!(loaded.message_id, None);
 
         // Create a real message so the FK constraint is satisfied on upsert

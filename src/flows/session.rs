@@ -327,6 +327,9 @@ impl PersistedAiFailure {
             AiFailureCode::ContextLimitExceeded => {
                 AiFailureKind::Input(InputFailure::ContextLimitExceeded)
             }
+            AiFailureCode::ContextUnavailable => {
+                AiFailureKind::Input(InputFailure::ContextUnavailable)
+            }
             AiFailureCode::Unknown => AiFailureKind::Unknown,
         };
         AiFailure::new(kind, RetrySafety::SameSelectionReadOnly)

@@ -18,6 +18,15 @@ pub enum AiContextPartInput {
     ResourceUri { uri: String, label: String },
     /// A local file path attachment
     FilePath { path: String, label: String },
+    /// Synthetic or SDK-authored text context. This travels only inbound; the
+    /// preparation receipt records kind/length/fingerprint, never these bytes.
+    TextBlock {
+        label: String,
+        source: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+    },
 }
 
 /// Chat information returned by AI SDK API responses

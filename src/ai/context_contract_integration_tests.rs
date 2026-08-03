@@ -53,10 +53,9 @@ fn explicit_context_surfaces_share_one_contract_end_to_end() {
     assert_eq!(receipt.context.attempted, 3);
     assert_eq!(receipt.context.resolved, 3);
     assert_eq!(
-        receipt.context.failures.len(),
-        0,
-        "unexpected failures: {:?}",
-        receipt.context.failures
+        receipt.context.failed, 0,
+        "unexpected failure count: {}",
+        receipt.context.failed
     );
 
     // Verify the final content contains all three expected context URIs

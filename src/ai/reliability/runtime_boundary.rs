@@ -24,6 +24,17 @@ pub(crate) fn provider_failure(
     )
 }
 
+pub(crate) fn context_unavailable_failure(detail: &str) -> AppFailureRecord {
+    super::classify_context_unavailable(
+        &FailureContext {
+            component: ProtocolComponent::Provider,
+            ..FailureContext::default()
+        },
+        detail,
+        runtime_vault(),
+    )
+}
+
 /// Typed classification for a Quick AI turn failure, falling back to the
 /// free-text provider classifier only when the code is not one we emit.
 ///

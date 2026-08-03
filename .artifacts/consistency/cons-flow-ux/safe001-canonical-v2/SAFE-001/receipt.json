@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SAFE-001",
+  "classification": "RUNTIME-CONFIRMED",
+  "binaryArtifact": "cons-flow-safe001",
+  "binarySha256": "c11299fd6d0a1e2c887eb028ca52b7635046ebc683ed765c07ffa1f3e1765745",
+  "agentChatFixtureOpened": true,
+  "accepted": {
+    "decision": "ready",
+    "attempted": 1,
+    "resolved": 1,
+    "failed": 0,
+    "payloadChars": 335,
+    "binaryFieldsStripped": true,
+    "nonbinaryFieldPreserved": true,
+    "bounded": true
+  },
+  "primaryFailure": {
+    "decision": "blocked",
+    "primaryFailed": 1,
+    "acceptedSend": false,
+    "safeUserError": true
+  },
+  "supplementalFailure": {
+    "decision": "partial",
+    "supplementalFailed": 1,
+    "acceptedSend": true,
+    "safeUserError": true
+  },
+  "negativeControls": {
+    "base64CanaryAbsentAtModelBoundary": true,
+    "zeroResolvedPrimaryCannotSend": true,
+    "serializedReceiptsContainNoRawContentOrSourceIdentity": true,
+    "visibleAgentChatSemanticsContainNoPreparationCanary": true
+  },
+  "cleanup": [
+    {
+      "sessionName": "safe001-context-preparation",
+      "processExited": true,
+      "streamsDrained": true,
+      "logWriterClosed": true,
+      "ownedProcessCount": 0,
+      "ownedPids": []
+    }
+  ],
+  "finalOwnedProcessCount": 0
+}

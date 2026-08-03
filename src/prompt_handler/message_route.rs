@@ -287,6 +287,13 @@ fn prompt_message_from_protocol_message(
             agent_id,
             target,
         }),
+        Message::InspectContextPreparation {
+            request_id,
+            fixture_id,
+        } => Some(PromptMessage::InspectContextPreparation {
+            request_id,
+            fixture_id,
+        }),
         Message::ResetAgentChatTestProbe { request_id, target } => {
             Some(PromptMessage::ResetAgentChatTestProbe { request_id, target })
         }

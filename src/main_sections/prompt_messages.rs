@@ -278,6 +278,11 @@ enum PromptMessage {
         fixture_id: String,
         target: Option<protocol::AutomationWindowTarget>,
     },
+    /// Run a deterministic, privacy-safe context preparation fixture.
+    InspectContextPreparation {
+        request_id: String,
+        fixture_id: String,
+    },
     /// Reset the Agent Chat test probe ring buffer
     ResetAgentChatTestProbe {
         request_id: String,

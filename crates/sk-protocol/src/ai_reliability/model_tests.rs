@@ -1024,6 +1024,7 @@ fn representative_failure_kinds() -> Vec<AiFailureKind> {
         AiFailureKind::Permission(PermissionFailure::UserDeniedTool),
         AiFailureKind::Input(InputFailure::MessageTooLarge),
         AiFailureKind::Input(InputFailure::ContextLimitExceeded),
+        AiFailureKind::Input(InputFailure::ContextUnavailable),
         AiFailureKind::Unknown,
     ]
 }

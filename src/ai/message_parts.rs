@@ -1,6 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use sha2::{Digest as _, Sha256};
+use std::sync::{Arc, OnceLock};
 
 /// Canonical label for the Ask Anything ambient context chip.
 pub const ASK_ANYTHING_LABEL: &str = "Ask Anything";
@@ -177,29 +178,104 @@ pub fn file_path_parts(parts: &[AiContextPart]) -> Vec<String> {
         .collect()
 }
 
-/// Records a single context part that failed to resolve.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Whether a context item is required for this send or may be omitted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct ContextResolutionFailure {
-    pub label: String,
-    pub source: String,
-    pub error: String,
+pub enum ContextPreparationRole {
+    Primary,
+    #[default]
+    Supplemental,
 }
 
-/// A deterministic receipt produced by resolving a set of context parts.
-///
-/// Captures how many parts were attempted, how many resolved successfully,
-/// any failures encountered, and the concatenated prompt prefix from all
-/// successful resolutions. Successful blocks are never dropped when another
-/// part fails.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Privacy-safe source classification. The source value itself (URI/path/text)
+/// never belongs in a receipt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
+pub enum ContextSourceKind {
+    Resource,
+    File,
+    Skill,
+    FocusedTarget,
+    Ambient,
+    #[default]
+    Text,
+}
+
+impl AiContextPart {
+    pub fn source_kind(&self) -> ContextSourceKind {
+        match self {
+            Self::ResourceUri { .. } => ContextSourceKind::Resource,
+            Self::FilePath { .. } => ContextSourceKind::File,
+            Self::SkillFile { .. } => ContextSourceKind::Skill,
+            Self::FocusedTarget { .. } => ContextSourceKind::FocusedTarget,
+            Self::AmbientContext { .. } => ContextSourceKind::Ambient,
+            Self::TextBlock { .. } => ContextSourceKind::Text,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct ContextPreparationItem {
+    pub part: AiContextPart,
+    pub role: ContextPreparationRole,
+}
+
+impl ContextPreparationItem {
+    pub fn primary(part: AiContextPart) -> Self {
+        Self {
+            part,
+            role: ContextPreparationRole::Primary,
+        }
+    }
+
+    pub fn supplemental(part: AiContextPart) -> Self {
+        Self {
+            part,
+            role: ContextPreparationRole::Supplemental,
+        }
+    }
+}
+
+impl std::fmt::Debug for ContextPreparationItem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContextPreparationItem")
+            .field("source_kind", &self.part.source_kind())
+            .field("role", &self.role)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A typed resolution failure. Raw source identities and error strings live
+/// only in the diagnostic vault carried by `AppFailureRecord`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextResolutionFailure {
+    pub part_id: String,
+    pub source_kind: ContextSourceKind,
+    pub role: ContextPreparationRole,
+    pub failure: crate::ai::reliability::AppFailureRecord,
+}
+
+/// Content-bearing resolution state. Deliberately non-serializable and
+/// redacted in Debug; only model-bound code may inspect `prompt_prefix`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ContextResolutionReceipt {
     pub attempted: usize,
     pub resolved: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<ContextResolutionFailure>,
     pub prompt_prefix: String,
+}
+
+impl std::fmt::Debug for ContextResolutionReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContextResolutionReceipt")
+            .field("attempted", &self.attempted)
+            .field("resolved", &self.resolved)
+            .field("failure_count", &self.failures.len())
+            .field("prompt_chars", &self.prompt_prefix.chars().count())
+            .finish()
+    }
 }
 
 impl ContextResolutionReceipt {
@@ -208,52 +284,41 @@ impl ContextResolutionReceipt {
     }
 }
 
-/// Hard ceiling on resolved resource text embedded into a single prompt
-/// block. One context attachment must never be able to exhaust the model's
-/// context window (a 758KB base64 screenshot inlined as text did exactly
-/// that via the `@selection` attachment).
+/// Hard ceiling on text embedded from one context item.
 const MAX_RESOURCE_PROMPT_CHARS: usize = 100_000;
+const CONTEXT_TRUNCATION_NOTE: &str =
+    "\n[truncated: context attachment exceeded the prompt size ceiling]";
 
-/// Prompt blocks are TEXT: a base64 image payload inside a JSON resource is
-/// unreadable to the model and burns (or overflows) the context window.
-/// Replace any `base64Data` string values with a small stub, then enforce
-/// the overall size ceiling.
-fn sanitize_resource_text_for_prompt(text: &str, mime_type: &str, uri: &str) -> String {
-    let mut sanitized = if mime_type == "application/json" && text.contains("\"base64Data\"") {
-        match serde_json::from_str::<serde_json::Value>(text) {
-            Ok(mut value) => {
-                let stripped = strip_base64_data_fields(&mut value);
-                if stripped > 0 {
-                    tracing::warn!(
-                        target: "script_kit::message_parts",
-                        event = "context_resource_base64_stripped_from_prompt_text",
-                        uri = %uri,
-                        stripped_fields = stripped,
-                        original_chars = text.chars().count(),
-                        "stripped base64 payloads from text-embedded context resource"
-                    );
-                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_string())
-                } else {
-                    text.to_string()
-                }
+/// Canonical sanitizer for every content-bearing `AiContextPart` variant.
+/// JSON is detected by parsing rather than trusting a MIME hint, so nested
+/// `base64Data` values cannot bypass stripping through a wrong or absent MIME.
+fn sanitize_resource_text_for_prompt(text: &str, _mime_type: &str, _source: &str) -> String {
+    let mut sanitized = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(mut value) => {
+            let stripped = strip_base64_data_fields(&mut value);
+            if stripped > 0 {
+                tracing::warn!(
+                    target: "script_kit::message_parts",
+                    event = "context_base64_stripped_from_prompt_text",
+                    stripped_fields = stripped,
+                    original_chars = text.chars().count(),
+                    "stripped base64 payloads from context text"
+                );
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_string())
+            } else {
+                text.to_string()
             }
-            Err(_) => text.to_string(),
         }
-    } else {
-        text.to_string()
+        Err(_) => text.to_string(),
     };
 
     if sanitized.chars().count() > MAX_RESOURCE_PROMPT_CHARS {
         let original_chars = sanitized.chars().count();
-        sanitized = sanitized
-            .chars()
-            .take(MAX_RESOURCE_PROMPT_CHARS)
-            .collect::<String>();
-        sanitized.push_str("\n[truncated: context attachment exceeded the prompt size ceiling]");
+        sanitized = sanitized.chars().take(MAX_RESOURCE_PROMPT_CHARS).collect();
+        sanitized.push_str(CONTEXT_TRUNCATION_NOTE);
         tracing::warn!(
             target: "script_kit::message_parts",
-            event = "context_resource_prompt_text_truncated",
-            uri = %uri,
+            event = "context_prompt_text_truncated",
             original_chars,
             max_chars = MAX_RESOURCE_PROMPT_CHARS,
         );
@@ -268,7 +333,7 @@ fn strip_base64_data_fields(value: &mut serde_json::Value) -> usize {
             for (key, entry) in map.iter_mut() {
                 if key == "base64Data" {
                     if let Some(data) = entry.as_str() {
-                        let chars = data.len();
+                        let chars = data.chars().count();
                         *entry = serde_json::Value::String(format!(
                             "[binary omitted: {chars} base64 chars]"
                         ));
@@ -285,65 +350,88 @@ fn strip_base64_data_fields(value: &mut serde_json::Value) -> usize {
     }
 }
 
-/// Resolve a single context part into a prompt block string.
-///
-/// - `ResourceUri` resolves via `mcp_resources::read_resource`.
-/// - `FilePath` reads the file; falls back to metadata-only if unreadable.
-pub fn resolve_context_part_to_prompt_block(
-    part: &AiContextPart,
+fn escape_xml_attribute(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn run_scoped_fingerprint(value: &str) -> String {
+    static SALT: OnceLock<String> = OnceLock::new();
+    let salt = SALT.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        format!("{}:{nanos}", std::process::id())
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
+    hasher.update([0]);
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+#[derive(Clone)]
+struct PreparedContextBlock {
+    content: String,
+    kind: ContextPartPreparationOutcomeKind,
+}
+
+fn context_unavailable(detail: &str) -> crate::ai::reliability::AppFailureRecord {
+    crate::ai::reliability::context_unavailable_failure(detail)
+}
+
+/// The one content resolver for all six `AiContextPart` variants.
+fn resolve_context_part_sanitized(
+    item: &ContextPreparationItem,
     scripts: &[Arc<crate::scripts::Script>],
     scriptlets: &[Arc<crate::scripts::Scriptlet>],
-) -> Result<String> {
-    match part {
+) -> std::result::Result<PreparedContextBlock, crate::ai::reliability::AppFailureRecord> {
+    let full = |content: String| PreparedContextBlock {
+        content,
+        kind: ContextPartPreparationOutcomeKind::FullContent,
+    };
+    match &item.part {
         AiContextPart::ResourceUri { uri, .. } => {
             let content = crate::mcp_resources::read_resource(uri, scripts, scriptlets, None)
-                .map_err(anyhow::Error::msg)
-                .with_context(|| format!("Failed to read MCP resource: {uri}"))?;
-
-            tracing::info!(
-                kind = "resource_uri",
-                uri = %content.uri,
-                mime_type = %content.mime_type,
-                "Resolved resource URI context part"
-            );
-
-            Ok(format!(
+                .map_err(|error| context_unavailable(&format!("resource read failed: {error}")))?;
+            let text =
+                sanitize_resource_text_for_prompt(&content.text, &content.mime_type, &content.uri);
+            Ok(full(format!(
                 "<context source=\"{}\" mimeType=\"{}\">\n{}\n</context>",
-                content.uri,
-                content.mime_type,
-                sanitize_resource_text_for_prompt(&content.text, &content.mime_type, &content.uri)
-            ))
+                escape_xml_attribute(&content.uri),
+                escape_xml_attribute(&content.mime_type),
+                text
+            )))
         }
         AiContextPart::FilePath { path, .. } => match std::fs::read_to_string(path) {
-            Ok(text) => {
-                tracing::info!(
-                    kind = "file_path_readable",
-                    path = %path,
-                    bytes = text.len(),
-                    "Resolved file path context part"
-                );
-                Ok(format!(
-                    "<attachment path=\"{}\">\n{}\n</attachment>",
-                    path, text
-                ))
-            }
-            Err(_) => {
-                let metadata = std::fs::metadata(path)
-                    .with_context(|| format!("Failed to stat attachment: {path}"))?;
-
-                tracing::info!(
-                    kind = "file_path_unreadable",
-                    path = %path,
-                    bytes = metadata.len(),
-                    "Resolved unreadable file path context part (metadata-only fallback)"
-                );
-
-                Ok(format!(
-                    "<attachment path=\"{}\" unreadable=\"true\" bytes=\"{}\" />",
-                    path,
-                    metadata.len()
-                ))
-            }
+            Ok(text) => Ok(full(format!(
+                "<attachment path=\"{}\">\n{}\n</attachment>",
+                escape_xml_attribute(path),
+                sanitize_resource_text_for_prompt(&text, "text/plain", path)
+            ))),
+            Err(read_error) => match std::fs::metadata(path) {
+                Ok(metadata) => Ok(PreparedContextBlock {
+                    content: format!(
+                        "<attachment path=\"{}\" unreadable=\"true\" bytes=\"{}\" />",
+                        escape_xml_attribute(path),
+                        metadata.len()
+                    ),
+                    kind: ContextPartPreparationOutcomeKind::MetadataOnly,
+                }),
+                Err(stat_error) => Err(context_unavailable(&format!(
+                    "attachment read failed: {read_error}; metadata failed: {stat_error}"
+                ))),
+            },
         },
         AiContextPart::SkillFile {
             path,
@@ -351,32 +439,58 @@ pub fn resolve_context_part_to_prompt_block(
             owner_label,
             ..
         } => {
-            let prompt = crate::ai::agent_chat::ui::build_staged_skill_prompt(
-                skill_name,
-                owner_label,
-                std::path::Path::new(path),
-            );
-            tracing::info!(
-                kind = "skill_file",
-                path = %path,
-                skill_name = %skill_name,
-                owner_label = %owner_label,
-                bytes = prompt.len(),
-                "Resolved skill file context part"
-            );
-            Ok(prompt)
+            let raw = std::fs::read_to_string(path)
+                .map_err(|error| context_unavailable(&format!("skill read failed: {error}")))?;
+            let content = sanitize_resource_text_for_prompt(&raw, "text/markdown", path);
+            let owner = escape_xml_attribute(owner_label);
+            let title = escape_xml_attribute(skill_name);
+            if owner_label == "Flow" {
+                Ok(full(format!(
+                    "Follow the attached flow \"{title}\" from the mdflow roster for this session.\n\n<flow path=\"{}\">\n{}\n</flow>",
+                    escape_xml_attribute(path),
+                    content
+                )))
+            } else {
+                let owner_phrase = if owner_label == "Claude Code" {
+                    format!("from {owner}")
+                } else {
+                    format!("from plugin \"{owner}\"")
+                };
+                Ok(full(format!(
+                    "Use the attached skill \"{title}\" {owner_phrase} for this session.\n\n<skill path=\"{}\">\n{}\n</skill>",
+                    escape_xml_attribute(path),
+                    content
+                )))
+            }
         }
         AiContextPart::FocusedTarget { target, label } => {
-            resolve_focused_target_part(target, label)
-        }
-        AiContextPart::AmbientContext { label } => {
-            tracing::info!(
-                kind = "ambient_context_display_only",
-                label = %label,
-                "Skipped display-only ambient context chip during prompt resolution"
+            let metadata = target
+                .metadata
+                .as_ref()
+                .map(serde_json::to_string_pretty)
+                .transpose()
+                .map_err(|error| {
+                    context_unavailable(&format!("focused metadata serialization failed: {error}"))
+                })?
+                .unwrap_or_else(|| "{}".to_string());
+            let metadata = sanitize_resource_text_for_prompt(
+                &metadata,
+                "application/json",
+                &target.semantic_id,
             );
-            Ok(String::new())
+            Ok(full(format!(
+                "<context source=\"focusedTarget\" itemSource=\"{}\" itemKind=\"{}\" semanticId=\"{}\">\nLabel: {}\nMetadata:\n{}\n</context>",
+                escape_xml_attribute(&target.source),
+                escape_xml_attribute(&target.kind),
+                escape_xml_attribute(&target.semantic_id),
+                escape_xml_attribute(label),
+                metadata,
+            )))
         }
+        AiContextPart::AmbientContext { .. } => Ok(PreparedContextBlock {
+            content: String::new(),
+            kind: ContextPartPreparationOutcomeKind::DisplayOnly,
+        }),
         AiContextPart::TextBlock {
             label,
             source,
@@ -384,134 +498,89 @@ pub fn resolve_context_part_to_prompt_block(
             mime_type,
         } => {
             let mime = mime_type.as_deref().unwrap_or("text/plain");
-            tracing::info!(
-                event = "context_part_resolved_text_block",
-                source = %source,
-                bytes = text.len(),
-                mime_type = %mime,
-                "Resolved text block context part"
-            );
-            Ok(format!(
+            Ok(full(format!(
                 "<context source=\"{}\" mimeType=\"{}\" label=\"{}\">\n{}\n</context>",
-                source, mime, label, text
-            ))
+                escape_xml_attribute(source),
+                escape_xml_attribute(mime),
+                escape_xml_attribute(label),
+                sanitize_resource_text_for_prompt(text, mime, source)
+            )))
         }
     }
 }
 
-/// Resolve a `FocusedTarget` context part into a deterministic prompt block.
-///
-/// The block includes target source, kind, semantic ID, label, and serialized
-/// metadata so the agent can unambiguously identify the focused subject.
-fn resolve_focused_target_part(
-    target: &crate::ai::tab_context::TabAiTargetContext,
-    label: &str,
-) -> Result<String> {
-    let metadata_json = target
-        .metadata
-        .as_ref()
-        .map(serde_json::to_string_pretty)
-        .transpose()
-        .context("Failed to serialize focused target metadata")?
-        .unwrap_or_else(|| "{}".to_string());
-
-    tracing::info!(
-        kind = "focused_target",
-        source = %target.source,
-        item_kind = %target.kind,
-        semantic_id = %target.semantic_id,
-        label = %label,
-        "Resolved focused target context part"
-    );
-
-    Ok(format!(
-        "<context source=\"focusedTarget\" itemSource=\"{}\" itemKind=\"{}\" semanticId=\"{}\">\nLabel: {}\nMetadata:\n{}\n</context>",
-        target.source, target.kind, target.semantic_id, label, metadata_json,
-    ))
+pub(crate) fn resolve_context_item_to_prompt_block(
+    part: &AiContextPart,
+    role: ContextPreparationRole,
+    scripts: &[Arc<crate::scripts::Script>],
+    scriptlets: &[Arc<crate::scripts::Scriptlet>],
+) -> std::result::Result<String, crate::ai::reliability::AppFailureRecord> {
+    let item = ContextPreparationItem {
+        part: part.clone(),
+        role,
+    };
+    resolve_context_part_sanitized(&item, scripts, scriptlets).map(|block| block.content)
 }
 
-/// Resolve multiple context parts, returning a machine-readable receipt.
-///
-/// Successful resolutions are never dropped when another part fails.
-/// The `prompt_prefix` contains all successfully resolved blocks joined
-/// by double newlines.
+/// Compatibility resolver. All content still passes through the canonical
+/// sanitizer; raw diagnostics are intentionally reduced to safe copy here.
+pub fn resolve_context_part_to_prompt_block(
+    part: &AiContextPart,
+    scripts: &[Arc<crate::scripts::Script>],
+    scriptlets: &[Arc<crate::scripts::Scriptlet>],
+) -> Result<String> {
+    resolve_context_item_to_prompt_block(part, ContextPreparationRole::Primary, scripts, scriptlets)
+        .map_err(|failure| anyhow::anyhow!(failure.primary_message()))
+}
+
 pub fn resolve_context_parts_with_receipt(
     parts: &[AiContextPart],
     scripts: &[Arc<crate::scripts::Script>],
     scriptlets: &[Arc<crate::scripts::Scriptlet>],
 ) -> ContextResolutionReceipt {
-    let attempted = parts.len();
+    let items = parts
+        .iter()
+        .cloned()
+        .map(ContextPreparationItem::primary)
+        .collect::<Vec<_>>();
+    resolve_context_items_with_receipt(&items, scripts, scriptlets)
+}
+
+fn resolve_context_items_with_receipt(
+    items: &[ContextPreparationItem],
+    scripts: &[Arc<crate::scripts::Script>],
+    scriptlets: &[Arc<crate::scripts::Scriptlet>],
+) -> ContextResolutionReceipt {
     let mut blocks = Vec::new();
     let mut failures = Vec::new();
-
-    for part in parts {
-        match resolve_context_part_to_prompt_block(part, scripts, scriptlets) {
-            Ok(block) => {
-                if block.trim().is_empty() {
-                    tracing::info!(
-                        checkpoint = "resolution_display_only",
-                        source = %part.source(),
-                        label = %part.label(),
-                        "context part produced no prompt block"
-                    );
-                    continue;
-                }
-                tracing::info!(
-                    checkpoint = "resolution_ok",
-                    source = %part.source(),
-                    label = %part.label(),
-                    "context part resolved successfully"
-                );
-                blocks.push(block);
-            }
-            Err(err) => {
-                tracing::warn!(
-                    checkpoint = "resolution_failed",
-                    source = %part.source(),
-                    label = %part.label(),
-                    error = %err,
-                    "context part resolution failed"
-                );
-                failures.push(ContextResolutionFailure {
-                    label: part.label().to_string(),
-                    source: part.source().to_string(),
-                    error: format!("{err:#}"),
-                });
-            }
+    for (index, item) in items.iter().enumerate() {
+        match resolve_context_part_sanitized(item, scripts, scriptlets) {
+            Ok(block) if !block.content.trim().is_empty() => blocks.push(block.content),
+            Ok(_) => {}
+            Err(failure) => failures.push(ContextResolutionFailure {
+                part_id: format!("context-{index:04}"),
+                source_kind: item.part.source_kind(),
+                role: item.role,
+                failure,
+            }),
         }
     }
-
-    let resolved = blocks.len();
-    let prompt_prefix = blocks.join("\n\n");
-
     ContextResolutionReceipt {
-        attempted,
-        resolved,
+        attempted: items.len(),
+        resolved: blocks.len(),
         failures,
-        prompt_prefix,
+        prompt_prefix: blocks.join("\n\n"),
     }
 }
 
-/// Resolve multiple context parts into a single prompt prefix string.
-///
-/// This is a compatibility wrapper around [`resolve_context_parts_with_receipt`].
-/// It returns the prompt prefix from all successfully resolved parts. If any
-/// part fails, the error is returned and successful blocks are lost — prefer
-/// the receipt-based API for partial-failure tolerance.
 pub fn resolve_context_parts_to_prompt_prefix(
     parts: &[AiContextPart],
     scripts: &[Arc<crate::scripts::Script>],
     scriptlets: &[Arc<crate::scripts::Scriptlet>],
 ) -> Result<String> {
     let receipt = resolve_context_parts_with_receipt(parts, scripts, scriptlets);
-    if receipt.has_failures() {
-        let first = &receipt.failures[0];
-        anyhow::bail!(
-            "Failed to resolve context part '{}' ({}): {}",
-            first.label,
-            first.source,
-            first.error
-        );
+    if let Some(failure) = receipt.failures.first() {
+        anyhow::bail!(failure.failure.primary_message());
     }
     Ok(receipt.prompt_prefix)
 }
@@ -621,7 +690,7 @@ pub fn merge_context_parts(left: &[AiContextPart], right: &[AiContextPart]) -> V
 // Schema-versioned message-preparation receipt
 // ---------------------------------------------------------------------------
 
-pub const AI_MESSAGE_PREPARATION_SCHEMA_VERSION: u32 = 1;
+pub const AI_MESSAGE_PREPARATION_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -637,35 +706,82 @@ pub enum ContextPartPreparationOutcomeKind {
     FullContent,
     MetadataOnly,
     Failed,
-    /// Display-only chip that produces no prompt block (e.g. `AmbientContext`).
     DisplayOnly,
+}
+
+impl Default for ContextPartPreparationOutcomeKind {
+    fn default() -> Self {
+        Self::Failed
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextPartPreparationOutcome {
-    pub label: String,
-    pub source: String,
+    #[serde(default)]
+    pub part_id: String,
+    #[serde(default)]
+    pub source_kind: ContextSourceKind,
+    #[serde(default)]
+    pub role: ContextPreparationRole,
     pub kind: ContextPartPreparationOutcomeKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
+    #[serde(default)]
+    pub content_chars: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<sk_protocol::ai_reliability::AiFailureCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_fingerprint: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextPreparationSummary {
+    #[serde(default)]
+    pub attempted: usize,
+    #[serde(default)]
+    pub resolved: usize,
+    #[serde(default)]
+    pub failed: usize,
+    #[serde(default)]
+    pub primary_failed: usize,
+    #[serde(default)]
+    pub supplemental_failed: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextAssemblySummary {
+    #[serde(default)]
+    pub mention_count: usize,
+    #[serde(default)]
+    pub pending_count: usize,
+    #[serde(default)]
+    pub merged_count: usize,
+    #[serde(default)]
+    pub duplicates_removed: usize,
+}
+
+/// Serializable preparation receipt. This type intentionally contains no raw
+/// content, prompt prefix, path, URI, provider/OS error, or unresolved part.
+/// Unknown v1 content fields are discarded by serde during compatibility load.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparedMessageReceipt {
     pub schema_version: u32,
     pub decision: PreparedMessageDecision,
-    pub raw_content: String,
-    pub final_user_content: String,
-    pub context: ContextResolutionReceipt,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assembly: Option<ContextAssemblyReceipt>,
+    #[serde(default)]
+    pub authored_content_chars: usize,
+    #[serde(default)]
+    pub final_content_chars: usize,
+    #[serde(default)]
+    pub context: ContextPreparationSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembly: Option<ContextAssemblySummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outcomes: Vec<ContextPartPreparationOutcome>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unresolved_parts: Vec<AiContextPart>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_error: Option<String>,
 }
 
@@ -675,7 +791,40 @@ impl PreparedMessageReceipt {
     }
 }
 
-/// Join a resolved prompt prefix with raw user content.
+/// Private model-bound payload paired with its privacy-safe public receipt.
+/// It is deliberately non-serializable and its Debug implementation is fully
+/// redacted.
+#[derive(Clone)]
+pub struct PreparedUserMessage {
+    pub final_user_content: String,
+    pub receipt: PreparedMessageReceipt,
+    unresolved_parts: Vec<AiContextPart>,
+}
+
+impl std::fmt::Debug for PreparedUserMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedUserMessage")
+            .field("receipt", &self.receipt)
+            .field("unresolved_count", &self.unresolved_parts.len())
+            .finish()
+    }
+}
+
+impl std::ops::Deref for PreparedUserMessage {
+    type Target = PreparedMessageReceipt;
+
+    fn deref(&self) -> &Self::Target {
+        &self.receipt
+    }
+}
+
+impl PreparedUserMessage {
+    pub fn unresolved_parts(&self) -> &[AiContextPart] {
+        &self.unresolved_parts
+    }
+}
+
 fn join_prompt_prefix_and_raw_content(prompt_prefix: &str, raw_content: &str) -> String {
     if !prompt_prefix.is_empty() && !raw_content.trim().is_empty() {
         format!("{prompt_prefix}\n\n{raw_content}")
@@ -686,296 +835,187 @@ fn join_prompt_prefix_and_raw_content(prompt_prefix: &str, raw_content: &str) ->
     }
 }
 
-/// Build a user-visible error string from resolution failures.
 fn build_user_visible_context_error(failures: &[ContextResolutionFailure]) -> Option<String> {
     if failures.is_empty() {
-        None
+        return None;
+    }
+    if failures
+        .iter()
+        .any(|failure| failure.role == ContextPreparationRole::Primary)
+    {
+        Some("This context could not be prepared. Retry or remove it before sending.".to_string())
     } else {
-        Some(format!(
-            "Failed to resolve context: {}",
-            failures
-                .iter()
-                .map(|f| format!("{}: {}", f.label, f.error))
-                .collect::<Vec<_>>()
-                .join("; ")
-        ))
+        Some("One attachment could not be added. The remaining message is ready.".to_string())
     }
 }
 
-/// Resolve a single context part, returning both the per-part outcome and
-/// an optional prompt block. Unlike [`resolve_context_part_to_prompt_block`],
-/// this distinguishes full-content from metadata-only successes.
-fn resolve_context_part_for_preparation(
-    part: &AiContextPart,
-    scripts: &[Arc<crate::scripts::Script>],
-    scriptlets: &[Arc<crate::scripts::Scriptlet>],
-) -> (ContextPartPreparationOutcome, Option<String>) {
-    match part {
-        AiContextPart::ResourceUri { uri, label } => {
-            match crate::mcp_resources::read_resource(uri, scripts, scriptlets, None) {
-                Ok(content) => {
-                    let prompt_block = format!(
-                        "<context source=\"{}\" mimeType=\"{}\">\n{}\n</context>",
-                        content.uri, content.mime_type, content.text
-                    );
-                    (
-                        ContextPartPreparationOutcome {
-                            label: label.clone(),
-                            source: uri.clone(),
-                            kind: ContextPartPreparationOutcomeKind::FullContent,
-                            detail: Some(format!("mimeType={}", content.mime_type)),
-                        },
-                        Some(prompt_block),
-                    )
-                }
-                Err(error) => (
-                    ContextPartPreparationOutcome {
-                        label: label.clone(),
-                        source: uri.clone(),
-                        kind: ContextPartPreparationOutcomeKind::Failed,
-                        detail: Some(format!("Failed to read MCP resource: {uri}: {error}")),
-                    },
-                    None,
-                ),
-            }
-        }
-        AiContextPart::FilePath { path, label } => match std::fs::read_to_string(path) {
-            Ok(text) => {
-                let prompt_block =
-                    format!("<attachment path=\"{}\">\n{}\n</attachment>", path, text);
-                (
-                    ContextPartPreparationOutcome {
-                        label: label.clone(),
-                        source: path.clone(),
-                        kind: ContextPartPreparationOutcomeKind::FullContent,
-                        detail: None,
-                    },
-                    Some(prompt_block),
-                )
-            }
-            Err(read_error) => match std::fs::metadata(path) {
-                Ok(metadata) => {
-                    let prompt_block = format!(
-                        "<attachment path=\"{}\" unreadable=\"true\" bytes=\"{}\" />",
-                        path,
-                        metadata.len()
-                    );
-                    (
-                        ContextPartPreparationOutcome {
-                            label: label.clone(),
-                            source: path.clone(),
-                            kind: ContextPartPreparationOutcomeKind::MetadataOnly,
-                            detail: Some(format!("textReadError={read_error}")),
-                        },
-                        Some(prompt_block),
-                    )
-                }
-                Err(stat_error) => (
-                    ContextPartPreparationOutcome {
-                        label: label.clone(),
-                        source: path.clone(),
-                        kind: ContextPartPreparationOutcomeKind::Failed,
-                        detail: Some(format!("Failed to stat attachment: {stat_error}")),
-                    },
-                    None,
-                ),
-            },
+fn safe_outcome(
+    index: usize,
+    item: &ContextPreparationItem,
+    result: &std::result::Result<PreparedContextBlock, crate::ai::reliability::AppFailureRecord>,
+) -> ContextPartPreparationOutcome {
+    let part_id = format!("context-{index:04}");
+    match result {
+        Ok(block) => ContextPartPreparationOutcome {
+            part_id,
+            source_kind: item.part.source_kind(),
+            role: item.role,
+            kind: block.kind.clone(),
+            content_chars: block.content.chars().count(),
+            content_fingerprint: (!block.content.is_empty())
+                .then(|| run_scoped_fingerprint(&block.content)),
+            failure_code: None,
+            diagnostic_fingerprint: None,
         },
-        AiContextPart::SkillFile {
-            path,
-            label,
-            skill_name,
-            owner_label,
-            ..
-        } => {
-            let prompt_block = crate::ai::agent_chat::ui::build_staged_skill_prompt(
-                skill_name,
-                owner_label,
-                std::path::Path::new(path),
-            );
-            (
-                ContextPartPreparationOutcome {
-                    label: label.clone(),
-                    source: path.clone(),
-                    kind: ContextPartPreparationOutcomeKind::FullContent,
-                    detail: Some(format!("skillName={skill_name}, owner={owner_label}")),
-                },
-                Some(prompt_block),
-            )
-        }
-        AiContextPart::FocusedTarget { target, label } => {
-            match resolve_focused_target_part(target, label) {
-                Ok(prompt_block) => (
-                    ContextPartPreparationOutcome {
-                        label: label.clone(),
-                        source: target.semantic_id.clone(),
-                        kind: ContextPartPreparationOutcomeKind::FullContent,
-                        detail: Some(format!(
-                            "itemSource={}, itemKind={}",
-                            target.source, target.kind
-                        )),
-                    },
-                    Some(prompt_block),
-                ),
-                Err(error) => (
-                    ContextPartPreparationOutcome {
-                        label: label.clone(),
-                        source: target.semantic_id.clone(),
-                        kind: ContextPartPreparationOutcomeKind::Failed,
-                        detail: Some(format!("Failed to resolve focused target: {error}")),
-                    },
-                    None,
-                ),
-            }
-        }
-        AiContextPart::AmbientContext { label } => (
-            ContextPartPreparationOutcome {
-                label: label.clone(),
-                source: "ambient://ask-anything".to_string(),
-                kind: ContextPartPreparationOutcomeKind::DisplayOnly,
-                detail: Some("Display-only ambient context chip".to_string()),
-            },
-            None,
-        ),
-        AiContextPart::TextBlock {
-            label,
-            source,
-            text,
-            mime_type,
-        } => {
-            let mime = mime_type.as_deref().unwrap_or("text/plain");
-            let prompt_block = format!(
-                "<context source=\"{}\" mimeType=\"{}\" label=\"{}\">\n{}\n</context>",
-                source, mime, label, text
-            );
-            (
-                ContextPartPreparationOutcome {
-                    label: label.clone(),
-                    source: source.clone(),
-                    kind: ContextPartPreparationOutcomeKind::FullContent,
-                    detail: Some(format!("mimeType={mime}, bytes={}", text.len())),
-                },
-                Some(prompt_block),
-            )
-        }
+        Err(record) => ContextPartPreparationOutcome {
+            part_id,
+            source_kind: item.part.source_kind(),
+            role: item.role,
+            kind: ContextPartPreparationOutcomeKind::Failed,
+            content_chars: 0,
+            content_fingerprint: None,
+            failure_code: Some(record.failure.code),
+            diagnostic_fingerprint: record
+                .failure
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.fingerprint.0.clone()),
+        },
     }
 }
 
-/// The single canonical message-preparation function.
-///
-/// Takes raw user text and pending context parts, resolves each part into
-/// a prompt block (or records failure), and returns a schema-versioned
-/// [`PreparedMessageReceipt`] with per-part outcomes, the aggregate
-/// [`ContextResolutionReceipt`], and a final decision.
-pub fn prepare_user_message_with_receipt(
+/// Canonical preparation entry with explicit primary/supplemental roles.
+pub fn prepare_user_message(
     raw_content: &str,
-    parts: &[AiContextPart],
+    items: &[ContextPreparationItem],
     scripts: &[Arc<crate::scripts::Script>],
     scriptlets: &[Arc<crate::scripts::Scriptlet>],
-) -> PreparedMessageReceipt {
-    let mut outcomes = Vec::with_capacity(parts.len());
+) -> PreparedUserMessage {
+    let mut outcomes = Vec::with_capacity(items.len());
     let mut failures = Vec::new();
     let mut unresolved_parts = Vec::new();
     let mut prompt_blocks = Vec::new();
 
-    for part in parts {
-        let (outcome, prompt_block) =
-            resolve_context_part_for_preparation(part, scripts, scriptlets);
-
-        if let Some(block) = prompt_block {
-            prompt_blocks.push(block);
-        } else if outcome.kind == ContextPartPreparationOutcomeKind::Failed {
-            unresolved_parts.push(part.clone());
-            failures.push(ContextResolutionFailure {
-                label: outcome.label.clone(),
-                source: outcome.source.clone(),
-                error: outcome
-                    .detail
-                    .clone()
-                    .unwrap_or_else(|| "unknown context resolution failure".to_string()),
-            });
+    for (index, item) in items.iter().enumerate() {
+        let result = resolve_context_part_sanitized(item, scripts, scriptlets);
+        outcomes.push(safe_outcome(index, item, &result));
+        match result {
+            Ok(block) if !block.content.trim().is_empty() => prompt_blocks.push(block.content),
+            Ok(_) => {}
+            Err(failure) => {
+                unresolved_parts.push(item.part.clone());
+                failures.push(ContextResolutionFailure {
+                    part_id: format!("context-{index:04}"),
+                    source_kind: item.part.source_kind(),
+                    role: item.role,
+                    failure,
+                });
+            }
         }
-
-        outcomes.push(outcome);
     }
 
-    let context = ContextResolutionReceipt {
-        attempted: parts.len(),
-        resolved: prompt_blocks.len(),
-        failures,
-        prompt_prefix: prompt_blocks.join("\n\n"),
-    };
-
-    let final_user_content =
-        join_prompt_prefix_and_raw_content(&context.prompt_prefix, raw_content);
-
-    let decision = if context.has_failures() && context.resolved == 0 {
+    let prompt_prefix = prompt_blocks.join("\n\n");
+    let final_user_content = join_prompt_prefix_and_raw_content(&prompt_prefix, raw_content);
+    let primary_failed = failures
+        .iter()
+        .filter(|failure| failure.role == ContextPreparationRole::Primary)
+        .count();
+    let supplemental_failed = failures.len() - primary_failed;
+    let decision = if primary_failed > 0
+        || (supplemental_failed > 0 && prompt_blocks.is_empty() && raw_content.trim().is_empty())
+    {
         PreparedMessageDecision::Blocked
-    } else if context.has_failures() {
+    } else if supplemental_failed > 0 {
         PreparedMessageDecision::Partial
     } else {
         PreparedMessageDecision::Ready
     };
-
-    let user_error = build_user_visible_context_error(&context.failures);
+    let user_error = build_user_visible_context_error(&failures);
+    let context = ContextPreparationSummary {
+        attempted: items.len(),
+        resolved: prompt_blocks.len(),
+        failed: failures.len(),
+        primary_failed,
+        supplemental_failed,
+    };
 
     tracing::info!(
         checkpoint = "message_prepare",
         decision = ?decision,
         attempted = context.attempted,
         resolved = context.resolved,
-        failures = context.failures.len(),
-        unresolved = unresolved_parts.len(),
+        failures = context.failed,
         final_user_content_len = final_user_content.len(),
         "ai message preparation complete"
     );
 
-    PreparedMessageReceipt {
-        schema_version: AI_MESSAGE_PREPARATION_SCHEMA_VERSION,
-        decision,
-        raw_content: raw_content.to_string(),
+    PreparedUserMessage {
+        receipt: PreparedMessageReceipt {
+            schema_version: AI_MESSAGE_PREPARATION_SCHEMA_VERSION,
+            decision,
+            authored_content_chars: raw_content.chars().count(),
+            final_content_chars: final_user_content.chars().count(),
+            context,
+            assembly: None,
+            outcomes,
+            user_error,
+        },
         final_user_content,
-        context,
-        assembly: None,
-        outcomes,
         unresolved_parts,
-        user_error,
     }
 }
 
-/// Canonical preflight function that assembles context from two sources.
-///
-/// 1. Merges `mention_parts` (from parsed directives) with `pending_parts`
-///    (from the composer UI / SDK), recording duplicate provenance.
-/// 2. Resolves the merged parts into prompt blocks via
-///    [`prepare_user_message_with_receipt`].
-/// 3. Attaches the assembly receipt so callers can inspect the full pipeline.
+/// Compatibility entry. Authored text is the primary payload, so attached
+/// parts are supplemental; when no authored text exists, each supplied part is
+/// primary. New callers should use [`prepare_user_message`] with explicit roles.
+pub fn prepare_user_message_with_receipt(
+    raw_content: &str,
+    parts: &[AiContextPart],
+    scripts: &[Arc<crate::scripts::Script>],
+    scriptlets: &[Arc<crate::scripts::Scriptlet>],
+) -> PreparedUserMessage {
+    let role = if raw_content.trim().is_empty() {
+        ContextPreparationRole::Primary
+    } else {
+        ContextPreparationRole::Supplemental
+    };
+    let items = parts
+        .iter()
+        .cloned()
+        .map(|part| ContextPreparationItem { part, role })
+        .collect::<Vec<_>>();
+    prepare_user_message(raw_content, &items, scripts, scriptlets)
+}
+
 pub fn prepare_user_message_from_sources_with_receipt(
     raw_content: &str,
     mention_parts: &[AiContextPart],
     pending_parts: &[AiContextPart],
     scripts: &[Arc<crate::scripts::Script>],
     scriptlets: &[Arc<crate::scripts::Scriptlet>],
-) -> PreparedMessageReceipt {
+) -> PreparedUserMessage {
     let assembly = merge_context_parts_with_receipt(mention_parts, pending_parts);
-    let mut prepared =
-        prepare_user_message_with_receipt(raw_content, &assembly.merged_parts, scripts, scriptlets);
-    prepared.assembly = Some(assembly);
-
-    tracing::info!(
-        target: "ai",
-        checkpoint = "message_preflight",
-        decision = ?prepared.decision,
-        attempted = prepared.context.attempted,
-        resolved = prepared.context.resolved,
-        duplicates_removed = prepared
-            .assembly
-            .as_ref()
-            .map(|a| a.duplicates_removed)
-            .unwrap_or(0),
-        "ai message preflight complete"
-    );
-
+    let authored_message_exists = !raw_content.trim().is_empty();
+    let items = assembly
+        .merged_parts
+        .iter()
+        .cloned()
+        .map(|part| ContextPreparationItem {
+            part,
+            role: if authored_message_exists {
+                ContextPreparationRole::Supplemental
+            } else {
+                ContextPreparationRole::Primary
+            },
+        })
+        .collect::<Vec<_>>();
+    let mut prepared = prepare_user_message(raw_content, &items, scripts, scriptlets);
+    prepared.receipt.assembly = Some(ContextAssemblySummary {
+        mention_count: assembly.mention_count,
+        pending_count: assembly.pending_count,
+        merged_count: assembly.merged_count,
+        duplicates_removed: assembly.duplicates_removed,
+    });
     prepared
 }
 
@@ -1133,7 +1173,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_resource_text_truncates_oversized_content() {
-        let huge = "x".repeat(MAX_RESOURCE_PROMPT_CHARS + 5_000);
+        let huge = "x".repeat(200_000);
         let sanitized = sanitize_resource_text_for_prompt(&huge, "text/plain", "kit://big");
         assert!(sanitized.chars().count() < huge.chars().count());
         assert!(sanitized.contains("[truncated: context attachment exceeded"));
@@ -1244,10 +1284,10 @@ mod tests {
             receipt.schema_version,
             AI_MESSAGE_PREPARATION_SCHEMA_VERSION
         );
-        assert_eq!(receipt.raw_content, "hello");
+        assert_eq!(receipt.authored_content_chars, 5);
         assert_eq!(receipt.final_user_content, "hello");
         assert!(receipt.outcomes.is_empty());
-        assert!(receipt.unresolved_parts.is_empty());
+        assert!(receipt.unresolved_parts().is_empty());
         assert!(receipt.user_error.is_none());
         assert!(receipt.can_send_message());
     }
@@ -1259,12 +1299,17 @@ mod tests {
             label: "missing.txt".to_string(),
         }];
 
-        let receipt = prepare_user_message_with_receipt("hello", &parts, &[], &[]);
+        let items = parts
+            .iter()
+            .cloned()
+            .map(ContextPreparationItem::primary)
+            .collect::<Vec<_>>();
+        let receipt = prepare_user_message("hello", &items, &[], &[]);
 
         assert_eq!(receipt.decision, PreparedMessageDecision::Blocked);
         assert_eq!(receipt.context.attempted, 1);
         assert_eq!(receipt.context.resolved, 0);
-        assert_eq!(receipt.unresolved_parts, parts);
+        assert_eq!(receipt.unresolved_parts(), parts);
         assert!(receipt.user_error.is_some());
         assert_eq!(receipt.outcomes.len(), 1);
         assert_eq!(
@@ -1298,7 +1343,7 @@ mod tests {
         {
             assert_eq!(receipt.decision, PreparedMessageDecision::Ready);
             assert_eq!(receipt.context.resolved, 1);
-            assert!(receipt.context.failures.is_empty());
+            assert!(receipt.context.failed == 0);
             assert_eq!(receipt.outcomes.len(), 1);
             assert_eq!(
                 receipt.outcomes[0].kind,
@@ -1366,8 +1411,8 @@ mod tests {
         assert_eq!(receipt.decision, PreparedMessageDecision::Partial);
         assert_eq!(receipt.context.attempted, 2);
         assert_eq!(receipt.context.resolved, 1);
-        assert_eq!(receipt.context.failures.len(), 1);
-        assert_eq!(receipt.unresolved_parts.len(), 1);
+        assert_eq!(receipt.context.failed, 1);
+        assert_eq!(receipt.unresolved_parts().len(), 1);
         assert!(receipt.final_user_content.contains("good content"));
         assert!(receipt.final_user_content.ends_with("query"));
         assert!(receipt.user_error.is_some());
@@ -1427,22 +1472,26 @@ mod tests {
         let receipt = PreparedMessageReceipt {
             schema_version: AI_MESSAGE_PREPARATION_SCHEMA_VERSION,
             decision: PreparedMessageDecision::Ready,
-            raw_content: "hello".to_string(),
-            final_user_content: "prefix\n\nhello".to_string(),
-            context: ContextResolutionReceipt {
+            authored_content_chars: 5,
+            final_content_chars: 13,
+            context: ContextPreparationSummary {
                 attempted: 1,
                 resolved: 1,
-                failures: vec![],
-                prompt_prefix: "prefix".to_string(),
+                failed: 0,
+                primary_failed: 0,
+                supplemental_failed: 0,
             },
             assembly: None,
             outcomes: vec![ContextPartPreparationOutcome {
-                label: "note.txt".to_string(),
-                source: "/tmp/note.txt".to_string(),
+                part_id: "context-0000".to_string(),
+                source_kind: ContextSourceKind::File,
+                role: ContextPreparationRole::Supplemental,
                 kind: ContextPartPreparationOutcomeKind::FullContent,
-                detail: None,
+                content_chars: 6,
+                content_fingerprint: Some("run-scoped-fingerprint".to_string()),
+                failure_code: None,
+                diagnostic_fingerprint: None,
             }],
-            unresolved_parts: vec![],
             user_error: None,
         };
 
@@ -1453,9 +1502,12 @@ mod tests {
 
         // Verify camelCase serde
         assert!(json.contains("\"schemaVersion\""));
-        assert!(json.contains("\"rawContent\""));
-        assert!(json.contains("\"finalUserContent\""));
+        assert!(json.contains("\"authoredContentChars\""));
         assert!(json.contains("\"fullContent\""));
+        assert!(!json.contains("rawContent"));
+        assert!(!json.contains("finalUserContent"));
+        assert!(!json.contains("promptPrefix"));
+        assert!(!json.contains("/tmp/note.txt"));
     }
 
     #[test]
@@ -1510,7 +1562,11 @@ mod tests {
         );
 
         assert!(prepared.can_send_message());
-        let assembly = prepared.assembly.expect("assembly receipt must be present");
+        let assembly = prepared
+            .receipt
+            .assembly
+            .as_ref()
+            .expect("assembly receipt must be present");
         assert_eq!(assembly.mention_count, 1);
         assert_eq!(assembly.pending_count, 1);
         assert_eq!(assembly.merged_count, 1);
@@ -1666,7 +1722,7 @@ mod tests {
         assert_eq!(receipt.decision, PreparedMessageDecision::Ready);
         assert_eq!(receipt.context.attempted, 1);
         assert_eq!(receipt.context.resolved, 0);
-        assert!(receipt.context.failures.is_empty());
+        assert!(receipt.context.failed == 0);
         assert!(receipt.unresolved_parts.is_empty());
         assert_eq!(receipt.final_user_content, "answer this");
         assert_eq!(
@@ -1702,5 +1758,192 @@ mod tests {
         assert!(json.contains("\"pendingCount\""));
         assert!(json.contains("\"keptFrom\""));
         assert!(json.contains("\"droppedFrom\""));
+    }
+
+    #[test]
+    fn canonical_sanitizer_strips_nested_base64_from_wrong_mime_text_block() {
+        let canary = "BASE64_CANARY".repeat(20_000);
+        let part = AiContextPart::TextBlock {
+            label: "Logs".to_string(),
+            source: "text://synthetic".to_string(),
+            text: serde_json::json!({
+                "outer": [{"inner": {"base64Data": canary, "keep": "nonbinary-survives"}}]
+            })
+            .to_string(),
+            mime_type: Some("text/plain".to_string()),
+        };
+        let prepared = prepare_user_message(
+            "inspect",
+            &[ContextPreparationItem::supplemental(part)],
+            &[],
+            &[],
+        );
+        assert!(!prepared.final_user_content.contains("BASE64_CANARY"));
+        assert!(prepared.final_user_content.contains("nonbinary-survives"));
+        assert!(prepared
+            .final_user_content
+            .contains("[binary omitted: 260000 base64 chars]"));
+        assert!(prepared.final_user_content.chars().count() < 101_000);
+    }
+
+    #[test]
+    fn canonical_sanitizer_strips_base64_when_text_block_mime_is_absent() {
+        let part = AiContextPart::TextBlock {
+            label: "Synthetic JSON".to_string(),
+            source: "text://synthetic".to_string(),
+            text: serde_json::json!({
+                "base64Data": "MISSING_MIME_BASE64_CANARY",
+                "keep": "still-here"
+            })
+            .to_string(),
+            mime_type: None,
+        };
+        let prepared = prepare_user_message(
+            "inspect",
+            &[ContextPreparationItem::supplemental(part)],
+            &[],
+            &[],
+        );
+        assert!(!prepared
+            .final_user_content
+            .contains("MISSING_MIME_BASE64_CANARY"));
+        assert!(prepared.final_user_content.contains("still-here"));
+    }
+
+    #[test]
+    fn canonical_sanitizer_strips_base64_from_focused_metadata() {
+        let part = AiContextPart::FocusedTarget {
+            target: crate::ai::tab_context::TabAiTargetContext {
+                source: "File<Search".to_string(),
+                kind: "file&row".to_string(),
+                semantic_id: "choice:\"unsafe\"".to_string(),
+                label: "Focused".to_string(),
+                metadata: Some(serde_json::json!({
+                    "nested": {"base64Data": "FOCUSED_BASE64_CANARY", "keep": 42}
+                })),
+            },
+            label: "Focused item".to_string(),
+        };
+        let prepared = prepare_user_message(
+            "inspect",
+            &[ContextPreparationItem::supplemental(part)],
+            &[],
+            &[],
+        );
+        assert!(!prepared
+            .final_user_content
+            .contains("FOCUSED_BASE64_CANARY"));
+        assert!(prepared.final_user_content.contains("\"keep\": 42"));
+        assert!(prepared.final_user_content.contains("File&lt;Search"));
+        assert!(prepared.final_user_content.contains("file&amp;row"));
+        assert!(prepared
+            .final_user_content
+            .contains("choice:&quot;unsafe&quot;"));
+    }
+
+    #[test]
+    fn wrapper_attributes_escape_xml_metacharacters() {
+        let part = AiContextPart::TextBlock {
+            label: "label<&\"'>".to_string(),
+            source: "source<&\"'>".to_string(),
+            text: "safe body".to_string(),
+            mime_type: Some("text/<&\"'>".to_string()),
+        };
+        let block = resolve_context_part_to_prompt_block(&part, &[], &[]).expect("resolve");
+        assert!(block.contains("source=\"source&lt;&amp;&quot;&apos;&gt;\""));
+        assert!(block.contains("label=\"label&lt;&amp;&quot;&apos;&gt;\""));
+        assert!(block.contains("mimeType=\"text/&lt;&amp;&quot;&apos;&gt;\""));
+    }
+
+    #[test]
+    fn primary_failure_blocks_while_supplemental_failure_can_be_partial() {
+        let missing_primary = ContextPreparationItem::primary(AiContextPart::FilePath {
+            path: "/missing/PRIMARY_PATH_CANARY".to_string(),
+            label: "Primary".to_string(),
+        });
+        let blocked = prepare_user_message("authored", &[missing_primary], &[], &[]);
+        assert_eq!(blocked.decision, PreparedMessageDecision::Blocked);
+        assert_eq!(blocked.context.primary_failed, 1);
+        assert!(!blocked.can_send_message());
+
+        let missing_supplemental = ContextPreparationItem::supplemental(AiContextPart::FilePath {
+            path: "/missing/SUPPLEMENTAL_PATH_CANARY".to_string(),
+            label: "Supplemental".to_string(),
+        });
+        let partial = prepare_user_message("authored", &[missing_supplemental], &[], &[]);
+        assert_eq!(partial.decision, PreparedMessageDecision::Partial);
+        assert_eq!(partial.context.supplemental_failed, 1);
+        assert!(partial.can_send_message());
+        assert_eq!(partial.final_user_content, "authored");
+    }
+
+    #[test]
+    fn valid_primary_plus_missing_supplemental_preserves_private_payload() {
+        let good = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(good.path(), "PRIMARY_CONTENT_CANARY").expect("write");
+        let items = vec![
+            ContextPreparationItem::primary(AiContextPart::FilePath {
+                path: good.path().to_string_lossy().to_string(),
+                label: "Primary".to_string(),
+            }),
+            ContextPreparationItem::supplemental(AiContextPart::FilePath {
+                path: "/missing/RAW_PATH_CANARY".to_string(),
+                label: "Supplemental".to_string(),
+            }),
+        ];
+        let prepared = prepare_user_message("", &items, &[], &[]);
+        assert_eq!(prepared.decision, PreparedMessageDecision::Partial);
+        assert!(prepared
+            .final_user_content
+            .contains("PRIMARY_CONTENT_CANARY"));
+        let serialized = serde_json::to_string(&prepared.receipt).expect("serialize receipt");
+        for canary in [
+            "PRIMARY_CONTENT_CANARY",
+            "RAW_PATH_CANARY",
+            "rawContent",
+            "finalUserContent",
+            "promptPrefix",
+            "metadata failed",
+        ] {
+            assert!(!serialized.contains(canary), "receipt leaked {canary}");
+        }
+        assert!(!format!("{prepared:?}").contains("PRIMARY_CONTENT_CANARY"));
+    }
+
+    #[test]
+    fn legacy_v1_receipt_discards_content_bearing_fields() {
+        let legacy = serde_json::json!({
+            "schemaVersion": 1,
+            "decision": "partial",
+            "rawContent": "LEGACY_RAW_CANARY",
+            "finalUserContent": "LEGACY_FINAL_CANARY",
+            "context": {
+                "attempted": 2,
+                "resolved": 1,
+                "failures": [{
+                    "label": "LEGACY_LABEL_CANARY",
+                    "source": "kit://URI_CANARY",
+                    "error": "OS_ERROR_CANARY"
+                }],
+                "promptPrefix": "PROMPT_PREFIX_CANARY"
+            },
+            "outcomes": []
+        });
+        let loaded: PreparedMessageReceipt =
+            serde_json::from_value(legacy).expect("load legacy receipt");
+        let serialized = serde_json::to_string(&loaded).expect("serialize redacted receipt");
+        assert_eq!(loaded.schema_version, 1);
+        assert_eq!(loaded.context.attempted, 2);
+        assert_eq!(loaded.context.resolved, 1);
+        for canary in [
+            "LEGACY_RAW_CANARY",
+            "LEGACY_FINAL_CANARY",
+            "LEGACY_LABEL_CANARY",
+            "URI_CANARY",
+            "OS_ERROR_CANARY",
+            "PROMPT_PREFIX_CANARY",
+        ] {
+            assert!(!serialized.contains(canary), "legacy load leaked {canary}");
+        }
     }
 }
