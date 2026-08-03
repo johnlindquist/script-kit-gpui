@@ -412,8 +412,13 @@ fn render_menu_syntax_main_hint(
     form_field_bounds: std::rc::Rc<std::cell::RefCell<Vec<gpui::Bounds<gpui::Pixels>>>>,
     cx: &mut Context<ScriptListApp>,
 ) -> AnyElement {
-    let palette = crate::components::non_list_palette(theme);
-    let metrics = crate::components::non_list_metrics(crate::components::NonListDensity::Compact);
+    let composition = crate::components::NonListComposition::new(
+        crate::components::NonListCompositionOwner::MenuSyntax,
+        crate::components::NonListDensity::Compact,
+        theme,
+    );
+    let palette = composition.palette();
+    let metrics = composition.metrics();
     // AdvancedQueryGuide hints keep persistent `hint.examples` visible;
     // boundary copy includes: "Plain #tag is launcher search".
     let examples = if hint.examples.is_empty() {
@@ -443,7 +448,7 @@ fn render_menu_syntax_main_hint(
         scroll_handle,
     )
     .child(
-        crate::components::non_list_content_stack(
+        composition.content_stack(
             "menu-syntax-main-hint-content",
             metrics.max_width,
             metrics.block_gap,
@@ -552,7 +557,7 @@ fn render_menu_syntax_main_hint(
         })
         .when_some(hint.warning.as_ref(), |d, warning| {
             d.child(
-                crate::components::non_list_card("menu-syntax-main-hint-warning", palette, metrics)
+                composition.card("menu-syntax-main-hint-warning")
                     .border_color(rgba(
                         (theme.colors.ui.warning << 8) | list_tokens.main_hint_warning_border_alpha,
                     ))
@@ -610,11 +615,7 @@ fn render_menu_syntax_main_hint(
                             }),
                     )
                     .child(
-                        crate::components::non_list_card(
-                            "menu-syntax-main-hint-examples",
-                            palette,
-                            metrics,
-                        )
+                        composition.card("menu-syntax-main-hint-examples")
                         .flex()
                         .flex_col()
                         .gap(px(list_tokens.main_hint_example_row_gap))

@@ -289,12 +289,6 @@ impl ScriptListApp {
         let _design_colors = tokens.colors();
         let design_spacing = tokens.spacing();
         let _design_typography = tokens.typography();
-        let color_resolver =
-            crate::theme::ColorResolver::new_for_shell(&self.theme, self.current_design);
-        let typography_resolver =
-            crate::theme::TypographyResolver::new_theme_first(&self.theme, self.current_design);
-        let empty_text_color = color_resolver.empty_text_color();
-        let empty_font_family = typography_resolver.primary_font().to_string();
 
         let chrome = crate::theme::AppChromeColors::from_theme(&self.theme);
         let text_primary = chrome.text_primary_hex;
@@ -458,9 +452,14 @@ impl ScriptListApp {
         // Build virtualized list
         let list_element: AnyElement = if filtered_len == 0 {
             let state = ProcessManagerEmptyState::from_filter(&filter);
-            crate::list_item::EmptyState::new(state.message(), empty_text_color, &empty_font_family)
-                .icon(crate::designs::icon_variations::IconName::Terminal)
-                .into_element()
+            crate::components::render_simple_empty_state(
+                "process-manager-empty",
+                state.message(),
+                "terminal",
+                None,
+                &self.theme,
+                cx,
+            )
         } else {
             let processes_for_closure: Vec<_> = filtered_processes
                 .iter()

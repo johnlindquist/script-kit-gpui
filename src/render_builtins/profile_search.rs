@@ -84,12 +84,6 @@ impl ScriptListApp {
 
         let tokens = get_tokens(self.current_design);
         let design_spacing = tokens.spacing();
-        let color_resolver =
-            crate::theme::ColorResolver::new_for_shell(&self.theme, self.current_design);
-        let typography_resolver =
-            crate::theme::TypographyResolver::new_theme_first(&self.theme, self.current_design);
-        let empty_text_color = color_resolver.empty_text_color();
-        let empty_font_family = typography_resolver.primary_font().to_string();
         let list_colors = crate::list_item::ListItemColors::from_theme(&self.theme);
         let text_primary = self.theme.colors.text.primary;
         let text_dimmed = self.theme.colors.text.dimmed;
@@ -143,16 +137,18 @@ impl ScriptListApp {
                 .items_center()
                 .justify_center()
                 .child(
-                    crate::list_item::EmptyState::new(
+                    crate::components::render_simple_empty_state(
+                        "profile-search-empty",
                         if filter.trim().is_empty() {
                             "No profiles"
                         } else {
                             "No matching profiles"
                         },
-                        empty_text_color,
-                        &empty_font_family,
-                    )
-                    .into_element(),
+                        "user",
+                        None,
+                        &self.theme,
+                        cx,
+                    ),
                 )
                 .into_any_element()
         } else {

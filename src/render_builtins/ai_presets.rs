@@ -129,12 +129,6 @@ impl ScriptListApp {
         selected_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tokens = get_tokens(self.current_design);
-        let design_spacing = tokens.spacing();
-        let design_typography = tokens.typography();
-
-        let text_muted = self.theme.colors.text.muted;
-
         // Load all presets (defaults + user-saved)
         let all_presets = crate::ai::presets::load_presets().unwrap_or_default();
         let default_presets: Vec<(&str, &str, &str)> = vec![
@@ -231,14 +225,14 @@ impl ScriptListApp {
             .collect();
 
         let list_element: AnyElement = if count == 0 {
-            div()
-                .w_full()
-                .py(px(design_spacing.padding_xl))
-                .text_center()
-                .text_color(rgb(text_muted))
-                .font_family(design_typography.font_family)
-                .child(AiPresetSearchEmptyState::from_filter(&filter).message())
-                .into_any_element()
+            crate::components::render_simple_empty_state(
+                "ai-presets-empty",
+                AiPresetSearchEmptyState::from_filter(&filter).message(),
+                "sparkles",
+                None,
+                &self.theme,
+                cx,
+            )
         } else {
             crate::components::scrollbar::render_tracked_scroll_column(
                 "search-ai-presets-row-stack",

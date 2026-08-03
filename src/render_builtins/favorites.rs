@@ -175,12 +175,6 @@ impl ScriptListApp {
         selected_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let color_resolver =
-            crate::theme::ColorResolver::new_for_shell(&self.theme, self.current_design);
-        let typography_resolver =
-            crate::theme::TypographyResolver::new_theme_first(&self.theme, self.current_design);
-        let empty_text_color = color_resolver.empty_text_color();
-        let empty_font_family = typography_resolver.primary_font().to_string();
 
         // Load favorites and resolve to script/scriptlet names
         let favorites = script_kit_gpui::favorites::load_favorites().unwrap_or_default();
@@ -273,9 +267,14 @@ impl ScriptListApp {
 
         let list_element: AnyElement = if count == 0 {
             let message = FavoritesEmptyState::from_filter(&filter).message();
-            crate::list_item::EmptyState::new(message, empty_text_color, &empty_font_family)
-                .icon(crate::designs::icon_variations::IconName::Star)
-                .into_element()
+            crate::components::render_simple_empty_state(
+                "favorites-empty",
+                message,
+                "star",
+                None,
+                &self.theme,
+                cx,
+            )
         } else {
             crate::components::scrollbar::render_tracked_scroll_column(
                 "favorites-row-stack",

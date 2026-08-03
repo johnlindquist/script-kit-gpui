@@ -6,8 +6,8 @@
 - consult count: 1 / 1
 - plan status: complete (`plan.md`, 19/19 task IDs covered)
 - protocol/profile: v2 / `profile-a-2`
-- execution status: C01–C14 complete (`UX-002`, `UX-001`, `UX-017`, `UX-015`, `UX-006`, `UX-010`, `UX-003`, `UX-009`, `UX-004`, `UX-005`, `UX-011`, `UX-012`, `UX-013`, `UX-014`, `UX-016`, `UX-007`); starting C15
-- audit verdict: pending
+- execution status: C01–C16 complete (`UX-002`, `UX-001`, `UX-017`, `UX-015`, `UX-006`, `UX-010`, `UX-003`, `UX-009`, `UX-004`, `UX-005`, `UX-011`, `UX-012`, `UX-013`, `UX-014`, `UX-016`, `UX-007`, `UX-008`, `UX-018`, `GOV-001`)
+- audit verdict: PASS — all 19 assigned Core UX task IDs implemented, receipted, and locally audited
 
 ## Receipts
 
@@ -237,3 +237,16 @@
 - **Audit/guardrails:** Source inventory remains 2,818 sites (18/18 inventory tests), hardcoded visual inventory 16/16, glass static suite 40/40, and calibration fixture 1/1. Protected glass diff is empty; no generated output or locked chrome/motion/popup value changed.
 - **Cleanup:** Final Driver process exited, streams drained, log writer closed, exact executable-path process count is zero, clipboard untouched, and no signal used.
 - **Commit:** This section is committed atomically with `Implement UX-008: render launcher section labels strongly while preserving semantic source text and slot stability`; use `git log -1 --oneline` for the immutable hash.
+
+### C16 — UX-018 + GOV-001 semantic-state and rich-composition ownership
+
+- **Status:** Complete; focused behavior/model tests, stable build, product runtime/visual matrix, negative controls, governance, anti-drift, cleanup, and the final Core UX lane audit are green.
+- **Implementation:** Added explicit icon ownership and a simple semantic empty-state factory to `InfoStateSpec`; migrated 16 legacy `list_item::EmptyState` built-in callers plus the hand-built AI Presets empty view; projected Favorites/AI Presets through the same `InfoState` source in `getElements`; removed the legacy renderer and empty-only constants. Replaced loose rich helpers with `NonListComposition`, whose constructor requires `NonListCompositionOwner::{MenuSyntax,About}`. About and menu syntax consume that owner-bound composition without changing their rich content. AI recovery remains untouched as the typed capability/action owner.
+- **Local correction:** The first focused InfoState test failed to compile because GPUI `SharedString::as_deref()` yields `ArcCow<str>`, not `str`; the assertion now compares `as_ref()` content. Runtime then exposed that Favorites still projected the old `genericFilterableEmptyState` semantic kind even though rendering used InfoState. The collector was corrected to build semantics from `simple_empty_state_spec`, AI Presets was migrated at the same ownership boundary, and the obsolete generic semantic kind/collector name were removed. No additional Oracle consult was used.
+- **Focused receipts:** `components::info_state` 17/17; `components::non_list_state` 3/3; `components::ai_recovery` 3/3; binary `info_state_semantic_tests` 3/3; library/product checks and stable product build finished. `render_script_list` has no directly named unit tests (0 selected); its real boundary is covered by the runtime matrix.
+- **Runtime/visual receipt:** `.artifacts/consistency/UX-018-GOV-001/runtime-state-ownership.json` is `RUNTIME-CONFIRMED`. Empty Favorites exposes `InfoState/favorites-empty/star`; advanced query guidance exposes only `MenuSyntaxMainHint`; About exposes its rich header/actions/update/acknowledgements geometry; Agent Chat exposes the typed shared recovery spine and redacted `UsageExhausted` capability model. Four screenshots were inspected.
+- **Inventory/negative controls:** Zero production `list_item::EmptyState`, `EmptyState::new`, `genericFilterableEmptyState`, `collect_generic_filterable_rows`, retired loose rich helper, or external loose `non_list_*` call sites. Only About and Menu Syntax construct rich composition. `components::ai_recovery` has no diff. Source inventory remains 2,818 sites (18/18 tests); hardcoded visual guard has no additions (16/16 tests).
+- **Build:** `target-agent/artifacts/core-state-ownership/script-kit-gpui`; SHA-256 `28b1f7677c0b2fa2cf946b37395cc439cd4bda7eb0d4391d0db2e54294752cfe`.
+- **Audit/guardrails:** Protected glass owner diff is empty; static glass suite 40/40 and production calibration fixture 1/1 pass. Existing copy, footer ownership, focus/keyboard routes, popup lifecycle, list geometry, and locked motion/material values remain unchanged. Adversarial C16/lane audit searched for every retired or duplicate ownership path and found no remaining gap; `VERDICT: PASS`.
+- **Cleanup:** Four isolated Driver runs each report process exited, streams drained, log writer closed, and exact executable-path `ownedProcessCount:0`; final artifact-path process inventory is empty, clipboard untouched, and no signal used.
+- **Commit:** This section is committed atomically with `Implement UX-018 and GOV-001: enforce semantic-state and compositional-layout ownership`; use `git log -1 --oneline` for the immutable hash.

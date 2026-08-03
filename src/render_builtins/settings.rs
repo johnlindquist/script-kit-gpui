@@ -327,12 +327,6 @@ impl ScriptListApp {
         // Shared with the design-token exporter (settings_contract.rs).
         let hub_layout = resolved_settings_hub_layout(design_spacing);
         let _design_typography = tokens.typography();
-        let color_resolver =
-            crate::theme::ColorResolver::new_for_shell(&self.theme, self.current_design);
-        let typography_resolver =
-            crate::theme::TypographyResolver::new_theme_first(&self.theme, self.current_design);
-        let empty_text_color = color_resolver.empty_text_color();
-        let empty_font_family = typography_resolver.primary_font().to_string();
 
         let chrome = theme::AppChromeColors::from_theme(&self.theme);
 
@@ -529,9 +523,14 @@ impl ScriptListApp {
 
         let list_element: AnyElement = if item_count == 0 {
             let state = SettingsEmptyState::from_filter(&filter);
-            crate::list_item::EmptyState::new(state.message(), empty_text_color, &empty_font_family)
-                .icon(crate::designs::icon_variations::IconName::Settings)
-                .into_element()
+            crate::components::render_simple_empty_state(
+                "settings-empty",
+                state.message(),
+                "settings",
+                None,
+                &self.theme,
+                cx,
+            )
         } else {
             crate::components::scrollbar::render_tracked_scroll_column(
                 "settings-row-stack",

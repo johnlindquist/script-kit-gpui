@@ -188,12 +188,6 @@ impl ScriptListApp {
         let tokens = get_tokens(self.current_design);
         let design_spacing = tokens.spacing();
         let design_typography = tokens.typography();
-        let color_resolver =
-            crate::theme::ColorResolver::new_for_shell(&self.theme, self.current_design);
-        let typography_resolver =
-            crate::theme::TypographyResolver::new_theme_first(&self.theme, self.current_design);
-        let empty_text_color = color_resolver.empty_text_color();
-        let empty_font_family = typography_resolver.primary_font().to_string();
 
         let all_entries = crate::dictation::load_history();
         let text_primary = self.theme.colors.text.primary;
@@ -392,9 +386,14 @@ impl ScriptListApp {
         );
         let list_element: AnyElement = if filtered_len == 0 {
             let state = DictationHistoryEmptyState::from_filter(&filter);
-            crate::list_item::EmptyState::new(state.message(), empty_text_color, &empty_font_family)
-                .icon(crate::designs::icon_variations::IconName::MessageCircle)
-                .into_element()
+            crate::components::render_simple_empty_state(
+                "dictation-history-empty",
+                state.message(),
+                "message-circle",
+                None,
+                &self.theme,
+                cx,
+            )
         } else {
             let selected = selected_index;
             let hovered = self.hovered_index;

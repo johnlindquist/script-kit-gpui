@@ -116,11 +116,11 @@ pub(crate) use info_state::{
     agent_chat_empty_guidance_spec, agent_setup_info_spec, info_metrics, info_palette,
     launcher_empty_or_no_results_spec, permission_onboarding_intro_spec,
     render_agent_chat_empty_guidance, render_info_state, render_info_state_full_width_panel,
-    render_launcher_empty_or_no_results, render_shared_empty_state, shared_empty_state_spec,
-    InfoCue, InfoCueSemanticSnapshot, InfoCueValidationError, InfoEmptySurface, InfoGuidanceItem,
-    InfoMetrics, InfoSection, InfoStateDensity, InfoStateLayout, InfoStateSemanticSnapshot,
-    InfoStateSpec, InfoStateTone, InfoTextMetric, InfoTonePresentation, InfoTypeScale,
-    INFO_SPACING, INFO_TYPE_SCALE,
+    render_launcher_empty_or_no_results, render_shared_empty_state, render_simple_empty_state,
+    shared_empty_state_spec, simple_empty_state_spec, InfoCue, InfoCueSemanticSnapshot,
+    InfoCueValidationError, InfoEmptySurface, InfoGuidanceItem, InfoMetrics, InfoSection,
+    InfoStateDensity, InfoStateLayout, InfoStateSemanticSnapshot, InfoStateSpec, InfoStateTone,
+    InfoTextMetric, InfoTonePresentation, InfoTypeScale, INFO_SPACING, INFO_TYPE_SCALE,
 };
 #[allow(unused_imports)]
 pub(crate) use inline_dropdown::{
@@ -138,10 +138,7 @@ pub use minimal_prompt_shell::MinimalPromptShell;
 pub(crate) use navigation_affordance::render_back_affordance;
 #[allow(unused_imports)]
 pub(crate) use non_list_state::{
-    non_list_action_row, non_list_callout, non_list_card, non_list_centered_shell,
-    non_list_content_stack, non_list_footer_note, non_list_icon_glyph, non_list_intro,
-    non_list_metrics, non_list_palette, non_list_requirement_row, NonListDensity, NonListMetrics,
-    NonListPalette,
+    NonListComposition, NonListCompositionOwner, NonListDensity, NonListMetrics, NonListPalette,
 };
 #[allow(unused_imports)]
 pub use notes_editor::{

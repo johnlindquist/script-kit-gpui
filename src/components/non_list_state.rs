@@ -1,14 +1,10 @@
-#![allow(dead_code)]
-
-//! Legacy non-list layout helpers.
+//! Owner-bound rich non-list composition.
 //!
-//! New help, empty, setup, permission, recovery, and about-style guidance should
-//! use `components::info_state` so intent, copy, type scale, and theme opacity
-//! are encoded in one shared system.
+//! Semantic empty/help/setup/permission/recovery states belong to `info_state`,
+//! while this module retains only rich About and menu-syntax compositions. New
+//! callers must add an explicit owner variant instead of importing loose helpers.
 
-use gpui::{
-    div, prelude::*, px, rgb, rgba, AnyElement, Div, FontWeight, Rgba, SharedString, Stateful,
-};
+use gpui::{div, prelude::*, px, rgb, rgba, AnyElement, Div, Rgba, SharedString, Stateful};
 
 use crate::theme::{self, AppChromeColors};
 use crate::ui::chrome;
@@ -17,6 +13,21 @@ use crate::ui::chrome;
 pub(crate) enum NonListDensity {
     Compact,
     Comfortable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NonListCompositionOwner {
+    MenuSyntax,
+    About,
+}
+
+impl NonListCompositionOwner {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::MenuSyntax => "menu-syntax",
+            Self::About => "about",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,19 +50,60 @@ pub(crate) struct NonListPalette {
     pub title: Rgba,
     pub body: Rgba,
     pub hint: Rgba,
-    pub placeholder: Rgba,
-    pub icon: Rgba,
-    pub surface: Rgba,
     pub panel: Rgba,
     pub input: Rgba,
     pub border: Rgba,
     pub hover: Rgba,
-    pub selected: Rgba,
     pub accent: Rgba,
-    pub error: Rgba,
 }
 
-pub(crate) fn non_list_metrics(density: NonListDensity) -> NonListMetrics {
+#[derive(Clone, Copy)]
+pub(crate) struct NonListComposition {
+    owner: NonListCompositionOwner,
+    metrics: NonListMetrics,
+    palette: NonListPalette,
+}
+
+impl NonListComposition {
+    pub(crate) fn new(
+        owner: NonListCompositionOwner,
+        density: NonListDensity,
+        theme: &theme::Theme,
+    ) -> Self {
+        Self {
+            owner,
+            metrics: non_list_metrics(density),
+            palette: non_list_palette(theme),
+        }
+    }
+
+    pub(crate) const fn metrics(self) -> NonListMetrics {
+        self.metrics
+    }
+
+    pub(crate) const fn palette(self) -> NonListPalette {
+        self.palette
+    }
+
+    pub(crate) fn content_stack(self, id: &'static str, max_width: f32, gap: f32) -> Stateful<Div> {
+        debug_assert!(!self.owner.as_str().is_empty());
+        non_list_content_stack(id, max_width, gap)
+    }
+
+    pub(crate) fn card(self, id: &'static str) -> Stateful<Div> {
+        non_list_card(id, self.palette, self.metrics)
+    }
+
+    pub(crate) fn action_row(self, actions: Vec<AnyElement>) -> Div {
+        non_list_action_row(actions)
+    }
+
+    pub(crate) fn footer_note(self, text: impl Into<SharedString>) -> Div {
+        non_list_footer_note(text, self.palette)
+    }
+}
+
+fn non_list_metrics(density: NonListDensity) -> NonListMetrics {
     match density {
         NonListDensity::Compact => NonListMetrics {
             max_width: 420.0,
@@ -82,27 +134,22 @@ pub(crate) fn non_list_metrics(density: NonListDensity) -> NonListMetrics {
     }
 }
 
-pub(crate) fn non_list_palette(theme: &theme::Theme) -> NonListPalette {
+fn non_list_palette(theme: &theme::Theme) -> NonListPalette {
     let chrome = AppChromeColors::from_theme(theme);
 
     NonListPalette {
         title: rgb(chrome.text_primary_hex),
         body: rgba(chrome.text_muted_rgba),
         hint: rgba(chrome.text_hint_rgba),
-        placeholder: rgba(chrome.placeholder_text_rgba),
-        icon: rgba(chrome.text_icon_rgba),
-        surface: rgba(chrome.surface_rgba),
         panel: rgba(chrome.panel_surface_rgba),
         input: rgba(chrome.input_surface_rgba),
         border: rgba(chrome.border_rgba),
         hover: rgba(chrome.hover_rgba),
-        selected: rgba(chrome.selection_rgba),
         accent: rgb(chrome.accent_hex),
-        error: rgb(theme.colors.ui.error),
     }
 }
 
-pub(crate) fn non_list_content_stack(id: &'static str, max_width: f32, gap: f32) -> Stateful<Div> {
+fn non_list_content_stack(id: &'static str, max_width: f32, gap: f32) -> Stateful<Div> {
     div()
         .id(id)
         .w_full()
@@ -112,71 +159,7 @@ pub(crate) fn non_list_content_stack(id: &'static str, max_width: f32, gap: f32)
         .gap(px(gap))
 }
 
-pub(crate) fn non_list_centered_shell(id: &'static str, max_width: f32, gap: f32) -> Stateful<Div> {
-    div()
-        .id(id)
-        .w_full()
-        .h_full()
-        .min_h(px(0.0))
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(gap))
-        .max_w(px(max_width))
-        .px(px(32.0))
-        .py(px(24.0))
-}
-
-pub(crate) fn non_list_intro(
-    title: impl Into<SharedString>,
-    description: impl Into<SharedString>,
-    palette: NonListPalette,
-    metrics: NonListMetrics,
-) -> Div {
-    div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .child(
-            div()
-                .text_size(px(metrics.title_size))
-                .line_height(px(metrics.title_line))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(palette.title)
-                .child(title.into()),
-        )
-        .child(
-            div()
-                .text_size(px(metrics.body_size))
-                .line_height(px(metrics.body_line))
-                .text_color(palette.body)
-                .child(description.into()),
-        )
-}
-
-pub(crate) fn non_list_icon_glyph(
-    glyph: impl Into<SharedString>,
-    palette: NonListPalette,
-    metrics: NonListMetrics,
-) -> Div {
-    div()
-        .size(px(metrics.icon_size))
-        .rounded(px(metrics.card_radius))
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.panel)
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(metrics.icon_size * 0.45))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(palette.icon)
-        .child(glyph.into())
-}
-
-pub(crate) fn non_list_card(
+fn non_list_card(
     id: &'static str,
     palette: NonListPalette,
     metrics: NonListMetrics,
@@ -192,72 +175,7 @@ pub(crate) fn non_list_card(
         .bg(palette.panel)
 }
 
-pub(crate) fn non_list_callout(
-    id: &'static str,
-    title: impl Into<SharedString>,
-    body: impl Into<SharedString>,
-    palette: NonListPalette,
-    metrics: NonListMetrics,
-) -> Stateful<Div> {
-    non_list_card(id, palette, metrics).child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .text_size(px(14.0))
-                    .line_height(px(20.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(palette.title)
-                    .child(title.into()),
-            )
-            .child(
-                div()
-                    .text_size(px(metrics.body_size))
-                    .line_height(px(metrics.body_line))
-                    .text_color(palette.body)
-                    .child(body.into()),
-            ),
-    )
-}
-
-pub(crate) fn non_list_requirement_row(
-    label: impl Into<SharedString>,
-    status: impl Into<SharedString>,
-    palette: NonListPalette,
-) -> Div {
-    div()
-        .w_full()
-        .min_h(px(32.0))
-        .px(px(10.0))
-        .py(px(7.0))
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.input)
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(12.0))
-        .child(
-            div()
-                .min_w(px(0.0))
-                .text_size(px(13.0))
-                .line_height(px(18.0))
-                .text_color(palette.title)
-                .child(label.into()),
-        )
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(palette.hint)
-                .child(status.into()),
-        )
-}
-
-pub(crate) fn non_list_action_row(actions: Vec<AnyElement>) -> Div {
+fn non_list_action_row(actions: Vec<AnyElement>) -> Div {
     div()
         .w_full()
         .flex()
@@ -267,7 +185,7 @@ pub(crate) fn non_list_action_row(actions: Vec<AnyElement>) -> Div {
         .children(actions)
 }
 
-pub(crate) fn non_list_footer_note(text: impl Into<SharedString>, palette: NonListPalette) -> Div {
+fn non_list_footer_note(text: impl Into<SharedString>, palette: NonListPalette) -> Div {
     div()
         .text_xs()
         .line_height(px(16.0))
@@ -310,12 +228,8 @@ mod tests {
     }
 
     #[test]
-    fn source_routes_palette_through_app_chrome_colors() {
-        let source = include_str!("non_list_state.rs");
-
-        assert!(source.contains("AppChromeColors::from_theme(theme)"));
-        assert!(source.contains("chrome.text_primary_hex"));
-        assert!(source.contains("chrome.panel_surface_rgba"));
-        assert!(source.contains("chrome.input_surface_rgba"));
+    fn rich_composition_has_only_explicit_current_owners() {
+        assert_eq!(NonListCompositionOwner::MenuSyntax.as_str(), "menu-syntax");
+        assert_eq!(NonListCompositionOwner::About.as_str(), "about");
     }
 }

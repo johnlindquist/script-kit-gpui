@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 18 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 20 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -17,7 +17,7 @@
 
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
-| Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C15 complete; C16 pending |
+| Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
 | Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | Plan complete; C01 starting |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
@@ -527,6 +527,32 @@
   5. Open Dictation's microphone picker; the two compact microphone rows must remain headerless.
   6. Run `bun scripts/agentic/ux8-section-grammar-probe.ts`; expect `RUNTIME-CONFIRMED`, every non-empty first-row Y equal to `87`, zero-result count `0`, semantic/display label pairs, and `ownedProcessCount:0`.
 - **Intentional differences preserved:** Main and Actions use launcher presentation; Unified and compact popup families preserve authored casing/anatomy unless explicitly opted in. Actions keeps its specialized 24px headers and 36px rows. Semantic text is never uppercased in storage. Existing grouped labels, icons, counts, section ordering, selection behavior, scroll math, fixed Actions shell, popup lifecycle, and all locked glass/footer contracts remain unchanged.
+
+### UX-018 — Enforce the semantic-state versus rich-composition boundary
+
+- **Status:** Complete. Semantic empty/help/setup/permission/simple-recovery presentation is owned by `InfoState`; rich About and menu-syntax compositions remain rich; typed AI recovery actions remain capability-owned.
+- **Commit boundary:** C16 — `Implement UX-018 and GOV-001: enforce semantic-state and compositional-layout ownership`. UX-018 and GOV-001 form one compiler-visible ownership batch.
+- **Changed behavior:** Seventeen built-in empty states now render through `render_simple_empty_state`, including the previously hand-built AI Preset empty state. Each state receives a stable semantic ID and explicit icon hint while retaining its existing message and optional detail. Favorites and AI Presets also project the same `InfoState` owner through `getElements`; the old `genericFilterableEmptyState` semantic representation is gone. About and advanced menu syntax preserve their cards, forms, warnings, examples, actions, scrolling, and authored layout rather than being flattened. AI failure actions remain in `ai_recovery` and retain typed capabilities, disabled reasons, diagnostic redaction, and primary-action selection.
+- **Exact owners:** `src/components/info_state.rs::{InfoStateSpec::icon_hint,simple_empty_state_spec,render_simple_empty_state}`; `src/app_layout/collect_elements.rs::{info_state_elements,collect_filterable_rows_with_info_empty}`; the 16 migrated `src/render_builtins/{process_manager,settings,window_switcher,favorites,clipboard,agent_chat_history,sdk_reference,browser_history,dictation_history,file_search,browser_tabs,script_templates,app_launcher,emoji_picker,current_app_commands,profile_search}.rs` consumers; `src/render_builtins/ai_presets.rs`; `src/about/render.rs`; `src/render_script_list/mod.rs`; and `scripts/agentic/core-state-ownership-probe.ts`.
+- **Focused tests:** `components::info_state` → PASS (17/17); `components::non_list_state` → PASS (3/3); `components::ai_recovery` → PASS (3/3); product `info_state_semantic_tests` → PASS (3/3); library and product checks plus stable product build → PASS. The first focused InfoState compile exposed an `ArcCow<str>` assertion mismatch; the test now compares borrowed string content without changing production behavior.
+- **Runtime/model receipt:** `.artifacts/consistency/UX-018-GOV-001/runtime-state-ownership.json` → `RUNTIME-CONFIRMED`. Empty Favorites reports `semanticId:info-state:favorites-empty`, `source:InfoState`, neutral semantics, and icon `star`. Advanced query guidance reports only `MenuSyntaxMainHint`; About reports its header, quick actions, update card, update action, and acknowledgements geometry; Agent Chat reports the shared `ai-recovery-*` spine, `awaitingRecovery`, `UsageExhausted`, `ai-recovery-switch-account`, and redacted diagnostics.
+- **Visual receipts:** `semantic-builtin-empty.png`, `rich-menu-syntax.png`, `rich-about.png`, and `typed-ai-recovery.png` under `.artifacts/consistency/UX-018-GOV-001/` were captured from the final artifact and visually inspected. Semantic Favorites remains centered and understated; menu syntax keeps its structured guidance/example card; About keeps its branded rich page; recovery keeps its typed action row and saved-transcript notice.
+- **Negative controls:** `rg` finds zero `list_item::EmptyState`, `EmptyState::new`, `genericFilterableEmptyState`, `collect_generic_filterable_rows`, or retired loose rich helper sites. Rich runtime semantics contain no `InfoState`; the semantic built-in contains no rich owner; raw provider `plan_type` is absent from UI semantics. No third generic state/content-page renderer remains.
+- **Binary:** `target-agent/artifacts/core-state-ownership/script-kit-gpui`; SHA-256 `28b1f7677c0b2fa2cf946b37395cc439cd4bda7eb0d4391d0db2e54294752cfe`.
+- **Governance/anti-drift:** Source-audit inventory remains 2,818 reader sites and passes 18/18 tests. Hardcoded-visual inventory reports no additions and passes 16/16 tests. Protected glass owner diff is empty; the static glass suite passes 40/40 and the production calibration fixture passes 1/1.
+- **Cleanup:** All four final Driver scenarios report `processExited:true`, `streamsDrained:true`, `logWriterClosed:true`, and exact artifact-path `ownedProcessCount:0`; the final exact-path process inventory is empty. Clipboard was untouched and no signal was used.
+- **User test/view:** 1. Open Favorites in a sandbox with no favorites; expect the centered star and existing “No favorites yet” message. 2. Filter AI Presets to zero matches; expect the same semantic anatomy with the presets message, not a one-off text block. 3. In Main, enter `type:script __c16_no_match_ownership__`; expect the rich query explanation with filters, search words, widening advice, and an example card. 4. Open About; expect branded content, quick-action buttons, update card, and acknowledgements to remain intact. 5. Open the Agent Chat recovery fixture; expect Switch account, Sign in, Check again, Copy details, and Dismiss with no raw provider JSON. 6. Run `bun scripts/agentic/core-state-ownership-probe.ts`; expect `RUNTIME-CONFIRMED` and four zero-process cleanup receipts.
+- **Intentional differences preserved:** Semantic states use compact neutral/help/setup/permission/recovery anatomy; About and menu syntax intentionally retain rich composition; AI recovery intentionally retains typed executable capabilities. Existing copy, list headers, row geometry, footer ownership, focus behavior, and locked glass/motion/material values remain unchanged.
+
+### GOV-001 — Make state/composition ownership compiler-visible
+
+- **Status:** Complete. Rich composition is no longer a bag of importable helpers; callers must construct `NonListComposition` with an explicit `NonListCompositionOwner`.
+- **Ownership boundary:** `NonListCompositionOwner` has exactly `MenuSyntax` and `About`. `NonListComposition` privately stores the owner, metrics, and palette and is the only crate export for content stacks, cards, action rows, and rich footer notes. Loose `non_list_*` exports and five dead helpers were deleted; unused palette fields and the module-wide dead-code allowance were removed. Adding another rich owner now requires an enum change and an explicit constructor call visible to rustc and review.
+- **Retired duplicate:** `list_item::EmptyState`, its builder/renderer/`IntoElement` implementation, and seven empty-state-only visual constants were deleted after production caller count reached zero. `InfoStateSpec` is now the semantic source of truth; `ai_recovery` remains the typed action source of truth.
+- **Compiler/model proof:** Product and library checks pass; `rich_composition_has_only_explicit_current_owners` proves the exhaustive owner labels; repository inventory finds production constructors only at `src/about/render.rs` and `src/render_script_list/mod.rs`. There are no external loose-helper calls and no third generic empty-state semantic kind.
+- **Local lane audit:** PASS against all 19 Core UX task IDs. The final C16 audit searched for retired APIs, dead helpers, stale generic semantics, extra rich owners, AI recovery drift, source-reader additions, hardcoded visual additions, and protected glass changes; no surviving gap was found.
+- **User test/view:** 1. Run `rg -n "NonListCompositionOwner::|list_item::EmptyState|genericFilterableEmptyState" src`. Expect exactly the About and Menu Syntax owner constructors and zero retired-state hits. 2. Run `./scripts/agentic/agent-cargo.sh check --bin script-kit-gpui`; expect a finished build with no C16 migration warnings. 3. Run the C16 runtime probe and compare the four screenshots: semantic, rich menu, rich About, and typed recovery must remain distinct.
+- **Intentional differences preserved:** Compiler visibility constrains ownership, not appearance. About/menu cards, InfoState tone/layout choices, and AI action capabilities remain separate systems because they model different user intent; no unifying visual abstraction was forced across them.
 
 ## Verification ledger
 

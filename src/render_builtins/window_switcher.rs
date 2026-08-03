@@ -136,12 +136,6 @@ impl ScriptListApp {
         let design_spacing = tokens.spacing();
         let design_typography = tokens.typography();
         let design_visual = tokens.visual();
-        let color_resolver =
-            crate::theme::ColorResolver::new_for_shell(&self.theme, self.current_design);
-        let typography_resolver =
-            crate::theme::TypographyResolver::new_theme_first(&self.theme, self.current_design);
-        let empty_text_color = color_resolver.empty_text_color();
-        let empty_font_family = typography_resolver.primary_font().to_string();
 
         // Use design tokens for global theming
         let opacity = self.theme.get_opacity();
@@ -270,9 +264,14 @@ impl ScriptListApp {
         // Build virtualized list
         let list_element: AnyElement = if filtered_len == 0 {
             let state = WindowSwitcherEmptyState::from_filter(&filter);
-            crate::list_item::EmptyState::new(state.message(), empty_text_color, &empty_font_family)
-                .icon(crate::designs::icon_variations::IconName::Sidebar)
-                .into_element()
+            crate::components::render_simple_empty_state(
+                "window-switcher-empty",
+                state.message(),
+                "panel-left",
+                None,
+                &self.theme,
+                cx,
+            )
         } else {
             // Clone data for the closure
             let windows_for_closure: Vec<_> = filtered_windows

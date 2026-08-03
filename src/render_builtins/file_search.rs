@@ -581,12 +581,6 @@ impl ScriptListApp {
         let design_spacing = tokens.spacing();
         let _design_typography = tokens.typography();
         let design_visual = tokens.visual();
-        let color_resolver =
-            crate::theme::ColorResolver::new_for_shell(&self.theme, self.current_design);
-        let typography_resolver =
-            crate::theme::TypographyResolver::new_theme_first(&self.theme, self.current_design);
-        let empty_text_color = color_resolver.empty_text_color();
-        let empty_font_family = typography_resolver.primary_font().to_string();
         let _opacity = self.theme.get_opacity();
         // bg_with_alpha removed - let vibrancy show through from Root (matches main menu)
         // Removed: box_shadows - shadows on transparent elements block vibrancy
@@ -984,10 +978,14 @@ impl ScriptListApp {
         } else if filtered_len == 0 {
             // No results and not loading - show empty state message
             let state = FileSearchEmptyState::from_query(query);
-            let icon = crate::designs::icon_variations::IconName::Folder;
-            crate::list_item::EmptyState::new(state.title(), empty_text_color, &empty_font_family)
-                .icon(icon)
-                .into_element()
+            crate::components::render_simple_empty_state(
+                "file-search-empty",
+                state.title(),
+                "folder",
+                None,
+                &self.theme,
+                cx,
+            )
         } else {
             uniform_list(
                 "file-search-list",

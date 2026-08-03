@@ -77,12 +77,6 @@ impl ScriptListApp {
         let tokens = get_tokens(self.current_design);
         let design_spacing = tokens.spacing();
         let design_typography = tokens.typography();
-        let color_resolver =
-            crate::theme::ColorResolver::new_for_shell(&self.theme, self.current_design);
-        let typography_resolver =
-            crate::theme::TypographyResolver::new_theme_first(&self.theme, self.current_design);
-        let empty_text_color = color_resolver.empty_text_color();
-        let empty_font_family = typography_resolver.primary_font().to_string();
 
         let chrome = crate::theme::AppChromeColors::from_theme(&self.theme);
         let text_primary = rgb(chrome.text_primary_hex);
@@ -211,9 +205,14 @@ impl ScriptListApp {
         let list_colors = ListItemColors::from_theme(&self.theme);
         let list_element: AnyElement = if filtered_len == 0 {
             let state = ScriptTemplateCatalogEmptyState::from_filter(filter);
-            crate::list_item::EmptyState::new(state.message(), empty_text_color, &empty_font_family)
-                .icon(crate::designs::icon_variations::IconName::File)
-                .into_element()
+            crate::components::render_simple_empty_state(
+                "script-templates-empty",
+                state.message(),
+                "file",
+                None,
+                &self.theme,
+                cx,
+            )
         } else {
             let templates_for_list = templates.clone();
             let visible_for_list: Vec<usize> =

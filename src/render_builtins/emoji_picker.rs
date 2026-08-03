@@ -90,12 +90,6 @@ impl ScriptListApp {
         let design_spacing = tokens.spacing();
         let _design_typography = tokens.typography();
         let design_visual = tokens.visual();
-        let color_resolver =
-            crate::theme::ColorResolver::new_for_shell(&self.theme, self.current_design);
-        let typography_resolver =
-            crate::theme::TypographyResolver::new_theme_first(&self.theme, self.current_design);
-        let empty_text_color = color_resolver.empty_text_color();
-        let empty_font_family = typography_resolver.primary_font().to_string();
 
         let text_primary = self.theme.colors.text.primary;
         let text_dimmed = self.theme.colors.text.dimmed;
@@ -279,13 +273,14 @@ impl ScriptListApp {
         const EMOJI_CELL_ID_OFFSET: usize = 20_000;
 
         let grid_element: AnyElement = if filtered_len == 0 {
-            crate::list_item::EmptyState::new(
+            crate::components::render_simple_empty_state(
+                "emoji-picker-empty",
                 EmojiPickerEmptyState::from_filter(&filter).message(),
-                empty_text_color,
-                &empty_font_family,
+                "star",
+                None,
+                &self.theme,
+                cx,
             )
-            .icon(crate::designs::icon_variations::IconName::Star)
-            .into_element()
         } else {
             let row_height = crate::emoji::GRID_ROW_HEIGHT;
             let selected_outline = rgba((self.theme.colors.accent.selected << 8) | 0x80);

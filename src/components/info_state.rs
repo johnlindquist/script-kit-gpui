@@ -457,6 +457,7 @@ pub(crate) struct InfoStateSpec {
     pub layout: InfoStateLayout,
     pub density: InfoStateDensity,
     pub tone: InfoStateTone,
+    pub icon_hint: Option<&'static str>,
     pub eyebrow: Option<SharedString>,
     pub title: Option<SharedString>,
     pub body: Option<SharedString>,
@@ -505,6 +506,7 @@ impl InfoStateSpec {
             layout: InfoStateLayout::Centered,
             density: InfoStateDensity::Compact,
             tone: InfoStateTone::Neutral,
+            icon_hint: None,
             eyebrow: None,
             title: None,
             body: None,
@@ -535,7 +537,7 @@ impl InfoStateSpec {
             tone: self.tone,
             semantic_kind: tone.semantic_kind,
             accessible_prefix: tone.accessible_prefix,
-            default_icon_hint: tone.default_icon_hint,
+            default_icon_hint: self.icon_hint.or(tone.default_icon_hint),
             title_present: self.title.is_some(),
             title_byte_len: self.title.as_ref().map_or(0, |title| title.len()),
             body_present: self.body.is_some(),
@@ -557,6 +559,11 @@ impl InfoStateSpec {
 
     pub(crate) fn tone(mut self, tone: InfoStateTone) -> Self {
         self.tone = tone;
+        self
+    }
+
+    pub(crate) fn icon_hint(mut self, icon_hint: &'static str) -> Self {
+        self.icon_hint = Some(icon_hint);
         self
     }
 
@@ -655,6 +662,40 @@ pub(crate) fn render_shared_empty_state(
     cx: &gpui::App,
 ) -> AnyElement {
     render_info_state(shared_empty_state_spec(surface, query), theme, cx)
+}
+
+/// Semantic replacement for the retired list-local EmptyState renderer.
+pub(crate) fn simple_empty_state_spec(
+    id: &'static str,
+    message: impl Into<SharedString>,
+    icon_hint: &'static str,
+    hint: Option<&str>,
+) -> InfoStateSpec {
+    let mut spec = InfoStateSpec::new(id)
+        .layout(InfoStateLayout::Centered)
+        .density(InfoStateDensity::Compact)
+        .tone(InfoStateTone::Neutral)
+        .icon_hint(icon_hint)
+        .body(message);
+    if let Some(hint) = hint.filter(|hint| !hint.trim().is_empty()) {
+        spec = spec.footer_note(hint.to_string());
+    }
+    spec
+}
+
+pub(crate) fn render_simple_empty_state(
+    id: &'static str,
+    message: impl Into<SharedString>,
+    icon_hint: &'static str,
+    hint: Option<&str>,
+    theme: &theme::Theme,
+    cx: &gpui::App,
+) -> AnyElement {
+    render_info_state(
+        simple_empty_state_spec(id, message, icon_hint, hint),
+        theme,
+        cx,
+    )
 }
 
 pub(crate) fn permission_onboarding_intro_spec(
@@ -1012,8 +1053,9 @@ fn render_info_tone_header(spec: &InfoStateSpec, palette: InfoPalette) -> Option
             .accessible_prefix
             .map(|prefix| SharedString::from(prefix.to_string()))
     });
-    let icon = presentation
-        .default_icon_hint
+    let icon = spec
+        .icon_hint
+        .or(presentation.default_icon_hint)
         .and_then(crate::icons::lucide_from_str);
     if eyebrow.is_none() && icon.is_none() {
         return None;
@@ -1782,6 +1824,31 @@ mod tests {
             shared_empty_state_spec(InfoEmptySurface::NotesBrowse, "meeting")
         );
         assert!(notes_filtered.contains("No notes match your filter"));
+    }
+
+    #[test]
+    fn simple_builtin_empty_state_is_semantic_and_keeps_optional_hint() {
+        let spec = simple_empty_state_spec(
+            "process-manager-empty",
+            "No running processes",
+            "terminal",
+            Some("Start a script to see it here"),
+        );
+        assert_eq!(spec.layout, InfoStateLayout::Centered);
+        assert_eq!(spec.tone, InfoStateTone::Neutral);
+        assert_eq!(spec.icon_hint, Some("terminal"));
+        assert_eq!(
+            spec.body.as_ref().map(|body| body.as_ref()),
+            Some("No running processes")
+        );
+        assert_eq!(
+            spec.footer_note.as_ref().map(|note| note.as_ref()),
+            Some("Start a script to see it here")
+        );
+        let semantics = spec.semantic_snapshot();
+        assert_eq!(semantics.semantic_kind, "neutral");
+        assert_eq!(semantics.default_icon_hint, Some("terminal"));
+        assert!(semantics.actions.is_empty());
     }
 
     #[test]

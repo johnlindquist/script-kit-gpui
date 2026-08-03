@@ -737,12 +737,13 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 let rows = Self::ai_preset_search_visible_row_labels(filter);
-                self.collect_generic_filterable_rows(
+                self.collect_filterable_rows_with_info_empty(
                     "ai-presets-filter",
                     filter.clone(),
                     "ai-presets",
                     "ai-presets-empty",
                     AiPresetSearchEmptyState::from_filter(filter).message(),
+                    "sparkles",
                     &rows,
                     *selected_index,
                     limit,
@@ -755,12 +756,13 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 let rows = self.filtered_favorite_ids_for_filter(filter);
-                self.collect_generic_filterable_rows(
+                self.collect_filterable_rows_with_info_empty(
                     "favorites-filter",
                     filter.clone(),
                     "favorites",
                     "favorites-empty",
                     FavoritesEmptyState::from_filter(filter).message(),
+                    "star",
                     &rows,
                     *selected_index,
                     limit,
@@ -2483,19 +2485,31 @@ impl ScriptListApp {
         ElementCollectionOutcome::new(elements, total_count)
     }
 
-    fn collect_generic_filterable_rows(
+    fn collect_filterable_rows_with_info_empty(
         &self,
         input_name: &str,
         input_value: String,
         list_name: &str,
-        empty_panel_name: &str,
+        empty_state_id: &'static str,
         empty_text: &str,
+        empty_icon_hint: &'static str,
         rows: &[String],
         selected_index: usize,
         limit: usize,
     ) -> (Vec<protocol::ElementInfo>, usize) {
-        let empty_panel_count = usize::from(rows.is_empty());
-        let total_count = rows.len() + 2 + empty_panel_count;
+        let empty_state = rows.is_empty().then(|| {
+            crate::components::simple_empty_state_spec(
+                empty_state_id,
+                empty_text.to_string(),
+                empty_icon_hint,
+                None,
+            )
+            .semantic_snapshot()
+        });
+        let empty_element_count = empty_state
+            .as_ref()
+            .map_or(0, |snapshot| Self::info_state_elements(snapshot).len());
+        let total_count = rows.len() + 2 + empty_element_count;
         let mut elements = Vec::with_capacity(limit.min(total_count));
 
         Self::push_limited_element(
@@ -2514,28 +2528,12 @@ impl ScriptListApp {
             protocol::ElementInfo::list(list_name, rows.len()),
         );
 
-        if rows.is_empty() {
-            Self::push_limited_element(
-                &mut elements,
-                limit,
-                protocol::ElementInfo {
-                    semantic_id: protocol::generate_semantic_id_named("panel", empty_panel_name),
-                    element_type: protocol::ElementType::Panel,
-                    text: Some(empty_text.to_string()),
-                    value: Some(list_name.to_string()),
-                    selected: None,
-                    focused: None,
-                    index: None,
-                    role: Some("empty-state".to_string()),
-                    kind: Some("genericFilterableEmptyState".to_string()),
-                    source: Some(list_name.to_string()),
-                    source_name: None,
-                    selectable: Some(false),
-                    status_kind: None,
-                    action_disabled: None,
-                    style: None,
-                },
-            );
+        if let Some(snapshot) = empty_state.as_ref() {
+            for element in Self::info_state_elements(snapshot) {
+                if !Self::push_limited_element(&mut elements, limit, element) {
+                    break;
+                }
+            }
             return (elements, total_count);
         }
 
@@ -3673,6 +3671,26 @@ mod info_state_semantic_tests {
                 && element.value.as_deref() == Some("cmd+k")
                 && element.semantic_id == "info-cue:agent-chat-open-actions"
         }));
+    }
+
+    #[test]
+    fn simple_builtin_empty_elements_expose_info_state_owner_and_icon() {
+        let snapshot = crate::components::simple_empty_state_spec(
+            "favorites-empty",
+            "No favorites yet",
+            "star",
+            None,
+        )
+        .semantic_snapshot();
+        let elements = ScriptListApp::info_state_elements(&snapshot);
+        assert_eq!(elements.len(), 1);
+        let root = &elements[0];
+        assert_eq!(root.semantic_id, "info-state:favorites-empty");
+        assert_eq!(root.role.as_deref(), Some("info-state"));
+        assert_eq!(root.source.as_deref(), Some("InfoState"));
+        assert_eq!(root.source_name.as_deref(), Some("favorites-empty"));
+        assert_eq!(root.value.as_deref(), Some("star"));
+        assert_eq!(root.kind.as_deref(), Some("neutral"));
     }
 }
 

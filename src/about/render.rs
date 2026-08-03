@@ -15,8 +15,7 @@ use crate::{
     about::AboutState,
     branding,
     components::{
-        non_list_action_row, non_list_card, non_list_content_stack, non_list_footer_note,
-        non_list_metrics, non_list_palette, NonListDensity, NonListMetrics, NonListPalette,
+        NonListComposition, NonListCompositionOwner, NonListDensity, NonListMetrics, NonListPalette,
     },
     theme,
     ui::chrome,
@@ -74,8 +73,13 @@ fn render_about_surface_inner(
 ) -> impl IntoElement {
     let theme = theme::get_cached_theme();
     let chrome = theme::AppChromeColors::from_theme(&theme);
-    let palette = non_list_palette(&theme);
-    let metrics = non_list_metrics(NonListDensity::Comfortable);
+    let composition = NonListComposition::new(
+        NonListCompositionOwner::About,
+        NonListDensity::Comfortable,
+        &theme,
+    );
+    let palette = composition.palette();
+    let metrics = composition.metrics();
     let snapshot = update_state
         .read()
         .map(|guard| guard.clone())
@@ -106,17 +110,36 @@ fn render_about_surface_inner(
                 .items_center()
                 .overflow_y_scrollbar()
                 .child(
-                    non_list_content_stack("about-non-list-content", 560.0, metrics.item_gap)
+                    composition
+                        .content_stack("about-non-list-content", 560.0, metrics.item_gap)
                         .items_center()
                         .child(render_logo_block(palette, metrics))
                         .child(render_title_version(chrome, palette))
                         .child(render_tagline(palette, metrics))
                         .child(render_creator_row(palette, metrics))
-                        .child(render_quick_actions(palette, metrics, &actions))
-                        .child(render_update_card(palette, metrics, snapshot, &actions))
-                        .child(render_acknowledgements(palette, metrics, state, &actions))
+                        .child(render_quick_actions(
+                            composition,
+                            palette,
+                            metrics,
+                            &actions,
+                        ))
+                        .child(render_update_card(
+                            composition,
+                            palette,
+                            metrics,
+                            snapshot,
+                            &actions,
+                        ))
+                        .child(render_acknowledgements(
+                            composition,
+                            palette,
+                            metrics,
+                            state,
+                            &actions,
+                        ))
                         .child(
-                            non_list_footer_note("© John Lindquist · Built with GPUI", palette)
+                            composition
+                                .footer_note("© John Lindquist · Built with GPUI")
                                 .mt(px(20.0))
                                 .h(px(28.0))
                                 .flex()
@@ -268,49 +291,52 @@ fn render_creator_row(palette: NonListPalette, metrics: NonListMetrics) -> Div {
 }
 
 fn render_quick_actions(
+    composition: NonListComposition,
     palette: NonListPalette,
     metrics: NonListMetrics,
     actions: &AboutSurfaceActions,
 ) -> Div {
-    non_list_action_row(vec![
-        action_button_with_min_width(
-            "about-open-github",
-            "Open GitHub repo",
-            palette,
-            metrics,
-            actions.open_github.clone(),
-            true,
-            128.0,
-        )
-        .into_any_element(),
-        action_button_with_min_width(
-            "about-open-discord",
-            "Open Discord",
-            palette,
-            metrics,
-            actions.open_discord.clone(),
-            true,
-            128.0,
-        )
-        .into_any_element(),
-        action_button_with_min_width(
-            "about-follow-x",
-            "Follow on X",
-            palette,
-            metrics,
-            actions.follow_x.clone(),
-            true,
-            128.0,
-        )
-        .into_any_element(),
-    ])
-    .mt(px(metrics.item_gap))
-    .max_w(px(metrics.max_width))
-    .justify_center()
-    .flex_wrap()
+    composition
+        .action_row(vec![
+            action_button_with_min_width(
+                "about-open-github",
+                "Open GitHub repo",
+                palette,
+                metrics,
+                actions.open_github.clone(),
+                true,
+                128.0,
+            )
+            .into_any_element(),
+            action_button_with_min_width(
+                "about-open-discord",
+                "Open Discord",
+                palette,
+                metrics,
+                actions.open_discord.clone(),
+                true,
+                128.0,
+            )
+            .into_any_element(),
+            action_button_with_min_width(
+                "about-follow-x",
+                "Follow on X",
+                palette,
+                metrics,
+                actions.follow_x.clone(),
+                true,
+                128.0,
+            )
+            .into_any_element(),
+        ])
+        .mt(px(metrics.item_gap))
+        .max_w(px(metrics.max_width))
+        .justify_center()
+        .flex_wrap()
 }
 
 fn render_update_card(
+    composition: NonListComposition,
     palette: NonListPalette,
     metrics: NonListMetrics,
     update_state: UpdateState,
@@ -358,7 +384,8 @@ fn render_update_card(
         ),
     };
 
-    non_list_card("about-update-card", palette, metrics)
+    composition
+        .card("about-update-card")
         .mt(px(metrics.item_gap))
         .max_w(px(metrics.max_width))
         .min_h(px(60.0))
@@ -404,12 +431,14 @@ fn render_update_card(
 }
 
 fn render_acknowledgements(
+    composition: NonListComposition,
     palette: NonListPalette,
     metrics: NonListMetrics,
     state: &AboutState,
     actions: &AboutSurfaceActions,
 ) -> impl IntoElement {
-    non_list_card("about-acknowledgements", palette, metrics)
+    composition
+        .card("about-acknowledgements")
         .mt(px(metrics.item_gap))
         .max_w(px(metrics.max_width))
         .px(px(0.0))

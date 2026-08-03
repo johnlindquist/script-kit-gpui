@@ -80,12 +80,6 @@ impl ScriptListApp {
         let tokens = get_tokens(self.current_design);
         let design_spacing = tokens.spacing();
         let _design_typography = tokens.typography();
-        let color_resolver =
-            crate::theme::ColorResolver::new_for_shell(&self.theme, self.current_design);
-        let typography_resolver =
-            crate::theme::TypographyResolver::new_theme_first(&self.theme, self.current_design);
-        let empty_text_color = color_resolver.empty_text_color();
-        let empty_font_family = typography_resolver.primary_font().to_string();
 
         let chrome = theme::AppChromeColors::from_theme(&self.theme);
 
@@ -230,10 +224,14 @@ impl ScriptListApp {
                 "current_app_commands.render_empty_state"
             );
 
-            crate::list_item::EmptyState::new(empty_title, empty_text_color, &empty_font_family)
-                .hint(empty_detail)
-                .icon(crate::designs::icon_variations::IconName::Terminal)
-                .into_element()
+            crate::components::render_simple_empty_state(
+                "current-app-commands-empty",
+                empty_title,
+                "terminal",
+                Some(empty_detail.as_str()),
+                &self.theme,
+                cx,
+            )
         } else {
             let entries_for_closure: Vec<(usize, builtins::BuiltInEntry)> = filtered_entries
                 .iter()
