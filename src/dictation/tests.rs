@@ -3470,8 +3470,8 @@ fn agent_chat_dictation_delivery_suppresses_focused_launcher_context() {
     let tab_ai_arm = &handler_src[tab_ai_arm_start..tab_ai_arm_start + 900];
 
     assert!(
-        tab_ai_arm.contains("open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part"),
-        "Agent Chat dictation should submit the transcript as the prompt without inheriting the selected ScriptList item as context"
+        tab_ai_arm.contains("send_dictation_to_agent_chat(transcript.clone(), cx)"),
+        "Agent Chat dictation should use the explicit Send verb without inheriting the selected ScriptList item as context"
     );
 }
 

@@ -333,7 +333,7 @@
           "id": "WF-008",
           "title": "Bind auto-submit to explicit entry verbs",
           "status": "P1; SOURCE-CONFIRMED policy risk.",
-          "owners": "AgentChatSeedPolicy, request constructors, launcher/Quick AI/Notes/Dictation/File Search/Actions/plugin callers.",
+          "owners": "AgentChatEntryIntent, AgentChatEntryDispatch/Outcome, launcher/Quick AI/Notes/Dictation/File Search/Actions/plugin callers.",
           "before": "Current behavior is spread across local owners, implicit conventions, or incomplete proof, so the same cue can make different promises.",
           "after": "Each entry has verb, seed, context, return policy; composer-only preserves exact draft; auto-submit clears only after accepted dispatch.",
           "acceptance": "Each entry has verb, seed, context, return policy; composer-only preserves exact draft; auto-submit clears only after accepted dispatch.",

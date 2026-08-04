@@ -254,10 +254,7 @@ impl ScriptListApp {
 
         // Compute canonical effective intent once, matching PTY path's normalization.
         let effective_intent = Self::tab_ai_effective_submission_intent(&request);
-        let auto_submit = matches!(
-            request.seed_policy,
-            agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn
-        ) && effective_intent.is_some();
+        let auto_submit = request.requests_submission() && effective_intent.is_some();
 
         // Build Agent Chat initial input via the shared helper, ensuring the same
         // verification contract as the PTY submission path.
@@ -305,12 +302,29 @@ impl ScriptListApp {
                 )
             });
 
+        if std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() == Some("1")
+            && std::env::var("SCRIPT_KIT_TEST_AGENT_CHAT_PREFLIGHT_REFUSAL")
+                .ok()
+                .as_deref()
+                == Some("1")
+        {
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_preflight_fixture_refused",
+            );
+            self.preserve_source_after_agent_chat_preflight_failure(
+                "Agent Chat preflight was refused",
+                cx,
+            );
+            return;
+        }
+
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_open_begin",
             agent_chat_ui_variant = request.ui_variant.state_id(),
             auto_submit,
-            has_entry_intent = request.entry_intent.is_some(),
+            has_entry_intent = request.entry_text().is_some(),
             had_harness_session,
             pending_script_list_trigger = ?pending_script_list_trigger,
             prefilled_len = agent_chat_initial_input.as_ref().map(|text| text.len()).unwrap_or(0),
@@ -386,17 +400,8 @@ impl ScriptListApp {
                         event = "quick_ai_launch_resolution_failed",
                         error = %error,
                     );
-                    self.toast_manager.push(
-                        crate::components::toast::Toast::error(
-                            "Quick AI is unavailable",
-                            &self.theme,
-                        )
-                        .duration_ms(Some(TOAST_ERROR_MS)),
-                    );
-                    self.show_pi_agent_chat_unavailable_setup_view(
-                        source_view,
-                        error.to_string(),
-                        crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(request.ui_variant),
+                    self.preserve_source_after_agent_chat_preflight_failure(
+                        "Quick AI is unavailable",
                         cx,
                     );
                 }
@@ -454,23 +459,28 @@ impl ScriptListApp {
                     error = %error,
                     focused_text_mini,
                 );
-                if focused_text_mini {
-                    self.toast_manager.push(
-                        crate::components::toast::Toast::error(
-                            "Pi Text profile is unavailable",
-                            &self.theme,
-                        )
-                        .duration_ms(Some(TOAST_ERROR_MS)),
-                    );
-                }
-                self.show_pi_agent_chat_unavailable_setup_view(
-                source_view,
-                error.to_string(),
-                crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(request.ui_variant),
-                cx,
-            );
+                self.preserve_source_after_agent_chat_preflight_failure(
+                    if focused_text_mini {
+                        "Pi Text profile is unavailable"
+                    } else {
+                        "Agent Chat is unavailable"
+                    },
+                    cx,
+                );
             }
         }
+    }
+
+    fn preserve_source_after_agent_chat_preflight_failure(
+        &mut self,
+        user_message: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.toast_manager.push(
+            crate::components::toast::Toast::error(user_message, &self.theme)
+                .duration_ms(Some(TOAST_ERROR_MS)),
+        );
+        cx.notify();
     }
 
     /// WP-B2: whether a Quick AI launch carries context it promised never to
@@ -494,14 +504,12 @@ impl ScriptListApp {
     /// refusal, not a debug assert). The caller owns dropping `capture_rx`.
     fn fail_quick_ai_context_invariant(
         &mut self,
-        source_view: AppView,
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
         has_focused_part: bool,
         use_ask_anything_fallback: bool,
         has_ambient_chip: bool,
         cx: &mut Context<Self>,
     ) {
-        let error = "quick_ai_zero_context_launch_invariant_violated";
         tracing::error!(
             target: "script_kit::quick_ai",
             event = "quick_ai_zero_context_launch_invariant_violated",
@@ -510,12 +518,8 @@ impl ScriptListApp {
             use_ask_anything_fallback,
             has_ambient_chip,
         );
-        self.show_pi_agent_chat_unavailable_setup_view(
-            source_view,
-            error.to_string(),
-            crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(
-                ui_variant,
-            ),
+        self.preserve_source_after_agent_chat_preflight_failure(
+            "Quick AI refused unexpected context",
             cx,
         );
     }
@@ -546,7 +550,6 @@ impl ScriptListApp {
         ) {
             drop(capture_rx);
             self.fail_quick_ai_context_invariant(
-                source_view,
                 request.ui_variant,
                 focused_part.is_some(),
                 use_ask_anything_fallback,
@@ -613,8 +616,8 @@ impl ScriptListApp {
         // enter with the request's own zero-implicit-context policy.
         debug_assert_eq!(
             request.context_policy,
-            AgentChatContextPolicy::SuppressFocused,
-            "Quick AI must enter with a zero-implicit-context policy",
+            AgentChatContextPolicy::NoContext,
+            "Quick AI must enter with a zero-context policy",
         );
         let needs_deferred = self.stage_agent_chat_initial_context_parts(
             None,
@@ -674,7 +677,6 @@ impl ScriptListApp {
         ) {
             drop(capture_rx);
             self.fail_quick_ai_context_invariant(
-                source_view,
                 request.ui_variant,
                 focused_part.is_some(),
                 use_ask_anything_fallback,
@@ -744,12 +746,10 @@ impl ScriptListApp {
                     warm_key = %pi_launch.warm_key,
                     error = %error,
                 );
-                self.show_pi_agent_chat_unavailable_setup_view(
-                source_view,
-                error.to_string(),
-                crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy::for_launch_variant(request.ui_variant),
-                cx,
-            );
+                self.preserve_source_after_agent_chat_preflight_failure(
+                    "Agent Chat could not start",
+                    cx,
+                );
                 return;
             }
         };
@@ -841,8 +841,7 @@ impl ScriptListApp {
             auto_submit,
             pending_script_list_trigger,
             &request.context_policy,
-            request.ui_variant
-                != crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi,
+            request.context_policy != AgentChatContextPolicy::NoContext,
             &source_view,
             cx,
         );

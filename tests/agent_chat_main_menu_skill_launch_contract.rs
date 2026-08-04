@@ -34,17 +34,14 @@ fn main_menu_skill_launch_opens_agent_chat_without_entry_intent_submit() {
         "main-menu skill launch must build slash command text"
     );
     assert!(
-        body.contains("build_skill_context_part")
-            && body.contains("&skill.title")
-            && body.contains("owner")
-            && body.contains("&skill.skill_id")
-            && body.contains("&skill.path"),
-        "main-menu skill launch must build skill context part"
+        body.contains("AgentChatContextPolicy::PluginSkill")
+            && body.contains("AgentChatEntryIntent::add(Some(command_text))"),
+        "main-menu skill launch must carry the skill through typed Add staging"
     );
     assert!(
-        body.contains("self.open_agent_chat_from_entry_request(")
+        body.contains("self.open_and_observe_agent_chat_from_entry_request(")
             && body.contains("AgentChatEntryOrigin::PluginSkill"),
-        "main-menu skill launch must dispatch PluginSkill entry request"
+        "main-menu skill launch must dispatch and observe the PluginSkill request"
     );
     assert!(
         body.contains("stage_selected_plugin_skill_from_main_menu"),

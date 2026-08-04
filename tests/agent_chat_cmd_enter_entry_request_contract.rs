@@ -22,7 +22,9 @@ fn agent_chat_entry_request_is_the_cmd_enter_handoff_choke_point() {
     for needle in [
         "pub(crate) enum AgentChatEntryOrigin",
         "pub(crate) enum AgentChatThreadTarget",
-        "pub(crate) enum AgentChatSeedPolicy",
+        "pub(crate) enum AgentChatEntryIntent",
+        "pub(crate) enum AgentChatEntryDispatch",
+        "pub(crate) struct AgentChatEntryOutcome",
         "pub(crate) struct AgentChatEntryRequest",
         "pub(crate) fn open_agent_chat_from_entry_request",
         "blocks_launcher_ai_entry()",

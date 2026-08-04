@@ -18,6 +18,9 @@ pub(crate) enum AgentChatContextPolicy {
     /// This does NOT suppress explicit context parts or an explicit
     /// FullScreen/FocusedWindow/etc. capture kind — it is not `NoContext`.
     SuppressFocused,
+    /// Admit no implicit, ambient, profile-standing, or focused context. Used
+    /// only by entry modes that promise a genuinely clean conversation.
+    NoContext,
     /// Explicit host-provided context parts. The supported contract is exactly
     /// one part; the dispatcher fails closed on any other cardinality.
     Parts {
@@ -36,6 +39,11 @@ pub(crate) enum AgentChatContextPolicy {
         target: crate::ai::TabAiTargetContext,
         supplemental_parts: Vec<crate::ai::message_parts::AiContextPart>,
         source: &'static str,
+    },
+    /// A plugin skill selected from the main menu. The specialized staging
+    /// helper preserves slash-picker identity and cursor semantics.
+    PluginSkill {
+        skill: crate::plugins::PluginSkill,
     },
 }
 
@@ -57,8 +65,8 @@ impl AgentChatContextPolicy {
             | AgentChatUiVariant::BottomDock
             | AgentChatUiVariant::DenseLog
             | AgentChatUiVariant::Sidecar
-            | AgentChatUiVariant::FocusedTextMini
-            | AgentChatUiVariant::QuickAi => Self::SuppressFocused,
+            | AgentChatUiVariant::FocusedTextMini => Self::SuppressFocused,
+            AgentChatUiVariant::QuickAi => Self::NoContext,
         }
     }
 
@@ -68,9 +76,11 @@ impl AgentChatContextPolicy {
         match self {
             Self::AmbientOrFocused => true,
             Self::SuppressFocused
+            | Self::NoContext
             | Self::Parts { .. }
             | Self::ActionsPayload { .. }
-            | Self::NotesHandoff { .. } => false,
+            | Self::NotesHandoff { .. }
+            | Self::PluginSkill { .. } => false,
         }
     }
 }
@@ -92,11 +102,9 @@ pub(crate) struct TabAiResolvedContext {
 pub(crate) struct TabAiLaunchRequest {
     /// The `AppView` that was active when Tab was pressed.
     pub(crate) source_view: AppView,
-    /// Optional user intent (from Shift+Tab typed query).
-    pub(crate) entry_intent: Option<String>,
-    /// Whether the initial text stays in the composer or is submitted as the
-    /// first turn after context bootstrap.
-    pub(crate) seed_policy: super::agent_chat_entry::AgentChatSeedPolicy,
+    /// Typed entry verb and optional text. Submission is permitted only for
+    /// `Ask` and `Send`; `Open`, `Add`, and `Continue` are composer-only.
+    pub(crate) entry: super::agent_chat_entry::AgentChatEntryIntent,
     /// Agent Chat presentation variant. Standard preserves the existing UI.
     pub(crate) ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
     /// Single-source context policy: whether this launch inherits the source
@@ -112,6 +120,19 @@ pub(crate) struct TabAiLaunchRequest {
     pub(crate) capture_kind: crate::ai::TabAiCaptureKind,
     /// Monotonic generation counter, used to drop stale capture results.
     pub(crate) capture_generation: u64,
+}
+
+impl TabAiLaunchRequest {
+    pub(crate) fn entry_text(&self) -> Option<&str> {
+        self.entry.seed_text()
+    }
+
+    pub(crate) fn requests_submission(&self) -> bool {
+        self.quick_submit_plan
+            .as_ref()
+            .map(|plan| plan.submit)
+            .unwrap_or_else(|| self.entry.requests_submission())
+    }
 }
 
 /// Artifacts produced by the deferred background capture task.

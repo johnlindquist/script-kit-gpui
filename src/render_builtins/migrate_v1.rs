@@ -508,7 +508,7 @@ impl ScriptListApp {
             receipts,
             source
         );
-        self.open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part(Some(prompt), cx);
+        self.ask_agent_chat_suppressing_focused_part(prompt, cx);
     }
 
     fn render_migrate_v1(

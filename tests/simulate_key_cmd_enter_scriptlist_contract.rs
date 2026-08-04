@@ -166,9 +166,7 @@ fn script_list_cmd_enter_plain_prompt_uses_agent_chat_entry_intent() {
         "plain natural ScriptList input should have a distinct Cmd+Enter prompt route"
     );
     assert!(
-        body.contains(
-            "open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part(Some(intent), cx)"
-        ),
+        body.contains("ask_agent_chat_suppressing_focused_part(intent, cx)"),
         "plain natural ScriptList input should seed Agent Chat as an entry intent so it can stream"
     );
 }

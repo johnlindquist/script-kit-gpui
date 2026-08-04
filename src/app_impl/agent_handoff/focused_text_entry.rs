@@ -305,14 +305,13 @@ impl ScriptListApp {
 
         self.begin_tab_ai_harness_entry_from_source_view(
             source_view,
-            None,
+            agent_chat_entry::AgentChatEntryIntent::open(None),
             AgentChatContextPolicy::SuppressFocused,
             None,
             crate::ai::TabAiCaptureKind::DefaultContext,
             // force_agent_chat_surface: focused-text apply semantics must not route to the terminal.
             true,
             crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::FocusedTextMini,
-            agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
             cx,
         );
 
@@ -518,13 +517,12 @@ impl ScriptListApp {
 
         self.begin_tab_ai_harness_entry_from_source_view(
             source_view,
-            None,
+            agent_chat_entry::AgentChatEntryIntent::open(None),
             AgentChatContextPolicy::SuppressFocused,
             None,
             crate::ai::TabAiCaptureKind::DefaultContext,
             true,
             crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::FocusedTextMini,
-            agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
             cx,
         );
 

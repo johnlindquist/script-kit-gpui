@@ -6561,10 +6561,7 @@ impl ScriptListApp {
                         // A detached chat window is an independent workspace:
                         // dictation reveals the embedded chat without
                         // destroying the user's detached conversation.
-                        self.open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part(
-                            Some(transcript.clone()),
-                            cx,
-                        );
+                        self.send_dictation_to_agent_chat(transcript.clone(), cx);
                         // Let the orchestrator reveal the main window as Agent Chat
                         // chat and focus the composer after the view is
                         // seeded with the dictated prompt.

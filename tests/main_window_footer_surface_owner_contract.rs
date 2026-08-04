@@ -233,7 +233,7 @@ fn script_issues_enter_routes_to_agent_chat_prompt_submission() {
     assert!(
         RENDER_PROMPTS_OTHER_SOURCE.contains("pub(crate) fn format_script_issues_agent_prompt")
             && RENDER_PROMPTS_OTHER_SOURCE.contains("Self::format_script_issues_diagnostics(report)")
-            && RENDER_PROMPTS_OTHER_SOURCE.contains("open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part(Some(prompt), cx)"),
+            && RENDER_PROMPTS_OTHER_SOURCE.contains("ask_agent_chat_suppressing_focused_part(prompt, cx)"),
         "Script issues Agent handoff must include the formatted diagnostics and suppress focused context"
     );
 

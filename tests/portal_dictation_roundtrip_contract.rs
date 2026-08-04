@@ -57,8 +57,8 @@ fn ai_chat_composer_delivery_stages_agent_chat_composer_without_auto_submit() {
     assert!(
         handler.contains("open_agent_chat_with_composer_seed("),
         "AiChatComposer delivery must stage the transcript through the \
-         composer-seed entry — that path uses AgentChatSeedPolicy::ComposerOnly, \
-         the 'nothing else changed' invariant from the story. An auto-submit \
+         composer-seed entry — that path uses AgentChatEntryIntent::Add, \
+         the 'nothing else changed' invariant from the story. An Ask/Send \
          entry would send the transcript without the user reviewing it."
     );
     let arm_start = handler
@@ -80,10 +80,9 @@ fn tab_ai_harness_delivery_opens_agent_chat_with_transcript_entry_intent() {
          dispatch block — losing it would drop the Agent Chat composer target entirely"
     );
     assert!(
-        handler.contains("open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part")
-            && handler.contains("Some(transcript.clone())"),
-        "TabAiHarness delivery must open Agent Chat Chat with the transcript as \
-         the entry intent so Agent Chat auto-submits the dictated prompt without \
+        handler.contains("send_dictation_to_agent_chat(transcript.clone(), cx)"),
+        "TabAiHarness delivery must use the explicit Send entry verb so Agent Chat \
+         auto-submits the dictated prompt exactly once without \
          inheriting the selected launcher row as context"
     );
 }

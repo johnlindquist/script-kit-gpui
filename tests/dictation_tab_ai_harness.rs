@@ -155,9 +155,8 @@ fn dictation_transcript_delivery_routes_tab_ai_harness() {
         "handle_dictation_transcript must have a TabAiHarness arm"
     );
     assert!(
-        fn_body.contains("open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part")
-            && fn_body.contains("Some(transcript.clone())"),
-        "TabAiHarness delivery must open Agent Chat with the transcript as the entry intent without inheriting launcher context"
+        fn_body.contains("send_dictation_to_agent_chat(transcript.clone(), cx)"),
+        "TabAiHarness delivery must use explicit Send without inheriting launcher context"
     );
 }
 
@@ -180,7 +179,7 @@ fn tab_ai_harness_delivery_seeds_script_list_return_origin_before_open() {
         .find("self.seed_agent_chat_dictation_return_origin()")
         .expect("TabAiHarness delivery must seed its close return origin");
     let open_idx = arm
-        .find("self.open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part")
+        .find("self.send_dictation_to_agent_chat")
         .expect("TabAiHarness delivery must open embedded Agent Chat");
     let finish_idx = arm
         .find("WindowEvent::FinishDictation")
@@ -214,7 +213,7 @@ fn tab_ai_harness_delivery_closes_detached_agent_chat_before_embedded_open() {
         .find("crate::ai::agent_chat::ui::chat_window::close_chat_window(&mut **cx)")
         .expect("TabAiHarness delivery must close detached Agent Chat before embedded reveal");
     let open_idx = arm
-        .find("self.open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part")
+        .find("self.send_dictation_to_agent_chat")
         .expect("TabAiHarness delivery must open embedded Agent Chat");
     let finish_idx = arm
         .find("WindowEvent::FinishDictation")

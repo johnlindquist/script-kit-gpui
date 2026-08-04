@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "classification": "RUNTIME-CONFIRMED",
+  "binaryArtifact": "cons-flow-c03",
+  "binarySha256": "9cfcf16b580b3fca23e2965e2e0ec5e3df260291f51f2c00e317ed9a734f5777",
+  "scenarios": [
+    {
+      "name": "open-draft",
+      "status": "PASS",
+      "visibleVerb": "Open",
+      "state": {
+        "status": "idle",
+        "uiVariant": "standard",
+        "inputLength": 18,
+        "messageCount": 0,
+        "contextChipCount": 2,
+        "resolvedTarget": {
+          "windowId": "main",
+          "windowKind": "main",
+          "title": "Script Kit"
+        }
+      },
+      "outcomeHasThreadIdentity": true,
+      "submission": "notRequested"
+    },
+    {
+      "name": "ask-cmd-enter",
+      "status": "PASS",
+      "visibleVerb": "Ask",
+      "state": {
+        "status": "streaming",
+        "uiVariant": "standard",
+        "inputLength": 0,
+        "messageCount": 1,
+        "contextChipCount": 0,
+        "resolvedTarget": {
+          "windowId": "main",
+          "windowKind": "main",
+          "title": "Script Kit"
+        }
+      },
+      "outcomeHasThreadIdentity": true,
+      "submission": "accepted"
+    },
+    {
+      "name": "quick-question",
+      "status": "PASS",
+      "visibleVerb": "Open",
+      "state": {
+        "status": "idle",
+        "uiVariant": "standard",
+        "inputLength": 0,
+        "messageCount": 0,
+        "contextChipCount": 0,
+        "resolvedTarget": {
+          "windowId": "main",
+          "windowKind": "main",
+          "title": "Script Kit"
+        }
+      },
+      "outcomeHasThreadIdentity": true,
+      "submission": "notRequested"
+    },
+    {
+      "name": "preflight-refusal",
+      "status": "PASS",
+      "visibleVerb": "Refused",
+      "sourceViewPreserved": true,
+      "draftLength": 34
+    }
+  ],
+  "negativeControls": {
+    "openDidNotSubmit": true,
+    "quickQuestionDidNotSubmitOrInheritContext": true,
+    "askProducedExactlyOneTurn": true,
+    "failedPreflightPreservedSource": true,
+    "receiptContainsNoAuthoredText": true
+  },
+  "cleanup": [
+    {
+      "name": "open-draft",
+      "processExited": true,
+      "streamsDrained": true,
+      "logWriterClosed": true,
+      "ownedProcessCount": 0,
+      "closeError": null,
+      "clipboardTouched": false
+    },
+    {
+      "name": "ask-cmd-enter",
+      "processExited": true,
+      "streamsDrained": true,
+      "logWriterClosed": true,
+      "ownedProcessCount": 0,
+      "closeError": null,
+      "clipboardTouched": false
+    },
+    {
+      "name": "quick-question",
+      "processExited": true,
+      "streamsDrained": true,
+      "logWriterClosed": true,
+      "ownedProcessCount": 0,
+      "closeError": null,
+      "clipboardTouched": false
+    },
+    {
+      "name": "preflight-refusal",
+      "processExited": true,
+      "streamsDrained": true,
+      "logWriterClosed": true,
+      "ownedProcessCount": 0,
+      "closeError": null,
+      "clipboardTouched": false
+    }
+  ],
+  "failures": [],
+  "taskId": "WF-002"
+}

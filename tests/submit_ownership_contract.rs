@@ -83,7 +83,7 @@ fn brain_inbox_enter_stages_agent_chat_without_submit_or_resolve() {
     );
     assert!(
         staging_body.contains(
-            "open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part(None, cx)"
+            "open_clean_agent_chat(cx)"
         ) && staging_body.contains("stage_brain_inbox_context_on_agent_chat(")
             && staging_body.contains("chat_view.resume_from_history(thread_id, cx)"),
         "The Brain Inbox staging helper should open Agent Chat without entry intent, optionally resume chat history, and stage inbox context"

@@ -617,7 +617,7 @@ impl ScriptListApp {
 
         let spine_cwd = self.spine_cwd.clone();
         self.embedded_agent_chat = None;
-        self.open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part(None, cx);
+        self.open_clean_agent_chat(cx);
 
         if let AppView::AgentChatView { entity } = &self.current_view {
             let entity = entity.clone();
@@ -693,7 +693,7 @@ impl ScriptListApp {
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
         cx: &mut Context<Self>,
     ) {
-        self.open_agent_chat_from_entry_request(
+        self.open_and_observe_agent_chat_from_entry_request(
             agent_chat_entry::AgentChatEntryRequest::main_launcher_with_variant(
                 entry_intent,
                 ui_variant,
@@ -738,7 +738,7 @@ impl ScriptListApp {
         seed_text: String,
         cx: &mut Context<Self>,
     ) {
-        self.open_agent_chat_from_entry_request(
+        self.open_and_observe_agent_chat_from_entry_request(
             agent_chat_entry::AgentChatEntryRequest::quick_ai_handoff(seed_text),
             cx,
         );
@@ -749,7 +749,7 @@ impl ScriptListApp {
     /// [`agent_chat_entry::AgentChatEntryRequest::quick_question`] for the
     /// contract and the 2026-07-10 regression it guards against.
     pub(crate) fn open_agent_chat_for_quick_question(&mut self, cx: &mut Context<Self>) {
-        self.open_agent_chat_from_entry_request(
+        self.open_and_observe_agent_chat_from_entry_request(
             agent_chat_entry::AgentChatEntryRequest::quick_question(),
             cx,
         );
@@ -757,15 +757,52 @@ impl ScriptListApp {
 
     /// Entry point for direct prompt handoffs that should not inherit the
     /// currently selected launcher row as Agent Chat context.
-    pub(crate) fn open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part(
-        &mut self,
-        entry_intent: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_agent_chat_from_entry_request(
-            agent_chat_entry::AgentChatEntryRequest::clean_main_launcher(entry_intent),
+    pub(crate) fn open_clean_agent_chat(&mut self, cx: &mut Context<Self>) {
+        self.open_and_observe_agent_chat_from_entry_request(
+            agent_chat_entry::AgentChatEntryRequest::clean_main_launcher(None),
             cx,
         );
+    }
+
+    pub(crate) fn ask_agent_chat_suppressing_focused_part(
+        &mut self,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        match agent_chat_entry::AgentChatEntryRequest::explicit_ask(
+            agent_chat_entry::AgentChatEntryOrigin::MainLauncher,
+            text,
+            crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+            AgentChatContextPolicy::SuppressFocused,
+            None,
+        ) {
+            Ok(request) => self.open_and_observe_agent_chat_from_entry_request(request, cx),
+            Err(reason_code) => tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_ask_refused",
+                reason_code,
+            ),
+        }
+    }
+
+    pub(crate) fn send_dictation_to_agent_chat(
+        &mut self,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        match agent_chat_entry::AgentChatEntryRequest::explicit_send(
+            agent_chat_entry::AgentChatEntryOrigin::Dictation,
+            text,
+            AgentChatContextPolicy::SuppressFocused,
+            None,
+        ) {
+            Ok(request) => self.open_and_observe_agent_chat_from_entry_request(request, cx),
+            Err(reason_code) => tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_send_refused",
+                reason_code,
+            ),
+        }
     }
 
     /// Dictation delivery: stage `seed_text` in the Agent Chat composer WITHOUT
@@ -779,13 +816,13 @@ impl ScriptListApp {
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
         cx: &mut Context<Self>,
     ) {
-        self.open_agent_chat_from_entry_request(
+        self.open_and_observe_agent_chat_from_entry_request(
             agent_chat_entry::AgentChatEntryRequest {
+                request_id: agent_chat_entry::next_agent_chat_entry_request_id(),
                 origin: agent_chat_entry::AgentChatEntryOrigin::Dictation,
                 target: agent_chat_entry::AgentChatThreadTarget::ExistingDetachedOrEmbedded,
-                seed_text: Some(seed_text),
+                intent: agent_chat_entry::AgentChatEntryIntent::add(Some(seed_text)),
                 ui_variant,
-                seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
                 context_policy: AgentChatContextPolicy::SuppressFocused,
                 return_origin: None,
             },
@@ -893,13 +930,18 @@ impl ScriptListApp {
                 .is_some_and(|value| !value.trim().is_empty()),
             return_focus_target = ?self.tab_ai_harness_return_focus_target,
         );
-        self.open_agent_chat_from_entry_request(
+        self.open_and_observe_agent_chat_from_entry_request(
             agent_chat_entry::AgentChatEntryRequest {
+                request_id: agent_chat_entry::next_agent_chat_entry_request_id(),
                 origin: agent_chat_entry::AgentChatEntryOrigin::MainLauncher,
                 target: agent_chat_entry::AgentChatThreadTarget::ExistingDetachedOrEmbedded,
-                seed_text: entry_intent,
+                intent: match entry_intent {
+                    Some(text) if !text.trim().is_empty() => {
+                        agent_chat_entry::AgentChatEntryIntent::Send { text }
+                    }
+                    _ => agent_chat_entry::AgentChatEntryIntent::open(None),
+                },
                 ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-                seed_policy: agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn,
                 context_policy: AgentChatContextPolicy::AmbientOrFocused,
                 return_origin: Some(source_view.clone()),
             },
@@ -918,10 +960,9 @@ impl ScriptListApp {
 
     fn open_tab_ai_agent_chat_with_options(
         &mut self,
-        entry_intent: Option<String>,
+        entry: agent_chat_entry::AgentChatEntryIntent,
         context_policy: AgentChatContextPolicy,
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
-        seed_policy: agent_chat_entry::AgentChatSeedPolicy,
         force_fresh: bool,
         cx: &mut Context<Self>,
     ) {
@@ -929,8 +970,8 @@ impl ScriptListApp {
             return;
         }
 
-        let normalized_entry_intent = entry_intent
-            .as_deref()
+        let normalized_entry_intent = entry
+            .seed_text()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
@@ -942,11 +983,7 @@ impl ScriptListApp {
         let quick_ai =
             ui_variant == crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi;
 
-        let allow_reuse = !force_fresh
-            && matches!(
-                seed_policy,
-                agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn
-            );
+        let allow_reuse = !force_fresh && entry.requests_submission();
 
         if !quick_ai && allow_reuse && crate::ai::agent_chat::ui::chat_window::is_chat_window_open()
         {
@@ -984,19 +1021,22 @@ impl ScriptListApp {
                 has_cached_retry_request,
                 cached_agent_chat_is_setup_mode,
             )
-            && self.try_reuse_embedded_agent_chat_view(entry_intent.clone(), ui_variant, cx)
+            && self.try_reuse_embedded_agent_chat_view(
+                normalized_entry_intent.clone(),
+                ui_variant,
+                cx,
+            )
         {
             return;
         }
 
         self.begin_tab_ai_harness_entry(
-            entry_intent,
+            entry,
             context_policy,
             None,
             crate::ai::TabAiCaptureKind::DefaultContext,
             true,
             ui_variant,
-            seed_policy,
             cx,
         );
     }
@@ -1060,8 +1100,7 @@ impl ScriptListApp {
 
         let request = TabAiLaunchRequest {
             source_view: self.current_view.clone(),
-            entry_intent: None,
-            seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
+            entry: agent_chat_entry::AgentChatEntryIntent::add(None),
             ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
             context_policy,
             quick_submit_plan: None,
@@ -1102,13 +1141,13 @@ impl ScriptListApp {
             pending_script_list_trigger = ?self.tab_ai_harness_script_list_trigger,
             semantic_id = %target.semantic_id,
         );
-        self.open_agent_chat_from_entry_request(
+        self.open_and_observe_agent_chat_from_entry_request(
             agent_chat_entry::AgentChatEntryRequest {
+                request_id: agent_chat_entry::next_agent_chat_entry_request_id(),
                 origin: agent_chat_entry::AgentChatEntryOrigin::ActionsDialog,
                 target: agent_chat_entry::AgentChatThreadTarget::ExistingDetachedOrEmbedded,
-                seed_text: None,
+                intent: agent_chat_entry::AgentChatEntryIntent::add(None),
                 ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-                seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
                 context_policy: AgentChatContextPolicy::ActionsPayload { target },
                 return_origin: Some(source_view.clone()),
             },
@@ -1129,6 +1168,21 @@ impl ScriptListApp {
         &mut self,
         part: crate::ai::message_parts::AiContextPart,
         source: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_tab_ai_agent_chat_with_context_part_and_entry(
+            part,
+            source,
+            agent_chat_entry::AgentChatEntryIntent::add(None),
+            cx,
+        );
+    }
+
+    fn open_tab_ai_agent_chat_with_context_part_and_entry(
+        &mut self,
+        part: crate::ai::message_parts::AiContextPart,
+        source: &'static str,
+        entry: agent_chat_entry::AgentChatEntryIntent,
         cx: &mut Context<Self>,
     ) {
         if self.tab_ai_save_offer_state.is_some() {
@@ -1153,8 +1207,7 @@ impl ScriptListApp {
         };
         let request = TabAiLaunchRequest {
             source_view: self.current_view.clone(),
-            entry_intent: None,
-            seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
+            entry,
             ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
             context_policy,
             quick_submit_plan: None,
@@ -1373,8 +1426,8 @@ impl ScriptListApp {
     /// Open Agent Chat Chat with a selected plugin skill staged like a slash pick.
     ///
     /// Main-menu skill selection should leave `/{skill} ` in the composer
-    /// with the skill attached as pending context. It must not become an
-    /// entry intent, because entry intents auto-submit.
+    /// with the skill attached as pending context. The typed `Add` verb stages
+    /// both values without constructing a submitted turn.
     pub(crate) fn open_agent_chat_with_selected_skill(
         &mut self,
         skill: &crate::plugins::PluginSkill,
@@ -1387,13 +1440,6 @@ impl ScriptListApp {
         };
         let command_text =
             crate::ai::agent_chat::ui::build_skill_slash_command_text(&skill.skill_id);
-        let part = crate::ai::agent_chat::ui::build_skill_context_part(
-            &skill.title,
-            owner,
-            &skill.skill_id,
-            &skill.path,
-        );
-
         tracing::info!(
             event = "agent_chat_skill_slash_selection_requested",
             plugin_id = %skill.plugin_id,
@@ -1405,6 +1451,29 @@ impl ScriptListApp {
             "Opening Agent Chat with plugin skill staged as a slash selection"
         );
 
+        self.open_and_observe_agent_chat_from_entry_request(
+            agent_chat_entry::AgentChatEntryRequest {
+                request_id: agent_chat_entry::next_agent_chat_entry_request_id(),
+                origin: agent_chat_entry::AgentChatEntryOrigin::PluginSkill {
+                    skill_id: skill.skill_id.clone(),
+                },
+                target: agent_chat_entry::AgentChatThreadTarget::ExistingDetachedOrEmbedded,
+                intent: agent_chat_entry::AgentChatEntryIntent::add(Some(command_text)),
+                ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+                context_policy: AgentChatContextPolicy::PluginSkill {
+                    skill: skill.clone(),
+                },
+                return_origin: Some(self.current_view.clone()),
+            },
+            cx,
+        );
+    }
+
+    fn stage_plugin_skill_from_entry(
+        &mut self,
+        skill: &crate::plugins::PluginSkill,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if let Some(entity) =
             crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity()
         {
@@ -1413,39 +1482,23 @@ impl ScriptListApp {
             });
             if staged {
                 crate::ai::agent_chat::ui::chat_window::activate_chat_window(cx);
-                return;
+                return true;
             }
         }
 
-        self.open_agent_chat_from_entry_request(
-            agent_chat_entry::AgentChatEntryRequest {
-                origin: agent_chat_entry::AgentChatEntryOrigin::PluginSkill {
-                    skill_id: skill.skill_id.clone(),
-                },
-                target: agent_chat_entry::AgentChatThreadTarget::ExistingDetachedOrEmbedded,
-                seed_text: None,
-                ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-                seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
-                context_policy: AgentChatContextPolicy::SuppressFocused,
-                return_origin: Some(self.current_view.clone()),
-            },
+        self.open_tab_ai_agent_chat_with_options(
+            agent_chat_entry::AgentChatEntryIntent::open(None),
+            AgentChatContextPolicy::SuppressFocused,
+            crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+            false,
             cx,
         );
-
         if let AppView::AgentChatView { entity } = &self.current_view {
-            let staged = entity.update(cx, |chat, cx| {
+            return entity.update(cx, |chat, cx| {
                 chat.stage_selected_plugin_skill_from_main_menu(skill, cx)
             });
-            tracing::info!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_skill_slash_selection_staged",
-                plugin_id = %skill.plugin_id,
-                skill_id = %skill.skill_id,
-                staged,
-                slash_input = %command_text,
-                attached_part_label = %part.label(),
-            );
         }
+        false
     }
 
     pub(crate) fn open_tab_ai_agent_chat_with_slash_picker(
@@ -1748,14 +1801,19 @@ impl ScriptListApp {
             return;
         }
 
+        let entry = match entry_intent {
+            Some(text) if !text.trim().is_empty() => {
+                agent_chat_entry::AgentChatEntryIntent::Send { text }
+            }
+            _ => agent_chat_entry::AgentChatEntryIntent::open(None),
+        };
         self.begin_tab_ai_harness_entry(
-            entry_intent,
+            entry,
             context_policy,
             None,
             capture_kind,
             false,
             crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-            agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn,
             cx,
         );
     }
@@ -1773,15 +1831,16 @@ impl ScriptListApp {
             return;
         }
         let capture_kind = plan.capture_kind_enum();
-        let intent = Some(plan.submission_intent().to_string());
+        let entry = agent_chat_entry::AgentChatEntryIntent::Send {
+            text: plan.submission_intent().to_string(),
+        };
         self.begin_tab_ai_harness_entry(
-            intent,
+            entry,
             AgentChatContextPolicy::AmbientOrFocused,
             Some(plan),
             capture_kind,
             false,
             crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-            agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn,
             cx,
         );
     }
@@ -1882,16 +1941,17 @@ impl ScriptListApp {
             );
 
             let capture_kind = plan.capture_kind_enum();
-            let entry_intent = Some(plan.submission_intent().to_string());
+            let entry = agent_chat_entry::AgentChatEntryIntent::Send {
+                text: plan.submission_intent().to_string(),
+            };
             self.begin_tab_ai_harness_entry_from_source_view(
                 source_view,
-                entry_intent,
+                entry,
                 AgentChatContextPolicy::AmbientOrFocused,
                 Some(plan),
                 capture_kind,
                 false,
                 crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-                agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn,
                 cx,
             );
             return;
@@ -1959,11 +2019,12 @@ impl ScriptListApp {
         let (ui_snapshot, invocation_receipt) = self.snapshot_tab_ai_ui(cx);
         self.tab_ai_harness_capture_generation += 1;
 
-        let entry_intent = plan.submission_intent().to_string();
+        let entry = agent_chat_entry::AgentChatEntryIntent::Send {
+            text: plan.submission_intent().to_string(),
+        };
         let request = TabAiLaunchRequest {
             source_view,
-            entry_intent: Some(entry_intent),
-            seed_policy: agent_chat_entry::AgentChatSeedPolicy::AutoSubmitFirstTurn,
+            entry,
             ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
             context_policy: AgentChatContextPolicy::AmbientOrFocused,
             quick_submit_plan: Some(plan),
@@ -2010,7 +2071,7 @@ impl ScriptListApp {
                     }
 
                     let resolved = this.build_tab_ai_context_from(
-                        request.entry_intent.clone().unwrap_or_default(),
+                        request.entry_text().unwrap_or_default().to_string(),
                         request.source_view.clone(),
                         request.ui_snapshot.clone(),
                         artifacts.desktop,
@@ -2042,7 +2103,7 @@ impl ScriptListApp {
 
                     match crate::ai::build_tab_ai_harness_submission(
                         &context,
-                        request.entry_intent.as_deref(),
+                        request.entry_text(),
                         crate::ai::TabAiHarnessSubmissionMode::Submit,
                         request.quick_submit_plan.as_ref(),
                         Some(&resolved.invocation_receipt),
@@ -2307,10 +2368,7 @@ impl ScriptListApp {
                 event = "tab_ai_global_cmd_enter_plain_prompt_routed_to_agent_chat",
                 input_len = intent.len(),
             );
-            self.open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part(
-                Some(intent),
-                cx,
-            );
+            self.ask_agent_chat_suppressing_focused_part(intent, cx);
             return true;
         }
 
@@ -2351,13 +2409,13 @@ impl ScriptListApp {
             );
         }
 
-        self.open_agent_chat_from_entry_request(
+        self.open_and_observe_agent_chat_from_entry_request(
             agent_chat_entry::AgentChatEntryRequest {
+                request_id: agent_chat_entry::next_agent_chat_entry_request_id(),
                 origin,
                 target: agent_chat_entry::AgentChatThreadTarget::ExistingDetachedOrEmbedded,
-                seed_text: None,
+                intent: agent_chat_entry::AgentChatEntryIntent::add(None),
                 ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-                seed_policy: agent_chat_entry::AgentChatSeedPolicy::ComposerOnly,
                 context_policy,
                 return_origin: Some(self.current_view.clone()),
             },
@@ -2463,24 +2521,22 @@ impl ScriptListApp {
     /// background and is injected into the live PTY once complete.
     fn begin_tab_ai_harness_entry(
         &mut self,
-        entry_intent: Option<String>,
+        entry: agent_chat_entry::AgentChatEntryIntent,
         context_policy: AgentChatContextPolicy,
         quick_submit_plan: Option<crate::ai::TabAiQuickSubmitPlan>,
         capture_kind: crate::ai::TabAiCaptureKind,
         force_agent_chat_surface: bool,
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
-        seed_policy: agent_chat_entry::AgentChatSeedPolicy,
         cx: &mut Context<Self>,
     ) {
         self.begin_tab_ai_harness_entry_from_source_view(
             self.current_view.clone(),
-            entry_intent,
+            entry,
             context_policy,
             quick_submit_plan,
             capture_kind,
             force_agent_chat_surface,
             ui_variant,
-            seed_policy,
             cx,
         );
     }
@@ -2494,13 +2550,12 @@ impl ScriptListApp {
     fn begin_tab_ai_harness_entry_from_source_view(
         &mut self,
         source_view: AppView,
-        entry_intent: Option<String>,
+        entry: agent_chat_entry::AgentChatEntryIntent,
         context_policy: AgentChatContextPolicy,
         quick_submit_plan: Option<crate::ai::TabAiQuickSubmitPlan>,
         capture_kind: crate::ai::TabAiCaptureKind,
         force_agent_chat_surface: bool,
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
-        seed_policy: agent_chat_entry::AgentChatSeedPolicy,
         cx: &mut Context<Self>,
     ) {
         let snapshot_started_at = std::time::Instant::now();
@@ -2519,10 +2574,6 @@ impl ScriptListApp {
                 _ => "Other",
             },
         );
-        let entry_intent = entry_intent
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-
         // Emit the receipt as a standalone structured log line for agent/test consumption
         tracing::info!(
             target: "script_kit::tab_ai",
@@ -2544,8 +2595,7 @@ impl ScriptListApp {
 
         let request = TabAiLaunchRequest {
             source_view,
-            entry_intent,
-            seed_policy,
+            entry,
             ui_variant,
             context_policy,
             quick_submit_plan,
@@ -2562,7 +2612,7 @@ impl ScriptListApp {
             .quick_submit_plan
             .as_ref()
             .map(|plan| plan.submit)
-            .unwrap_or(request.entry_intent.is_some());
+            .unwrap_or_else(|| request.requests_submission());
         let submission_mode = if submit_now {
             crate::ai::TabAiHarnessSubmissionMode::Submit
         } else {
@@ -2580,7 +2630,7 @@ impl ScriptListApp {
             surface = if surface_preference.use_quick_terminal { "quick_terminal" } else { "agent_chat" },
             reason = if surface_preference.use_quick_terminal { "script_verification_required" } else { "default_agent_chat" },
             prompt_type = %request.ui_snapshot.prompt_type,
-            has_entry_intent = request.entry_intent.is_some(),
+            has_entry_intent = request.entry_text().is_some(),
             submit_now,
             includes_script_authoring_skill = surface_preference.includes_script_authoring_skill,
             includes_bun_build_verification = surface_preference.includes_bun_build_verification,
@@ -2763,7 +2813,7 @@ impl ScriptListApp {
             .quick_submit_plan
             .as_ref()
             .map(|plan| plan.submission_intent())
-            .or(request.entry_intent.as_deref())
+            .or(request.entry_text())
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
@@ -2922,7 +2972,7 @@ impl ScriptListApp {
         tracing::debug!(
             event = "tab_ai_harness_submission_planned",
             wait_for_readiness,
-            has_entry_intent = request.entry_intent.is_some(),
+            has_entry_intent = request.entry_text().is_some(),
         );
 
         // Save the originating surface so Escape and re-entry can use it
@@ -2990,7 +3040,7 @@ impl ScriptListApp {
                     }
 
                     let resolved = this.build_tab_ai_context_from(
-                        request.entry_intent.clone().unwrap_or_default(),
+                        request.entry_text().unwrap_or_default().to_string(),
                         request.source_view.clone(),
                         request.ui_snapshot.clone(),
                         artifacts.desktop,
@@ -3027,13 +3077,13 @@ impl ScriptListApp {
                         .quick_submit_plan
                         .as_ref()
                         .map(|plan| plan.submission_intent())
-                        .or(request.entry_intent.as_deref());
+                        .or(request.entry_text());
 
                     let submit_now = request
                         .quick_submit_plan
                         .as_ref()
                         .map(|plan| plan.submit)
-                        .unwrap_or(request.entry_intent.is_some());
+                        .unwrap_or_else(|| request.requests_submission());
 
                     let submission_mode = if submit_now {
                         crate::ai::TabAiHarnessSubmissionMode::Submit

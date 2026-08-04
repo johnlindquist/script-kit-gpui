@@ -871,7 +871,7 @@ impl ScriptListApp {
             return;
         }
 
-        self.open_tab_ai_agent_chat_with_entry_intent_suppressing_focused_part(None, cx);
+        self.open_clean_agent_chat(cx);
 
         if let AppView::AgentChatView { entity } = &self.current_view {
             let entity = entity.clone();
