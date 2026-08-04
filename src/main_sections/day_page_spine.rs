@@ -42,7 +42,23 @@ impl DayPageView {
         text_plane.source_name = Some("getLayoutInfo".to_string());
         text_plane.selectable = Some(false);
 
-        let mut elements = vec![protocol::ElementInfo::panel("day-page"), editor, text_plane];
+        let bound_date = self.session.bound_date();
+        let identity = crate::components::main_view_chrome::SemanticChipSpec::enabled_identity(
+            bound_date
+                .map(|date| format!("day-page-document:{date}"))
+                .unwrap_or_else(|| "day-page-document:unbound".to_string()),
+            bound_date
+                .map(|date| format!("Today · {date}"))
+                .unwrap_or_else(|| "Today".to_string()),
+            crate::components::main_view_chrome::SemanticChipAction::OpenDetails,
+            "⌘P",
+        );
+        let mut elements = vec![
+            protocol::ElementInfo::panel("day-page"),
+            crate::windows::automation_surface_collector::collect_semantic_chip_element(&identity),
+            editor,
+            text_plane,
+        ];
 
         if !self.clipboard_shelf.is_empty() && self.kit_resource_preview.is_none() {
             let count = self.clipboard_shelf.len();

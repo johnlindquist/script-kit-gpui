@@ -205,6 +205,146 @@ fn element(
     }
 }
 
+fn conversation_semantic_role(
+    role: crate::components::main_view_chrome::SemanticChipRole,
+) -> crate::protocol::ConversationSemanticRole {
+    use crate::components::main_view_chrome::SemanticChipRole;
+    use crate::protocol::ConversationSemanticRole;
+
+    match role {
+        SemanticChipRole::ContextAttachment => ConversationSemanticRole::ContextChip,
+        SemanticChipRole::Identity => ConversationSemanticRole::IdentityBadge,
+        SemanticChipRole::DestinationSelector => ConversationSemanticRole::DestinationSelector,
+    }
+}
+
+fn conversation_semantic_action(
+    role: crate::components::main_view_chrome::SemanticChipRole,
+    action: crate::components::main_view_chrome::SemanticChipAction,
+) -> crate::protocol::ConversationSemanticAction {
+    use crate::components::main_view_chrome::{SemanticChipAction, SemanticChipRole};
+    use crate::protocol::ConversationSemanticAction;
+
+    match (role, action) {
+        (SemanticChipRole::ContextAttachment, SemanticChipAction::OpenDetails) => {
+            ConversationSemanticAction::OpenContextDetails
+        }
+        (SemanticChipRole::ContextAttachment, SemanticChipAction::RemoveContext) => {
+            ConversationSemanticAction::RemoveContext
+        }
+        (SemanticChipRole::Identity, SemanticChipAction::OpenSelector) => {
+            ConversationSemanticAction::OpenIdentitySelector
+        }
+        (
+            SemanticChipRole::Identity,
+            SemanticChipAction::OpenDetails | SemanticChipAction::OpenSurface,
+        ) => ConversationSemanticAction::OpenIdentityDetails,
+        (SemanticChipRole::DestinationSelector, SemanticChipAction::SelectDestination) => {
+            ConversationSemanticAction::SelectDestination
+        }
+        _ => unreachable!("SemanticChipSpec rejects role/action mismatches"),
+    }
+}
+
+fn semantic_chip_action_element(
+    chip: &crate::components::main_view_chrome::SemanticChipSpec,
+    action: Option<crate::components::main_view_chrome::SemanticChipAction>,
+    trailing: bool,
+) -> ElementInfo {
+    let action = action.map(|action| conversation_semantic_action(chip.role, action));
+    let semantic_id = if trailing {
+        format!(
+            "{}:{}",
+            chip.semantic_id,
+            action
+                .expect("trailing semantic actions are present")
+                .as_str()
+        )
+    } else {
+        chip.semantic_id.to_string()
+    };
+
+    ElementInfo {
+        semantic_id,
+        element_type: if chip.enabled && action.is_some() {
+            ElementType::Button
+        } else {
+            ElementType::Panel
+        },
+        text: Some(if trailing {
+            format!("Remove {}", chip.label)
+        } else {
+            chip.label.to_string()
+        }),
+        value: (!trailing && !chip.shortcut_tokens.is_empty())
+            .then(|| chip.shortcut_tokens.join("")),
+        selected: None,
+        focused: None,
+        index: None,
+        role: Some(conversation_semantic_role(chip.role).as_str().to_string()),
+        kind: action.map(|action| action.as_str().to_string()),
+        source: Some("ConversationSemanticChip".to_string()),
+        source_name: None,
+        selectable: Some(chip.enabled && action.is_some()),
+        status_kind: None,
+        action_disabled: chip.disabled_reason.as_ref().map(ToString::to_string),
+        style: None,
+    }
+}
+
+/// Project the same typed semantic chip specification used by renderers into
+/// the element protocol. Every main and secondary conversational collector
+/// goes through this function, so role/action strings cannot drift by host.
+pub(crate) fn collect_semantic_chip_element(
+    chip: &crate::components::main_view_chrome::SemanticChipSpec,
+) -> ElementInfo {
+    semantic_chip_action_element(chip, chip.body_action, false)
+}
+
+/// Project every executable region of a chip. Context attachments may expose
+/// both body details and a separately-addressable trailing remove action.
+pub(crate) fn collect_semantic_chip_elements(
+    chip: &crate::components::main_view_chrome::SemanticChipSpec,
+) -> Vec<ElementInfo> {
+    let mut elements = vec![collect_semantic_chip_element(chip)];
+    if let Some(action) = chip.trailing_action {
+        elements.push(semantic_chip_action_element(chip, Some(action), true));
+    }
+    elements
+}
+
+pub(crate) fn collect_conversation_command_elements<Handler>(
+    commands: &[crate::components::conversation_actions::BoundConversationCommand<Handler>],
+) -> Vec<ElementInfo> {
+    use crate::components::conversation_actions::ConfirmPolicy;
+
+    commands
+        .iter()
+        .map(|command| ElementInfo {
+            semantic_id: command.descriptor.semantic_action_id.to_string(),
+            element_type: ElementType::Button,
+            text: Some(command.descriptor.label.to_string()),
+            value: command.descriptor.shortcut.map(str::to_string),
+            selected: Some(false),
+            focused: Some(false),
+            index: None,
+            role: Some("conversationCommand".to_string()),
+            kind: Some(command.descriptor.semantic_action_id.to_string()),
+            source: Some("ConversationCommandDescriptor".to_string()),
+            source_name: None,
+            selectable: Some(command.descriptor.availability.is_enabled()),
+            status_kind: (command.descriptor.confirmation == ConfirmPolicy::Required)
+                .then(|| "confirmationRequired".to_string()),
+            action_disabled: command
+                .descriptor
+                .availability
+                .disabled_reason()
+                .map(str::to_string),
+            style: None,
+        })
+        .collect()
+}
+
 /// Collect semantic elements for a resolved non-main automation window.
 ///
 /// Returns `None` for window kinds that do not yet have a collector.
@@ -267,7 +407,7 @@ pub fn collect_surface_snapshot(
 fn collect_dictation_snapshot(resolved: &AutomationWindowInfo) -> SurfaceElementSnapshot {
     let state = crate::dictation::snapshot_overlay_state().unwrap_or_default();
     let phase = format!("{:?}", state.phase);
-    let target = state.target.overlay_label().to_string();
+    let destination = crate::dictation::destination_selector_spec(state.target);
 
     let mut panel = element(
         "panel:dictation-overlay",
@@ -295,16 +435,7 @@ fn collect_dictation_snapshot(resolved: &AutomationWindowInfo) -> SurfaceElement
     );
     signal.kind = Some("signal".to_string());
 
-    let mut target_badge = element(
-        "button:dictation-target",
-        ElementType::Button,
-        Some(target),
-        None,
-        None,
-        None,
-        Some(0),
-    );
-    target_badge.role = Some("target".to_string());
+    let mut target_badge = collect_semantic_chip_element(&destination);
     target_badge.selectable = Some(crate::dictation::can_cycle_dictation_target());
 
     SurfaceElementSnapshot {
@@ -393,21 +524,27 @@ fn collect_notes_snapshot(
     ask_ai.kind = Some("MainAgentChat".to_string());
     ask_ai.selectable = Some(true);
 
+    let identity = crate::notes::get_notes_document_identity_spec(cx)
+        .map(|spec| collect_semantic_chip_element(&spec));
+    let mut elements = vec![
+        element(
+            "panel:notes-window",
+            ElementType::Panel,
+            resolved.title.clone(),
+            None,
+            None,
+            None,
+            None,
+        ),
+        ask_ai,
+        editor,
+    ];
+    elements.extend(identity);
+    let total_count = elements.len();
+
     Some(SurfaceElementSnapshot {
-        elements: vec![
-            element(
-                "panel:notes-window",
-                ElementType::Panel,
-                resolved.title.clone(),
-                None,
-                None,
-                None,
-                None,
-            ),
-            ask_ai,
-            editor,
-        ],
-        total_count: 3,
+        elements,
+        total_count,
         focused_semantic_id: Some("input:notes-editor".to_string()),
         selected_semantic_id: None,
         warnings: Vec::new(),
@@ -482,6 +619,17 @@ pub(crate) fn collect_agent_chat_detached_elements(
             None,
         ));
     }
+
+    elements.extend(
+        entity
+            .read(cx)
+            .conversation_semantic_chip_specs(cx)
+            .iter()
+            .flat_map(collect_semantic_chip_elements),
+    );
+    elements.extend(collect_conversation_command_elements(
+        &entity.read(cx).conversation_command_bindings(cx),
+    ));
 
     if elements.len() > limit {
         elements.truncate(limit);
@@ -817,10 +965,44 @@ fn collect_confirm_popup_snapshot(cx: &gpui::App) -> Option<SurfaceElementSnapsh
 #[cfg(test)]
 mod tests {
     use super::{
-        prompt_popup_semantic_cache,
+        collect_semantic_chip_element, collect_semantic_chip_elements, prompt_popup_semantic_cache,
         remove_dictation_microphone_prompt_popup_snapshot_if_generation,
         PromptPopupElementSnapshot,
     };
+
+    #[test]
+    fn conversation_semantic_projection_exposes_every_role_safe_action() {
+        use crate::components::main_view_chrome::{SemanticChipAction, SemanticChipSpec};
+
+        let context = SemanticChipSpec::context_attachment("context:one", "File", true);
+        let context_elements = collect_semantic_chip_elements(&context);
+        assert_eq!(context_elements.len(), 2);
+        assert_eq!(context_elements[0].role.as_deref(), Some("contextChip"));
+        assert_eq!(
+            context_elements[0].kind.as_deref(),
+            Some("openContextDetails")
+        );
+        assert_eq!(context_elements[1].kind.as_deref(), Some("removeContext"));
+        assert_ne!(
+            context_elements[0].semantic_id,
+            context_elements[1].semantic_id
+        );
+
+        let identity = SemanticChipSpec::enabled_identity(
+            "identity:one",
+            "Agent",
+            SemanticChipAction::OpenSelector,
+            "⇧⇥",
+        );
+        let identity = collect_semantic_chip_element(&identity);
+        assert_eq!(identity.role.as_deref(), Some("identityBadge"));
+        assert_eq!(identity.kind.as_deref(), Some("openIdentitySelector"));
+
+        let destination = SemanticChipSpec::destination_selector("destination:one", "Today");
+        let destination = collect_semantic_chip_element(&destination);
+        assert_eq!(destination.role.as_deref(), Some("destinationSelector"));
+        assert_eq!(destination.kind.as_deref(), Some("selectDestination"));
+    }
 
     #[test]
     fn prompt_popup_cache_cleanup_requires_exact_generation() {

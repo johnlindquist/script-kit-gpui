@@ -2462,36 +2462,74 @@ impl AgentChatView {
         let attach_picker_active = self.composer_picker_session.is_some()
             || self.agent_chat_spine_owns_list()
             || self.pending_portal_session.is_some();
+        let command_bindings =
+            crate::components::conversation_actions::agent_chat_conversation_commands(
+                crate::components::conversation_actions::AgentChatConversationCommandFacts {
+                    response_in_progress: matches!(thread.status, AgentChatThreadStatus::Streaming),
+                    waiting_for_permission: matches!(
+                        thread.status,
+                        AgentChatThreadStatus::WaitingForPermission
+                    ),
+                    context_preparing: self.context_capture_pending,
+                    composer_has_text: !thread.input.text().trim().is_empty()
+                        || !thread.pending_context_items().is_empty(),
+                    retry_available: Self::retryable_recovery_active(thread),
+                    has_response: Self::has_pastable_assistant_response(thread),
+                },
+            );
+        let command = |handler| {
+            command_bindings
+                .iter()
+                .find(|command| command.handler == handler)
+        };
         let mut buttons = Vec::new();
 
         match thread.status {
             AgentChatThreadStatus::Streaming => {
+                let descriptor = &command(
+                    crate::components::conversation_actions::AgentChatConversationCommand::Stop,
+                )
+                .expect("streaming Agent Chat binds Stop")
+                .descriptor;
                 buttons.push(AgentChatFooterButtonSpec {
                     action: FooterAction::Stop,
-                    key: crate::components::footer_chrome::FOOTER_AI_STOP_KEY,
-                    label: crate::components::footer_chrome::FOOTER_AI_STOP_LABEL,
+                    key: descriptor.shortcut.expect("Stop has a shortcut"),
+                    label: descriptor.label,
                     selected: false,
-                    enabled: true,
-                    disabled_reason: None,
+                    enabled: descriptor.availability.is_enabled(),
+                    disabled_reason: descriptor.availability.disabled_reason(),
                 });
             }
             AgentChatThreadStatus::WaitingForPermission => {
+                let descriptor = &command(
+                    crate::components::conversation_actions::AgentChatConversationCommand::Send,
+                )
+                .expect("permission-waiting Agent Chat binds disabled Send")
+                .descriptor;
                 buttons.push(AgentChatFooterButtonSpec {
                     action: FooterAction::Run,
-                    key: "↵",
-                    label: "Send",
+                    key: descriptor.shortcut.expect("Send has a shortcut"),
+                    label: descriptor.label,
                     selected: false,
-                    enabled: false,
-                    disabled_reason: Some("waiting_for_permission"),
+                    enabled: descriptor.availability.is_enabled(),
+                    disabled_reason: descriptor.availability.disabled_reason(),
                 });
             }
             AgentChatThreadStatus::Idle | AgentChatThreadStatus::Error => {
-                if let Some(retry) = Self::retry_footer_button(thread) {
-                    buttons.push(retry);
+                if let Some(retry) = command(
+                    crate::components::conversation_actions::AgentChatConversationCommand::Retry,
+                ) {
+                    buttons.push(AgentChatFooterButtonSpec {
+                        action: FooterAction::Retry,
+                        key: retry.descriptor.shortcut.expect("Retry has a shortcut"),
+                        label: retry.descriptor.label,
+                        selected: false,
+                        enabled: retry.descriptor.availability.is_enabled(),
+                        disabled_reason: retry.descriptor.availability.disabled_reason(),
+                    });
                 }
                 let input = thread.input.text();
                 let raw_empty = input.is_empty();
-                let blank = input.trim().is_empty();
                 if raw_empty && Self::has_pastable_assistant_response(thread) {
                     buttons.push(AgentChatFooterButtonSpec {
                         action: FooterAction::PasteResponse,
@@ -2502,22 +2540,25 @@ impl AgentChatView {
                         disabled_reason: None,
                     });
                 } else {
+                    let descriptor = &command(
+                        crate::components::conversation_actions::AgentChatConversationCommand::Send,
+                    )
+                    .expect("idle Agent Chat binds Send")
+                    .descriptor;
                     buttons.push(AgentChatFooterButtonSpec {
                         action: FooterAction::Run,
-                        key: "↵",
+                        key: descriptor.shortcut.expect("Send has a shortcut"),
                         label: if attach_picker_active {
                             "Attach"
                         } else {
-                            "Send"
+                            descriptor.label
                         },
                         selected: false,
-                        enabled: (attach_picker_active || !blank) && !self.context_capture_pending,
-                        disabled_reason: if blank && !attach_picker_active {
-                            Some("type_message_first")
-                        } else if self.context_capture_pending {
-                            Some("context_capture_pending")
-                        } else {
+                        enabled: attach_picker_active || descriptor.availability.is_enabled(),
+                        disabled_reason: if attach_picker_active {
                             None
+                        } else {
+                            descriptor.availability.disabled_reason()
                         },
                     });
                 }
@@ -2554,6 +2595,73 @@ impl AgentChatView {
             enabled: true,
             disabled_reason: None,
         })
+    }
+
+    pub(crate) fn conversation_command_facts(
+        &self,
+        cx: &App,
+    ) -> crate::components::conversation_actions::AgentChatConversationCommandFacts {
+        let thread = self.live_thread().read(cx);
+        crate::components::conversation_actions::AgentChatConversationCommandFacts {
+            response_in_progress: matches!(thread.status, AgentChatThreadStatus::Streaming),
+            waiting_for_permission: matches!(
+                thread.status,
+                AgentChatThreadStatus::WaitingForPermission
+            ),
+            context_preparing: self.context_capture_pending,
+            composer_has_text: !thread.input.text().trim().is_empty()
+                || !thread.pending_context_items().is_empty(),
+            retry_available: Self::retryable_recovery_active(thread),
+            has_response: Self::has_pastable_assistant_response(thread),
+        }
+    }
+
+    pub(crate) fn conversation_command_bindings(
+        &self,
+        cx: &App,
+    ) -> Vec<
+        crate::components::conversation_actions::BoundConversationCommand<
+            crate::components::conversation_actions::AgentChatConversationCommand,
+        >,
+    > {
+        crate::components::conversation_actions::agent_chat_conversation_commands(
+            self.conversation_command_facts(cx),
+        )
+    }
+
+    pub(crate) fn execute_conversation_command(
+        &mut self,
+        command: crate::components::conversation_actions::AgentChatConversationCommand,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::components::conversation_actions::AgentChatConversationCommand;
+
+        let Some(binding) = self
+            .conversation_command_bindings(cx)
+            .into_iter()
+            .find(|binding| binding.handler == command)
+        else {
+            return false;
+        };
+        if !binding.descriptor.availability.is_enabled() {
+            return false;
+        }
+
+        match command {
+            AgentChatConversationCommand::Send => self.submit_with_expanded_tokens(cx),
+            AgentChatConversationCommand::Stop => {
+                let _ = self.cancel_streaming_from_escape(cx);
+            }
+            AgentChatConversationCommand::Retry => self.retry_last_user_turn(cx),
+            AgentChatConversationCommand::NewConversation => {
+                return self.start_new_conversation(cx);
+            }
+            AgentChatConversationCommand::CopyLastResponse => {
+                return self.copy_last_response(cx);
+            }
+            AgentChatConversationCommand::Close => return false,
+        }
+        true
     }
 
     fn focused_text_visible_footer_buttons(
@@ -2760,6 +2868,41 @@ impl AgentChatView {
             matches!(message.role, AgentChatThreadMessageRole::Assistant)
                 && !message.body.trim().is_empty()
         })
+    }
+
+    pub(crate) fn copy_last_response(&self, cx: &mut App) -> bool {
+        let last = {
+            let thread = self.live_thread().read(cx);
+            let bodies: Vec<String> = thread
+                .messages
+                .iter()
+                .filter(|message| matches!(message.role, AgentChatThreadMessageRole::Assistant))
+                .map(|message| message.body.to_string())
+                .collect();
+            crate::flows::session::resolve_last_copyable_response(bodies.iter().map(String::as_str))
+                .map(str::to_string)
+        };
+        let Some(text) = last else {
+            return false;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        true
+    }
+
+    pub(crate) fn start_new_conversation(&mut self, cx: &mut Context<Self>) -> bool {
+        if matches!(
+            self.live_thread().read(cx).status,
+            AgentChatThreadStatus::Streaming | AgentChatThreadStatus::WaitingForPermission
+        ) {
+            return false;
+        }
+        self.live_thread()
+            .update(cx, |thread, cx| thread.clear_messages(cx));
+        if let Some(transcript) = &self.transcript {
+            transcript.update(cx, |transcript, cx| transcript.clear_collapsed_ids(cx));
+        }
+        cx.notify();
+        true
     }
 
     fn latest_assistant_response_text(thread: &AgentChatThread) -> Option<String> {
@@ -6690,6 +6833,59 @@ impl AgentChatView {
             visible_end,
             cursor_in_window: cursor_index.saturating_sub(visible_start),
         }
+    }
+
+    /// Typed conversation semantics shared by the Agent Chat renderer's live
+    /// thread state and both embedded/detached element collectors.
+    pub(crate) fn conversation_semantic_chip_specs(
+        &self,
+        cx: &App,
+    ) -> Vec<crate::components::main_view_chrome::SemanticChipSpec> {
+        use crate::ai::message_parts::ContextSourceKind;
+        use crate::components::main_view_chrome::{SemanticChipAction, SemanticChipSpec};
+
+        let thread = self.live_thread().read(cx);
+        let mut specs = vec![
+            SemanticChipSpec::enabled_identity(
+                "agent-chat-identity-profile",
+                thread.profile_display().to_string(),
+                SemanticChipAction::OpenSelector,
+                "⇧⇥",
+            ),
+            SemanticChipSpec::enabled_identity(
+                "agent-chat-identity-model",
+                thread.selected_model_display().to_string(),
+                SemanticChipAction::OpenSelector,
+                "⇧⇥",
+            ),
+        ];
+        let safe_kind_label = |kind: ContextSourceKind| match kind {
+            ContextSourceKind::Resource => "Resource",
+            ContextSourceKind::File => "File",
+            ContextSourceKind::Skill => "Skill",
+            ContextSourceKind::FocusedTarget => "Focused item",
+            ContextSourceKind::Ambient => "Ambient context",
+            ContextSourceKind::Text => "Text context",
+        };
+        specs.extend(
+            thread
+                .pending_context_items()
+                .iter()
+                .chain(thread.context_receipts().iter())
+                .map(|item| {
+                    let label = format!(
+                        "{} · {}",
+                        item.provenance.cue(),
+                        safe_kind_label(item.source_kind())
+                    );
+                    crate::components::main_view_chrome::SemanticChipSpec::context_attachment(
+                        format!("agent-chat-context:{}", item.id.as_str()),
+                        label,
+                        item.can_remove(),
+                    )
+                }),
+        );
+        specs
     }
 
     /// Redacted per-part identity for automation: kind/label/source, plus the
@@ -15221,19 +15417,28 @@ impl AgentChatView {
             return;
         }
 
-        if modifiers.platform && key.eq_ignore_ascii_case("w") {
-            let is_detached_host = crate::ai::agent_chat::ui::chat_window::is_chat_window(window);
-            tracing::info!(
-                target: "script_kit::keyboard",
-                event = "agent_chat_cmd_w_host_close_requested",
-                host = if is_detached_host { "detached" } else { "embedded" },
-            );
-            // Detached host: on_close_window_requested is unset, so this falls
-            // back to on_close_requested (close_chat_window) and closes the
-            // detached window — same as the embedded host's window close.
-            self.trigger_close_window_requested(window, cx);
-            cx.stop_propagation();
-            return;
+        if let Some((command, availability)) =
+            crate::components::conversation_actions::match_conversation_command_shortcut(
+                &self.conversation_command_bindings(cx),
+                key,
+                modifiers.platform,
+                modifiers.shift,
+            )
+        {
+            use crate::components::conversation_actions::{
+                AgentChatConversationCommand, ConversationCommandAvailability,
+            };
+            if command != AgentChatConversationCommand::Send {
+                if availability == ConversationCommandAvailability::Enabled {
+                    if command == AgentChatConversationCommand::Close {
+                        self.trigger_close_window_requested(window, cx);
+                    } else {
+                        let _ = self.execute_conversation_command(command, cx);
+                    }
+                }
+                cx.stop_propagation();
+                return;
+            }
         }
 
         // ── Cmd+N → start a new thread (both hosts) ──────────────
@@ -15274,20 +15479,6 @@ impl AgentChatView {
             });
             cx.stop_propagation();
             return;
-        }
-
-        // ── Cmd+. → cancel streaming (standard macOS cancel) ──────
-        if modifiers.platform && key == "." {
-            let is_streaming = matches!(
-                self.live_thread().read(cx).status,
-                AgentChatThreadStatus::Streaming
-            );
-            if Self::streaming_turn_owns_cmd_period(key, modifiers, is_streaming) {
-                self.live_thread()
-                    .update(cx, |thread, cx| thread.cancel_streaming(cx));
-                cx.stop_propagation();
-                return;
-            }
         }
 
         // ── Cmd+0 → reset Agent Chat zoom/font sizing ───────────
@@ -15477,74 +15668,9 @@ impl AgentChatView {
             return;
         }
 
-        // ── Cmd+Shift+C → copy last response to clipboard ──────
-        if modifiers.platform && modifiers.shift && key.eq_ignore_ascii_case("c") {
-            // Newest assistant turn that actually SAID something.
-            //
-            // Taking the newest assistant message unconditionally copies the
-            // in-flight turn, whose body is empty until the first token lands
-            // — and writing "" to the clipboard SUCCEEDS. The user sees a copy
-            // that worked and pastes nothing.
-            //
-            // `resolve_last_copyable_response` is the same rule Flow's ⇧⌘C
-            // uses. Sharing it is the point: two copy paths with private
-            // notions of "the last response" is how they drifted apart in the
-            // first place.
-            let last = {
-                let thread = self.live_thread().read(cx);
-                let bodies: Vec<String> = thread
-                    .messages
-                    .iter()
-                    .filter(|m| {
-                        matches!(m.role, super::thread::AgentChatThreadMessageRole::Assistant)
-                    })
-                    .map(|m| m.body.to_string())
-                    .collect();
-                crate::flows::session::resolve_last_copyable_response(
-                    bodies.iter().map(|body| body.as_str()),
-                )
-                .map(|body| body.to_string())
-            };
-            if let Some(text) = last {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-            }
-            cx.stop_propagation();
-            return;
-        }
-
-        // ── Cmd+Shift+R → retry an active failed-turn recovery ───
-        if self.focused_text.is_none()
-            && modifiers.platform
-            && modifiers.shift
-            && !modifiers.alt
-            && !modifiers.control
-            && key.eq_ignore_ascii_case("r")
-            && {
-                let thread = self.live_thread().read(cx);
-                Self::retryable_recovery_active(thread)
-            }
-        {
-            self.retry_last_user_turn(cx);
-            cx.stop_propagation();
-            return;
-        }
-
         // ── Cmd+N → new thread (current keeps streaming in background) ──
         if modifiers.platform && key.eq_ignore_ascii_case("n") {
             self.start_new_thread(cx);
-            cx.notify();
-            cx.stop_propagation();
-            return;
-        }
-
-        // ── Cmd+L → new conversation (clear messages, keep session) ──
-        if modifiers.platform && key.eq_ignore_ascii_case("l") {
-            self.live_thread().update(cx, |thread, cx| {
-                thread.clear_messages(cx);
-            });
-            if let Some(transcript) = &self.transcript {
-                transcript.update(cx, |t, cx| t.clear_collapsed_ids(cx));
-            }
             cx.notify();
             cx.stop_propagation();
             return;
@@ -15962,6 +16088,18 @@ impl AgentChatView {
                         permission_active,
                     },
                 );
+                cx.stop_propagation();
+                return;
+            }
+            let send_enabled = self
+                .conversation_command_bindings(cx)
+                .iter()
+                .find(|command| {
+                    command.handler
+                        == crate::components::conversation_actions::AgentChatConversationCommand::Send
+                })
+                .is_some_and(|command| command.descriptor.availability.is_enabled());
+            if !send_enabled {
                 cx.stop_propagation();
                 return;
             }

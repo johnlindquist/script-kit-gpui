@@ -461,6 +461,42 @@ fn test_toggle_info_appears_for_all_script_types() {
     }
 }
 
+fn default_agent_chat_command_facts(
+) -> crate::components::conversation_actions::AgentChatConversationCommandFacts {
+    crate::components::conversation_actions::AgentChatConversationCommandFacts {
+        has_response: true,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn agent_chat_actions_project_the_live_primary_command_binding() {
+    let idle = get_agent_chat_actions_with_facts(default_agent_chat_command_facts());
+    let send = idle
+        .iter()
+        .find(|action| action.id == "agent_chat_send")
+        .expect("idle Agent Chat must project its Send descriptor into Actions");
+    assert_eq!(send.shortcut.as_deref(), Some("↵"));
+    assert_eq!(send.disabled_reason(), Some("Type a message first."));
+    assert!(!idle.iter().any(|action| action.id == "agent_chat_stop"));
+
+    let streaming = get_agent_chat_actions_with_facts(
+        crate::components::conversation_actions::AgentChatConversationCommandFacts {
+            response_in_progress: true,
+            ..default_agent_chat_command_facts()
+        },
+    );
+    let stop = streaming
+        .iter()
+        .find(|action| action.id == "agent_chat_stop")
+        .expect("streaming Agent Chat must project its Stop descriptor into Actions");
+    assert_eq!(stop.shortcut.as_deref(), Some("⌘."));
+    assert_eq!(stop.disabled_reason(), None);
+    assert!(!streaming
+        .iter()
+        .any(|action| action.id == "agent_chat_send"));
+}
+
 fn sample_agent_chat_model(
     id: &str,
     display_name: &str,
@@ -480,6 +516,7 @@ fn test_agent_chat_close_shortcut_is_only_advertised_for_detached_host() {
         0,
         &[],
         &[],
+        default_agent_chat_command_facts(),
         AgentChatActionsDialogHost::Shared,
     );
     let notes = get_agent_chat_root_route_for_host(
@@ -488,6 +525,7 @@ fn test_agent_chat_close_shortcut_is_only_advertised_for_detached_host() {
         0,
         &[],
         &[],
+        default_agent_chat_command_facts(),
         AgentChatActionsDialogHost::Notes,
     );
     let detached = get_agent_chat_root_route_for_host(
@@ -496,6 +534,7 @@ fn test_agent_chat_close_shortcut_is_only_advertised_for_detached_host() {
         0,
         &[],
         &[],
+        default_agent_chat_command_facts(),
         AgentChatActionsDialogHost::Detached,
     );
 
@@ -589,6 +628,7 @@ fn test_agent_chat_root_actions_add_change_model_when_models_exist() {
         0,
         &[],
         &[],
+        default_agent_chat_command_facts(),
     );
 
     let change_model = actions
@@ -604,7 +644,8 @@ fn test_agent_chat_root_actions_add_change_model_when_models_exist() {
 
 #[test]
 fn test_agent_chat_root_actions_surface_review_approvals_only_when_grants_exist() {
-    let without_grants = get_agent_chat_root_actions(&[], None, 0, &[], &[]);
+    let without_grants =
+        get_agent_chat_root_actions(&[], None, 0, &[], &[], default_agent_chat_command_facts());
     assert!(
         !without_grants
             .iter()
@@ -612,7 +653,8 @@ fn test_agent_chat_root_actions_surface_review_approvals_only_when_grants_exist(
         "no review action when the session has no standing grants"
     );
 
-    let with_grants = get_agent_chat_root_actions(&[], None, 2, &[], &[]);
+    let with_grants =
+        get_agent_chat_root_actions(&[], None, 2, &[], &[], default_agent_chat_command_facts());
     let review = with_grants
         .iter()
         .find(|action| action.id == AGENT_CHAT_REVIEW_APPROVALS_ACTION_ID)
@@ -629,7 +671,14 @@ fn test_agent_chat_root_actions_surface_thread_switcher() {
         unread: 3,
         is_streaming: true,
     }];
-    let actions = get_agent_chat_root_actions(&[], None, 0, &summaries, &[]);
+    let actions = get_agent_chat_root_actions(
+        &[],
+        None,
+        0,
+        &summaries,
+        &[],
+        default_agent_chat_command_facts(),
+    );
 
     let new_thread = actions
         .iter()
@@ -662,7 +711,8 @@ fn test_agent_chat_root_actions_surface_rewind_only_with_fork_points() {
         text: "fix the parser bug".to_string(),
     }];
 
-    let without = get_agent_chat_root_actions(&[], None, 0, &[], &[]);
+    let without =
+        get_agent_chat_root_actions(&[], None, 0, &[], &[], default_agent_chat_command_facts());
     assert!(
         !without
             .iter()
@@ -670,7 +720,14 @@ fn test_agent_chat_root_actions_surface_rewind_only_with_fork_points() {
         "no rewind action without checkpoints"
     );
 
-    let with = get_agent_chat_root_actions(&[], None, 0, &[], &points);
+    let with = get_agent_chat_root_actions(
+        &[],
+        None,
+        0,
+        &[],
+        &points,
+        default_agent_chat_command_facts(),
+    );
     let rewind = with
         .iter()
         .find(|action| action.id == AGENT_CHAT_REWIND_ACTION_ID)
@@ -723,6 +780,7 @@ fn detached_agent_chat_history_routes_through_actions_dialog() {
         0,
         &[],
         &[],
+        default_agent_chat_command_facts(),
         AgentChatActionsDialogHost::Detached,
     );
     assert!(

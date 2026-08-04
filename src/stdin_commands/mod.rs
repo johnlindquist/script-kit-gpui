@@ -474,6 +474,12 @@ pub enum ExternalCommand {
         #[serde(default, rename = "requestId")]
         request_id: Option<ExternalCommandRequestId>,
     },
+    /// Open an ordinary script-owned ChatPrompt without spawning a script process.
+    /// This is the deterministic agent-facing equivalent of the SDK `chat()` message.
+    OpenChatPromptFixture {
+        #[serde(default, rename = "requestId")]
+        request_id: Option<ExternalCommandRequestId>,
+    },
     /// Close one exact generation-scoped PromptPopup through AppKit.
     ClosePromptPopupNatively {
         target: crate::protocol::AutomationWindowTarget,
@@ -854,6 +860,7 @@ impl ExternalCommand {
             | Self::OpenConfirmPrompt { request_id, .. }
             | Self::OpenAgentChatDetachedFixture { request_id, .. }
             | Self::OpenAgentChatHistoryPopupFixture { request_id, .. }
+            | Self::OpenChatPromptFixture { request_id, .. }
             | Self::ClosePromptPopupNatively { request_id, .. }
             | Self::PasteClipboardIntoAgentChat { request_id, .. } => {
                 request_id.as_ref().map(ExternalCommandRequestId::as_str)
@@ -878,6 +885,7 @@ impl ExternalCommand {
             Self::OpenConfirmPrompt { .. } => "openConfirmPrompt",
             Self::OpenAgentChatDetachedFixture { .. } => "openAgentChatDetachedFixture",
             Self::OpenAgentChatHistoryPopupFixture { .. } => "openAgentChatHistoryPopupFixture",
+            Self::OpenChatPromptFixture { .. } => "openChatPromptFixture",
             Self::ClosePromptPopupNatively { .. } => "closePromptPopupNatively",
             Self::OpenAi => "openAi",
             Self::OpenMiniAi => "openMiniAi",
@@ -940,6 +948,7 @@ pub const EXTERNAL_COMMAND_VERBS: &[&str] = &[
     "openConfirmPrompt",
     "openAgentChatDetachedFixture",
     "openAgentChatHistoryPopupFixture",
+    "openChatPromptFixture",
     "closePromptPopupNatively",
     "openAi",
     "openMiniAi",
@@ -1487,6 +1496,7 @@ mod tests {
             },
             ExternalCommand::OpenAgentChatDetachedFixture { request_id: None },
             ExternalCommand::OpenAgentChatHistoryPopupFixture { request_id: None },
+            ExternalCommand::OpenChatPromptFixture { request_id: None },
             ExternalCommand::ClosePromptPopupNatively {
                 target: crate::protocol::AutomationWindowTarget::Instance {
                     id: "fixture-popup".to_string(),

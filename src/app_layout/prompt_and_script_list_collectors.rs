@@ -4,7 +4,10 @@ impl ScriptListApp {
         chat_prompt: &prompts::ChatPrompt,
         limit: usize,
     ) -> (Vec<protocol::ElementInfo>, usize) {
-        let total_count = chat_prompt.messages.len() + 3;
+        let command_elements = crate::windows::automation_surface_collector::collect_conversation_command_elements(
+            &chat_prompt.conversation_command_bindings(),
+        );
+        let total_count = chat_prompt.messages.len() + 3 + command_elements.len();
         let mut elements = Vec::with_capacity(limit.min(total_count));
 
         Self::push_limited_element(
@@ -37,6 +40,9 @@ impl ScriptListApp {
             limit,
             protocol::ElementInfo::list("chat-messages", chat_prompt.messages.len()),
         );
+        for command in command_elements {
+            Self::push_limited_element(&mut elements, limit, command);
+        }
 
         for (index, message) in chat_prompt.messages.iter().enumerate() {
             if elements.len() >= limit {

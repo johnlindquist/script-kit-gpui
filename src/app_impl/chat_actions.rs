@@ -55,12 +55,30 @@ impl ScriptListApp {
                     });
                 }
             }
-            "copy_response" => {
+            "send" | "stop" | "close" => {
+                let command = match action_id {
+                    "send" => crate::components::conversation_actions::ChatPromptConversationCommand::Send,
+                    "stop" => crate::components::conversation_actions::ChatPromptConversationCommand::Stop,
+                    "close" => crate::components::conversation_actions::ChatPromptConversationCommand::Close,
+                    _ => unreachable!(),
+                };
                 if let AppView::ChatPrompt { entity, .. } = &self.current_view {
                     entity.update(cx, |chat, cx| {
-                        chat.handle_copy_last_response(cx);
+                        let _ = chat.execute_conversation_command(command, cx);
                     });
-                    self.show_hud("Copied response".to_string(), Some(HUD_SHORT_MS), cx);
+                }
+            }
+            "copy_response" => {
+                if let AppView::ChatPrompt { entity, .. } = &self.current_view {
+                    let copied = entity.update(cx, |chat, cx| {
+                        chat.execute_conversation_command(
+                            crate::components::conversation_actions::ChatPromptConversationCommand::CopyLastResponse,
+                            cx,
+                        )
+                    });
+                    if copied {
+                        self.show_hud("Copied response".to_string(), Some(HUD_SHORT_MS), cx);
+                    }
                 }
             }
             "clear_conversation" => {

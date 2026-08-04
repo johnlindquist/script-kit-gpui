@@ -111,15 +111,15 @@ fn finalize_flow_session_turn(
 }
 
 /// Footer grammar for a flow session (Oracle audit 2026-07-21, Footer-A):
-/// idle = `↵ Send · ⌘K Actions · Esc Desk`; working = `⌘. Stop · ⌘K Actions ·
-/// Esc Desk`. No permanent Terminate — it is a destructive expert command that
+/// idle = `↵ Send · ⌘K Actions · Esc Background`; working = `⌘. Stop · ⌘K Actions ·
+/// Esc Background`. No permanent Terminate — it is a destructive expert command that
 /// lives in the ⌘K Actions menu (with its ⇧⌘⎋ shortcut still handled).
 ///
 /// The working row shows Stop because the status text says only THAT the
 /// session is busy, never how to make it stop. `⌘.` is already bound
 /// ([`FlowSessionKeyAction::Stop`]) and cancels the in-flight turn while the
 /// conversation survives — but it was the one live binding the footer never
-/// named, so a user watching a runaway turn had `Esc Desk` (leave it running)
+/// named, so a user watching a runaway turn had `Esc Background` (leave it running)
 /// or nothing. Agent Chat has always shown its stop affordance (`Esc Stop`);
 /// this closes half of that gap. The two surfaces still stop on DIFFERENT
 /// keys — see `docs/specs/one-conversation-experience.md` §2.1.
@@ -131,18 +131,31 @@ pub(crate) fn flow_session_footer_hints_for_tests(working: bool) -> Vec<gpui::Sh
 }
 
 fn flow_session_footer_hints(working: bool) -> Vec<gpui::SharedString> {
+    use crate::components::conversation_actions::{
+        flow_conversation_commands, FlowConversationCommand,
+    };
+    let commands = flow_conversation_commands(working);
     let mut hints = Vec::with_capacity(3);
-    if working {
-        hints.push(gpui::SharedString::from(format!(
-            "{} {}",
-            crate::components::footer_chrome::FOOTER_AI_STOP_KEY,
-            crate::components::footer_chrome::FOOTER_AI_STOP_LABEL
-        )));
-    } else {
-        hints.push(gpui::SharedString::from("↵ Send"));
+    for handler in [
+        if working {
+            FlowConversationCommand::Stop
+        } else {
+            FlowConversationCommand::Send
+        },
+        FlowConversationCommand::Background,
+    ] {
+        if let Some(command) = commands.iter().find(|command| {
+            command.handler == handler && command.descriptor.availability.is_enabled()
+        }) {
+            if let Some(shortcut) = command.descriptor.shortcut {
+                hints.push(gpui::SharedString::from(format!(
+                    "{shortcut} {}",
+                    command.descriptor.label
+                )));
+            }
+        }
     }
-    hints.push(gpui::SharedString::from("⌘K Actions"));
-    hints.push(gpui::SharedString::from("Esc Desk"));
+    hints.insert(1, gpui::SharedString::from("⌘K Actions"));
     hints
 }
 
@@ -193,39 +206,36 @@ fn resolve_flow_session_key_action(
     turn_active: bool,
     actions_open: bool,
 ) -> FlowSessionKeyAction {
-    if platform && shift && is_key_escape(key) && !actions_open {
-        return FlowSessionKeyAction::Terminate;
-    }
-    if is_key_escape(key) && !actions_open {
-        return FlowSessionKeyAction::Background;
-    }
-    if platform && key == "." && turn_active {
-        return FlowSessionKeyAction::Stop;
-    }
+    use crate::components::conversation_actions::{
+        flow_conversation_commands, match_conversation_command_shortcut,
+        FlowConversationCommand,
+    };
+
     if platform && key.eq_ignore_ascii_case("k") {
         return FlowSessionKeyAction::ToggleActions;
     }
-    // ⌘L, matching Agent Chat. Suppressed while the actions popup is open for
-    // the same reason ⎋ is: the popup owns the keyboard while it is up.
-    if platform && !shift && key.eq_ignore_ascii_case("l") && !actions_open {
-        return FlowSessionKeyAction::NewConversation;
+    if actions_open {
+        return FlowSessionKeyAction::Ignore;
     }
-    // ⇧⌘C, matching Agent Chat and matching the shortcut badge this session's
-    // own ⌘K menu prints next to "Copy Last Response". The badge shipped
-    // without this arm, so the chord did nothing while the menu claimed it
-    // worked — a shortcut that is advertised and unbound is worse than one
-    // that is absent, because the user stops looking for the menu item.
-    // Unshifted ⌘C is deliberately NOT claimed: that is the platform's
-    // copy-the-selection, and now that flow answers render selectable
-    // (`render_answer_region`) stealing it would break selecting one paragraph
-    // out of an answer.
-    if platform && shift && key.eq_ignore_ascii_case("c") && !actions_open {
-        return FlowSessionKeyAction::CopyLastResponse;
+
+    match match_conversation_command_shortcut(
+        &flow_conversation_commands(turn_active),
+        key,
+        platform,
+        shift,
+    ) {
+        Some((FlowConversationCommand::TerminateRuntime, _)) => FlowSessionKeyAction::Terminate,
+        Some((FlowConversationCommand::Background, _)) => FlowSessionKeyAction::Background,
+        Some((FlowConversationCommand::Stop, _)) => FlowSessionKeyAction::Stop,
+        Some((FlowConversationCommand::NewConversation, _)) => {
+            FlowSessionKeyAction::NewConversation
+        }
+        Some((FlowConversationCommand::CopyLastResponse, _)) => {
+            FlowSessionKeyAction::CopyLastResponse
+        }
+        Some((FlowConversationCommand::Send, _)) => FlowSessionKeyAction::Submit,
+        None => FlowSessionKeyAction::Ignore,
     }
-    if is_key_enter(key) && !platform && !shift {
-        return FlowSessionKeyAction::Submit;
-    }
-    FlowSessionKeyAction::Ignore
 }
 
 /// What Up/Down should do to a flow session's composer.
@@ -3426,8 +3436,8 @@ mod flow_session_footer_and_finalize {
     }
 
     /// Footer grammar (Oracle 2026-07-21 adjudication): idle is exactly
-    /// `↵ Send · ⌘K Actions · Esc Desk`; working is exactly
-    /// `⌘. Stop · ⌘K Actions · Esc Desk` — no Send while busy, no permanent
+    /// `↵ Send · ⌘K Actions · Esc Background`; working is exactly
+    /// `⌘. Stop · ⌘K Actions · Esc Background` — no Send while busy, no permanent
     /// Terminate.
     ///
     /// The working row used to omit Stop entirely, so the one key that cancels
@@ -3436,11 +3446,11 @@ mod flow_session_footer_and_finalize {
     fn flow_session_footer_matches_idle_and_working_grammar() {
         let idle = flow_session_footer_hints(false);
         let idle: Vec<&str> = idle.iter().map(|h| h.as_ref()).collect();
-        assert_eq!(idle, vec!["↵ Send", "⌘K Actions", "Esc Desk"]);
+        assert_eq!(idle, vec!["↵ Send", "⌘K Actions", "Esc Background"]);
 
         let working = flow_session_footer_hints(true);
         let working: Vec<&str> = working.iter().map(|h| h.as_ref()).collect();
-        assert_eq!(working, vec!["⌘. Stop", "⌘K Actions", "Esc Desk"]);
+        assert_eq!(working, vec!["⌘. Stop", "⌘K Actions", "Esc Background"]);
     }
 
     /// Every hint the working footer shows must name a key the flow session

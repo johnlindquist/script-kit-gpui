@@ -840,6 +840,7 @@ pub fn toggle_detached_actions(cx: &mut App) {
         Vec<crate::ai::agent_chat::ui::AgentChatThreadSummary>,
         Vec<crate::ai::agent_chat::ui::AgentChatForkPoint>,
         Vec<crate::actions::Action>,
+        crate::components::conversation_actions::AgentChatConversationCommandFacts,
     )> = view_weak.as_ref().and_then(|weak| {
         weak.upgrade().map(|entity| {
             let view = entity.read(cx);
@@ -853,6 +854,14 @@ pub fn toggle_detached_actions(cx: &mut App) {
                     thread_summaries,
                     Vec::new(),
                     Vec::new(),
+                    crate::components::conversation_actions::AgentChatConversationCommandFacts {
+                        response_in_progress: false,
+                        waiting_for_permission: false,
+                        context_preparing: false,
+                        composer_has_text: false,
+                        retry_available: false,
+                        has_response: false,
+                    },
                 ),
                 crate::ai::agent_chat::ui::AgentChatSession::Live(thread) => {
                     let thread = thread.read(cx);
@@ -863,6 +872,7 @@ pub fn toggle_detached_actions(cx: &mut App) {
                         thread_summaries,
                         thread.fork_points().to_vec(),
                         recovery_actions,
+                        view.conversation_command_facts(cx),
                     )
                 }
             }
@@ -876,8 +886,25 @@ pub fn toggle_detached_actions(cx: &mut App) {
         thread_summaries,
         fork_points,
         recovery_actions,
-    ) = agent_chat_context
-        .unwrap_or_else(|| (None, Vec::new(), 0, Vec::new(), Vec::new(), Vec::new()));
+        command_facts,
+    ) = agent_chat_context.unwrap_or_else(|| {
+        (
+            None,
+            Vec::new(),
+            0,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            crate::components::conversation_actions::AgentChatConversationCommandFacts {
+                response_in_progress: false,
+                waiting_for_permission: false,
+                context_preparing: false,
+                composer_has_text: false,
+                retry_available: false,
+                has_response: false,
+            },
+        )
+    });
 
     let dialog = cx.new(|cx| {
         let focus_handle = cx.focus_handle();
@@ -892,6 +919,7 @@ pub fn toggle_detached_actions(cx: &mut App) {
                 standing_approval_count,
                 thread_summaries: &thread_summaries,
                 fork_points: &fork_points,
+                command_facts,
             },
             theme_arc,
             crate::actions::AgentChatActionsDialogHost::Detached,
@@ -1341,6 +1369,19 @@ fn dispatch_detached_action(
                 });
             }
         }
+        "agent_chat_send" | "agent_chat_stop" => {
+            if let Some(entity) = entity_weak.upgrade() {
+                let command = if action_id == "agent_chat_send" {
+                    crate::components::conversation_actions::AgentChatConversationCommand::Send
+                } else {
+                    crate::components::conversation_actions::AgentChatConversationCommand::Stop
+                };
+                let executed = entity.update(cx, |chat, cx| {
+                    chat.execute_conversation_command(command, cx)
+                });
+                tracing::info!(event = "detached_action_conversation_command", executed);
+            }
+        }
         "agent_chat_new_thread" => {
             if let Some(entity) = entity_weak.upgrade() {
                 entity.update(cx, |chat, cx| chat.start_new_thread(cx));
@@ -1502,13 +1543,7 @@ fn dispatch_detached_action(
         "agent_chat_new_conversation" => {
             if let Some(entity) = entity_weak.upgrade() {
                 entity.update(cx, |chat, cx| {
-                    chat.live_thread().update(cx, |thread, cx| {
-                        thread.clear_messages(cx);
-                    });
-                    if let Some(transcript) = &chat.transcript {
-                        transcript.update(cx, |t, cx| t.clear_collapsed_ids(cx));
-                    }
-                    cx.notify();
+                    let _ = chat.start_new_conversation(cx);
                 });
                 tracing::info!(event = "detached_action_new_conversation");
             }

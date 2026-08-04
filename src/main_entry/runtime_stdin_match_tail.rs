@@ -99,6 +99,32 @@
                                     "Detached Agent Chat history popup fixture result"
                                 );
                             }
+                            ExternalCommand::OpenChatPromptFixture { ref request_id } => {
+                                let rid = request_id.as_ref().map(|id| id.as_str());
+                                view.handle_prompt_message(
+                                    PromptMessage::ShowChat {
+                                        id: "fixture:ordinary-chat-prompt".to_string(),
+                                        placeholder: Some("Message".to_string()),
+                                        messages: vec![crate::protocol::ChatPromptMessage::assistant(
+                                            "Fixture response",
+                                        )],
+                                        hint: Some("Ordinary Script ChatPrompt".to_string()),
+                                        footer: None,
+                                        actions: None,
+                                        model: None,
+                                        models: Vec::new(),
+                                        save_history: false,
+                                        use_builtin_ai: false,
+                                    },
+                                    ctx,
+                                );
+                                tracing::info!(
+                                    category = "STDIN",
+                                    event = "chat_prompt_fixture_opened",
+                                    command = "openChatPromptFixture",
+                                    request_id = ?rid,
+                                );
+                            }
                             ExternalCommand::ClosePromptPopupNatively { ref target, ref request_id } => {
                                 let rid = request_id.as_ref().map(|id| id.as_str());
                                 match crate::components::inline_popup_window::close_prompt_popup_target_natively(target, ctx) {

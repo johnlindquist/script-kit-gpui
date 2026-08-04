@@ -288,8 +288,13 @@ mod tests {
             ChatInputKeyAction::ToggleActions
         );
         assert_eq!(
-            resolve_chat_input_key_action("c", true, false),
+            resolve_chat_input_key_action("c", true, true),
             ChatInputKeyAction::CopyLastResponse
+        );
+        assert_eq!(
+            resolve_chat_input_key_action("c", true, false),
+            ChatInputKeyAction::Ignore,
+            "plain Cmd+C must remain available to copy the current selection"
         );
         assert_eq!(
             resolve_chat_input_key_action("backspace", true, false),

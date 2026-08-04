@@ -771,6 +771,9 @@ pub struct AgentChatActionsDialogContext<'a> {
     pub(crate) thread_summaries: &'a [crate::ai::agent_chat::ui::AgentChatThreadSummary],
     /// Rewindable user messages (Pi fork checkpoints) for "Rewind & Edit".
     pub(crate) fork_points: &'a [crate::ai::agent_chat::ui::AgentChatForkPoint],
+    /// Live capability facts used to build executable conversation commands.
+    pub(crate) command_facts:
+        crate::components::conversation_actions::AgentChatConversationCommandFacts,
 }
 
 /// Immutable parent/subject identity captured when an ActionsDialog opens.
@@ -1538,7 +1541,32 @@ impl ActionsDialog {
         chat_info: &ChatPromptInfo,
         theme: Arc<theme::Theme>,
     ) -> Self {
-        let root_route = super::builders::get_chat_root_route(chat_info);
+        Self::with_chat_commands(
+            focus_handle,
+            on_select,
+            chat_info,
+            crate::components::conversation_actions::chat_prompt_conversation_commands(
+                false,
+                false,
+                chat_info.has_response,
+            ),
+            theme,
+        )
+    }
+
+    pub(crate) fn with_chat_commands(
+        focus_handle: FocusHandle,
+        on_select: ActionCallback,
+        chat_info: &ChatPromptInfo,
+        command_bindings: Vec<
+            crate::components::conversation_actions::BoundConversationCommand<
+                crate::components::conversation_actions::ChatPromptConversationCommand,
+            >,
+        >,
+        theme: Arc<theme::Theme>,
+    ) -> Self {
+        let root_route =
+            super::builders::get_chat_root_route_with_facts(chat_info, command_bindings);
         let config = ActionsDialogConfig::default();
 
         logging::log(
@@ -2057,6 +2085,7 @@ impl ActionsDialog {
                 context.standing_approval_count,
                 context.thread_summaries,
                 context.fork_points,
+                context.command_facts,
                 host,
             )
         };

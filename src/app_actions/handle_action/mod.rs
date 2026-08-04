@@ -1604,6 +1604,21 @@ impl ScriptListApp {
         }
 
         match action_id {
+            "agent_chat_send" | "agent_chat_stop" => {
+                let command = if action_id == "agent_chat_send" {
+                    crate::components::conversation_actions::AgentChatConversationCommand::Send
+                } else {
+                    crate::components::conversation_actions::AgentChatConversationCommand::Stop
+                };
+                let executed = entity.update(cx, |chat, cx| {
+                    chat.execute_conversation_command(command, cx)
+                });
+                if executed {
+                    DispatchOutcome::success()
+                } else {
+                    DispatchOutcome::not_handled()
+                }
+            }
             "agent_chat_new_thread" => {
                 let entity = entity.clone();
                 entity.update(cx, |chat, cx| chat.start_new_thread(cx));
@@ -1735,19 +1750,16 @@ impl ScriptListApp {
                     return DispatchOutcome::success();
                 }
 
-                // Clear messages but keep the session alive
+                // Clear messages but keep the session alive through the same
+                // descriptor-backed transaction used by ⌘L.
                 let entity = entity.clone();
-                entity.update(cx, |chat, cx| {
-                    if let Some(thread) = chat.thread() {
-                        thread.update(cx, |thread, cx| {
-                            thread.clear_messages(cx);
-                        });
-                    }
-                    if let Some(transcript) = &chat.transcript {
-                        transcript.update(cx, |t, cx| t.clear_collapsed_ids(cx));
-                    }
-                    cx.notify();
-                });
+                let changed = entity.update(cx, |chat, cx| chat.start_new_conversation(cx));
+                if !changed {
+                    return DispatchOutcome::error(
+                        crate::action_helpers::ERROR_ACTION_FAILED,
+                        "Stop the current response first.",
+                    );
+                }
                 DispatchOutcome::success()
             }
             "agent_chat_paste_to_frontmost" => {

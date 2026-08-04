@@ -777,7 +777,6 @@ mod traits;
 mod vibrancy;
 mod window_ops;
 
-pub(crate) use window_ops::update_notes_window_detached;
 pub use window_ops::{
     accept_notes_ghost_for_automation, apply_mcp_notes_mutation_on_main_thread, close_notes_window,
     get_notes_app_entity_and_handle, get_notes_editor_runtime_info, get_notes_editor_text,
@@ -787,6 +786,7 @@ pub use window_ops::{
     open_notes_window_without_launcher_restore, quick_capture, save_note_with_content,
     save_note_with_content_and_source, toggle_notes_popup_for_automation,
 };
+pub(crate) use window_ops::{get_notes_document_identity_spec, update_notes_window_detached};
 
 #[cfg(test)]
 mod tests;

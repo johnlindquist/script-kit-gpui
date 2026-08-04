@@ -75,6 +75,65 @@ pub struct ElementEditorRuntimeInfo {
     pub markdown_link_highlight_ranges: Option<serde_json::Value>,
 }
 
+/// Closed semantic roles shared by conversational context/identity controls.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConversationSemanticRole {
+    ContextChip,
+    IdentityBadge,
+    DestinationSelector,
+}
+
+impl ConversationSemanticRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ContextChip => "contextChip",
+            Self::IdentityBadge => "identityBadge",
+            Self::DestinationSelector => "destinationSelector",
+        }
+    }
+}
+
+/// Actions are role-specific: context removal can never be invoked against an
+/// identity badge, and destination selection never mutates conversation context.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConversationSemanticAction {
+    RemoveContext,
+    OpenContextDetails,
+    OpenIdentitySelector,
+    OpenIdentityDetails,
+    SelectDestination,
+}
+
+impl ConversationSemanticAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RemoveContext => "removeContext",
+            Self::OpenContextDetails => "openContextDetails",
+            Self::OpenIdentitySelector => "openIdentitySelector",
+            Self::OpenIdentityDetails => "openIdentityDetails",
+            Self::SelectDestination => "selectDestination",
+        }
+    }
+
+    pub const fn is_valid_for(self, role: ConversationSemanticRole) -> bool {
+        matches!(
+            (role, self),
+            (
+                ConversationSemanticRole::ContextChip,
+                Self::RemoveContext | Self::OpenContextDetails
+            ) | (
+                ConversationSemanticRole::IdentityBadge,
+                Self::OpenIdentitySelector | Self::OpenIdentityDetails
+            ) | (
+                ConversationSemanticRole::DestinationSelector,
+                Self::SelectDestination
+            )
+        )
+    }
+}
+
 /// Information about a UI element returned by getElements
 ///
 /// Contains semantic ID, type, text content, and state information
@@ -450,5 +509,34 @@ impl ScriptletData {
     pub fn with_source_path(mut self, path: String) -> Self {
         self.source_path = Some(path);
         self
+    }
+}
+
+#[cfg(test)]
+mod conversation_semantic_tests {
+    use super::*;
+
+    #[test]
+    fn conversation_semantic_roles_and_actions_are_exhaustive_and_role_safe() {
+        let roles = [
+            ConversationSemanticRole::ContextChip,
+            ConversationSemanticRole::IdentityBadge,
+            ConversationSemanticRole::DestinationSelector,
+        ];
+        assert_eq!(
+            roles.map(ConversationSemanticRole::as_str),
+            ["contextChip", "identityBadge", "destinationSelector"]
+        );
+
+        assert!(ConversationSemanticAction::RemoveContext
+            .is_valid_for(ConversationSemanticRole::ContextChip));
+        assert!(!ConversationSemanticAction::RemoveContext
+            .is_valid_for(ConversationSemanticRole::IdentityBadge));
+        assert!(ConversationSemanticAction::OpenIdentitySelector
+            .is_valid_for(ConversationSemanticRole::IdentityBadge));
+        assert!(!ConversationSemanticAction::SelectDestination
+            .is_valid_for(ConversationSemanticRole::ContextChip));
+        assert!(ConversationSemanticAction::SelectDestination
+            .is_valid_for(ConversationSemanticRole::DestinationSelector));
     }
 }

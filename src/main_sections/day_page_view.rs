@@ -1011,10 +1011,17 @@ impl Render for DayPageView {
                 this.handle_key_down(event, window, cx);
             }));
 
-        let footer_config = app
+        let preview_availability = self.kit_resource_preview_action_availability();
+        let preview_return_label = self.kit_resource_preview_return_label();
+        let mut footer_config = app
             .read(cx)
-            .main_window_footer_config_with_cx(Some(&*cx))
+            .main_window_footer_config_with_cx(None)
             .expect("Day Page owns a main-window footer config");
+        footer_config.buttons = day_page_footer_buttons_for_preview(
+            &app.read(cx),
+            preview_availability,
+            preview_return_label,
+        );
         let footer_app = app.downgrade();
         let footer =
             crate::components::prompt_layout_shell::render_main_window_footer_slot_for_prompt_surface(
@@ -1899,6 +1906,24 @@ pub(crate) fn day_page_footer_buttons(
     app: &ScriptListApp,
     cx: Option<&gpui::App>,
 ) -> Vec<FooterButtonConfig> {
+    let preview = if let (AppView::DayPage { entity }, Some(cx)) = (&app.current_view, cx) {
+        let view = entity.read(cx);
+        view.kit_resource_preview_action_availability()
+            .map(|availability| (availability, view.kit_resource_preview_return_label()))
+    } else {
+        None
+    };
+    let (availability, return_label) = preview
+        .map(|(availability, label)| (Some(availability), label))
+        .unwrap_or((None, "Back to Today"));
+    day_page_footer_buttons_for_preview(app, availability, return_label)
+}
+
+fn day_page_footer_buttons_for_preview(
+    app: &ScriptListApp,
+    availability: Option<DayPageKitPreviewActionAvailability>,
+    return_label: &'static str,
+) -> Vec<FooterButtonConfig> {
     let footer_disabled = crate::confirm::is_confirm_window_open();
     let actions_open = app.show_actions_popup || crate::actions::is_actions_window_open();
     let enabled = !footer_disabled;
@@ -1908,29 +1933,21 @@ pub(crate) fn day_page_footer_buttons(
     // action first, Actions ⌘K, and a "Back to …" slot last so Close reads as
     // "return to where I was", never "close the window". The remaining preview
     // actions stay reachable through ⌘K and their shortcuts (slot cap is 3).
-    if let (AppView::DayPage { entity }, Some(cx)) = (&app.current_view, cx) {
-        let view = entity.read(cx);
-        if let Some(availability) = view.kit_resource_preview_action_availability() {
-            let primary = if availability.open_source_target.is_some() {
-                FooterButtonConfig::new(FooterAction::Run, "↵", "Open Source")
-            } else if availability.can_add_to_agent_chat {
-                FooterButtonConfig::new(FooterAction::Ai, "⌘↵", "Add to Agent Chat")
-            } else {
-                FooterButtonConfig::new(FooterAction::Copy, "⌘C", "Copy URI")
-            };
-            return vec![
-                primary.enabled(enabled),
-                FooterButtonConfig::new(FooterAction::Actions, "⌘K", "Actions")
-                    .selected(actions_open)
-                    .enabled(enabled),
-                FooterButtonConfig::new(
-                    FooterAction::Close,
-                    "Esc",
-                    view.kit_resource_preview_return_label(),
-                )
+    if let Some(availability) = availability {
+        let primary = if availability.open_source_target.is_some() {
+            FooterButtonConfig::new(FooterAction::Run, "↵", "Open Source")
+        } else if availability.can_add_to_agent_chat {
+            FooterButtonConfig::new(FooterAction::Ai, "⌘↵", "Add to Agent Chat")
+        } else {
+            FooterButtonConfig::new(FooterAction::Copy, "⌘C", "Copy URI")
+        };
+        return vec![
+            primary.enabled(enabled),
+            FooterButtonConfig::new(FooterAction::Actions, "⌘K", "Actions")
+                .selected(actions_open)
                 .enabled(enabled),
-            ];
-        }
+            FooterButtonConfig::new(FooterAction::Close, "Esc", return_label).enabled(enabled),
+        ];
     }
 
     vec![

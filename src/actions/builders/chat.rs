@@ -190,6 +190,24 @@ pub const CHAT_MODEL_PICKER_ROUTE_ID: &str = "chat:model_picker";
 
 /// Build the root route for a chat prompt's actions dialog.
 pub fn get_chat_root_route(info: &ChatPromptInfo) -> crate::actions::ActionsDialogRoute {
+    get_chat_root_route_with_facts(
+        info,
+        crate::components::conversation_actions::chat_prompt_conversation_commands(
+            false,
+            false,
+            info.has_response,
+        ),
+    )
+}
+
+pub(crate) fn get_chat_root_route_with_facts(
+    info: &ChatPromptInfo,
+    command_bindings: Vec<
+        crate::components::conversation_actions::BoundConversationCommand<
+            crate::components::conversation_actions::ChatPromptConversationCommand,
+        >,
+    >,
+) -> crate::actions::ActionsDialogRoute {
     let context_title = info
         .current_model
         .clone()
@@ -197,7 +215,7 @@ pub fn get_chat_root_route(info: &ChatPromptInfo) -> crate::actions::ActionsDial
 
     crate::actions::ActionsDialogRoute {
         id: CHAT_ROOT_ROUTE_ID.to_string(),
-        actions: get_chat_context_actions(info),
+        actions: get_chat_context_actions_with_facts(info, command_bindings),
         context_title: Some(context_title),
         search_placeholder: Some("Search chat actions...".to_string()),
         initial_selected_action_id: Some(CHAT_CHANGE_MODEL_ACTION_ID.to_string()),
@@ -255,6 +273,24 @@ pub fn get_chat_model_picker_actions(info: &ChatPromptInfo) -> Vec<Action> {
 /// of flat model rows. Use [`get_chat_model_picker_actions`] for model-level
 /// actions.
 pub fn get_chat_context_actions(info: &ChatPromptInfo) -> Vec<Action> {
+    get_chat_context_actions_with_facts(
+        info,
+        crate::components::conversation_actions::chat_prompt_conversation_commands(
+            false,
+            false,
+            info.has_response,
+        ),
+    )
+}
+
+pub(crate) fn get_chat_context_actions_with_facts(
+    info: &ChatPromptInfo,
+    command_bindings: Vec<
+        crate::components::conversation_actions::BoundConversationCommand<
+            crate::components::conversation_actions::ChatPromptConversationCommand,
+        >,
+    >,
+) -> Vec<Action> {
     if !is_chat_prompt_info_valid(info) {
         return Vec::new();
     }
@@ -291,6 +327,56 @@ pub fn get_chat_context_actions(info: &ChatPromptInfo) -> Vec<Action> {
         )
         .with_icon(IconName::MagnifyingGlass),
     );
+
+    actions.retain(|action| action.id != "chat:copy_response");
+    for binding in command_bindings {
+        use crate::components::conversation_actions::{
+            ChatPromptConversationCommand, ConversationCommandAvailability,
+        };
+        let (action_id, description, section, icon) = match binding.handler {
+            ChatPromptConversationCommand::Send => (
+                "chat:send",
+                "Send the current message",
+                "Conversation",
+                IconName::ArrowRight,
+            ),
+            ChatPromptConversationCommand::Stop => (
+                "chat:stop",
+                "Stop the current response",
+                "Conversation",
+                IconName::Close,
+            ),
+            ChatPromptConversationCommand::Close => (
+                "chat:close",
+                "Close this script conversation",
+                "Conversation",
+                IconName::Close,
+            ),
+            ChatPromptConversationCommand::CopyLastResponse => (
+                "chat:copy_response",
+                "Copy the most recent assistant response",
+                "Response",
+                IconName::Copy,
+            ),
+        };
+        let mut action = Action::new(
+            action_id,
+            binding.descriptor.label,
+            Some(description.to_string()),
+            ActionCategory::ScriptContext,
+        )
+        .with_section(section)
+        .with_icon(icon);
+        if let Some(shortcut) = binding.descriptor.shortcut {
+            action = action.with_shortcut(shortcut);
+        }
+        if let ConversationCommandAvailability::Disabled { reason } =
+            binding.descriptor.availability
+        {
+            action = action.disabled(reason.as_str());
+        }
+        actions.push(action);
+    }
 
     actions
 }

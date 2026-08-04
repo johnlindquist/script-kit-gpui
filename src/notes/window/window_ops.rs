@@ -2108,6 +2108,37 @@ pub fn get_notes_editor_text(cx: &gpui::App) -> Option<String> {
 }
 
 /// Return shared Markdown editor runtime metadata for the live Notes window.
+pub(crate) fn get_notes_document_identity_spec(
+    cx: &gpui::App,
+) -> Option<crate::components::main_view_chrome::SemanticChipSpec> {
+    let entity = {
+        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
+        slot.lock().ok()?.clone()?
+    };
+    let app = entity.read(cx);
+    let (semantic_id, label) = if let Some(binding) = app.active_day_binding.as_ref() {
+        (
+            format!("notes-document-day:{}", binding.date),
+            format!("Today · {}", binding.date),
+        )
+    } else if let Some(note_id) = app.selected_note_id {
+        (
+            format!("notes-document:{}", note_id.as_str()),
+            "Current Note".to_string(),
+        )
+    } else {
+        ("notes-document:draft".to_string(), "Draft Note".to_string())
+    };
+    Some(
+        crate::components::main_view_chrome::SemanticChipSpec::enabled_identity(
+            semantic_id,
+            label,
+            crate::components::main_view_chrome::SemanticChipAction::OpenDetails,
+            "⌘P",
+        ),
+    )
+}
+
 pub fn get_notes_editor_runtime_info(
     cx: &gpui::App,
 ) -> Option<crate::protocol::ElementEditorRuntimeInfo> {

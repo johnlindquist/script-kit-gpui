@@ -875,6 +875,7 @@ impl ScriptListApp {
                         thread_summaries,
                         fork_points,
                         recovery_actions,
+                        command_facts,
                     ) = {
                         let view = entity.read(cx);
                         let focused_text = view.has_focused_text_context();
@@ -891,6 +892,14 @@ impl ScriptListApp {
                                 thread_summaries,
                                 Vec::new(),
                                 Vec::new(),
+                                crate::components::conversation_actions::AgentChatConversationCommandFacts {
+                                    response_in_progress: false,
+                                    waiting_for_permission: false,
+                                    context_preparing: false,
+                                    composer_has_text: false,
+                                    retry_available: false,
+                                    has_response: false,
+                                },
                             ),
                             crate::ai::agent_chat::ui::AgentChatSession::Live(thread) => {
                                 let thread = thread.read(cx);
@@ -903,6 +912,7 @@ impl ScriptListApp {
                                     thread_summaries,
                                     thread.fork_points().to_vec(),
                                     recovery_actions,
+                                    view.conversation_command_facts(cx),
                                 )
                             }
                         }
@@ -925,6 +935,7 @@ impl ScriptListApp {
                         thread_summaries,
                         fork_points,
                         recovery_actions,
+                        command_facts,
                     ))
                 } else {
                     None
@@ -1025,6 +1036,7 @@ impl ScriptListApp {
                     ref thread_summaries,
                     ref fork_points,
                     ref recovery_actions,
+                    command_facts,
                 )) = agent_chat_context
                 {
                     // Agent Chat chat view: use route-based dialog with drill-down model/profile pickers
@@ -1039,6 +1051,7 @@ impl ScriptListApp {
                             standing_approval_count,
                             thread_summaries,
                             fork_points,
+                            command_facts,
                         },
                         std::sync::Arc::clone(&theme_arc),
                         agent_chat_actions_host,
@@ -1741,25 +1754,28 @@ impl ScriptListApp {
             self.close_actions_popup(ActionsDialogHost::ChatPrompt, window, cx);
         } else {
             // Get chat info from current ChatPrompt entity
-            let chat_info = if let AppView::ChatPrompt { entity, .. } = &self.current_view {
+            let (chat_info, chat_command_bindings) = if let AppView::ChatPrompt { entity, .. } = &self.current_view {
                 let chat = entity.read(cx);
-                ChatPromptInfo {
-                    current_model: chat.model.clone(),
-                    available_models: chat
-                        .models
-                        .iter()
-                        .map(|m| ChatModelInfo {
-                            id: m.id.clone(),
-                            display_name: m.name.clone(),
-                            provider: m.provider.clone(),
-                        })
-                        .collect(),
-                    has_messages: !chat.messages.is_empty(),
-                    has_response: chat
-                        .messages
-                        .iter()
-                        .any(|m| m.position == crate::protocol::ChatMessagePosition::Left),
-                }
+                (
+                    ChatPromptInfo {
+                        current_model: chat.model.clone(),
+                        available_models: chat
+                            .models
+                            .iter()
+                            .map(|m| ChatModelInfo {
+                                id: m.id.clone(),
+                                display_name: m.name.clone(),
+                                provider: m.provider.clone(),
+                            })
+                            .collect(),
+                        has_messages: !chat.messages.is_empty(),
+                        has_response: chat
+                            .messages
+                            .iter()
+                            .any(|m| m.position == crate::protocol::ChatMessagePosition::Left),
+                    },
+                    chat.conversation_command_bindings(),
+                )
             } else {
                 logging::log(
                     "KEY",
@@ -1776,10 +1792,11 @@ impl ScriptListApp {
             let is_mini = matches!(self.main_window_mode, MainWindowMode::Mini);
             let dialog = cx.new(|cx| {
                 let focus_handle = cx.focus_handle();
-                let mut dialog = ActionsDialog::with_chat(
+                let mut dialog = ActionsDialog::with_chat_commands(
                     focus_handle,
                     std::sync::Arc::new(|_action_id| {}), // Callback handled via main app
                     &chat_info,
+                    chat_command_bindings,
                     theme_arc,
                 );
 

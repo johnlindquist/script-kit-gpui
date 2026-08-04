@@ -249,7 +249,6 @@ impl ScriptListApp {
     fn main_view_context_elements(
         zone: &crate::components::main_view_chrome::MainViewContextZoneSpec,
     ) -> Vec<protocol::ElementInfo> {
-        use crate::components::main_view_chrome::{SemanticChipAction, SemanticChipRole};
         let mut chips = vec![&zone.leading_identity];
         if let Some(context) = zone.context_attachment.as_ref() {
             chips.push(context);
@@ -258,42 +257,9 @@ impl ScriptListApp {
 
         chips
             .into_iter()
-            .map(|chip| {
-                let role = match chip.role {
-                    SemanticChipRole::ContextAttachment => "contextAttachment",
-                    SemanticChipRole::Identity => "identity",
-                    SemanticChipRole::DestinationSelector => "destinationSelector",
-                };
-                let action = chip.body_action.map(|action| match action {
-                    SemanticChipAction::OpenDetails => "openDetails",
-                    SemanticChipAction::RemoveContext => "removeContext",
-                    SemanticChipAction::OpenSelector => "openSelector",
-                    SemanticChipAction::OpenSurface => "openSurface",
-                    SemanticChipAction::SelectDestination => "selectDestination",
-                });
-                protocol::ElementInfo {
-                    semantic_id: chip.semantic_id.to_string(),
-                    element_type: if chip.enabled && chip.body_action.is_some() {
-                        protocol::ElementType::Button
-                    } else {
-                        protocol::ElementType::Panel
-                    },
-                    text: Some(chip.label.to_string()),
-                    value: (!chip.shortcut_tokens.is_empty())
-                        .then(|| chip.shortcut_tokens.join("")),
-                    selected: None,
-                    focused: None,
-                    index: None,
-                    role: Some(role.to_string()),
-                    kind: action.map(str::to_string),
-                    source: Some("MainViewContextZone".to_string()),
-                    source_name: None,
-                    selectable: Some(chip.enabled && chip.body_action.is_some()),
-                    status_kind: None,
-                    action_disabled: chip.disabled_reason.as_ref().map(ToString::to_string),
-                    style: None,
-                }
-            })
+            .flat_map(
+                crate::windows::automation_surface_collector::collect_semantic_chip_elements,
+            )
             .collect()
     }
 
@@ -350,6 +316,20 @@ impl ScriptListApp {
                         ),
                         protocol::ElementInfo::list("agent_chat-messages", state.message_count),
                     ];
+                    elements.extend(
+                        entity
+                            .read(cx)
+                            .conversation_semantic_chip_specs(cx)
+                            .iter()
+                            .flat_map(
+                                crate::windows::automation_surface_collector::collect_semantic_chip_elements,
+                            ),
+                    );
+                    elements.extend(
+                        crate::windows::automation_surface_collector::collect_conversation_command_elements(
+                            &entity.read(cx).conversation_command_bindings(cx),
+                        ),
+                    );
                     if state.message_count == 0 {
                         let snapshot =
                             crate::components::agent_chat_empty_guidance_spec().semantic_snapshot();
@@ -1861,7 +1841,9 @@ impl ScriptListApp {
                     // real draft and real focus — instead of the hidden ones.
                     let removed = elements.len();
                     elements.retain(|el| {
-                        el.semantic_id != "input:chat-input" && el.semantic_id != "input:chat-model"
+                        el.semantic_id != "input:chat-input"
+                            && el.semantic_id != "input:chat-model"
+                            && el.role.as_deref() != Some("conversationCommand")
                     });
                     total_count = total_count.saturating_sub(removed - elements.len());
                     let placeholder = chat
@@ -1887,6 +1869,22 @@ impl ScriptListApp {
                         .map(|(meta, _)| meta)
                         .find(|meta| meta.id == *session_id)
                     {
+                        let identity = crate::components::main_view_chrome::SemanticChipSpec::enabled_identity(
+                            format!("flow-session-identity:{}", meta.id),
+                            meta.friendly_name.clone(),
+                            crate::components::main_view_chrome::SemanticChipAction::OpenDetails,
+                            "⌘K",
+                        );
+                        elements.push(
+                            crate::windows::automation_surface_collector::collect_semantic_chip_element(&identity),
+                        );
+                        let command_elements = crate::windows::automation_surface_collector::collect_conversation_command_elements(
+                            &crate::components::conversation_actions::flow_conversation_commands(
+                                meta.active_turn.is_some(),
+                            ),
+                        );
+                        total_count += 1 + command_elements.len();
+                        elements.extend(command_elements);
                         if let Some(spec) = crate::ai::reliability::project_recovery(
                             &meta.reliability.state().identity,
                             meta.reliability.state(),

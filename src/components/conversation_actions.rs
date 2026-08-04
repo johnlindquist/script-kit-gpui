@@ -21,6 +21,495 @@ use gpui::{div, prelude::*, px, rgb, svg, Animation, AnimationExt as _, SharedSt
 use crate::components::conversation_style::ConversationStyleDef;
 use crate::designs::icon_variations::IconName;
 
+/// Closed command vocabulary shared by conversation footers, Actions, key
+/// routing, and semantic automation. Hosts bind only commands they can execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ConversationCommandId {
+    Send,
+    Stop,
+    Retry,
+    Background,
+    Back,
+    Close,
+    NewConversation,
+    DeleteConversation,
+    TerminateRuntime,
+    ContinueAsNewConversation,
+    CopyLastResponse,
+    CopyTurn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConversationCommandRole {
+    Primary,
+    Secondary,
+    Destructive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmPolicy {
+    None,
+    Required,
+}
+
+/// Closed user-safe reasons for supported commands that cannot run right now.
+/// Callers cannot smuggle provider, adapter, path, or authored text into UI copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConversationCommandDisabledReason {
+    TypeMessageFirst,
+    ContextStillPreparing,
+    ResponseInProgress,
+    NoResponseRunning,
+    WaitingForPermission,
+}
+
+impl ConversationCommandDisabledReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::TypeMessageFirst => "Type a message first.",
+            Self::ContextStillPreparing => "Wait for context to finish loading.",
+            Self::ResponseInProgress => "Stop the current response first.",
+            Self::NoResponseRunning => "No response is running.",
+            Self::WaitingForPermission => "Resolve the permission request first.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConversationCommandAvailability {
+    Enabled,
+    Disabled {
+        reason: ConversationCommandDisabledReason,
+    },
+}
+
+impl ConversationCommandAvailability {
+    pub(crate) const fn disabled(reason: ConversationCommandDisabledReason) -> Self {
+        Self::Disabled { reason }
+    }
+
+    pub(crate) const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+
+    pub(crate) const fn disabled_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Enabled => None,
+            Self::Disabled { reason } => Some(reason.as_str()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConversationCommandDescriptor {
+    pub(crate) id: ConversationCommandId,
+    pub(crate) label: &'static str,
+    pub(crate) shortcut: Option<&'static str>,
+    pub(crate) role: ConversationCommandRole,
+    pub(crate) availability: ConversationCommandAvailability,
+    pub(crate) confirmation: ConfirmPolicy,
+    pub(crate) semantic_action_id: &'static str,
+}
+
+fn command_metadata(
+    id: ConversationCommandId,
+) -> (
+    &'static str,
+    Option<&'static str>,
+    ConversationCommandRole,
+    ConfirmPolicy,
+    &'static str,
+) {
+    use ConversationCommandId::*;
+    match id {
+        Send => (
+            "Send",
+            Some("↵"),
+            ConversationCommandRole::Primary,
+            ConfirmPolicy::None,
+            "conversation.send",
+        ),
+        Stop => (
+            "Stop",
+            Some("⌘."),
+            ConversationCommandRole::Primary,
+            ConfirmPolicy::None,
+            "conversation.stop",
+        ),
+        Retry => (
+            "Retry",
+            Some("⇧⌘R"),
+            ConversationCommandRole::Primary,
+            ConfirmPolicy::None,
+            "conversation.retry",
+        ),
+        Background => (
+            "Background",
+            Some("Esc"),
+            ConversationCommandRole::Secondary,
+            ConfirmPolicy::None,
+            "conversation.background",
+        ),
+        Back => (
+            "Back",
+            Some("Esc"),
+            ConversationCommandRole::Secondary,
+            ConfirmPolicy::None,
+            "conversation.back",
+        ),
+        Close => (
+            "Close",
+            Some("⌘W"),
+            ConversationCommandRole::Secondary,
+            ConfirmPolicy::None,
+            "conversation.close",
+        ),
+        NewConversation => (
+            "New Conversation",
+            Some("⌘L"),
+            ConversationCommandRole::Secondary,
+            ConfirmPolicy::None,
+            "conversation.new",
+        ),
+        DeleteConversation => (
+            "Delete Conversation…",
+            None,
+            ConversationCommandRole::Destructive,
+            ConfirmPolicy::Required,
+            "conversation.delete",
+        ),
+        TerminateRuntime => (
+            "Terminate Runtime…",
+            Some("⇧⌘⎋"),
+            ConversationCommandRole::Destructive,
+            ConfirmPolicy::Required,
+            "conversation.terminateRuntime",
+        ),
+        ContinueAsNewConversation => (
+            "Continue as New Conversation",
+            None,
+            ConversationCommandRole::Secondary,
+            ConfirmPolicy::None,
+            "conversation.continueAsNew",
+        ),
+        CopyLastResponse => (
+            "Copy Last Response",
+            Some("⇧⌘C"),
+            ConversationCommandRole::Secondary,
+            ConfirmPolicy::None,
+            "conversation.copyLast",
+        ),
+        CopyTurn => (
+            "Copy Turn",
+            None,
+            ConversationCommandRole::Secondary,
+            ConfirmPolicy::None,
+            "conversation.copyTurn",
+        ),
+    }
+}
+
+/// A descriptor and its host-owned executable binding are inseparable. A host
+/// cannot advertise a command without supplying the exhaustive handler token
+/// that its owning surface dispatches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundConversationCommand<Handler> {
+    pub(crate) descriptor: ConversationCommandDescriptor,
+    pub(crate) handler: Handler,
+}
+
+impl<Handler> BoundConversationCommand<Handler> {
+    pub(crate) fn enabled(id: ConversationCommandId, handler: Handler) -> Self {
+        Self::with_availability(id, ConversationCommandAvailability::Enabled, handler)
+    }
+
+    pub(crate) fn disabled(
+        id: ConversationCommandId,
+        reason: ConversationCommandDisabledReason,
+        handler: Handler,
+    ) -> Self {
+        Self::with_availability(
+            id,
+            ConversationCommandAvailability::disabled(reason),
+            handler,
+        )
+    }
+
+    fn with_availability(
+        id: ConversationCommandId,
+        availability: ConversationCommandAvailability,
+        handler: Handler,
+    ) -> Self {
+        let (label, shortcut, role, confirmation, semantic_action_id) = command_metadata(id);
+        Self {
+            descriptor: ConversationCommandDescriptor {
+                id,
+                label,
+                shortcut,
+                role,
+                availability,
+                confirmation,
+                semantic_action_id,
+            },
+            handler,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentChatConversationCommand {
+    Send,
+    Stop,
+    Retry,
+    NewConversation,
+    CopyLastResponse,
+    Close,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AgentChatConversationCommandFacts {
+    pub(crate) response_in_progress: bool,
+    pub(crate) waiting_for_permission: bool,
+    pub(crate) context_preparing: bool,
+    pub(crate) composer_has_text: bool,
+    pub(crate) retry_available: bool,
+    pub(crate) has_response: bool,
+}
+
+pub(crate) fn agent_chat_conversation_commands(
+    facts: AgentChatConversationCommandFacts,
+) -> Vec<BoundConversationCommand<AgentChatConversationCommand>> {
+    let mut commands = Vec::new();
+    if facts.response_in_progress {
+        commands.push(BoundConversationCommand::enabled(
+            ConversationCommandId::Stop,
+            AgentChatConversationCommand::Stop,
+        ));
+    } else {
+        let send_availability = if facts.waiting_for_permission {
+            Some(ConversationCommandDisabledReason::WaitingForPermission)
+        } else if facts.context_preparing {
+            Some(ConversationCommandDisabledReason::ContextStillPreparing)
+        } else if !facts.composer_has_text {
+            Some(ConversationCommandDisabledReason::TypeMessageFirst)
+        } else {
+            None
+        };
+        commands.push(match send_availability {
+            Some(reason) => BoundConversationCommand::disabled(
+                ConversationCommandId::Send,
+                reason,
+                AgentChatConversationCommand::Send,
+            ),
+            None => BoundConversationCommand::enabled(
+                ConversationCommandId::Send,
+                AgentChatConversationCommand::Send,
+            ),
+        });
+    }
+    if facts.retry_available {
+        commands.push(BoundConversationCommand::enabled(
+            ConversationCommandId::Retry,
+            AgentChatConversationCommand::Retry,
+        ));
+    }
+    commands.push(if facts.response_in_progress {
+        BoundConversationCommand::disabled(
+            ConversationCommandId::NewConversation,
+            ConversationCommandDisabledReason::ResponseInProgress,
+            AgentChatConversationCommand::NewConversation,
+        )
+    } else {
+        BoundConversationCommand::enabled(
+            ConversationCommandId::NewConversation,
+            AgentChatConversationCommand::NewConversation,
+        )
+    });
+    if facts.has_response {
+        commands.push(BoundConversationCommand::enabled(
+            ConversationCommandId::CopyLastResponse,
+            AgentChatConversationCommand::CopyLastResponse,
+        ));
+    }
+    commands.push(BoundConversationCommand::enabled(
+        ConversationCommandId::Close,
+        AgentChatConversationCommand::Close,
+    ));
+    commands
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlowConversationCommand {
+    Send,
+    Stop,
+    Background,
+    NewConversation,
+    CopyLastResponse,
+    TerminateRuntime,
+}
+
+pub(crate) fn flow_conversation_commands(
+    response_in_progress: bool,
+) -> Vec<BoundConversationCommand<FlowConversationCommand>> {
+    vec![
+        if response_in_progress {
+            BoundConversationCommand::enabled(
+                ConversationCommandId::Stop,
+                FlowConversationCommand::Stop,
+            )
+        } else {
+            BoundConversationCommand::enabled(
+                ConversationCommandId::Send,
+                FlowConversationCommand::Send,
+            )
+        },
+        BoundConversationCommand::enabled(
+            ConversationCommandId::Background,
+            FlowConversationCommand::Background,
+        ),
+        if response_in_progress {
+            BoundConversationCommand::disabled(
+                ConversationCommandId::NewConversation,
+                ConversationCommandDisabledReason::ResponseInProgress,
+                FlowConversationCommand::NewConversation,
+            )
+        } else {
+            BoundConversationCommand::enabled(
+                ConversationCommandId::NewConversation,
+                FlowConversationCommand::NewConversation,
+            )
+        },
+        BoundConversationCommand::enabled(
+            ConversationCommandId::CopyLastResponse,
+            FlowConversationCommand::CopyLastResponse,
+        ),
+        BoundConversationCommand::disabled(
+            ConversationCommandId::Stop,
+            ConversationCommandDisabledReason::NoResponseRunning,
+            FlowConversationCommand::Stop,
+        ),
+        BoundConversationCommand::enabled(
+            ConversationCommandId::TerminateRuntime,
+            FlowConversationCommand::TerminateRuntime,
+        ),
+    ]
+    .into_iter()
+    .filter(|command| {
+        command.descriptor.id != ConversationCommandId::Stop
+            || command.descriptor.availability.is_enabled()
+            || !response_in_progress
+    })
+    .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChatPromptConversationCommand {
+    Send,
+    Stop,
+    Close,
+    CopyLastResponse,
+}
+
+pub(crate) fn chat_prompt_conversation_commands(
+    response_in_progress: bool,
+    composer_has_text: bool,
+    has_response: bool,
+) -> Vec<BoundConversationCommand<ChatPromptConversationCommand>> {
+    let mut commands = vec![
+        if response_in_progress {
+            BoundConversationCommand::enabled(
+                ConversationCommandId::Stop,
+                ChatPromptConversationCommand::Stop,
+            )
+        } else if composer_has_text {
+            BoundConversationCommand::enabled(
+                ConversationCommandId::Send,
+                ChatPromptConversationCommand::Send,
+            )
+        } else {
+            BoundConversationCommand::disabled(
+                ConversationCommandId::Send,
+                ConversationCommandDisabledReason::TypeMessageFirst,
+                ChatPromptConversationCommand::Send,
+            )
+        },
+        BoundConversationCommand::enabled(
+            ConversationCommandId::Close,
+            ChatPromptConversationCommand::Close,
+        ),
+    ];
+    if has_response {
+        commands.push(BoundConversationCommand::enabled(
+            ConversationCommandId::CopyLastResponse,
+            ChatPromptConversationCommand::CopyLastResponse,
+        ));
+    }
+    commands
+}
+
+pub(crate) fn match_conversation_command_shortcut<Handler: Copy>(
+    commands: &[BoundConversationCommand<Handler>],
+    key: &str,
+    platform: bool,
+    shift: bool,
+) -> Option<(Handler, ConversationCommandAvailability)> {
+    commands
+        .iter()
+        .find(|command| match command.descriptor.shortcut {
+            Some("↵") => crate::ui_foundation::is_key_enter(key) && !platform && !shift,
+            Some("Esc") => crate::ui_foundation::is_key_escape(key) && !platform && !shift,
+            Some("⌘.") => platform && !shift && key == ".",
+            Some("⌘W") => platform && !shift && key.eq_ignore_ascii_case("w"),
+            Some("⌘L") => platform && !shift && key.eq_ignore_ascii_case("l"),
+            Some("⇧⌘C") => platform && shift && key.eq_ignore_ascii_case("c"),
+            Some("⇧⌘R") => platform && shift && key.eq_ignore_ascii_case("r"),
+            Some("⇧⌘⎋") => platform && shift && crate::ui_foundation::is_key_escape(key),
+            _ => false,
+        })
+        .map(|command| (command.handler, command.descriptor.availability))
+}
+
+pub(crate) fn resolve_conversation_command_shortcut<Handler: Copy>(
+    commands: &[BoundConversationCommand<Handler>],
+    key: &str,
+    platform: bool,
+    shift: bool,
+) -> Option<Handler> {
+    match match_conversation_command_shortcut(commands, key, platform, shift) {
+        Some((handler, ConversationCommandAvailability::Enabled)) => Some(handler),
+        Some((_, ConversationCommandAvailability::Disabled { .. })) | None => None,
+    }
+}
+
+pub(crate) fn validate_conversation_command_bindings<Handler>(
+    commands: &[BoundConversationCommand<Handler>],
+) -> Result<(), &'static str> {
+    let mut ids = std::collections::HashSet::new();
+    let mut semantic_ids = std::collections::HashSet::new();
+    for command in commands {
+        if !ids.insert(command.descriptor.id) {
+            return Err("duplicate conversation command id");
+        }
+        if !semantic_ids.insert(command.descriptor.semantic_action_id) {
+            return Err("duplicate conversation semantic action id");
+        }
+        if command.descriptor.role == ConversationCommandRole::Destructive
+            && command.descriptor.confirmation != ConfirmPolicy::Required
+        {
+            return Err("destructive conversation commands require confirmation");
+        }
+        if command
+            .descriptor
+            .availability
+            .disabled_reason()
+            .is_some_and(str::is_empty)
+        {
+            return Err("disabled conversation commands require a safe reason");
+        }
+    }
+    Ok(())
+}
+
 /// What a conversation row should do about a per-turn copy control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TurnCopyEligibility {
@@ -167,6 +656,91 @@ pub(crate) fn render_conversation_copy_button(
 #[cfg(test)]
 mod conversation_actions_tests {
     use super::*;
+
+    #[test]
+    fn command_bindings_require_unique_ids_safe_reasons_and_confirmation() {
+        let commands = vec![
+            BoundConversationCommand::enabled(ConversationCommandId::Send, "send"),
+            BoundConversationCommand::disabled(
+                ConversationCommandId::NewConversation,
+                ConversationCommandDisabledReason::ResponseInProgress,
+                "new",
+            ),
+            BoundConversationCommand::enabled(ConversationCommandId::DeleteConversation, "delete"),
+        ];
+        validate_conversation_command_bindings(&commands).unwrap();
+        let delete = commands
+            .iter()
+            .find(|command| command.descriptor.id == ConversationCommandId::DeleteConversation)
+            .unwrap();
+        assert_eq!(delete.descriptor.confirmation, ConfirmPolicy::Required);
+        assert_eq!(delete.descriptor.role, ConversationCommandRole::Destructive);
+        assert_eq!(
+            commands[1].descriptor.availability.disabled_reason(),
+            Some("Stop the current response first.")
+        );
+
+        let duplicate = vec![
+            BoundConversationCommand::enabled(ConversationCommandId::Send, "one"),
+            BoundConversationCommand::enabled(ConversationCommandId::Send, "two"),
+        ];
+        assert_eq!(
+            validate_conversation_command_bindings(&duplicate),
+            Err("duplicate conversation command id")
+        );
+    }
+
+    #[test]
+    fn unsupported_commands_are_absent_from_host_bindings() {
+        let chat_prompt = vec![
+            BoundConversationCommand::enabled(ConversationCommandId::Send, "send"),
+            BoundConversationCommand::enabled(ConversationCommandId::Close, "close"),
+        ];
+        assert!(chat_prompt.iter().all(|command| !matches!(
+            command.descriptor.id,
+            ConversationCommandId::Background | ConversationCommandId::NewConversation
+        )));
+        assert!(chat_prompt
+            .iter()
+            .all(|command| command.descriptor.availability.is_enabled()));
+    }
+
+    #[test]
+    fn host_adapters_expose_only_bound_commands_with_typed_availability() {
+        let agent = agent_chat_conversation_commands(AgentChatConversationCommandFacts {
+            response_in_progress: true,
+            waiting_for_permission: false,
+            context_preparing: false,
+            composer_has_text: true,
+            retry_available: false,
+            has_response: true,
+        });
+        validate_conversation_command_bindings(&agent).unwrap();
+        assert!(agent.iter().any(|command| {
+            command.handler == AgentChatConversationCommand::Stop
+                && command.descriptor.availability.is_enabled()
+        }));
+        assert!(agent.iter().any(|command| {
+            command.handler == AgentChatConversationCommand::NewConversation
+                && command.descriptor.availability.disabled_reason()
+                    == Some("Stop the current response first.")
+        }));
+
+        let flow = flow_conversation_commands(false);
+        validate_conversation_command_bindings(&flow).unwrap();
+        assert!(flow.iter().any(|command| {
+            command.handler == FlowConversationCommand::Stop
+                && command.descriptor.availability.disabled_reason()
+                    == Some("No response is running.")
+        }));
+
+        let prompt = chat_prompt_conversation_commands(false, false, false);
+        validate_conversation_command_bindings(&prompt).unwrap();
+        assert!(prompt.iter().all(|command| !matches!(
+            command.descriptor.id,
+            ConversationCommandId::Background | ConversationCommandId::NewConversation
+        )));
+    }
 
     #[test]
     fn completed_assistant_answer_has_turn_copy() {

@@ -972,6 +972,21 @@ fn agent_chat_message_action_title(text: &str) -> String {
 /// Actions available in the Agent Chat chat view (Cmd+K menu).
 #[allow(dead_code)]
 pub fn get_agent_chat_actions() -> Vec<Action> {
+    get_agent_chat_actions_with_facts(
+        crate::components::conversation_actions::AgentChatConversationCommandFacts {
+            response_in_progress: false,
+            waiting_for_permission: false,
+            context_preparing: false,
+            composer_has_text: false,
+            retry_available: false,
+            has_response: true,
+        },
+    )
+}
+
+pub(crate) fn get_agent_chat_actions_with_facts(
+    facts: crate::components::conversation_actions::AgentChatConversationCommandFacts,
+) -> Vec<Action> {
     let config = crate::config::load_config();
     let mut actions = get_prompt_export_actions(&config)
         .into_iter()
@@ -1170,6 +1185,77 @@ pub fn get_agent_chat_actions() -> Vec<Action> {
         .with_icon(IconName::Close)
         .with_section("Window"),
     ]);
+
+    actions.retain(|action| {
+        !matches!(
+            action.id.as_str(),
+            "agent_chat_copy_last_response"
+                | "agent_chat_retry_last"
+                | "agent_chat_new_conversation"
+                | "agent_chat_close"
+        )
+    });
+    for binding in crate::components::conversation_actions::agent_chat_conversation_commands(facts)
+    {
+        use crate::components::conversation_actions::{
+            AgentChatConversationCommand, ConversationCommandAvailability,
+        };
+        let (action_id, description, section, icon) = match binding.handler {
+            AgentChatConversationCommand::Send => (
+                "agent_chat_send",
+                "Send the current message",
+                "Conversation",
+                IconName::ArrowRight,
+            ),
+            AgentChatConversationCommand::Stop => (
+                "agent_chat_stop",
+                "Stop the current response",
+                "Conversation",
+                IconName::Close,
+            ),
+            AgentChatConversationCommand::Retry => (
+                "agent_chat_retry_last",
+                "Retry the immutable last user request",
+                "Response",
+                IconName::ArrowRight,
+            ),
+            AgentChatConversationCommand::NewConversation => (
+                "agent_chat_new_conversation",
+                "Clear messages and keep this session",
+                "Session",
+                IconName::Plus,
+            ),
+            AgentChatConversationCommand::CopyLastResponse => (
+                "agent_chat_copy_last_response",
+                "Copy the most recent assistant response",
+                "Response",
+                IconName::Copy,
+            ),
+            AgentChatConversationCommand::Close => (
+                "agent_chat_close",
+                "Close Agent Chat",
+                "Window",
+                IconName::Close,
+            ),
+        };
+        let mut action = Action::new(
+            action_id,
+            binding.descriptor.label,
+            Some(description.to_string()),
+            ActionCategory::ScriptContext,
+        )
+        .with_section(section)
+        .with_icon(icon);
+        if let Some(shortcut) = binding.descriptor.shortcut {
+            action = action.with_shortcut(shortcut);
+        }
+        if let ConversationCommandAvailability::Disabled { reason } =
+            binding.descriptor.availability
+        {
+            action = action.disabled(reason.as_str());
+        }
+        actions.push(action);
+    }
     actions
 }
 
@@ -1434,6 +1520,7 @@ pub(crate) fn get_agent_chat_root_actions(
     standing_approval_count: usize,
     thread_summaries: &[crate::ai::agent_chat::ui::AgentChatThreadSummary],
     fork_points: &[crate::ai::agent_chat::ui::AgentChatForkPoint],
+    command_facts: crate::components::conversation_actions::AgentChatConversationCommandFacts,
 ) -> Vec<Action> {
     let profile_entries = agent_chat_profile_picker_entries();
     let selected_profile_id = selected_agent_chat_profile_picker_id();
@@ -1537,7 +1624,7 @@ pub(crate) fn get_agent_chat_root_actions(
         );
     }
 
-    actions.extend(get_agent_chat_actions());
+    actions.extend(get_agent_chat_actions_with_facts(command_facts));
     actions
 }
 
@@ -1634,6 +1721,8 @@ fn agent_chat_host_action_plan(
                 action_id,
                 "agent_chat:change_profile"
                     | "agent_chat:change_model"
+                    | "agent_chat_send"
+                    | "agent_chat_stop"
                     | "agent_chat_copy_last_response"
                     | "agent_chat_retry_last"
                     | "agent_chat_export_markdown"
@@ -1667,6 +1756,8 @@ fn agent_chat_host_action_plan(
             if matches!(
                 action_id,
                 "agent_chat:change_model"
+                    | "agent_chat_send"
+                    | "agent_chat_stop"
                     | "agent_chat_copy_last_response"
                     | "agent_chat_retry_last"
                     | "agent_chat_export_markdown"
@@ -1735,6 +1826,7 @@ pub(crate) fn get_agent_chat_root_route_for_host(
     standing_approval_count: usize,
     thread_summaries: &[crate::ai::agent_chat::ui::AgentChatThreadSummary],
     fork_points: &[crate::ai::agent_chat::ui::AgentChatForkPoint],
+    command_facts: crate::components::conversation_actions::AgentChatConversationCommandFacts,
     host: AgentChatActionsDialogHost,
 ) -> crate::actions::ActionsDialogRoute {
     let host_label = match host {
@@ -1752,6 +1844,7 @@ pub(crate) fn get_agent_chat_root_route_for_host(
             standing_approval_count,
             thread_summaries,
             fork_points,
+            command_facts,
         ),
     );
 
@@ -1939,6 +2032,7 @@ pub(crate) fn get_agent_chat_root_route(
         0,
         &[],
         &[],
+        crate::components::conversation_actions::AgentChatConversationCommandFacts::default(),
         AgentChatActionsDialogHost::Shared,
     )
 }

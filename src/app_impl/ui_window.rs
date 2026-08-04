@@ -125,7 +125,7 @@ pub(crate) fn flow_session_footer_buttons(
     // Stop replaces Send while a turn is in flight. `⌘.` was already bound and
     // already cancelled the turn, but the footer never named it, so the status
     // text said the session was busy without saying how to stop it — leaving
-    // `Esc Desk` (walk away, it keeps running) as the only visible exit.
+    // `Esc Background` (walk away, it keeps running) as the only visible exit.
     let mut buttons = Vec::with_capacity(3);
     if working {
         buttons.push(
@@ -810,7 +810,7 @@ impl ScriptListApp {
                         self.go_back_or_close(window, cx);
                     }
                 } else if matches!(self.current_view, AppView::FlowSessionView { .. }) {
-                    // Native `Esc Desk` matches keyboard Esc: BACKGROUND the
+                    // Native `Esc Background` matches keyboard Esc: BACKGROUND the
                     // session (keep it alive in the Desk). Terminate is the
                     // destructive expert command in ⌘K Actions with the ⇧⌘⎋
                     // shortcut (Oracle 2026-07-21 footer adjudication — the

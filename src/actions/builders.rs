@@ -34,6 +34,7 @@ pub(crate) use shared::format_shortcut_hint;
 
 #[allow(unused_imports)]
 pub use chat::get_chat_model_picker_actions;
+pub(crate) use chat::get_chat_root_route_with_facts;
 #[allow(unused_imports)]
 pub use chat::{get_ai_command_bar_actions, get_chat_context_actions};
 #[allow(unused_imports)]

@@ -50,8 +50,8 @@ fn paste_into_frontmost_app_label_falls_back_to_active_app() {
 }
 
 /// Flow session native footer grammar (Oracle 2026-07-21 adjudication):
-/// idle = `↵ Send · ⌘K Actions · Esc Desk`; working =
-/// `⌘. Stop · ⌘K Actions · Esc Desk`.
+/// idle = `↵ Send · ⌘K Actions · Esc Background`; working =
+/// `⌘. Stop · ⌘K Actions · Esc Background`.
 /// No permanent Terminate (destructive expert command → ⌘K Actions, shortcut
 /// ⇧⌘⎋ still handled) and no disabled "Working…" pseudo-button (the leading
 /// status text carries Working/Connecting).

@@ -335,6 +335,29 @@ pub(crate) fn resolve_chat_input_key_action(
     cmd_pressed: bool,
     shift_pressed: bool,
 ) -> ChatInputKeyAction {
+    resolve_chat_input_key_action_with_facts(
+        key,
+        cmd_pressed,
+        shift_pressed,
+        key == ".",
+        true,
+        true,
+    )
+}
+
+pub(crate) fn resolve_chat_input_key_action_with_facts(
+    key: &str,
+    cmd_pressed: bool,
+    shift_pressed: bool,
+    response_in_progress: bool,
+    composer_has_text: bool,
+    has_response: bool,
+) -> ChatInputKeyAction {
+    use crate::components::conversation_actions::{
+        chat_prompt_conversation_commands, match_conversation_command_shortcut,
+        ChatPromptConversationCommand,
+    };
+
     if is_key_escape(key) {
         return ChatInputKeyAction::Escape;
     }
@@ -343,10 +366,20 @@ pub(crate) fn resolve_chat_input_key_action(
         return ChatInputKeyAction::JumpToLatest;
     }
 
+    let commands =
+        chat_prompt_conversation_commands(response_in_progress, composer_has_text, has_response);
+    if let Some((handler, _availability)) =
+        match_conversation_command_shortcut(&commands, key, cmd_pressed, shift_pressed)
+    {
+        return match handler {
+            ChatPromptConversationCommand::Send => ChatInputKeyAction::Submit,
+            ChatPromptConversationCommand::Stop => ChatInputKeyAction::StopStreaming,
+            ChatPromptConversationCommand::Close => ChatInputKeyAction::Ignore,
+            ChatPromptConversationCommand::CopyLastResponse => ChatInputKeyAction::CopyLastResponse,
+        };
+    }
+
     if cmd_pressed {
-        if key == "." {
-            return ChatInputKeyAction::StopStreaming;
-        }
         if is_key_down(key) {
             return ChatInputKeyAction::JumpToLatest;
         }
@@ -355,9 +388,6 @@ pub(crate) fn resolve_chat_input_key_action(
         }
         if is_key_enter(key) {
             return ChatInputKeyAction::ContinueInChat;
-        }
-        if key.eq_ignore_ascii_case("c") {
-            return ChatInputKeyAction::CopyLastResponse;
         }
         if is_key_backspace(key) {
             return ChatInputKeyAction::ClearConversation;
@@ -368,11 +398,8 @@ pub(crate) fn resolve_chat_input_key_action(
         return ChatInputKeyAction::Ignore;
     }
 
-    if is_key_enter(key) {
-        if shift_pressed {
-            return ChatInputKeyAction::InsertNewline;
-        }
-        return ChatInputKeyAction::Submit;
+    if is_key_enter(key) && shift_pressed {
+        return ChatInputKeyAction::InsertNewline;
     }
 
     ChatInputKeyAction::DelegateToInput
@@ -716,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn test_existing_key_mappings_unchanged() {
+    fn test_conversation_and_host_key_mappings_remain_distinct() {
         assert_eq!(
             resolve_chat_input_key_action("escape", false, false),
             ChatInputKeyAction::Escape
@@ -734,8 +761,13 @@ mod tests {
             ChatInputKeyAction::ContinueInChat
         );
         assert_eq!(
-            resolve_chat_input_key_action("c", true, false),
+            resolve_chat_input_key_action("c", true, true),
             ChatInputKeyAction::CopyLastResponse
+        );
+        assert_eq!(
+            resolve_chat_input_key_action("c", true, false),
+            ChatInputKeyAction::Ignore,
+            "plain Cmd+C must remain available to copy the current selection"
         );
         assert_eq!(
             resolve_chat_input_key_action("backspace", true, false),

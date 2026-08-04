@@ -1482,15 +1482,20 @@ fn agent_handoff_uses_catalog_loader_not_claude_only_loader() {
 }
 
 #[test]
-fn agent_handoff_routes_to_setup_mode_when_blocked() {
+fn agent_handoff_preserves_source_or_offers_warm_recovery_when_blocked() {
     assert!(
-        TAB_AI_AGENT_CHAT_LAUNCH_SOURCE.contains("show_pi_agent_chat_unavailable_setup_view"),
-        "tab_ai Agent Chat launch helper must create setup-mode view when the Pi agent launch is blocked"
+        TAB_AI_AGENT_CHAT_LAUNCH_SOURCE
+            .contains("preserve_source_after_agent_chat_preflight_failure"),
+        "preflight failure must preserve the source surface and report the refusal"
+    );
+    assert!(
+        TAB_AI_AGENT_CHAT_LAUNCH_SOURCE.contains("show_agent_chat_warm_recovery"),
+        "a failed warm session must expose its typed recovery path"
     );
     assert!(
         TAB_AI_AGENT_CHAT_LAUNCH_SOURCE.contains("pi_agent_chat_launch_resolution_failed")
-            || TAB_AI_AGENT_CHAT_LAUNCH_SOURCE.contains("pi_agent_chat_warm_failed_setup"),
-        "agent_handoff must log launch resolution event"
+            && TAB_AI_AGENT_CHAT_LAUNCH_SOURCE.contains("pi_agent_chat_warm_failed_setup"),
+        "agent_handoff must log both blocked launch classes"
     );
 }
 

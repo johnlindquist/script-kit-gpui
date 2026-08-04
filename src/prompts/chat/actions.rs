@@ -37,6 +37,31 @@ fn next_transfer_to_agent_chat_ready_barrier_step(
 }
 
 impl ChatPrompt {
+    pub(crate) fn execute_conversation_command(
+        &mut self,
+        command: crate::components::conversation_actions::ChatPromptConversationCommand,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::components::conversation_actions::ChatPromptConversationCommand;
+        let Some(binding) = self
+            .conversation_command_bindings()
+            .into_iter()
+            .find(|binding| binding.handler == command)
+        else {
+            return false;
+        };
+        if !binding.descriptor.availability.is_enabled() {
+            return false;
+        }
+        match command {
+            ChatPromptConversationCommand::Send => self.handle_submit(cx),
+            ChatPromptConversationCommand::Stop => self.stop_streaming(cx),
+            ChatPromptConversationCommand::Close => self.handle_escape(cx),
+            ChatPromptConversationCommand::CopyLastResponse => self.handle_copy_last_response(cx),
+        }
+        true
+    }
+
     pub(crate) fn handle_escape(&mut self, _cx: &mut Context<Self>) {
         logging::log("CHAT", "Escape pressed - closing chat");
 

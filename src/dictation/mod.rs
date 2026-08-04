@@ -103,7 +103,7 @@ pub use window::{
     DictationOverlay, DictationOverlayState,
 };
 pub(crate) use window::{
-    dictation_overlay_fixture_mode, dictation_window_lifecycle_receipt,
+    destination_selector_spec, dictation_overlay_fixture_mode, dictation_window_lifecycle_receipt,
     open_dictation_microphone_popup_fixture, set_dictation_overlay_fixture_mode,
 };
 

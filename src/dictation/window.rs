@@ -158,7 +158,6 @@ fn destination_chip_base(
     icon: &'static str,
     is_active: bool,
     dimmed: bool,
-    send_mode: bool,
 ) -> gpui::Stateful<Div> {
     let theme = get_cached_theme();
     let text_muted = theme.colors.text.muted.with_opacity(OPACITY_TEXT_MUTED);
@@ -188,15 +187,6 @@ fn destination_chip_base(
         );
     }
     chip = chip.child(verb);
-    if send_mode {
-        chip = chip.child(
-            div()
-                .text_size(px(STATUS_TEXT_SIZE_PX - 1.0))
-                .font_family(FONT_SYSTEM_UI)
-                .text_color(label_color)
-                .child("\u{21b5}"),
-        );
-    }
 
     if is_active {
         chip = chip
@@ -218,79 +208,41 @@ fn destination_chip_base(
 pub(crate) enum ChipClickBehavior {
     Ignore,
     Retarget,
-    SendTo,
 }
 
 pub(crate) fn chip_click_behavior(
     phase: &DictationSessionPhase,
-    armed: bool,
-    option_held: bool,
+    _armed: bool,
+    _option_held: bool,
 ) -> ChipClickBehavior {
-    if !matches!(
+    if matches!(
         phase,
         DictationSessionPhase::Recording | DictationSessionPhase::Confirming
     ) {
-        return ChipClickBehavior::Ignore;
-    }
-
-    if !armed || option_held {
         ChipClickBehavior::Retarget
     } else {
-        ChipClickBehavior::SendTo
+        ChipClickBehavior::Ignore
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DestinationChipMode {
-    Aim,
-    Send,
-}
-
-pub(crate) fn destination_chip_mode(
-    phase: &DictationSessionPhase,
-    armed: bool,
-    option_held: bool,
-) -> DestinationChipMode {
-    match chip_click_behavior(phase, armed, option_held) {
-        ChipClickBehavior::SendTo => DestinationChipMode::Send,
-        ChipClickBehavior::Ignore | ChipClickBehavior::Retarget => DestinationChipMode::Aim,
-    }
-}
-
-/// Tooltip copy for a destination chip, naming the concrete outcome.
-pub(crate) fn chip_tooltip_label(
-    target: crate::dictation::DictationTarget,
-    mode: DestinationChipMode,
-) -> SharedString {
+/// Tooltip copy for a destination selector. Selecting a destination never
+/// stops or delivers the current dictation session.
+pub(crate) fn chip_tooltip_label(target: crate::dictation::DictationTarget) -> SharedString {
     let frontmost_app_name = || {
         crate::frontmost_app_tracker::get_last_real_app()
             .map(|app| app.name.trim().to_string())
             .filter(|name| !name.is_empty())
     };
 
-    match mode {
-        DestinationChipMode::Send => match target {
-            crate::dictation::DictationTarget::ExternalApp => match frontmost_app_name() {
-                Some(name) => format!("Stop & paste into {name}").into(),
-                None => "Stop & paste into the frontmost app".into(),
-            },
-            crate::dictation::DictationTarget::DayPageToday => {
-                "Stop & append to today's note".into()
-            }
-            crate::dictation::DictationTarget::QuickAiQuestion => "Stop & ask AI".into(),
-            crate::dictation::DictationTarget::TabAiHarness => "Stop & send to Agent Chat".into(),
-            other => other.overlay_label().into(),
+    match target {
+        crate::dictation::DictationTarget::ExternalApp => match frontmost_app_name() {
+            Some(name) => format!("Dictate into {name}").into(),
+            None => "Dictate into the frontmost app".into(),
         },
-        DestinationChipMode::Aim => match target {
-            crate::dictation::DictationTarget::ExternalApp => match frontmost_app_name() {
-                Some(name) => format!("Dictate into {name}").into(),
-                None => "Dictate into the frontmost app".into(),
-            },
-            crate::dictation::DictationTarget::DayPageToday => "Dictate to today's note".into(),
-            crate::dictation::DictationTarget::QuickAiQuestion => "Dictate to AI".into(),
-            crate::dictation::DictationTarget::TabAiHarness => "Dictate to Agent Chat".into(),
-            other => other.overlay_label().into(),
-        },
+        crate::dictation::DictationTarget::DayPageToday => "Dictate to today's note".into(),
+        crate::dictation::DictationTarget::QuickAiQuestion => "Dictate to AI".into(),
+        crate::dictation::DictationTarget::TabAiHarness => "Dictate to Agent Chat".into(),
+        other => other.overlay_label().into(),
     }
 }
 
@@ -310,6 +262,17 @@ pub(crate) fn target_badge_label(target: crate::dictation::DictationTarget) -> S
     }
 
     target.overlay_label().into()
+}
+
+/// The renderer and element collector share this exact selection projection.
+/// Activating it retargets only; delivery remains owned by the footer action.
+pub(crate) fn destination_selector_spec(
+    target: crate::dictation::DictationTarget,
+) -> crate::components::main_view_chrome::SemanticChipSpec {
+    crate::components::main_view_chrome::SemanticChipSpec::destination_selector(
+        format!("dictation-destination:{}", target.sticky_label()),
+        target_badge_label(target),
+    )
 }
 
 /// Resolve the tracked frontmost app's pre-decoded icon from the app launcher cache.
@@ -338,7 +301,7 @@ fn render_target_badge_content(target: crate::dictation::DictationTarget) -> Any
         .overflow_hidden()
         .text_ellipsis()
         .whitespace_nowrap()
-        .child(target_badge_label(target))
+        .child(destination_selector_spec(target).label)
         .into_any_element()
 }
 
@@ -1567,12 +1530,11 @@ impl DictationOverlay {
 
     /// Render the destination verb chips: Paste · Today · Ask · Send.
     ///
-    /// Chip clicks follow [`chip_click_behavior`]: with a recognized
-    /// transcript ("armed") a click stops the session and delivers there in
-    /// one gesture; unarmed — or with Option held — a click only retargets
-    /// the session (and becomes the new sticky default) while recording
-    /// continues. The active chip stays highlighted so the destination is
-    /// always visible, and armed send-mode chips carry a trailing ↵ glyph.
+    /// Chip clicks follow [`chip_click_behavior`]: while Recording or
+    /// Confirming, a click only retargets the session (and becomes the new
+    /// sticky default). Stopping and delivery remain separate explicit
+    /// actions. The active chip stays highlighted so the destination is
+    /// always visible.
     /// Targets outside the chip set (Notes, Prompt, Filter) highlight no
     /// chip — the badge still tells the truth.
     ///
@@ -1593,16 +1555,12 @@ impl DictationOverlay {
 
         let theme = get_cached_theme();
         let hover_bg = theme.colors.background.main.with_opacity(OPACITY_SELECTED);
-        let armed = self.transcript_armed();
-        let option_held = OPTION_HELD.load(Ordering::SeqCst);
-        let mode = destination_chip_mode(&self.state.phase, armed, option_held);
-        let send_mode = matches!(mode, DestinationChipMode::Send);
         for (target, verb, icon) in DICTATION_CHIP_TARGETS {
             let is_active = self.state.target == target;
-            let tooltip_label = chip_tooltip_label(target, mode);
-            let mut chip = destination_chip_base(verb, icon, is_active, !interactive, send_mode);
+            let tooltip_label = chip_tooltip_label(target);
+            let mut chip = destination_chip_base(verb, icon, is_active, !interactive);
             if interactive {
-                if send_mode || !is_active {
+                if !is_active {
                     chip = chip.hover(move |style| style.bg(hover_bg));
                 }
                 chip = chip
@@ -1613,7 +1571,7 @@ impl DictationOverlay {
                     })
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                        cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
                             match chip_click_behavior(
                                 &this.state.phase,
                                 this.transcript_armed(),
@@ -1622,10 +1580,6 @@ impl DictationOverlay {
                                 ChipClickBehavior::Ignore => {}
                                 ChipClickBehavior::Retarget => {
                                     this.select_destination(target, cx);
-                                }
-                                ChipClickBehavior::SendTo => {
-                                    this.select_destination(target, cx);
-                                    this.submit_overlay_session(window, cx);
                                 }
                             }
                         }),
@@ -2862,7 +2816,6 @@ fn render_static_header_row(state: &DictationOverlayState) -> impl IntoElement {
             icon,
             state.target == target,
             !live,
-            false,
         ));
     }
 

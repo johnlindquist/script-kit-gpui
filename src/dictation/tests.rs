@@ -1907,13 +1907,14 @@ fn dictation_overlay_close_handles_dead_windows_gracefully() {
     let source =
         std::fs::read_to_string("src/dictation/window.rs").expect("read dictation window.rs");
 
-    let close_start = source
-        .find("pub fn close_dictation_overlay")
-        .expect("close_dictation_overlay must exist");
-    let close_src = &source[close_start..close_start + 900.min(source.len() - close_start)];
+    let close_src = extract_delta_contract_section(
+        &source,
+        "pub fn close_dictation_overlay",
+        "pub(crate) fn dictation_window_lifecycle_receipt",
+    );
 
     assert!(
-        close_src.contains(".update("),
+        close_src.contains("handle.update(cx"),
         "close_dictation_overlay must call handle.update"
     );
     // Dead windows are not errors — the close function must log a warning
@@ -1922,11 +1923,23 @@ fn dictation_overlay_close_handles_dead_windows_gracefully() {
         close_src.contains("Overlay window already gone"),
         "close_dictation_overlay must warn when closing an already-dead window"
     );
-    // The slot must be cleared before attempting removal so no other
-    // caller can see a stale handle.
+    // The calibrated exit tail keeps the handle reusable until the native
+    // removal commits, then clears both the singleton slot and registries.
+    let compact_close = compact_delta_contract(close_src);
+    let remove_pos = compact_close
+        .find("window.remove_window()")
+        .expect("close must eventually remove the native window");
+    let clear_pos = compact_close
+        .find("DICTATION_OVERLAY_WINDOW.get_or_init(||Mutex::new(None)).lock().take()")
+        .expect("close must clear the singleton slot after removal");
     assert!(
-        close_src.contains("guard.take()"),
-        "close_dictation_overlay must clear the slot before removing the window"
+        remove_pos < clear_pos,
+        "the live handle must remain registered until native removal commits"
+    );
+    assert!(
+        close_src.contains("remove_runtime_window_handle")
+            && close_src.contains("remove_automation_window"),
+        "close must reconcile both runtime and automation registries"
     );
 }
 
@@ -4170,12 +4183,15 @@ fn dictation_overlay_singleton_nonactivating_contract() {
     );
     let body = compact_delta_contract(section);
 
-    // Live-handle reuse: probe handle liveness before reuse
+    // Live-handle reuse: probe handle liveness before reuse. A reopen may
+    // also cancel a still-pending calibrated exit on that same native window.
     assert!(
-        body.contains(&compact_delta_contract(
-            "let alive = handle.update(cx, |_view, _window, _cx| {}).is_ok();"
-        )),
+        body.contains("letalive=handle.update(cx") && body.contains(".is_ok();"),
         "overlay open path must probe handle liveness before reuse"
+    );
+    assert!(
+        body.contains("cancel_gpui_window_exit_dematerialize(window)"),
+        "reopening during the exit tail must cancel dematerialization before reuse"
     );
 
     // Singleton reuse: the live-handle branch must return the existing
@@ -4298,19 +4314,23 @@ fn dictation_overlay_claims_full_popup_bounds_contract() {
         "dictation pill must fill the bounded content stage and preserve the non-glass full-window fallback"
     );
 
-    // Root overlay node must fill the popup window edge-to-edge with overflow hidden
-    assert!(
-        body.contains(&compact_delta_contract(
-            "div().track_focus(&self.focus_handle).on_key_down(cx.listener(Self::handle_key_down)).on_modifiers_changed("
-        )),
-        "root overlay node must fill the popup window edge-to-edge with overflow_hidden"
-    );
-    assert!(
-        body.contains(&compact_delta_contract(
-            ".w_full().h_full().overflow_hidden().child(composition)"
-        )),
-        "root overlay node must fill the popup window edge-to-edge with overflow_hidden"
-    );
+    // Root overlay node must own focus, keyboard/modifier routing, and the
+    // full edge-to-edge clipped popup bounds. Mouse routing may sit between
+    // those independent contracts without invalidating them.
+    let root_start = body
+        .find("div().track_focus(&self.focus_handle)")
+        .expect("root overlay must own the focus handle");
+    let root = &body[root_start..];
+    for required in [
+        ".on_key_down(cx.listener(Self::handle_key_down))",
+        ".on_modifiers_changed(",
+        ".w_full().h_full().overflow_hidden().child(composition)",
+    ] {
+        assert!(
+            root.contains(required),
+            "root overlay contract missing {required}"
+        );
+    }
 }
 
 #[test]
@@ -4951,26 +4971,15 @@ fn overlay_destination_chip_click_behavior_matches_armed_option_matrix() {
         DictationSessionPhase::Confirming,
     ];
     for phase in interactive {
-        assert_eq!(
-            chip_click_behavior(&phase, false, false),
-            ChipClickBehavior::Retarget,
-            "{phase:?} unarmed should only retarget"
-        );
-        assert_eq!(
-            chip_click_behavior(&phase, false, true),
-            ChipClickBehavior::Retarget,
-            "{phase:?} unarmed with Option should only retarget"
-        );
-        assert_eq!(
-            chip_click_behavior(&phase, true, true),
-            ChipClickBehavior::Retarget,
-            "{phase:?} armed with Option should stay in aim mode"
-        );
-        assert_eq!(
-            chip_click_behavior(&phase, true, false),
-            ChipClickBehavior::SendTo,
-            "{phase:?} armed without Option should send"
-        );
+        for armed in [false, true] {
+            for option_held in [false, true] {
+                assert_eq!(
+                    chip_click_behavior(&phase, armed, option_held),
+                    ChipClickBehavior::Retarget,
+                    "{phase:?} must only retarget regardless of armed/Option state"
+                );
+            }
+        }
     }
 
     let non_interactive = [
@@ -5012,44 +5021,26 @@ fn dictation_footer_stop_button_tracks_armed_state() {
 }
 
 #[test]
-fn dictation_chip_tooltips_match_aim_and_send_modes() {
-    use super::window::{chip_tooltip_label, DestinationChipMode};
+fn dictation_chip_tooltips_describe_selection_without_delivery() {
+    use super::window::chip_tooltip_label;
     use crate::dictation::DictationTarget;
 
-    let external_aim = chip_tooltip_label(DictationTarget::ExternalApp, DestinationChipMode::Aim);
+    let external = chip_tooltip_label(DictationTarget::ExternalApp);
     assert!(
-        external_aim.as_ref().starts_with("Dictate into "),
-        "external app aim tooltip should name dictation target"
+        external.as_ref().starts_with("Dictate into "),
+        "external app tooltip should name the selection target"
     );
     assert_eq!(
-        chip_tooltip_label(DictationTarget::DayPageToday, DestinationChipMode::Aim).as_ref(),
+        chip_tooltip_label(DictationTarget::DayPageToday).as_ref(),
         "Dictate to today's note"
     );
     assert_eq!(
-        chip_tooltip_label(DictationTarget::QuickAiQuestion, DestinationChipMode::Aim).as_ref(),
+        chip_tooltip_label(DictationTarget::QuickAiQuestion).as_ref(),
         "Dictate to AI"
     );
     assert_eq!(
-        chip_tooltip_label(DictationTarget::TabAiHarness, DestinationChipMode::Aim).as_ref(),
+        chip_tooltip_label(DictationTarget::TabAiHarness).as_ref(),
         "Dictate to Agent Chat"
-    );
-
-    let external_send = chip_tooltip_label(DictationTarget::ExternalApp, DestinationChipMode::Send);
-    assert!(
-        external_send.as_ref().starts_with("Stop & paste into "),
-        "external app send tooltip should name stop-and-paste outcome"
-    );
-    assert_eq!(
-        chip_tooltip_label(DictationTarget::DayPageToday, DestinationChipMode::Send).as_ref(),
-        "Stop & append to today's note"
-    );
-    assert_eq!(
-        chip_tooltip_label(DictationTarget::QuickAiQuestion, DestinationChipMode::Send).as_ref(),
-        "Stop & ask AI"
-    );
-    assert_eq!(
-        chip_tooltip_label(DictationTarget::TabAiHarness, DestinationChipMode::Send).as_ref(),
-        "Stop & send to Agent Chat"
     );
 }
 

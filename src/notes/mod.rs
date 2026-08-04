@@ -85,8 +85,6 @@ pub fn agent_chat_thread_source(ui_thread_id: &str) -> String {
 
 // Re-export key types - suppress unused warnings since these are public API
 #[allow(unused_imports)]
-pub(crate) use window::update_notes_window_detached;
-#[allow(unused_imports)]
 pub use window::{
     accept_notes_ghost_for_automation, apply_mcp_notes_mutation_on_main_thread, close_notes_window,
     get_notes_app_entity_and_handle, get_notes_editor_runtime_info, get_notes_editor_text,
@@ -97,3 +95,5 @@ pub use window::{
     save_note_with_content, save_note_with_content_and_source, toggle_notes_popup_for_automation,
     NotesApp, NotesRunCommandExecutor,
 };
+#[allow(unused_imports)]
+pub(crate) use window::{get_notes_document_identity_spec, update_notes_window_detached};

@@ -26,8 +26,45 @@ impl ChatPrompt {
         gpui::SharedString::from(parts.join(" · "))
     }
 
+    pub(crate) fn conversation_command_bindings(
+        &self,
+    ) -> Vec<
+        crate::components::conversation_actions::BoundConversationCommand<
+            crate::components::conversation_actions::ChatPromptConversationCommand,
+        >,
+    > {
+        crate::components::conversation_actions::chat_prompt_conversation_commands(
+            self.is_streaming(),
+            !self.input.text().trim().is_empty(),
+            self.messages
+                .iter()
+                .any(|message| !message.is_user() && !message.get_content().trim().is_empty()),
+        )
+    }
+
+    fn conversation_footer_hints(&self) -> Vec<gpui::SharedString> {
+        use crate::components::conversation_actions::ChatPromptConversationCommand;
+        let commands = self.conversation_command_bindings();
+        let primary = commands
+            .iter()
+            .find(|command| {
+                matches!(
+                    command.handler,
+                    ChatPromptConversationCommand::Send | ChatPromptConversationCommand::Stop
+                )
+            })
+            .expect("ChatPrompt always binds Send or Stop");
+        crate::components::universal_prompt_hints_with_primary_key_label(
+            primary
+                .descriptor
+                .shortcut
+                .expect("ChatPrompt primary command has shortcut"),
+            primary.descriptor.label,
+        )
+    }
+
     fn render_mini_hint_strip(&self) -> impl IntoElement {
-        let hints = crate::components::universal_prompt_hints();
+        let hints = self.conversation_footer_hints();
         crate::components::emit_prompt_hint_audit("prompts::chat::mini", &hints);
         crate::components::render_simple_hint_strip(hints, None)
     }
@@ -37,7 +74,7 @@ impl ChatPrompt {
             return self.render_mini_hint_strip().into_any_element();
         }
 
-        let hints = crate::components::universal_prompt_hints();
+        let hints = self.conversation_footer_hints();
         let helper_text = self.footer_status_text();
 
         tracing::info!(
@@ -202,7 +239,18 @@ impl Render for ChatPrompt {
             // Note: Actions menu keyboard navigation is handled by ActionsDialog window
             // We just need to handle ⌘K to open it via callback
 
-            match resolve_chat_input_key_action(key, modifiers.platform, modifiers.shift) {
+            let has_response = this
+                .messages
+                .iter()
+                .any(|message| !message.is_user() && !message.get_content().trim().is_empty());
+            match resolve_chat_input_key_action_with_facts(
+                key,
+                modifiers.platform,
+                modifiers.shift,
+                this.is_streaming(),
+                !this.input.text().trim().is_empty(),
+                has_response,
+            ) {
                 ChatInputKeyAction::Escape => {
                     // Escape - stop streaming if active, otherwise close chat.
                     // This handler is installed for Standalone hosts only;

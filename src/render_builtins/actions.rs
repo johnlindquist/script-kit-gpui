@@ -1022,6 +1022,11 @@ impl ScriptListApp {
                 actions
             }
             FlowDeskSubject::Session { working, .. } => {
+                use crate::components::conversation_actions::{
+                    flow_conversation_commands, ConversationCommandAvailability,
+                    FlowConversationCommand,
+                };
+
                 let mut actions = vec![Action::new(
                     "flow_desk_session_open",
                     "Open Conversation",
@@ -1031,91 +1036,80 @@ impl ScriptListApp {
                 .with_shortcut("↵")
                 .with_section("Session")
                 .with_icon(IconName::Terminal)];
-                actions.push(
-                    Action::new(
-                        "flow_desk_session_background",
-                        "Background",
-                        Some("Leave it running and return to the desk".to_string()),
+
+                for binding in flow_conversation_commands(*working) {
+                    if binding.handler == FlowConversationCommand::Send {
+                        continue;
+                    }
+                    let (action_id, description, section, icon) = match binding.handler {
+                        FlowConversationCommand::Send => unreachable!(),
+                        FlowConversationCommand::Stop => (
+                            "flow_desk_session_stop",
+                            "Cancel the in-flight turn — the conversation survives",
+                            "Response",
+                            IconName::Close,
+                        ),
+                        FlowConversationCommand::Background => (
+                            "flow_desk_session_background",
+                            "Leave it running and return to the desk",
+                            "Session",
+                            IconName::ArrowDown,
+                        ),
+                        FlowConversationCommand::NewConversation => (
+                            "flow_desk_session_new_conversation",
+                            "Start a fresh conversation with this flow",
+                            "Session",
+                            IconName::Plus,
+                        ),
+                        FlowConversationCommand::CopyLastResponse => (
+                            "flow_desk_session_copy_last_response",
+                            "Copy the most recent assistant response",
+                            "Response",
+                            IconName::Copy,
+                        ),
+                        FlowConversationCommand::TerminateRuntime => (
+                            "flow_desk_session_terminate",
+                            "Permanently end this conversation after confirmation",
+                            "Danger",
+                            IconName::Trash,
+                        ),
+                    };
+                    let mut action = Action::new(
+                        action_id,
+                        binding.descriptor.label,
+                        Some(description.to_string()),
                         ActionCategory::ScriptContext,
                     )
-                    .with_shortcut("⌘⇧D")
-                    .with_section("Session")
-                    .with_icon(IconName::ArrowDown),
-                );
-                // Mirrors Agent Chat's `agent_chat_new_conversation` exactly:
-                // same title, same ⌘L, same icon, same Session section, so a
-                // user who learned it on one surface finds it on the other.
-                //
-                // OMITTED while a turn is in flight rather than shown greyed:
-                // this action list has no disabled state, and the AI
-                // reliability rule is that an action a surface cannot perform
-                // is never rendered as though it can. The ⌘L key path stays
-                // live and answers with a neutral toast, so the affordance is
-                // still discoverable — it just cannot be clicked into a
-                // no-op.
-                if !working {
-                    actions.push(
-                        Action::new(
-                            "flow_desk_session_new_conversation",
-                            "New Conversation",
-                            Some("Clear this conversation and start a fresh thread".to_string()),
-                            ActionCategory::ScriptContext,
-                        )
-                        .with_shortcut("\u{2318}L")
-                        .with_section("Session")
-                        .with_icon(IconName::Plus),
-                    );
+                    .with_section(section)
+                    .with_icon(icon);
+                    if let Some(shortcut) = binding.descriptor.shortcut {
+                        action = action.with_shortcut(shortcut);
+                    }
+                    if let ConversationCommandAvailability::Disabled { reason } =
+                        binding.descriptor.availability
+                    {
+                        action = action.disabled(reason.as_str());
+                    }
+                    actions.push(action);
                 }
+
                 actions.extend([
-                // Response section mirrors Agent Chat exactly — same title,
-                // same ⇧⌘C, same section name. Copying the last answer is the
-                // single most common thing a user does with a finished turn,
-                // and Flow forced them to copy the whole transcript and edit
-                // it down by hand.
-                Action::new(
-                    "flow_desk_session_copy_last_response",
-                    "Copy Last Response",
-                    Some("Copy the most recent assistant response".to_string()),
-                    ActionCategory::ScriptContext,
-                )
-                .with_shortcut("\u{21e7}\u{2318}C")
-                .with_section("Response")
-                .with_icon(IconName::Copy),
-                Action::new(
-                    "flow_desk_session_copy_transcript",
-                    "Copy Transcript",
-                    Some("All turns as Markdown".to_string()),
-                    ActionCategory::ScriptContext,
-                )
-                .with_section("Response")
-                .with_icon(IconName::Copy),
-                Action::new(
-                    "flow_desk_create",
-                    "New Flow",
-                    Some("Describe an agent in plain English (md create)".to_string()),
-                    ActionCategory::ScriptContext,
-                )
-                .with_section("Create")
-                .with_icon(IconName::Plus),
-                Action::new(
-                    "flow_desk_session_stop",
-                    "Stop Current Turn",
-                    Some("Cancel the in-flight turn — the conversation survives".to_string()),
-                    ActionCategory::ScriptContext,
-                )
-                .with_section("Danger")
-                .with_icon(IconName::Close),
-                Action::new(
-                    "flow_desk_session_terminate",
-                    "Terminate Flow",
-                    Some(
-                        "Cancel any active turn and permanently end this conversation".to_string(),
-                    ),
-                    ActionCategory::ScriptContext,
-                )
-                .with_shortcut("⇧⌘⎋")
-                .with_section("Danger")
-                .with_icon(IconName::Trash),
+                    Action::new(
+                        "flow_desk_session_copy_transcript",
+                        "Copy Transcript",
+                        Some("All turns as Markdown".to_string()),
+                        ActionCategory::ScriptContext,
+                    )
+                    .with_section("Response")
+                    .with_icon(IconName::Copy),
+                    Action::new(
+                        "flow_desk_create",
+                        "New Flow",
+                        Some("Describe an agent in plain English (md create)".to_string()),
+                        ActionCategory::ScriptContext,
+                    )
+                    .with_section("Create")
+                    .with_icon(IconName::Plus),
                 ]);
                 actions
             }
@@ -1345,7 +1339,26 @@ impl ScriptListApp {
                 self.stop_flow_session(id, cx);
             }
             ("flow_desk_session_terminate", Some(FlowDeskSubject::Session { id, .. })) => {
-                self.terminate_flow_session(id, window, cx);
+                let owner = cx.entity().downgrade();
+                let owner_for_confirm = owner.clone();
+                crate::confirm::open_parent_confirm_dialog_for_entity(
+                    window,
+                    cx,
+                    owner,
+                    crate::confirm::ParentConfirmOptions::destructive(
+                        "Terminate Runtime?",
+                        "This permanently ends the current Flow conversation.",
+                        "Terminate",
+                    ),
+                    move |window, cx| {
+                        if let Some(entity) = owner_for_confirm.upgrade() {
+                            entity.update(cx, |this, cx| {
+                                this.terminate_flow_session(id, window, cx);
+                            });
+                        }
+                    },
+                    |_window, _cx| {},
+                );
             }
             ("flow_desk_run_cancel", Some(FlowDeskSubject::Run(id))) => {
                 crate::flows::runner::cancel_run(id);
@@ -1774,22 +1787,24 @@ mod flow_desk_create_discoverability_tests {
         assert_eq!(flow.icon, reference.icon);
     }
 
-    /// The list has no disabled state, so an action that cannot run must not
-    /// be listed. Offering "New Conversation" mid-turn would either orphan a
-    /// running turn or click into a no-op — both worse than not showing it.
+    /// A temporarily unavailable command remains visible with a typed reason,
+    /// so the Actions menu explains the stable command vocabulary without
+    /// allowing a running turn to be orphaned.
     #[test]
-    fn new_conversation_is_withheld_while_a_turn_is_running() {
+    fn new_conversation_is_visible_but_disabled_while_a_turn_is_running() {
         let working = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session {
             id: 7,
             working: true,
         });
-        assert!(
-            !working
-                .iter()
-                .any(|action| action.id == "flow_desk_session_new_conversation"),
-            "a working session must not offer a reset it would have to refuse"
+        let new_conversation = working
+            .iter()
+            .find(|action| action.id == "flow_desk_session_new_conversation")
+            .expect("a working session must keep New Conversation discoverable");
+        assert_eq!(
+            new_conversation.disabled_reason(),
+            Some("Stop the current response first.")
         );
-        // Everything else stays put — withholding one verb must not quietly
+        // Everything else stays put — disabling one verb must not quietly
         // strip the session's other affordances.
         for expected in [
             "flow_desk_session_open",
