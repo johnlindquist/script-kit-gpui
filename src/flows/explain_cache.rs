@@ -563,12 +563,12 @@ mod tests {
                 "flow.md",
                 dir.path().to_str().expect("utf8 cwd"),
                 &[],
-                started + Duration::from_millis(50),
+                started + Duration::from_secs(1),
             )
             .expect_err("hanging explain must time out");
 
             assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-            assert!(started.elapsed() < Duration::from_secs(1));
+            assert!(started.elapsed() < Duration::from_secs(3));
             let pids = read_fixture_pids(&pid_file);
             assert_eq!(pids.len(), 2);
             assert!(

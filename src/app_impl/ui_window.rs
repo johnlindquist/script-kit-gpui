@@ -115,12 +115,11 @@ pub(crate) fn flow_session_footer_buttons(
 ) -> Vec<crate::footer_popup::FooterButtonConfig> {
     use crate::footer_popup::{FooterAction, FooterButtonConfig};
 
-    // Footer grammar (Oracle 2026-07-21, Footer-A): idle = Send · Actions ·
-    // Desk; working = Stop · Actions · Desk. No permanent Terminate — it is a
-    // destructive expert command that lives in ⌘K Actions (the ⇧⌘⎋ shortcut
-    // still works; macOS eats plain ⌘⎋ at the window server, verified
-    // 2026-07-11). No disabled "Working…" pseudo-button either: the leading
-    // status text already says Working/Connecting.
+    // Footer grammar: idle = Send · Actions · Background; working = Stop ·
+    // Actions · Background. Terminate Runtime is destructive, confirmed, and
+    // Actions-only; it has no hidden shortcut. No disabled "Working…"
+    // pseudo-button either: the leading status text already says
+    // Working/Connecting.
     //
     // Stop replaces Send while a turn is in flight. `⌘.` was already bound and
     // already cancelled the turn, but the footer never named it, so the status
@@ -144,7 +143,9 @@ pub(crate) fn flow_session_footer_buttons(
             .selected(actions_open)
             .enabled(enabled),
     );
-    buttons.push(FooterButtonConfig::new(FooterAction::Close, "Esc", "Desk").enabled(enabled));
+    buttons.push(
+        FooterButtonConfig::new(FooterAction::Close, "Esc", "Background").enabled(enabled),
+    );
     buttons
 }
 
@@ -1355,20 +1356,47 @@ impl ScriptListApp {
             return buttons;
         }
 
-        // Flow Desk: Converse / Run Once / Actions — the desk grammar.
-        if matches!(self.current_view, AppView::FlowUxView { .. }) {
+        // Flow Desk: selected-row verbs come from the same descriptor used by
+        // Enter, paint, Actions, and getElements.
+        if let AppView::FlowUxView {
+            filter,
+            selected_index,
+            ..
+        } = &self.current_view
+        {
             use crate::footer_popup::{FooterAction, FooterButtonConfig};
 
             let footer_disabled = self.main_window_footer_buttons_blocked();
             let actions_open = self.show_actions_popup || crate::actions::is_actions_window_open();
             let enabled = !footer_disabled;
-            let buttons = vec![
-                FooterButtonConfig::new(FooterAction::Run, "↵", "Converse").enabled(enabled),
-                FooterButtonConfig::new(FooterAction::Apply, "⇧↵", "Run Once").enabled(enabled),
-                FooterButtonConfig::new(FooterAction::Actions, "⌘K", "Actions")
-                    .selected(actions_open)
+            let descriptor = self
+                .flow_desk_rows(filter)
+                .get(*selected_index)
+                .map(|row| self.flow_desk_row_descriptor(row));
+            let mut buttons = Vec::new();
+            if let Some(descriptor) = descriptor {
+                buttons.push(
+                    FooterButtonConfig::new(
+                        FooterAction::Run,
+                        "↵",
+                        descriptor.primary.label(),
+                    )
                     .enabled(enabled),
-            ];
+                );
+                if let Some(secondary) = descriptor.secondary {
+                    buttons.push(
+                        FooterButtonConfig::new(FooterAction::Apply, "⇧↵", secondary.label())
+                            .enabled(enabled),
+                    );
+                }
+                if descriptor.actions_available {
+                    buttons.push(
+                        FooterButtonConfig::new(FooterAction::Actions, "⌘K", "Actions")
+                            .selected(actions_open)
+                            .enabled(enabled),
+                    );
+                }
+            }
             tracing::debug!(
                 target: "script_kit::footer_popup",
                 event = "main_window_footer_buttons_resolved",
@@ -2171,7 +2199,7 @@ impl ScriptListApp {
                 .ok()
                 .as_deref()
                 == Some("unavailable");
-        let cwd = (!fixture_unavailable)
+        let mut cwd = (!fixture_unavailable)
             .then(|| self.global_footer_cwd_chip().map(|chip| chip.label))
             .flatten()
             .or_else(|| {
@@ -2183,20 +2211,39 @@ impl ScriptListApp {
                     })
                     .flatten()
             });
+        let flow_session_identity = match &self.current_view {
+            AppView::FlowSessionView { session_id } => self
+                .conversations.flow_sessions
+                .iter()
+                .find(|(meta, _)| meta.id == *session_id)
+                .map(|(meta, _)| crate::flows::session::FlowSessionIdentitySnapshot::from_meta(meta)),
+            _ => None,
+        };
+        if let Some(identity) = &flow_session_identity {
+            cwd = Some(identity.cwd_display.clone());
+        }
         let cwd_available = cwd.is_some();
         let cwd_label = cwd.unwrap_or_else(|| MAIN_VIEW_CWD_UNAVAILABLE_LABEL.to_string());
 
         // In a flow session the active agent IS the flow: the shared
         // Agent·Model chip carries "<flow> · <engine>" rather than the global
         // spine agent, which is not what this conversation talks to.
-        let flow_session_label = match &self.current_view {
-            AppView::FlowSessionView { session_id } => self
-                .conversations.flow_sessions
-                .iter()
-                .find(|(meta, _)| meta.id == *session_id)
-                .map(|(meta, _)| format!("{} · {}", meta.friendly_name, meta.engine)),
-            _ => None,
-        };
+        let flow_session_label = flow_session_identity.as_ref().map(|identity| {
+            let model = identity
+                .model
+                .as_deref()
+                .map(|model| format!(" · {model}"))
+                .unwrap_or_default();
+            let rethread = identity.needs_rethread.then_some(" · reconnecting").unwrap_or("");
+            format!(
+                "{} · {}{} · {}{}",
+                identity.friendly_name,
+                identity.engine,
+                model,
+                if identity.read_only { "Archived" } else { "Active" },
+                rethread,
+            )
+        });
         let agent_model = (!fixture_unavailable)
             .then(|| flow_session_label.or_else(|| self.agent_model_footer_label()))
             .flatten();
@@ -2568,7 +2615,7 @@ impl ScriptListApp {
                 Some((ViewType::MainWindow, filtered_count))
             }
             AppView::FlowUxView { filter, .. } => {
-                let cwd = self.flow_ux_cwd();
+                let mut cwd = self.flow_ux_cwd();
                 let roster = crate::flows::catalog::flow_catalog().roster_for(&cwd);
                 let count = crate::flows::catalog::filter_flows(&roster.flows, filter).len();
                 Some((ViewType::MainWindow, count))

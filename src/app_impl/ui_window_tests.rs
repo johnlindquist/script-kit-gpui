@@ -73,7 +73,7 @@ fn flow_session_native_footer_matches_idle_and_working_contract() {
         vec![
             (FooterAction::Run, "↵", "Send"),
             (FooterAction::Actions, "⌘K", "Actions"),
-            (FooterAction::Close, "Esc", "Desk"),
+            (FooterAction::Close, "Esc", "Background"),
         ],
         "idle flow footer must be exactly Send · Actions · Desk"
     );
@@ -89,7 +89,7 @@ fn flow_session_native_footer_matches_idle_and_working_contract() {
         vec![
             (FooterAction::Stop, "⌘.", "Stop"),
             (FooterAction::Actions, "⌘K", "Actions"),
-            (FooterAction::Close, "Esc", "Desk"),
+            (FooterAction::Close, "Esc", "Background"),
         ],
         "working flow footer must be exactly Stop · Actions · Desk — no Send, no Terminate"
     );

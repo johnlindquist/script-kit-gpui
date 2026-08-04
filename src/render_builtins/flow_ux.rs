@@ -30,11 +30,92 @@ pub(crate) enum FlowDeskRow {
     /// mdflow missing: the actionable install affordance (Enter runs the
     /// install in the Quick Terminal).
     InstallMdflow,
+    /// mdflow present but pre-protocol: offer the explicit upgrade command.
+    UpgradeMdflow,
+    /// A typed roster failure: retry discovery without exposing raw stderr.
+    RetryRoster,
+    /// A nonempty query matched no session, run, or flow: clear it.
+    ClearQuery,
     /// mdflow present but the roster is empty: offer the `md init` starter
     /// scaffold.
     InitFlows,
-    /// The plain-English creation affordance (always last).
+    /// The plain-English creation affordance.
     CreateFlow,
+}
+
+/// Typed desk/setup state. Rendering, automation, recovery rows, and tests all
+/// consume this value rather than reverse-engineering status from display copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FlowDeskState {
+    Loading,
+    MdflowMissing,
+    MdflowIncompatible,
+    RosterFailed {
+        failure: crate::ai::reliability::AppFailureRecord,
+    },
+    ReadyEmpty,
+    NoMatch,
+    Ready,
+}
+
+impl FlowDeskState {
+    pub(crate) fn automation_label(&self) -> &'static str {
+        match self {
+            Self::Loading => "Loading",
+            Self::MdflowMissing => "MdflowMissing",
+            Self::MdflowIncompatible => "MdflowIncompatible",
+            Self::RosterFailed { .. } => "RosterFailed",
+            Self::ReadyEmpty => "ReadyEmpty",
+            Self::NoMatch => "NoMatch",
+            Self::Ready => "Ready",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlowDeskRowVerb {
+    OpenConversation,
+    OpenRunActions,
+    Converse,
+    OpenInTerminal,
+    RunOnce,
+    InstallMdflow,
+    UpgradeMdflow,
+    RetryRoster,
+    ScaffoldFlows,
+    ClearSearch,
+    CreateFlow,
+}
+
+impl FlowDeskRowVerb {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::OpenConversation => "Open Conversation",
+            Self::OpenRunActions => "Open Run Actions",
+            Self::Converse => "Converse",
+            Self::OpenInTerminal => "Open in Terminal",
+            Self::RunOnce => "Run Once",
+            Self::InstallMdflow => "Install mdflow",
+            Self::UpgradeMdflow => "Upgrade mdflow",
+            Self::RetryRoster => "Retry",
+            Self::ScaffoldFlows => "Scaffold",
+            Self::ClearSearch => "Clear Search",
+            Self::CreateFlow => "Create Flow",
+        }
+    }
+}
+
+/// Single selected-row projection consumed by paint, semantics, footer, and
+/// activation. A row cannot advertise a verb that its Enter path does not own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FlowDeskRowDescriptor {
+    pub semantic_id: String,
+    pub title: String,
+    pub detail: String,
+    pub icon: &'static str,
+    pub primary: FlowDeskRowVerb,
+    pub secondary: Option<FlowDeskRowVerb>,
+    pub actions_available: bool,
 }
 
 /// How a settled turn presents in the transcript: normal completion, a quiet
@@ -112,8 +193,8 @@ fn finalize_flow_session_turn(
 
 /// Footer grammar for a flow session (Oracle audit 2026-07-21, Footer-A):
 /// idle = `↵ Send · ⌘K Actions · Esc Background`; working = `⌘. Stop · ⌘K Actions ·
-/// Esc Background`. No permanent Terminate — it is a destructive expert command that
-/// lives in the ⌘K Actions menu (with its ⇧⌘⎋ shortcut still handled).
+/// Esc Background`. Terminate Runtime is Actions-only: no hidden destructive
+/// shortcut is advertised or handled.
 ///
 /// The working row shows Stop because the status text says only THAT the
 /// session is busy, never how to make it stop. `⌘.` is already bound
@@ -159,11 +240,15 @@ fn flow_session_footer_hints(working: bool) -> Vec<gpui::SharedString> {
     hints
 }
 
+/// Capabilities constructed only by the Actions confirmation closures. The
+/// mutating lifecycle functions require these tokens, so dismissal and footer
+/// paths cannot accidentally become destructive.
+pub(crate) struct ConfirmedFlowThreadDeletion(());
+pub(crate) struct ConfirmedFlowRuntimeTermination(());
+
 /// Exactly one action a flow-session key press resolves to (C-R1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FlowSessionKeyAction {
-    /// ⇧⌘⎋ — permanently end the conversation (destructive).
-    Terminate,
     /// ⎋ — leave the session view without touching the process.
     Background,
     /// ⌘. — cancel the in-flight turn only (conversation survives).
@@ -192,8 +277,8 @@ pub(crate) enum FlowSessionKeyAction {
 /// over-submitting the draft. See `resolve_chat_input_key_action` for the
 /// standalone-host parity reference.
 ///
-/// Precedence: while the actions popup is open, ⎋/⇧⌘⎋ belong to the popup, so
-/// Terminate and Background require `!actions_open`. ⌘. Stop only fires while a
+/// Precedence: while the actions popup is open, Escape belongs to the popup, so
+/// Background requires `!actions_open`. ⌘. Stop only fires while a
 /// turn is in flight; ⌘K always toggles; only a bare Enter submits.
 /// Held against the ⌘K action list by
 /// `flow_desk_create_discoverability_tests::every_advertised_session_shortcut_has_a_declared_owner`.
@@ -203,12 +288,12 @@ fn resolve_flow_session_key_action(
     key: &str,
     platform: bool,
     shift: bool,
-    turn_active: bool,
+    facts: crate::components::conversation_actions::FlowConversationCommandFacts,
     actions_open: bool,
 ) -> FlowSessionKeyAction {
     use crate::components::conversation_actions::{
-        flow_conversation_commands, match_conversation_command_shortcut,
-        FlowConversationCommand,
+        flow_conversation_commands_for_facts, match_conversation_command_shortcut,
+        ConversationCommandAvailability, FlowConversationCommand,
     };
 
     if platform && key.eq_ignore_ascii_case("k") {
@@ -219,22 +304,39 @@ fn resolve_flow_session_key_action(
     }
 
     match match_conversation_command_shortcut(
-        &flow_conversation_commands(turn_active),
+        &flow_conversation_commands_for_facts(facts),
         key,
         platform,
         shift,
     ) {
-        Some((FlowConversationCommand::TerminateRuntime, _)) => FlowSessionKeyAction::Terminate,
-        Some((FlowConversationCommand::Background, _)) => FlowSessionKeyAction::Background,
-        Some((FlowConversationCommand::Stop, _)) => FlowSessionKeyAction::Stop,
+        // Consume ⌘L even while disabled so a refused New cannot type "l" into
+        // the composer. The transition handler rechecks active work.
         Some((FlowConversationCommand::NewConversation, _)) => {
             FlowSessionKeyAction::NewConversation
         }
-        Some((FlowConversationCommand::CopyLastResponse, _)) => {
-            FlowSessionKeyAction::CopyLastResponse
+        Some((FlowConversationCommand::Background, ConversationCommandAvailability::Enabled)) => {
+            FlowSessionKeyAction::Background
         }
-        Some((FlowConversationCommand::Send, _)) => FlowSessionKeyAction::Submit,
-        None => FlowSessionKeyAction::Ignore,
+        Some((FlowConversationCommand::Stop, ConversationCommandAvailability::Enabled)) => {
+            FlowSessionKeyAction::Stop
+        }
+        Some((
+            FlowConversationCommand::CopyLastResponse,
+            ConversationCommandAvailability::Enabled,
+        )) => FlowSessionKeyAction::CopyLastResponse,
+        Some((FlowConversationCommand::Send, ConversationCommandAvailability::Enabled)) => {
+            FlowSessionKeyAction::Submit
+        }
+        Some((_, ConversationCommandAvailability::Disabled { .. }))
+        | Some((
+            FlowConversationCommand::BackToCurrent
+            | FlowConversationCommand::ConversationHistory
+            | FlowConversationCommand::ContinueAsNewConversation
+            | FlowConversationCommand::DeleteConversation
+            | FlowConversationCommand::TerminateRuntime,
+            ConversationCommandAvailability::Enabled,
+        ))
+        | None => FlowSessionKeyAction::Ignore,
     }
 }
 
@@ -311,6 +413,9 @@ pub(crate) enum FlowChatSubmitResult {
     Empty,
     /// A turn is already in flight on this session; the draft is preserved.
     Busy,
+    /// Archived transcripts are immutable; Continue as New is the only way to
+    /// branch one into a writable active conversation.
+    ReadOnlyArchive,
     /// The session id no longer resolves to a live session.
     MissingSession,
 }
@@ -331,14 +436,24 @@ pub(crate) enum FlowDeskSubject {
     Flow(crate::flows::model::FlowDescriptor),
     /// A conversation session — selected row or the open session view.
     ///
-    /// Carries `working` because the verb list is a pure function of the
-    /// subject, and at least one verb (New Conversation) must not be offered
-    /// while a turn is in flight. Threading it through the subject keeps that
-    /// rule inside the pure builder where the discoverability tests can reach
-    /// it, instead of an `if` in the dialog code.
-    Session { id: u64, working: bool },
+    /// Carries the current descriptor facts so the pure Actions builder can
+    /// expose active versus archived commands without reading app state.
+    Session {
+        id: u64,
+        facts: crate::components::conversation_actions::FlowConversationCommandFacts,
+        archives: Vec<(String, usize)>,
+        /// True only when the subject came from a desk row. An already-open
+        /// session must not advertise a redundant "Open Conversation" action.
+        open_required: bool,
+    },
     /// A background registry run by local id.
     Run(u64),
+    /// A setup/recovery row with the same descriptor used by its footer and
+    /// Enter path. Only typed, privacy-safe failure metadata may accompany it.
+    Recovery {
+        descriptor: FlowDeskRowDescriptor,
+        failure: Option<crate::ai::reliability::AppFailureRecord>,
+    },
     /// The Create Flow affordance.
     Create,
 }
@@ -367,6 +482,15 @@ pub(crate) fn flow_session_returns_to_desk(
     }
 }
 
+fn mdflow_run_accepted_context(phase: crate::flows::model::RunPhase) -> bool {
+    matches!(
+        phase,
+        crate::flows::model::RunPhase::Running
+            | crate::flows::model::RunPhase::Succeeded
+            | crate::flows::model::RunPhase::Cancelled
+    )
+}
+
 fn run_phase_icon(phase: crate::flows::model::RunPhase) -> &'static str {
     use crate::flows::model::RunPhase;
     match phase {
@@ -376,6 +500,72 @@ fn run_phase_icon(phase: crate::flows::model::RunPhase) -> &'static str {
         RunPhase::Succeeded => "✓",
         RunPhase::Failed => "✕",
         RunPhase::Cancelled => "⊘",
+    }
+}
+
+pub(crate) fn resolve_flow_desk_state(
+    mdflow_available: bool,
+    roster_status: crate::flows::catalog::RosterStatus,
+    roster_failure: Option<crate::ai::reliability::AppFailureRecord>,
+    query_present: bool,
+    matching_row_count: usize,
+) -> FlowDeskState {
+    use crate::flows::catalog::RosterStatus;
+
+    if !mdflow_available {
+        return FlowDeskState::MdflowMissing;
+    }
+    match roster_status {
+        RosterStatus::Loading => FlowDeskState::Loading,
+        RosterStatus::Legacy => FlowDeskState::MdflowIncompatible,
+        RosterStatus::Error => FlowDeskState::RosterFailed {
+            failure: roster_failure.unwrap_or_else(|| {
+                crate::ai::reliability::process_failure(
+                    sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+                    crate::ai::reliability::ProcessFailureFacts::RuntimeClosed,
+                )
+            }),
+        },
+        RosterStatus::Ready if query_present && matching_row_count == 0 => {
+            FlowDeskState::NoMatch
+        }
+        RosterStatus::Ready if matching_row_count == 0 => FlowDeskState::ReadyEmpty,
+        RosterStatus::Ready => FlowDeskState::Ready,
+    }
+}
+
+pub(crate) fn flow_desk_flow_row_descriptor(
+    flow: &crate::flows::model::FlowDescriptor,
+) -> FlowDeskRowDescriptor {
+    let purpose = flow
+        .description
+        .clone()
+        .unwrap_or_else(|| flow.name.clone());
+    let (primary, secondary) = if flow.interactive {
+        (FlowDeskRowVerb::OpenInTerminal, None)
+    } else if flow.is_workflow {
+        (FlowDeskRowVerb::RunOnce, None)
+    } else {
+        (FlowDeskRowVerb::Converse, Some(FlowDeskRowVerb::RunOnce))
+    };
+    FlowDeskRowDescriptor {
+        semantic_id: format!("flow-desk:flow:{}", flow.id),
+        title: flow.friendly_name(),
+        detail: format!(
+            "{purpose} · {} · {}",
+            flow.engine,
+            flow.origin_label()
+        ),
+        icon: if flow.interactive {
+            "🖥"
+        } else if flow.is_workflow {
+            "🧩"
+        } else {
+            "⚡"
+        },
+        primary,
+        secondary,
+        actions_available: true,
     }
 }
 
@@ -430,16 +620,6 @@ fn flow_recovery_copy_details(meta: &crate::flows::session::FlowSessionMeta) -> 
             meta.flow_id, meta.engine
         ),
     }
-}
-
-fn remove_flow_session<T>(
-    sessions: &mut Vec<(crate::flows::session::FlowSessionMeta, T)>,
-    session_id: u64,
-) -> Option<(crate::flows::session::FlowSessionMeta, T)> {
-    let index = sessions
-        .iter()
-        .position(|(meta, _)| meta.id == session_id)?;
-    Some(sessions.remove(index))
 }
 
 impl ScriptListApp {
@@ -594,11 +774,9 @@ impl ScriptListApp {
         crate::flows::catalog::desk_flows(&roster)
     }
 
-    /// Build the selectable desk rows for a filter: Active/recent sessions
-    /// first (newest first), then background runs (active before finished —
-    /// run-once and workflows are supervised HERE, never invisible), then
-    /// matching flows, then onboarding affordances, then Create Flow.
-    pub(crate) fn flow_desk_rows(&self, filter: &str) -> Vec<FlowDeskRow> {
+    /// Real content rows only: setup and utility affordances are added later
+    /// from the typed [`FlowDeskState`].
+    fn flow_desk_content_rows(&self, filter: &str) -> Vec<FlowDeskRow> {
         let mut rows: Vec<FlowDeskRow> = Vec::new();
         let query = filter.trim().to_lowercase();
 
@@ -614,9 +792,6 @@ impl ScriptListApp {
             }
         }
 
-        // Bare registry runs (conversation-turn runs settle inside their
-        // session transcript and never appear as rows). Active first, then
-        // finished, newest first within each group.
         let registry = crate::flows::run_registry::flow_run_registry();
         let mut runs: Vec<crate::flows::run_registry::RunSummary> = registry
             .run_summaries()
@@ -637,34 +812,180 @@ impl ScriptListApp {
                 .cmp(&a_active)
                 .then_with(|| b.local_id.cmp(&a.local_id))
         });
-        for run in runs {
-            rows.push(FlowDeskRow::Run(run.local_id));
-        }
+        rows.extend(runs.into_iter().map(|run| FlowDeskRow::Run(run.local_id)));
 
         let corpus = self.flow_desk_corpus();
-        for flow in crate::flows::catalog::filter_flows(&corpus, filter) {
-            rows.push(FlowDeskRow::Flow(flow.clone()));
-        }
+        rows.extend(
+            crate::flows::catalog::filter_flows(&corpus, filter)
+                .into_iter()
+                .cloned()
+                .map(FlowDeskRow::Flow),
+        );
+        rows
+    }
 
-        // Onboarding affordances only on the unfiltered desk: a search query
-        // must never grow setup rows.
-        if query.is_empty() {
-            if crate::flows::catalog::mdflow_binary().is_none() {
-                rows.push(FlowDeskRow::InstallMdflow);
-            } else {
-                let cwd = self.flow_ux_cwd();
-                let roster = crate::flows::catalog::flow_catalog().roster_for(&cwd);
-                let ready_and_empty =
-                    matches!(roster.status, crate::flows::catalog::RosterStatus::Ready)
-                        && roster.flows.is_empty();
-                if ready_and_empty {
-                    rows.push(FlowDeskRow::InitFlows);
+    pub(crate) fn flow_desk_state(&self, filter: &str) -> FlowDeskState {
+        let matching_row_count = self.flow_desk_content_rows(filter).len();
+        let cwd = self.flow_ux_cwd();
+        let roster = crate::flows::catalog::flow_catalog().roster_for(&cwd);
+        resolve_flow_desk_state(
+            crate::flows::catalog::mdflow_binary().is_some(),
+            roster.status,
+            roster.failure,
+            !filter.trim().is_empty(),
+            matching_row_count,
+        )
+    }
+
+    /// Build selectable rows from real content plus the exact recovery owned by
+    /// the typed desk state. Degraded setup never hides resumable content.
+    pub(crate) fn flow_desk_rows(&self, filter: &str) -> Vec<FlowDeskRow> {
+        let mut rows = self.flow_desk_content_rows(filter);
+        match self.flow_desk_state(filter) {
+            FlowDeskState::Loading => {}
+            FlowDeskState::MdflowMissing => rows.push(FlowDeskRow::InstallMdflow),
+            FlowDeskState::MdflowIncompatible => rows.push(FlowDeskRow::UpgradeMdflow),
+            FlowDeskState::RosterFailed { .. } => rows.push(FlowDeskRow::RetryRoster),
+            FlowDeskState::ReadyEmpty => {
+                rows.push(FlowDeskRow::InitFlows);
+                rows.push(FlowDeskRow::CreateFlow);
+            }
+            FlowDeskState::NoMatch => {
+                rows.push(FlowDeskRow::ClearQuery);
+                rows.push(FlowDeskRow::CreateFlow);
+            }
+            FlowDeskState::Ready => rows.push(FlowDeskRow::CreateFlow),
+        }
+        rows
+    }
+
+    pub(crate) fn flow_desk_row_descriptor(
+        &self,
+        row: &FlowDeskRow,
+    ) -> FlowDeskRowDescriptor {
+        match row {
+            FlowDeskRow::Session(session_id) => {
+                let meta = self
+                    .conversations.flow_sessions
+                    .iter()
+                    .find(|(meta, _)| meta.id == *session_id)
+                    .map(|(meta, _)| meta);
+                FlowDeskRowDescriptor {
+                    semantic_id: format!("flow-desk:session:{session_id}"),
+                    title: meta
+                        .map(|meta| meta.friendly_name.clone())
+                        .unwrap_or_else(|| "Conversation".to_string()),
+                    detail: meta
+                        .map(|meta| {
+                            format!(
+                                "{} · {} · {} · conversation",
+                                meta.state.label(),
+                                meta.elapsed_label(),
+                                meta.engine,
+                            )
+                        })
+                        .unwrap_or_else(|| "Conversation unavailable".to_string()),
+                    icon: if meta.is_some_and(|meta| meta.state.is_live()) {
+                        "💬"
+                    } else {
+                        "◽"
+                    },
+                    primary: FlowDeskRowVerb::OpenConversation,
+                    secondary: None,
+                    actions_available: true,
                 }
             }
+            FlowDeskRow::Run(run_id) => {
+                let run = crate::flows::run_registry::flow_run_registry().get(*run_id);
+                FlowDeskRowDescriptor {
+                    semantic_id: format!("flow-desk:run:{run_id}"),
+                    title: run
+                        .as_ref()
+                        .map(|run| crate::flows::model::friendly_flow_name(&run.flow_name))
+                        .unwrap_or_else(|| "Run".to_string()),
+                    detail: run
+                        .as_ref()
+                        .map(|run| {
+                            format!(
+                                "{} · {} · {}",
+                                run.display_status(),
+                                format_run_elapsed(run.elapsed_ms()),
+                                run.last_output_line().unwrap_or("—"),
+                            )
+                        })
+                        .unwrap_or_else(|| "Run unavailable".to_string()),
+                    icon: run
+                        .as_ref()
+                        .map(|run| run_phase_icon(run.phase))
+                        .unwrap_or("◽"),
+                    primary: FlowDeskRowVerb::OpenRunActions,
+                    secondary: None,
+                    actions_available: true,
+                }
+            }
+            FlowDeskRow::Flow(flow) => flow_desk_flow_row_descriptor(flow),
+            FlowDeskRow::InstallMdflow => FlowDeskRowDescriptor {
+                semantic_id: "flow-desk:recovery:install-mdflow".to_string(),
+                title: "Install mdflow".to_string(),
+                detail: "The flow engine isn't on PATH — open the install command in Terminal"
+                    .to_string(),
+                icon: "⬇",
+                primary: FlowDeskRowVerb::InstallMdflow,
+                secondary: None,
+                actions_available: false,
+            },
+            FlowDeskRow::UpgradeMdflow => FlowDeskRowDescriptor {
+                semantic_id: "flow-desk:recovery:upgrade-mdflow".to_string(),
+                title: "Upgrade mdflow".to_string(),
+                detail: "The installed mdflow predates the roster protocol".to_string(),
+                icon: "↥",
+                primary: FlowDeskRowVerb::UpgradeMdflow,
+                secondary: None,
+                actions_available: false,
+            },
+            FlowDeskRow::RetryRoster => FlowDeskRowDescriptor {
+                semantic_id: "flow-desk:recovery:retry-roster".to_string(),
+                title: "Retry flow discovery".to_string(),
+                detail: match self.flow_desk_state("") {
+                    FlowDeskState::RosterFailed { failure } => {
+                        failure.primary_message().to_string()
+                    }
+                    _ => "Flow discovery did not finish; retry with your work preserved"
+                        .to_string(),
+                },
+                icon: "↻",
+                primary: FlowDeskRowVerb::RetryRoster,
+                secondary: None,
+                actions_available: true,
+            },
+            FlowDeskRow::ClearQuery => FlowDeskRowDescriptor {
+                semantic_id: "flow-desk:recovery:clear-search".to_string(),
+                title: "Clear search".to_string(),
+                detail: "Show every available conversation, run, and flow".to_string(),
+                icon: "⌫",
+                primary: FlowDeskRowVerb::ClearSearch,
+                secondary: None,
+                actions_available: false,
+            },
+            FlowDeskRow::InitFlows => FlowDeskRowDescriptor {
+                semantic_id: "flow-desk:recovery:scaffold".to_string(),
+                title: "Scaffold starter flows".to_string(),
+                detail: "md init creates a flows/ roster here (no engine calls)".to_string(),
+                icon: "🌱",
+                primary: FlowDeskRowVerb::ScaffoldFlows,
+                secondary: None,
+                actions_available: false,
+            },
+            FlowDeskRow::CreateFlow => FlowDeskRowDescriptor {
+                semantic_id: "flow-desk:utility:create".to_string(),
+                title: "Create a flow…".to_string(),
+                detail: "Describe an agent in plain English (md create)".to_string(),
+                icon: "✚",
+                primary: FlowDeskRowVerb::CreateFlow,
+                secondary: None,
+                actions_available: true,
+            },
         }
-
-        rows.push(FlowDeskRow::CreateFlow);
-        rows
     }
 
     fn flow_session_index(&self, session_id: u64) -> Option<usize> {
@@ -680,6 +1001,41 @@ impl ScriptListApp {
     pub(crate) fn flow_session_has_active_turn(&self, session_id: u64) -> bool {
         self.flow_session_index(session_id)
             .is_some_and(|index| self.conversations.flow_sessions[index].0.active_turn.is_some())
+    }
+
+    pub(crate) fn flow_session_archives(&self, session_id: u64) -> Vec<(String, usize)> {
+        self.flow_session_index(session_id)
+            .map(|index| {
+                self.conversations.flow_sessions[index]
+                    .0
+                    .archived_threads
+                    .iter()
+                    .map(|thread| (thread.id.clone(), thread.turns.len()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn flow_conversation_command_facts(
+        &self,
+        session_id: u64,
+    ) -> crate::components::conversation_actions::FlowConversationCommandFacts {
+        let Some(index) = self.flow_session_index(session_id) else {
+            return Default::default();
+        };
+        let meta = &self.conversations.flow_sessions[index].0;
+        crate::components::conversation_actions::FlowConversationCommandFacts {
+            response_in_progress: meta.active_turn.is_some(),
+            viewing_archive: meta.selected_is_archived(),
+            has_archives: !meta.archived_threads.is_empty(),
+            selected_has_response: meta
+                .selected_turns()
+                .iter()
+                .any(|turn| !turn.assistant.trim().is_empty()),
+            composer_has_text: !self.filter_text.trim().is_empty(),
+            hidden_draft_exists: meta.selected_is_archived() && !meta.active_draft.is_empty(),
+            runtime_attached: meta.thread_ready,
+        }
     }
 
     /// Activate the desk's selected row — Enter (`run_once: false`) and ⇧↵
@@ -705,43 +1061,58 @@ impl ScriptListApp {
         let Some(row) = rows.get(selected).cloned() else {
             return;
         };
-        match row {
-            FlowDeskRow::Session(session_id) => {
-                self.open_flow_session(session_id, cx);
+        let descriptor = self.flow_desk_row_descriptor(&row);
+        let verb = if run_once {
+            descriptor.secondary
+        } else {
+            Some(descriptor.primary)
+        };
+        let Some(verb) = verb else {
+            return;
+        };
+
+        match (&row, verb) {
+            (FlowDeskRow::Session(session_id), FlowDeskRowVerb::OpenConversation) => {
+                self.open_flow_session(*session_id, cx);
             }
-            FlowDeskRow::Run(_) => {
-                // A run row's Enter opens its supervision actions (cancel,
-                // copy output, clear finished) — the same menu ⌘K shows.
+            (FlowDeskRow::Run(_), FlowDeskRowVerb::OpenRunActions) => {
                 self.toggle_flow_desk_actions(window, cx);
             }
-            FlowDeskRow::Flow(flow) => {
-                if flow.interactive {
-                    // The frozen contract: `--events` implies non-interactive
-                    // and a TTY-only flow must get a REAL terminal, never a
-                    // faked chat (protocol §3 "Open in Terminal").
-                    self.open_flow_in_terminal(&flow, cx);
-                } else if run_once || flow.is_workflow {
-                    // Workflows (DAGs) are run-once by nature; ⇧↵ is
-                    // explicit run-once for anything.
-                    self.flow_desk_run_once(&flow, cx);
-                } else {
-                    // Typed text rides along as the first message only when
-                    // it reads like a request (multi-word, not the flow's
-                    // own name) — fuzzy lookups must never become the task.
-                    let trimmed = filter.trim();
-                    let lowered = trimmed.to_lowercase();
-                    let is_name_lookup = trimmed.is_empty()
-                        || !trimmed.contains(' ')
-                        || flow.name.to_lowercase() == lowered
-                        || flow.friendly_name().to_lowercase() == lowered;
-                    let first_message = (!is_name_lookup).then(|| trimmed.to_string());
-                    self.resume_or_start_flow_session(&flow, first_message, cx);
-                }
+            (FlowDeskRow::Flow(flow), FlowDeskRowVerb::OpenInTerminal) => {
+                self.open_flow_in_terminal(flow, cx);
             }
-            FlowDeskRow::InstallMdflow => {
+            (FlowDeskRow::Flow(flow), FlowDeskRowVerb::RunOnce) => {
+                self.flow_desk_run_once(flow, cx);
+            }
+            (FlowDeskRow::Flow(flow), FlowDeskRowVerb::Converse) => {
+                let trimmed = filter.trim();
+                let lowered = trimmed.to_lowercase();
+                let is_name_lookup = trimmed.is_empty()
+                    || !trimmed.contains(' ')
+                    || flow.name.to_lowercase() == lowered
+                    || flow.friendly_name().to_lowercase() == lowered;
+                let first_message = (!is_name_lookup).then(|| trimmed.to_string());
+                self.resume_or_start_flow_session(flow, first_message, cx);
+            }
+            (FlowDeskRow::InstallMdflow, FlowDeskRowVerb::InstallMdflow) => {
                 self.open_quick_terminal_with_command(None, "npm i -g mdflow".to_string(), cx);
             }
-            FlowDeskRow::InitFlows => {
+            (FlowDeskRow::UpgradeMdflow, FlowDeskRowVerb::UpgradeMdflow) => {
+                self.open_quick_terminal_with_command(
+                    None,
+                    "npm i -g mdflow@latest".to_string(),
+                    cx,
+                );
+            }
+            (FlowDeskRow::RetryRoster, FlowDeskRowVerb::RetryRoster) => {
+                let cwd = self.flow_ux_cwd();
+                crate::flows::catalog::flow_catalog().refresh(&cwd);
+                self.start_flow_ux_tick(cx);
+            }
+            (FlowDeskRow::ClearQuery, FlowDeskRowVerb::ClearSearch) => {
+                self.clear_builtin_view_filter(cx);
+            }
+            (FlowDeskRow::InitFlows, FlowDeskRowVerb::ScaffoldFlows) => {
                 let cwd = self.flow_ux_cwd();
                 self.open_quick_terminal_with_command(
                     Some(std::path::PathBuf::from(cwd)),
@@ -749,8 +1120,17 @@ impl ScriptListApp {
                     cx,
                 );
             }
-            FlowDeskRow::CreateFlow => {
+            (FlowDeskRow::CreateFlow, FlowDeskRowVerb::CreateFlow) => {
                 self.start_flow_create_session(cx);
+            }
+            _ => {
+                tracing::warn!(
+                    target: "script_kit::flows",
+                    row = %descriptor.semantic_id,
+                    verb = ?verb,
+                    "Flow desk descriptor/activation mismatch"
+                );
+                return;
             }
         }
         cx.notify();
@@ -891,6 +1271,32 @@ impl ScriptListApp {
         // into canonical turns, then render AND store from that same vector,
         // so the restored session is semantically identical to the live one.
         let turns = crate::flows::session::canonical_session_turns(&snapshot);
+        let active_thread = snapshot
+            .threads
+            .iter()
+            .find(|thread| thread.id == snapshot.active_thread_id)
+            .cloned();
+        let archived_threads: Vec<crate::flows::session::FlowArchivedThread> = snapshot
+            .threads
+            .iter()
+            .filter(|thread| {
+                thread.state == crate::flows::session::PersistedFlowThreadState::Archived
+            })
+            .map(|thread| crate::flows::session::FlowArchivedThread {
+                id: thread.id.clone(),
+                parent_thread_id: thread.parent_thread_id.clone(),
+                created_at: thread.created_at.clone(),
+                archived_at: thread
+                    .archived_at
+                    .clone()
+                    .unwrap_or_else(|| snapshot.saved_at.clone()),
+                inherited_turn_count: thread.inherited_turn_count,
+                turns: crate::flows::session::canonical_persisted_turns(
+                    snapshot.version,
+                    &thread.turns,
+                ),
+            })
+            .collect();
         entity.update(cx, |chat, cx| {
             for (turn_index, turn) in turns.iter().enumerate() {
                 chat.add_message(
@@ -922,7 +1328,22 @@ impl ScriptListApp {
             }
         });
         let meta = &mut self.conversations.flow_sessions[index].0;
+        meta.active_thread_id = snapshot.active_thread_id.clone();
+        meta.active_thread_created_at = active_thread
+            .as_ref()
+            .map(|thread| thread.created_at.clone())
+            .unwrap_or_else(|| snapshot.saved_at.clone());
+        meta.active_parent_thread_id = active_thread
+            .as_ref()
+            .and_then(|thread| thread.parent_thread_id.clone());
+        meta.inherited_turn_count = active_thread
+            .as_ref()
+            .map(|thread| thread.inherited_turn_count)
+            .unwrap_or(0);
+        meta.persistence_revision = snapshot.revision.max(1);
         meta.turns = turns;
+        meta.archived_threads = archived_threads;
+        meta.transcript_selection = crate::flows::session::FlowTranscriptSelection::Active;
         meta.needs_rethread = true;
         tracing::info!(
             target: "script_kit::flows",
@@ -988,8 +1409,8 @@ impl ScriptListApp {
                     .try_send(crate::flows::session::FlowChatRequest::Submit { session_id, text });
             });
         // The flow session (this view) is the SINGLE lifecycle/key owner:
-        // Esc backgrounds, ⇧⌘⎋ terminates, Enter submits the shared draft —
-        // all handled by the `flow_session` key handler below. The hosted
+        // Esc backgrounds and Enter submits the shared draft; runtime
+        // termination remains an Actions-only confirmed command. The hosted
         // ChatPrompt runs as a pure transcript body (TranscriptOnly), so it
         // installs no key handlers and needs no escape callback of its own.
         let mut chat = crate::prompts::ChatPrompt::new(
@@ -1035,6 +1456,27 @@ impl ScriptListApp {
             },
         ));
         let entity = cx.new(|_| chat);
+        let definition_model = std::fs::read_to_string(&flow.path)
+            .ok()
+            .and_then(|source| {
+                crate::flows::session::resolve_flow_thread_contract(&source, "")
+                    .profile
+                    .model
+            });
+        let origin_kind = match flow.source {
+            crate::flows::model::FlowSource::Project => {
+                crate::flows::session::FlowOriginKind::Project
+            }
+            crate::flows::model::FlowSource::Package => {
+                crate::flows::session::FlowOriginKind::Package
+            }
+            crate::flows::model::FlowSource::Global => {
+                crate::flows::session::FlowOriginKind::Global
+            }
+            crate::flows::model::FlowSource::Registry => {
+                crate::flows::session::FlowOriginKind::BuiltIn
+            }
+        };
 
         let meta = crate::flows::session::FlowSessionMeta {
             id: session_id,
@@ -1042,7 +1484,14 @@ impl ScriptListApp {
             flow_name: flow.name.clone(),
             friendly_name: friendly,
             origin: flow.origin_label().to_string(),
+            origin_kind,
             engine: flow.engine.clone(),
+            model_source: if definition_model.is_some() {
+                crate::flows::session::FlowModelSource::Definition
+            } else {
+                crate::flows::session::FlowModelSource::Unavailable
+            },
+            model: definition_model,
             flow_path: flow.path.clone(),
             flow_mtime_ms: crate::flows::session::flow_definition_mtime_ms(&flow.path),
             cwd,
@@ -1050,13 +1499,24 @@ impl ScriptListApp {
             state: crate::flows::session::SessionState::NeedsYou,
             started_at: std::time::Instant::now(),
             last_activity: std::time::SystemTime::now(),
+            active_thread_id: crate::flows::session::FlowSessionMeta::new_thread_id(),
+            active_thread_created_at: chrono::Utc::now().to_rfc3339(),
+            active_parent_thread_id: None,
             turns: Vec::new(),
+            archived_threads: Vec::new(),
+            transcript_selection: crate::flows::session::FlowTranscriptSelection::Active,
+            inherited_turn_count: 0,
+            active_draft: String::new(),
+            draft_generation: 0,
+            runtime_generation: 0,
+            persistence_revision: 0,
             active_turn: None,
             thread_ready: !matches!(
                 transport,
                 crate::flows::session::SessionTransport::CodexThread
             ),
             needs_rethread: false,
+            pending_runtime_termination: false,
             reliability: crate::flows::session::FlowReliability::new(
                 &flow.id,
                 &flow.path,
@@ -1106,6 +1566,20 @@ impl ScriptListApp {
         let text = text.trim().to_string();
         if text.is_empty() {
             return FlowChatSubmitResult::Empty;
+        }
+        if self.conversations.flow_sessions[index]
+            .0
+            .selected_is_archived()
+        {
+            self.toast_manager.push(
+                crate::components::toast::Toast::info(
+                    "Archived conversations are read-only — use Continue as New".to_string(),
+                    &self.theme,
+                )
+                .duration_ms(Some(2500)),
+            );
+            cx.notify();
+            return FlowChatSubmitResult::ReadOnlyArchive;
         }
         // Busy check runs BEFORE any input/transcript mutation so a rejected
         // submit leaves the composer draft untouched for the caller to keep.
@@ -1247,7 +1721,6 @@ impl ScriptListApp {
             item_acc: String::new(),
             user_text: text,
         });
-        meta.needs_rethread = false;
         meta.state = crate::flows::session::SessionState::Working;
         let turn_ordinal = meta.turns.len();
         let (flow_id, flow_path) = (meta.flow_id.clone(), meta.flow_path.clone());
@@ -1302,6 +1775,7 @@ impl ScriptListApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> FlowChatSubmitResult {
+        self.capture_flow_session_draft(session_id);
         let draft = self.filter_text.clone();
         let result = self.submit_flow_chat_message(session_id, draft, cx);
         if result.consumes_draft() {
@@ -1311,6 +1785,7 @@ impl ScriptListApp {
             // reappear later over text the user had moved on from.
             self.flow_session_prompt_history_index = None;
             self.flow_session_prompt_draft = None;
+            self.clear_flow_session_draft(session_id);
             self.set_filter_text_immediate(String::new(), window, cx);
         }
         result
@@ -1337,6 +1812,9 @@ impl ScriptListApp {
         );
         self.filter_text = crate::components::text_input::normalize_single_line_text(message);
         self.pending_filter_sync = true;
+        if let AppView::FlowSessionView { session_id } = self.current_view {
+            self.capture_flow_session_draft(session_id);
+        }
         cx.notify();
     }
 
@@ -1469,15 +1947,21 @@ impl ScriptListApp {
         let meta = &mut self.conversations.flow_sessions[index].0;
         meta.turns.push(turn);
         meta.state = state;
+        let terminate_runtime = meta.pending_runtime_termination;
+        if terminate_runtime {
+            meta.pending_runtime_termination = false;
+            meta.thread_ready = false;
+            meta.needs_rethread = true;
+            meta.runtime_generation = meta.runtime_generation.saturating_add(1);
+        }
         // Snapshot the conversation through the FIFO store so an app restart
         // can restore it. Enqueued synchronously: on-disk order always
         // matches the order turns settled (WP-A1 — detached per-turn threads
         // let an older snapshot overwrite a newer one).
-        crate::flows::session::conversation_store().persist(
-            &meta.flow_id,
-            &meta.flow_path,
-            meta.turns.clone(),
-        );
+        crate::flows::session::conversation_store().persist_snapshot(meta.next_persisted_snapshot());
+        if terminate_runtime {
+            crate::flows::codex_client::codex_app_server().forget_session(session_id);
+        }
         tracing::info!(
             target: "script_kit::flows",
             event = "flow_turn_settled",
@@ -1509,9 +1993,12 @@ impl ScriptListApp {
         match event {
             FlowThreadEvent::ThreadStarted { session_id, model } => {
                 if let Some(index) = self.flow_session_index(session_id) {
-                    self.conversations.flow_sessions[index].0.thread_ready = true;
+                    let meta = &mut self.conversations.flow_sessions[index].0;
+                    meta.thread_ready = true;
+                    meta.needs_rethread = false;
                     if !model.is_empty() {
-                        self.conversations.flow_sessions[index].0.engine = format!("codex · {model}");
+                        meta.model = Some(model);
+                        meta.model_source = crate::flows::session::FlowModelSource::Runtime;
                     }
                 }
             }
@@ -1648,6 +2135,14 @@ impl ScriptListApp {
                 dirty = true;
                 continue;
             };
+            if mdflow_run_accepted_context(run.phase) {
+                // A fast fixture can move Starting → Succeeded between ticks;
+                // terminal success/cancellation is still authoritative proof
+                // that mdflow accepted and started this context.
+                let meta = &mut self.conversations.flow_sessions[index].0;
+                meta.thread_ready = true;
+                meta.needs_rethread = false;
+            }
             // Stream from the append-only conversation capture. The bounded
             // display tail front-evicts, which broke the byte cursor on long
             // turns (silent stalls / garbled text — 2026-07-11 audit P0);
@@ -1742,6 +2237,41 @@ impl ScriptListApp {
         }
     }
 
+    fn capture_flow_session_draft(&mut self, session_id: u64) {
+        let draft = self.filter_text.clone();
+        let Some(index) = self.flow_session_index(session_id) else {
+            return;
+        };
+        let meta = &mut self.conversations.flow_sessions[index].0;
+        if meta.selected_is_archived() || meta.active_draft == draft {
+            return;
+        }
+        meta.active_draft = draft;
+        meta.draft_generation = meta.draft_generation.saturating_add(1);
+    }
+
+    fn restore_flow_session_draft(&mut self, session_id: u64) {
+        let Some(index) = self.flow_session_index(session_id) else {
+            return;
+        };
+        let draft = self.conversations.flow_sessions[index].0.active_draft.clone();
+        self.filter_text = draft;
+        self.pending_filter_sync = true;
+    }
+
+    fn clear_flow_session_draft(&mut self, session_id: u64) {
+        let Some(index) = self.flow_session_index(session_id) else {
+            return;
+        };
+        let meta = &mut self.conversations.flow_sessions[index].0;
+        if !meta.active_draft.is_empty() {
+            meta.active_draft.clear();
+            meta.draft_generation = meta.draft_generation.saturating_add(1);
+        }
+        self.filter_text.clear();
+        self.pending_filter_sync = true;
+    }
+
     pub(crate) fn open_flow_session(&mut self, session_id: u64, cx: &mut Context<Self>) {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
@@ -1753,10 +2283,14 @@ impl ScriptListApp {
         self.flow_session_return_to_desk =
             flow_session_returns_to_desk(&self.current_view, self.flow_session_return_to_desk);
         self.current_view = AppView::FlowSessionView { session_id };
-        // The MAIN input is the composer (with all its context-attachment
-        // features) — clear any desk query and retitle the placeholder.
-        self.filter_text.clear();
-        self.pending_filter_sync = true;
+        // The main input is only the visible projection of the active
+        // session-owned draft. Archive browsing keeps the draft hidden.
+        if self.conversations.flow_sessions[index].0.selected_is_archived() {
+            self.filter_text.clear();
+            self.pending_filter_sync = true;
+        } else {
+            self.restore_flow_session_draft(session_id);
+        }
         self.pending_placeholder = Some(format!("Message {friendly}…"));
         self.focused_input = FocusedInput::MainFilter;
         self.pending_focus = Some(FocusTarget::MainFilter);
@@ -1785,6 +2319,7 @@ impl ScriptListApp {
         let AppView::FlowSessionView { session_id } = self.current_view else {
             return;
         };
+        self.capture_flow_session_draft(session_id);
         tracing::info!(
             target: "script_kit::flows",
             event = "flow_session_backgrounded",
@@ -1816,6 +2351,152 @@ impl ScriptListApp {
         };
         self.focused_input = FocusedInput::MainFilter;
         cx.notify();
+    }
+
+    fn render_flow_selected_transcript(&mut self, session_id: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.flow_session_index(session_id) else {
+            return;
+        };
+        let turns = self.conversations.flow_sessions[index]
+            .0
+            .selected_turns()
+            .to_vec();
+        let entity = self.conversations.flow_sessions[index].1.clone();
+        entity.update(cx, |chat, cx| {
+            chat.clear_messages(cx);
+            for (turn_index, turn) in turns.iter().enumerate() {
+                chat.add_message(
+                    crate::protocol::ChatPromptMessage::user(turn.user.clone()),
+                    cx,
+                );
+                let display = flow_turn_display_assistant(turn);
+                let failed =
+                    turn.outcome == crate::flows::session::PersistedTurnOutcome::Failed;
+                if !display.is_empty() || failed {
+                    chat.add_message(
+                        crate::protocol::ChatPromptMessage::assistant(display).with_id(format!(
+                            "flow-{session_id}-selected-turn-{turn_index}"
+                        )),
+                        cx,
+                    );
+                }
+            }
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn show_flow_archive(
+        &mut self,
+        session_id: u64,
+        archive_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self.flow_session_index(session_id) else {
+            return false;
+        };
+        if self.conversations.flow_sessions[index].0.active_turn.is_some() {
+            return false;
+        }
+        self.capture_flow_session_draft(session_id);
+        if !self.conversations.flow_sessions[index]
+            .0
+            .select_archive(archive_id)
+        {
+            return false;
+        }
+        self.filter_text.clear();
+        self.pending_filter_sync = true;
+        self.render_flow_selected_transcript(session_id, cx);
+        true
+    }
+
+    pub(crate) fn show_current_flow_conversation(
+        &mut self,
+        session_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.flow_session_index(session_id) else {
+            return;
+        };
+        self.conversations.flow_sessions[index].0.select_active();
+        self.render_flow_selected_transcript(session_id, cx);
+        self.restore_flow_session_draft(session_id);
+    }
+
+    pub(crate) fn continue_flow_archive_as_new(
+        &mut self,
+        session_id: u64,
+        archive_id: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self.flow_session_index(session_id) else {
+            return false;
+        };
+        if self.conversations.flow_sessions[index].0.active_turn.is_some()
+            || !self.conversations.flow_sessions[index].0.active_draft.is_empty()
+            || !self.conversations.flow_sessions[index]
+                .0
+                .continue_archive_as_new(archive_id)
+        {
+            return false;
+        }
+        crate::flows::codex_client::codex_app_server().forget_session(session_id);
+        let meta = &mut self.conversations.flow_sessions[index].0;
+        meta.thread_ready = false;
+        meta.needs_rethread = true;
+        meta.runtime_generation = meta.runtime_generation.saturating_add(1);
+        let snapshot = meta.next_persisted_snapshot();
+        crate::flows::session::conversation_store().persist_snapshot(snapshot);
+        self.render_flow_selected_transcript(session_id, cx);
+        true
+    }
+
+    pub(crate) fn delete_selected_flow_conversation(
+        &mut self,
+        session_id: u64,
+        _confirmed: ConfirmedFlowThreadDeletion,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self.flow_session_index(session_id) else {
+            return false;
+        };
+        if self.conversations.flow_sessions[index].0.active_turn.is_some() {
+            return false;
+        }
+        let deleting_active = !self.conversations.flow_sessions[index]
+            .0
+            .selected_is_archived();
+        let deleted = self.conversations.flow_sessions[index]
+            .0
+            .delete_selected_thread();
+        if deleting_active {
+            crate::flows::codex_client::codex_app_server().forget_session(session_id);
+            let meta = &mut self.conversations.flow_sessions[index].0;
+            meta.thread_ready = false;
+            meta.needs_rethread = true;
+            meta.runtime_generation = meta.runtime_generation.saturating_add(1);
+            if !meta.active_draft.is_empty() {
+                meta.active_draft.clear();
+                meta.draft_generation = meta.draft_generation.saturating_add(1);
+            }
+            meta.reliability = crate::flows::session::FlowReliability::new(
+                &meta.flow_id,
+                &meta.flow_path,
+                &meta.engine,
+            );
+        }
+        let snapshot = self.conversations.flow_sessions[index]
+            .0
+            .next_persisted_snapshot();
+        crate::flows::session::conversation_store()
+            .persist_selected_deletion(snapshot, deleted.id);
+        self.render_flow_selected_transcript(session_id, cx);
+        if deleting_active {
+            self.clear_flow_session_draft(session_id);
+        } else {
+            self.restore_flow_session_draft(session_id);
+        }
+        true
     }
 
     /// Explicit stop (⌘K verb): cancel the in-flight turn only. The
@@ -1895,14 +2576,22 @@ impl ScriptListApp {
             entity.update(cx, |chat, cx| {
                 chat.clear_messages(cx);
             });
-            let (flow_id, flow_path, engine) = {
+            let (flow_id, flow_path, engine, snapshot) = {
                 let meta = &mut self.conversations.flow_sessions[index].0;
-                meta.turns.clear();
+                meta.archive_active_and_start_empty();
                 meta.state = crate::flows::session::SessionState::NeedsYou;
+                meta.thread_ready = false;
+                meta.needs_rethread = true;
+                meta.runtime_generation = meta.runtime_generation.saturating_add(1);
+                if !meta.active_draft.is_empty() {
+                    meta.active_draft.clear();
+                    meta.draft_generation = meta.draft_generation.saturating_add(1);
+                }
                 (
                     meta.flow_id.clone(),
                     meta.flow_path.clone(),
                     meta.engine.clone(),
+                    meta.next_persisted_snapshot(),
                 )
             };
             // Recovery state is per-conversation. Carrying the old failure
@@ -1910,14 +2599,11 @@ impl ScriptListApp {
             // conversation that no longer exists.
             self.conversations.flow_sessions[index].0.reliability =
                 crate::flows::session::FlowReliability::new(&flow_id, &flow_path, &engine);
-            // Replace the persisted snapshot with an empty one. Ordered
-            // through the same FIFO store as every other write, so a
-            // straggling persist of the OLD transcript can never land after
-            // this and resurrect it on the next launch. An empty snapshot
-            // reads back as "no conversation" (`load_persisted_conversation`
-            // rejects empty turns), so the replaced transcript cannot
-            // reattach.
-            crate::flows::session::conversation_store().persist(&flow_id, &flow_path, Vec::new());
+            // Persist the empty ACTIVE thread plus immutable archive through
+            // the FIFO. Empty active state is real conversation metadata, not
+            // a deletion signal.
+            crate::flows::session::conversation_store().persist_snapshot(snapshot);
+            self.clear_flow_session_draft(session_id);
         }
 
         tracing::info!(
@@ -2004,46 +2690,45 @@ impl ScriptListApp {
         cx.notify();
     }
 
-    /// Explicitly end a conversation, even while a turn is in flight.
+    /// Stop and forget only the runtime. Transcript, draft, archives, and
+    /// persistence survive; active work settles before the runtime is forgotten.
     pub(crate) fn terminate_flow_session(
         &mut self,
         session_id: u64,
+        _confirmed: ConfirmedFlowRuntimeTermination,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(index) = self.flow_session_index(session_id) else {
             return;
         };
-        if let Some(active) = self.conversations.flow_sessions[index].0.active_turn.clone() {
-            match self.conversations.flow_sessions[index].0.transport {
-                crate::flows::session::SessionTransport::CodexThread => {
-                    crate::flows::codex_client::codex_app_server().interrupt(session_id);
-                }
-                crate::flows::session::SessionTransport::MdflowTurns => {
-                    if let Some(run_id) = active.run_id {
-                        crate::flows::runner::cancel_run(run_id);
-                    }
-                }
-            }
+        self.capture_flow_session_draft(session_id);
+        if self.conversations.flow_sessions[index].0.active_turn.is_some() {
+            // Termination waits for the authoritative terminal event. The turn
+            // settles as Stopped, persistence is updated, and only then is the
+            // runtime forgotten.
+            self.conversations.flow_sessions[index]
+                .0
+                .pending_runtime_termination = true;
+            self.stop_flow_session(session_id, cx);
+            return;
         }
+
         crate::flows::codex_client::codex_app_server().forget_session(session_id);
-        let viewing = matches!(
-            self.current_view,
-            AppView::FlowSessionView { session_id: current } if current == session_id
+        let meta = &mut self.conversations.flow_sessions[index].0;
+        meta.thread_ready = false;
+        meta.needs_rethread = true;
+        meta.pending_runtime_termination = false;
+        meta.runtime_generation = meta.runtime_generation.saturating_add(1);
+        crate::flows::session::conversation_store().persist_snapshot(meta.next_persisted_snapshot());
+        self.toast_manager.push(
+            crate::components::toast::Toast::success(
+                "Runtime terminated — conversation history is preserved".to_string(),
+                &self.theme,
+            )
+            .duration_ms(Some(1800)),
         );
-        // "Terminate Flow" promises to PERMANENTLY end the conversation —
-        // erase the persisted transcript too, or the next activation would
-        // silently restore it (2026-07-11 audit P0: UI-contract violation).
-        if let Some(removed) = remove_flow_session(&mut self.conversations.flow_sessions, session_id) {
-            // FIFO store (WP-A1): the delete is ordered AFTER any pending
-            // persist for this conversation, so a straggling snapshot can
-            // never resurrect a terminated transcript.
-            crate::flows::session::conversation_store()
-                .delete(&removed.0.flow_id, &removed.0.flow_path);
-        }
-        if viewing {
-            self.background_flow_session(window, cx);
-        }
+        let _ = window;
         cx.notify();
     }
 
@@ -2206,7 +2891,7 @@ impl ScriptListApp {
         let chrome = crate::theme::AppChromeColors::from_theme(&self.theme);
         let list_colors = crate::list_item::ListItemColors::from_theme(&self.theme);
         let cwd = self.flow_ux_cwd();
-        let roster = crate::flows::catalog::flow_catalog().roster_for(&cwd);
+        let desk_state = self.flow_desk_state(&filter);
         let rows = self.flow_desk_rows(&filter);
         let row_count = rows.len();
         let registry = crate::flows::run_registry::flow_run_registry();
@@ -2291,29 +2976,28 @@ impl ScriptListApp {
         // List element
         // ------------------------------------------------------------------
         let cwd_display = Self::flow_ux_cwd_display(&cwd);
-        let empty_message = match roster.status {
-            crate::flows::catalog::RosterStatus::Loading => {
-                format!("Loading flows in {cwd_display}…")
+        let empty_message = match &desk_state {
+            FlowDeskState::Loading => format!("Loading flows in {cwd_display}…"),
+            FlowDeskState::MdflowMissing => {
+                "mdflow is required before flows can be discovered".to_string()
             }
-            crate::flows::catalog::RosterStatus::Legacy => {
-                "mdflow is pre-protocol — upgrade with: npm i -g mdflow".to_string()
+            FlowDeskState::MdflowIncompatible => {
+                "The installed mdflow needs an update for Flow Desk".to_string()
             }
-            crate::flows::catalog::RosterStatus::Error => match roster.warnings.first() {
-                Some(warning) => format!("Flow roster unavailable — {warning}"),
-                None => format!("Flow roster unavailable in {cwd_display}"),
-            },
-            crate::flows::catalog::RosterStatus::Ready => String::new(),
+            FlowDeskState::RosterFailed { failure } => failure.primary_message().to_string(),
+            FlowDeskState::ReadyEmpty => {
+                format!("No flows are configured in {cwd_display} yet")
+            }
+            FlowDeskState::NoMatch => "No conversations, runs, or flows match".to_string(),
+            FlowDeskState::Ready => String::new(),
         };
 
         let list_element: gpui::AnyElement = {
-            let display_rows = rows.clone();
-            let hovered = self.hovered_index;
-            let session_meta: Vec<crate::flows::session::FlowSessionMeta> = self
-                .conversations.flow_sessions
+            let display_rows: Vec<FlowDeskRowDescriptor> = rows
                 .iter()
-                .map(|(meta, _)| meta.clone())
+                .map(|row| self.flow_desk_row_descriptor(row))
                 .collect();
-            let run_meta: Vec<crate::flows::run_registry::RunSummary> = registry.run_summaries();
+            let hovered = self.hovered_index;
             let click_entity = cx.entity();
             uniform_list(
                 "flow-desk-list",
@@ -2323,86 +3007,7 @@ impl ScriptListApp {
                         .map(|ix| {
                             let is_selected = ix == selected_index;
                             let is_hovered = hovered == Some(ix);
-                            let (title, description, icon) = match &display_rows[ix] {
-                            FlowDeskRow::Session(session_id) => {
-                                let meta =
-                                    session_meta.iter().find(|m| m.id == *session_id);
-                                match meta {
-                                    Some(meta) => (
-                                        meta.friendly_name.clone(),
-                                        format!(
-                                            "{} · {} · {} · conversation",
-                                            meta.state.label(),
-                                            meta.elapsed_label(),
-                                            meta.engine,
-                                        ),
-                                        if meta.state.is_live() { "💬" } else { "◽" },
-                                    ),
-                                    None => (
-                                        "Session".to_string(),
-                                        "ended".to_string(),
-                                        "◽",
-                                    ),
-                                }
-                            }
-                            FlowDeskRow::Run(run_id) => {
-                                let run = run_meta.iter().find(|r| r.local_id == *run_id);
-                                match run {
-                                    Some(run) => (
-                                        crate::flows::model::friendly_flow_name(
-                                            &run.flow_name,
-                                        ),
-                                        format!(
-                                            "{} · {} · {}",
-                                            run.display_status,
-                                            format_run_elapsed(run.elapsed_ms),
-                                            run.last_output_line.as_deref().unwrap_or("—"),
-                                        ),
-                                        run_phase_icon(run.phase),
-                                    ),
-                                    None => ("Run".to_string(), "gone".to_string(), "◽"),
-                                }
-                            }
-                            FlowDeskRow::Flow(flow) => {
-                                let purpose = flow
-                                    .description
-                                    .clone()
-                                    .unwrap_or_else(|| flow.name.clone());
-                                (
-                                    flow.friendly_name(),
-                                    format!(
-                                        "{purpose} · {} · {}",
-                                        flow.engine,
-                                        flow.origin_label()
-                                    ),
-                                    if flow.interactive {
-                                        "🖥"
-                                    } else if flow.is_workflow {
-                                        "🧩"
-                                    } else {
-                                        "⚡"
-                                    },
-                                )
-                            }
-                            FlowDeskRow::InstallMdflow => (
-                                "Install mdflow".to_string(),
-                                "The flow engine isn't on PATH — run npm i -g mdflow in Terminal"
-                                    .to_string(),
-                                "⬇",
-                            ),
-                            FlowDeskRow::InitFlows => (
-                                "Scaffold starter flows".to_string(),
-                                "md init creates a flows/ roster here (no engine calls)"
-                                    .to_string(),
-                                "🌱",
-                            ),
-                            FlowDeskRow::CreateFlow => (
-                                "Create a flow…".to_string(),
-                                "Describe an agent in plain English (md create)"
-                                    .to_string(),
-                                "✚",
-                            ),
-                        };
+                            let descriptor = &display_rows[ix];
                             let row_entity = click_entity.clone();
                             div()
                                 .id(ix)
@@ -2416,9 +3021,9 @@ impl ScriptListApp {
                                     },
                                 )
                                 .child(
-                                    ListItem::new(title, list_colors)
-                                        .description_opt(Some(description))
-                                        .icon(icon)
+                                    ListItem::new(descriptor.title.clone(), list_colors)
+                                        .description_opt(Some(descriptor.detail.clone()))
+                                        .icon(descriptor.icon)
                                         .selected(is_selected)
                                         .hovered(is_hovered),
                                 )
@@ -2463,7 +3068,7 @@ impl ScriptListApp {
                     .child(list_element)
                     .child(list_scrollbar),
             );
-        if !empty_message.is_empty() && roster.flows.is_empty() {
+        if !empty_message.is_empty() {
             // Roster problems surface as a banner above the (package) rows
             // instead of replacing the whole list — package flows still work
             // when a repo has none of its own.
@@ -2495,12 +3100,26 @@ impl ScriptListApp {
             .filter(|(meta, _)| meta.state.is_live())
             .count();
         let active_runs = registry.active_count();
-        let hints: Vec<gpui::SharedString> = vec![
-            gpui::SharedString::from("↵ Converse"),
-            gpui::SharedString::from("⇧↵ Run once"),
-            gpui::SharedString::from("⌘K Actions"),
-            gpui::SharedString::from("Esc Back"),
-        ];
+        let selected_descriptor = rows
+            .get(selected_index)
+            .map(|row| self.flow_desk_row_descriptor(row));
+        let mut hints: Vec<gpui::SharedString> = Vec::new();
+        if let Some(descriptor) = &selected_descriptor {
+            hints.push(gpui::SharedString::from(format!(
+                "↵ {}",
+                descriptor.primary.label()
+            )));
+            if let Some(secondary) = descriptor.secondary {
+                hints.push(gpui::SharedString::from(format!(
+                    "⇧↵ {}",
+                    secondary.label()
+                )));
+            }
+            if descriptor.actions_available {
+                hints.push(gpui::SharedString::from("⌘K Actions"));
+            }
+        }
+        hints.push(gpui::SharedString::from("Esc Back"));
         let footer =
             self.main_window_footer_slot(crate::components::render_simple_hint_strip(hints, None));
 
@@ -2593,11 +3212,12 @@ impl ScriptListApp {
         let trailing: Vec<gpui::AnyElement> = Vec::new();
 
         // Single exhaustive key owner (C-R1): WP7 removed ChatPrompt's own key
-        // handling for this transcript-only host, so every binding — Terminate,
-        // Background, Stop, ToggleActions, Submit — is resolved here and exactly
+        // handling for this transcript-only host, so every non-destructive
+        // binding — Background, Stop, ToggleActions, Submit — resolves here and exactly
         // ONE action runs per press. Plain ↵ submits; Shift/Cmd+Enter fall
         // through to the composer (never silently submit); ⌘. cancels the
         // in-flight turn without backgrounding or terminating.
+        let viewing_archive = meta.selected_is_archived();
         let handle_key = cx.listener(
             move |this: &mut Self,
                   event: &gpui::KeyDownEvent,
@@ -2609,25 +3229,32 @@ impl ScriptListApp {
                 let key = event.keystroke.key.as_str();
                 let platform = event.keystroke.modifiers.platform;
                 let shift = event.keystroke.modifiers.shift;
-                let turn_active = this
-                    .flow_session_index(session_id)
-                    .and_then(|index| this.conversations.flow_sessions[index].0.active_turn.as_ref())
-                    .is_some();
+                let command_facts = this.flow_conversation_command_facts(session_id);
                 let actions_open = this.show_actions_popup;
+                if platform && key.eq_ignore_ascii_case("w") && !actions_open {
+                    this.capture_flow_session_draft(session_id);
+                    this.close_and_reset_window(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if viewing_archive
+                    && !actions_open
+                    && !platform
+                    && !shift
+                    && crate::ui_foundation::is_key_escape(key)
+                {
+                    this.show_current_flow_conversation(session_id, cx);
+                    cx.stop_propagation();
+                    return;
+                }
 
                 match resolve_flow_session_key_action(
                     key,
                     platform,
                     shift,
-                    turn_active,
+                    command_facts,
                     actions_open,
                 ) {
-                    FlowSessionKeyAction::Terminate => {
-                        // ⇧⌘⎋ terminates — exactly what the ⌘K Actions menu
-                        // advertises. Plain ⌘⎋ must NOT destroy a conversation.
-                        this.terminate_flow_session(session_id, window, cx);
-                        cx.stop_propagation();
-                    }
                     FlowSessionKeyAction::Background => {
                         this.background_flow_session(window, cx);
                         cx.stop_propagation();
@@ -2667,11 +3294,13 @@ impl ScriptListApp {
                         cx.stop_propagation();
                     }
                     FlowSessionKeyAction::Submit => {
-                        // One shared draft transaction: clears the composer ONLY
-                        // when the submit consumed the draft (WP1 P0: clearing
-                        // before submit destroyed the message on a Busy race).
-                        let _ = this.submit_flow_session_draft(session_id, window, cx);
-                        cx.stop_propagation();
+                        if !viewing_archive {
+                            // One shared draft transaction: clears the composer ONLY
+                            // when the submit consumed the draft (WP1 P0: clearing
+                            // before submit destroyed the message on a Busy race).
+                            let _ = this.submit_flow_session_draft(session_id, window, cx);
+                            cx.stop_propagation();
+                        }
                     }
                     FlowSessionKeyAction::Ignore => {}
                 }
@@ -2681,18 +3310,27 @@ impl ScriptListApp {
         // Honest state rides as the footer hint strip's leading status text —
         // the same slot ChatPrompt's own footer uses ("Streaming · model").
         // No ticking elapsed timer in chrome; the desk row carries elapsed.
-        let status_text = if meta.active_turn.is_some() && !meta.thread_ready {
+        let status_text = if meta.selected_is_archived() {
+            format!("Archived · {} turns · read-only", meta.selected_turns().len())
+        } else if meta.active_turn.is_some() && !meta.thread_ready {
             format!("Connecting · {}", meta.engine)
         } else if meta.active_turn.is_some() {
             format!("Working · {}", meta.engine)
         } else {
-            meta.engine.clone()
+            format!("Active · {}", meta.engine)
         };
         // Truthful footer (WP1): a busy/connecting session cannot accept a
         // submit, so it must NOT advertise `↵ Send`; the leading status text
         // already carries "Working/Connecting". The pure `flow_session_footer_hints`
         // helper owns this rule so it can be unit-tested without a window.
-        let hints = flow_session_footer_hints(meta.active_turn.is_some());
+        let hints = if meta.selected_is_archived() {
+            vec![
+                gpui::SharedString::from("Esc Back to Current"),
+                gpui::SharedString::from("⌘K Actions"),
+            ]
+        } else {
+            flow_session_footer_hints(meta.active_turn.is_some())
+        };
         let footer = self.main_window_footer_slot(crate::components::render_simple_hint_strip(
             hints,
             Some(crate::components::render_hint_strip_leading_text(
@@ -2703,6 +3341,14 @@ impl ScriptListApp {
 
         let menu_def = self.current_main_menu_theme.def();
         let shell = menu_def.shell;
+        let header = if meta.selected_is_archived() {
+            crate::components::main_view_chrome::MainViewHeaderChrome::context_only(
+                menu_def,
+                self.render_clickable_main_view_context_zone(menu_def, cx),
+            )
+        } else {
+            self.render_builtin_main_input_header(trailing, cx)
+        };
         crate::components::main_view_chrome::render_main_view_chrome_footer_flush(
             crate::components::main_view_chrome::render_main_view_shell()
                 .text_color(rgb(chrome.text_primary_hex))
@@ -2713,7 +3359,7 @@ impl ScriptListApp {
             &self.theme,
             menu_def,
             crate::components::main_view_chrome::MainViewChrome {
-                header: self.render_builtin_main_input_header(trailing, cx),
+                header,
                 divider: crate::components::main_view_chrome::MainViewDividerChrome {
                     margin_x: shell.divider_margin_x,
                     height: shell.divider_height,
@@ -2725,11 +3371,13 @@ impl ScriptListApp {
                     // projects from the reducer-owned session state. It
                     // renders below the transcript in the TranscriptCard
                     // layout; a settled Ok/Stopped turn projects nothing.
-                    let recovery_card = crate::ai::reliability::project_recovery(
-                        &meta.reliability.state().identity,
-                        meta.reliability.state(),
-                        &crate::ai::reliability::flow_session_recovery_capabilities(),
-                    );
+                    let recovery_card = (!meta.selected_is_archived()).then(|| {
+                        crate::ai::reliability::project_recovery(
+                            &meta.reliability.state().identity,
+                            meta.reliability.state(),
+                            &crate::ai::reliability::flow_session_recovery_capabilities(),
+                        )
+                    }).flatten();
                     let mut main = div()
                         .flex()
                         .flex_col()
@@ -2979,7 +3627,6 @@ impl ScriptListApp {
             item_acc: String::new(),
             user_text: text,
         });
-        meta.needs_rethread = false;
         meta.state = crate::flows::session::SessionState::Working;
         match transport {
             crate::flows::session::SessionTransport::CodexThread => {
@@ -3035,6 +3682,9 @@ impl ScriptListApp {
                         .get(*id)
                         .map(|run| run.flow_id.clone()),
                     FlowDeskRow::InstallMdflow => Some("builtin:install-mdflow".to_string()),
+                    FlowDeskRow::UpgradeMdflow => Some("builtin:upgrade-mdflow".to_string()),
+                    FlowDeskRow::RetryRoster => Some("builtin:retry-flow-roster".to_string()),
+                    FlowDeskRow::ClearQuery => Some("builtin:clear-flow-search".to_string()),
                     FlowDeskRow::InitFlows => Some("builtin:init-flows".to_string()),
                     FlowDeskRow::CreateFlow => Some("builtin:create-flow".to_string()),
                 });
@@ -3050,11 +3700,14 @@ impl ScriptListApp {
             _ => (false, None),
         };
         let cwd = self.flow_ux_cwd();
+        let safe_cwd = crate::flows::session::safe_cwd_display(&cwd);
         let roster_entry = crate::flows::catalog::flow_catalog().roster_for(&cwd);
         let sessions: Vec<crate::flows::automation::SessionSnapshot> = self
             .conversations.flow_sessions
             .iter()
-            .map(|(meta, _)| crate::flows::automation::SessionSnapshot {
+            .map(|(meta, _)| {
+                let identity = crate::flows::session::FlowSessionIdentitySnapshot::from_meta(meta);
+                crate::flows::automation::SessionSnapshot {
                 id: meta.id,
                 flow_id: meta.flow_id.clone(),
                 flow_name: meta.flow_name.clone(),
@@ -3067,7 +3720,36 @@ impl ScriptListApp {
                     crate::flows::session::SessionTransport::CodexThread => "codexThread",
                     crate::flows::session::SessionTransport::MdflowTurns => "mdflowTurns",
                 },
-                engine: meta.engine.clone(),
+                engine: identity.engine,
+                model: identity.model,
+                model_source: match identity.model_source {
+                    crate::flows::session::FlowModelSource::Definition => "definition",
+                    crate::flows::session::FlowModelSource::Runtime => "runtime",
+                    crate::flows::session::FlowModelSource::Unavailable => "unavailable",
+                },
+                friendly_name: identity.friendly_name,
+                origin: identity.origin_label,
+                cwd_display: identity.cwd_display,
+                cwd_fingerprint: identity.cwd_fingerprint,
+                selection: identity.selection,
+                read_only: identity.read_only,
+                active_thread_fingerprint: identity.active_thread_fingerprint,
+                selected_thread_fingerprint: identity.selected_thread_fingerprint,
+                parent_thread_fingerprint: identity.parent_thread_fingerprint,
+                parent_retained: identity.parent_retained,
+                inherited_turn_count: identity.inherited_turn_count,
+                active_turn_count: identity.active_turn_count,
+                selected_turn_count: identity.selected_turn_count,
+                archive_count: identity.archive_count,
+                thread_count: identity.thread_count,
+                total_turn_count: identity.total_turn_count,
+                needs_rethread: identity.needs_rethread,
+                thread_ready: identity.thread_ready,
+                runtime_generation: identity.runtime_generation,
+                draft_chars: identity.draft_chars,
+                draft_fingerprint: identity.draft_fingerprint,
+                draft_generation: identity.draft_generation,
+                persistence_revision: identity.persistence_revision,
                 reliability_phase: crate::ai::reliability::phase_name(
                     &meta.reliability.state().phase,
                 )
@@ -3084,13 +3766,14 @@ impl ScriptListApp {
                     .rev()
                     .find_map(|turn| turn.failure.as_ref())
                     .map(|failure| failure.safe_summary.clone()),
+                }
             })
             .collect();
         let mut snapshot = crate::flows::automation::flow_ux_state(
             crate::flows::automation::FlowUxSnapshotInputs {
                 active_variant: desk_active.then_some(crate::flows::model::FlowUxVariant::Flash),
                 selected_flow_id: selected_flow_id.as_deref(),
-                roster: Some((&roster_entry, cwd.as_str())),
+                roster: Some((&roster_entry, safe_cwd.as_str())),
                 preview: None,
                 manager_visible: false,
                 manager_focused_run_id: None,
@@ -3106,13 +3789,156 @@ impl ScriptListApp {
             _ => None,
         };
         snapshot["activeTranscript"] = active_transcript.unwrap_or(serde_json::Value::Null);
+
+        let desk_filter = match &self.current_view {
+            AppView::FlowUxView { filter, .. } => filter.as_str(),
+            _ => "",
+        };
+        let desk_state = self.flow_desk_state(desk_filter);
+        snapshot["deskState"] = serde_json::Value::String(
+            desk_state.automation_label().to_string(),
+        );
+        snapshot["deskFailure"] = match &desk_state {
+            FlowDeskState::RosterFailed { failure } => serde_json::json!({
+                "code": format!("{:?}", failure.failure.code),
+                "diagnosticFingerprint": failure
+                    .failure
+                    .diagnostic
+                    .as_ref()
+                    .map(|diagnostic| diagnostic.fingerprint.0.clone()),
+            }),
+            _ => serde_json::Value::Null,
+        };
+        snapshot["selectedRow"] = match &self.current_view {
+            AppView::FlowUxView {
+                filter,
+                selected_index,
+                ..
+            } => self
+                .flow_desk_rows(filter)
+                .get(*selected_index)
+                .map(|row| self.flow_desk_row_descriptor(row))
+                .map(|descriptor| {
+                    serde_json::json!({
+                        "id": descriptor.semantic_id,
+                        "title": descriptor.title,
+                        "detail": descriptor.detail,
+                        "primaryVerb": descriptor.primary.label(),
+                        "secondaryVerb": descriptor.secondary.map(FlowDeskRowVerb::label),
+                        "actionsAvailable": descriptor.actions_available,
+                    })
+                })
+                .unwrap_or(serde_json::Value::Null),
+            _ => serde_json::Value::Null,
+        };
         snapshot
     }
 }
 
 #[cfg(test)]
+mod flow_desk_state {
+    use super::{resolve_flow_desk_state, FlowDeskState};
+    use crate::flows::catalog::RosterStatus;
+
+    fn failure() -> crate::ai::reliability::AppFailureRecord {
+        crate::ai::reliability::process_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+            crate::ai::reliability::ProcessFailureFacts::RuntimeClosed,
+        )
+    }
+
+    #[test]
+    fn all_seven_states_have_distinct_typed_resolutions() {
+        assert_eq!(
+            resolve_flow_desk_state(true, RosterStatus::Loading, None, false, 0),
+            FlowDeskState::Loading
+        );
+        assert_eq!(
+            resolve_flow_desk_state(false, RosterStatus::Error, Some(failure()), false, 0),
+            FlowDeskState::MdflowMissing,
+            "missing binary wins over a stale roster error"
+        );
+        assert_eq!(
+            resolve_flow_desk_state(true, RosterStatus::Legacy, None, false, 0),
+            FlowDeskState::MdflowIncompatible
+        );
+        assert!(matches!(
+            resolve_flow_desk_state(
+                true,
+                RosterStatus::Error,
+                Some(failure()),
+                false,
+                0,
+            ),
+            FlowDeskState::RosterFailed { .. }
+        ));
+        assert_eq!(
+            resolve_flow_desk_state(true, RosterStatus::Ready, None, false, 0),
+            FlowDeskState::ReadyEmpty
+        );
+        assert_eq!(
+            resolve_flow_desk_state(true, RosterStatus::Ready, None, true, 0),
+            FlowDeskState::NoMatch
+        );
+        assert_eq!(
+            resolve_flow_desk_state(true, RosterStatus::Ready, None, true, 1),
+            FlowDeskState::Ready
+        );
+    }
+}
+
+#[cfg(test)]
+mod flow_desk_row_descriptor {
+    use super::{
+        flow_desk_flow_row_descriptor, mdflow_run_accepted_context, FlowDeskRowVerb,
+    };
+
+    fn flow(interactive: bool, workflow: bool) -> crate::flows::model::FlowDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "id": "project:truthful",
+            "path": "/private/canary/flows/truthful.md",
+            "source": "project",
+            "name": "truthful",
+            "description": "Truthful flow",
+            "engine": "pi",
+            "inputs": [],
+            "isWorkflow": workflow,
+            "interactive": interactive,
+            "mtimeMs": 0
+        }))
+        .expect("flow descriptor")
+    }
+
+    #[test]
+    fn flow_kinds_expose_only_performable_primary_and_secondary_verbs() {
+        let conversational = flow_desk_flow_row_descriptor(&flow(false, false));
+        assert_eq!(conversational.primary, FlowDeskRowVerb::Converse);
+        assert_eq!(conversational.secondary, Some(FlowDeskRowVerb::RunOnce));
+
+        let workflow = flow_desk_flow_row_descriptor(&flow(false, true));
+        assert_eq!(workflow.primary, FlowDeskRowVerb::RunOnce);
+        assert_eq!(workflow.secondary, None);
+
+        let interactive = flow_desk_flow_row_descriptor(&flow(true, false));
+        assert_eq!(interactive.primary, FlowDeskRowVerb::OpenInTerminal);
+        assert_eq!(interactive.secondary, None);
+    }
+
+    #[test]
+    fn fast_terminal_mdflow_phases_prove_context_acceptance() {
+        use crate::flows::model::RunPhase;
+        assert!(!mdflow_run_accepted_context(RunPhase::Starting));
+        assert!(mdflow_run_accepted_context(RunPhase::Running));
+        assert!(mdflow_run_accepted_context(RunPhase::Succeeded));
+        assert!(mdflow_run_accepted_context(RunPhase::Cancelled));
+        assert!(!mdflow_run_accepted_context(RunPhase::Failed));
+        assert!(!mdflow_run_accepted_context(RunPhase::Cancelling));
+    }
+}
+
+#[cfg(test)]
 mod flow_session_escape_origin {
-    use super::{flow_session_returns_to_desk, remove_flow_session, AppView};
+    use super::{flow_session_returns_to_desk, AppView};
 
     fn desk_view() -> AppView {
         AppView::FlowUxView {
@@ -3149,48 +3975,6 @@ mod flow_session_escape_origin {
         assert!(!flow_session_returns_to_desk(&session, false));
     }
 
-    #[test]
-    fn terminate_removes_session_even_with_turn_in_flight() {
-        use crate::flows::session::{ActiveTurn, FlowSessionMeta, SessionState, SessionTransport};
-        let meta = FlowSessionMeta {
-            id: 7,
-            flow_id: "project:test".into(),
-            flow_name: "flow-test".into(),
-            friendly_name: "Test".into(),
-            origin: "Project".into(),
-            engine: "codex".into(),
-            flow_path: "/tmp/flow-test.md".into(),
-            flow_mtime_ms: 0,
-            cwd: "/tmp".into(),
-            transport: SessionTransport::CodexThread,
-            state: SessionState::Working,
-            started_at: std::time::Instant::now(),
-            last_activity: std::time::SystemTime::now(),
-            turns: vec![],
-            active_turn: Some(ActiveTurn {
-                run_id: None,
-                message_id: "message".into(),
-                assistant_acc: String::new(),
-                current_item_id: None,
-                item_acc: String::new(),
-                user_text: "hello".into(),
-            }),
-            thread_ready: true,
-            needs_rethread: false,
-            reliability: crate::flows::session::FlowReliability::new(
-                "project:test",
-                "/tmp/flow-test.md",
-                "codex",
-            ),
-        };
-        let mut sessions = vec![(meta, ())];
-        let removed = remove_flow_session(&mut sessions, 7).expect("live session removed");
-        assert!(
-            removed.0.active_turn.is_some(),
-            "mid-turn termination is allowed"
-        );
-        assert!(sessions.is_empty());
-    }
 }
 
 /// C-R1: the flow session is the single exhaustive key owner. WP7 deleted
@@ -3209,18 +3993,30 @@ mod flow_session_key_owner {
         turn_active: bool,
         actions_open: bool,
     ) -> FlowSessionKeyAction {
-        resolve_flow_session_key_action(key, platform, shift, turn_active, actions_open)
+        resolve_flow_session_key_action(
+            key,
+            platform,
+            shift,
+            crate::components::conversation_actions::FlowConversationCommandFacts {
+                response_in_progress: turn_active,
+                selected_has_response: true,
+                composer_has_text: true,
+                runtime_attached: true,
+                ..Default::default()
+            },
+            actions_open,
+        )
     }
 
     #[test]
-    fn shift_cmd_escape_terminates() {
+    fn shift_cmd_escape_has_no_destructive_owner() {
         assert_eq!(
             action("escape", true, true, false, false),
-            FlowSessionKeyAction::Terminate
+            FlowSessionKeyAction::Ignore
         );
         assert_eq!(
             action("escape", true, true, true, false),
-            FlowSessionKeyAction::Terminate
+            FlowSessionKeyAction::Ignore
         );
     }
 
@@ -3230,16 +4026,18 @@ mod flow_session_key_owner {
             action("escape", false, false, false, false),
             FlowSessionKeyAction::Background
         );
-        // Plain ⌘⎋ (no shift) must NOT terminate — it backgrounds.
+        // Modified Escape has no hidden lifecycle owner. It must never
+        // terminate; only plain Escape owns Background.
         assert_eq!(
             action("escape", true, false, false, false),
-            FlowSessionKeyAction::Background
+            FlowSessionKeyAction::Ignore
         );
     }
 
     #[test]
     fn escape_ignored_while_actions_open() {
-        // The actions popup owns Escape/⇧⌘⎋ while it is open.
+        // The Actions popup owns plain Escape and consumes modified Escape
+        // while it is open; neither route terminates the Flow runtime.
         assert_eq!(
             action("escape", false, false, false, true),
             FlowSessionKeyAction::Ignore
@@ -3459,18 +4257,24 @@ mod flow_session_footer_and_finalize {
     /// discovers mid-runaway-turn.
     #[test]
     fn every_working_footer_hint_names_a_key_the_session_really_binds() {
+        let facts = crate::components::conversation_actions::FlowConversationCommandFacts {
+            response_in_progress: true,
+            composer_has_text: true,
+            runtime_attached: true,
+            ..Default::default()
+        };
         assert_eq!(
-            resolve_flow_session_key_action(".", true, false, true, false),
+            resolve_flow_session_key_action(".", true, false, facts, false),
             FlowSessionKeyAction::Stop,
             "the footer promises ⌘. Stop while working"
         );
         assert_eq!(
-            resolve_flow_session_key_action("k", true, false, true, false),
+            resolve_flow_session_key_action("k", true, false, facts, false),
             FlowSessionKeyAction::ToggleActions,
             "the footer promises ⌘K Actions"
         );
         assert_eq!(
-            resolve_flow_session_key_action("escape", false, false, true, false),
+            resolve_flow_session_key_action("escape", false, false, facts, false),
             FlowSessionKeyAction::Background,
             "the footer promises Escape leaves the session"
         );

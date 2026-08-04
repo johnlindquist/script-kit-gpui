@@ -478,6 +478,57 @@ pub fn resolve_last_copyable_response<'a>(
         .find(|assistant| !assistant.is_empty())
 }
 
+/// Which transcript the Flow session is presenting. The active transcript is
+/// the only writable one; archives are immutable until explicitly continued
+/// into a new active thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowTranscriptSelection {
+    Active,
+    Archived(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowModelSource {
+    Definition,
+    Runtime,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowOriginKind {
+    Project,
+    Package,
+    Global,
+    BuiltIn,
+    Unknown,
+}
+
+impl FlowOriginKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Project => "Project",
+            Self::Package => "Package",
+            Self::Global => "Global",
+            Self::BuiltIn => "Built-in",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+/// One archived conversation retained alongside the active thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlowArchivedThread {
+    pub id: String,
+    pub parent_thread_id: Option<String>,
+    pub created_at: String,
+    pub archived_at: String,
+    /// Number of leading turns inherited when this thread was continued from
+    /// an archive. Preserve it when a continued active thread is archived
+    /// again so lineage never silently resets to zero.
+    pub inherited_turn_count: usize,
+    pub turns: Vec<SessionTurn>,
+}
+
 /// Metadata for one conversation, independent of the GPUI entity.
 #[derive(Debug, Clone)]
 pub struct FlowSessionMeta {
@@ -486,7 +537,10 @@ pub struct FlowSessionMeta {
     pub flow_name: String,
     pub friendly_name: String,
     pub origin: String,
+    pub origin_kind: FlowOriginKind,
     pub engine: String,
+    pub model: Option<String>,
+    pub model_source: FlowModelSource,
     /// Definition path (the flow's markdown file).
     pub flow_path: String,
     /// Definition mtime when the session's engine contract was resolved.
@@ -507,8 +561,29 @@ pub struct FlowSessionMeta {
     /// `SystemTime`, not `Instant`, so a future persisted-session identity
     /// (spec G2) can serialize it and agree with Agent Chat's `updated_at`.
     pub last_activity: std::time::SystemTime,
-    /// Committed turns (user + final assistant text) for context rollup.
+    /// Stable identity of the writable active conversation.
+    pub active_thread_id: String,
+    pub active_thread_created_at: String,
+    pub active_parent_thread_id: Option<String>,
+    /// Committed turns (user + final assistant text) for the writable active
+    /// conversation and context rollup.
     pub turns: Vec<SessionTurn>,
+    /// Immutable archived conversations. They are never merged back into the
+    /// active vector; Continue as New clones the selected archive instead.
+    pub archived_threads: Vec<FlowArchivedThread>,
+    /// The transcript currently rendered by the session host.
+    pub transcript_selection: FlowTranscriptSelection,
+    /// Number of leading active turns inherited by Continue as New. Those rows
+    /// remain read-only even though later turns may be appended.
+    pub inherited_turn_count: usize,
+    /// Session-owned live draft. The main filter is only its visible
+    /// projection while the active conversation is open.
+    pub active_draft: String,
+    pub draft_generation: u64,
+    pub runtime_generation: u64,
+    /// Monotonic persisted model revision. Selection-only UI changes do not
+    /// increment it; every committed thread mutation does.
+    pub persistence_revision: u64,
     /// Active turn: transport bookkeeping + ChatPrompt streaming message id.
     pub active_turn: Option<ActiveTurn>,
     /// Codex thread transport: true once `thread/start` was answered — the
@@ -521,6 +596,9 @@ pub struct FlowSessionMeta {
     /// This boolean is transport bookkeeping only; user-facing recovery
     /// actions are owned by [`FlowSessionMeta::reliability`] (S09).
     pub needs_rethread: bool,
+    /// Terminate Runtime was requested while work was active. The host waits
+    /// for the authoritative terminal turn event before forgetting transport.
+    pub pending_runtime_termination: bool,
     /// Reducer-driven reliability/recovery state for this conversation.
     pub reliability: FlowReliability,
 }
@@ -854,7 +932,216 @@ impl ActiveTurn {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletedFlowThreadKind {
+    Active,
+    Archived,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletedFlowThread {
+    pub id: String,
+    pub kind: DeletedFlowThreadKind,
+    pub turn_count: usize,
+}
+
 impl FlowSessionMeta {
+    pub fn new_thread_id() -> String {
+        format!("flow-thread-{}", uuid::Uuid::new_v4().simple())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture() -> Self {
+        let flow_id = "project:test-flow".to_string();
+        let flow_path = "/tmp/project/flows/test-flow.md".to_string();
+        let engine = "pi".to_string();
+        Self {
+            id: 1,
+            flow_id: flow_id.clone(),
+            flow_name: "test-flow".to_string(),
+            friendly_name: "Test Flow".to_string(),
+            origin: "project".to_string(),
+            origin_kind: FlowOriginKind::Project,
+            engine: engine.clone(),
+            model: None,
+            model_source: FlowModelSource::Unavailable,
+            flow_path: flow_path.clone(),
+            flow_mtime_ms: 0,
+            cwd: "/tmp/project".to_string(),
+            transport: SessionTransport::MdflowTurns,
+            state: SessionState::NeedsYou,
+            started_at: std::time::Instant::now(),
+            last_activity: std::time::SystemTime::now(),
+            active_thread_id: "active-a".to_string(),
+            active_thread_created_at: "2026-08-04T00:00:00Z".to_string(),
+            active_parent_thread_id: None,
+            turns: Vec::new(),
+            archived_threads: Vec::new(),
+            transcript_selection: FlowTranscriptSelection::Active,
+            inherited_turn_count: 0,
+            active_draft: String::new(),
+            draft_generation: 0,
+            runtime_generation: 0,
+            persistence_revision: 1,
+            active_turn: None,
+            thread_ready: true,
+            needs_rethread: false,
+            pending_runtime_termination: false,
+            reliability: FlowReliability::new(&flow_id, &flow_path, &engine),
+        }
+    }
+
+    pub fn selected_turns(&self) -> &[SessionTurn] {
+        match &self.transcript_selection {
+            FlowTranscriptSelection::Active => &self.turns,
+            FlowTranscriptSelection::Archived(id) => self
+                .archived_threads
+                .iter()
+                .find(|thread| &thread.id == id)
+                .map(|thread| thread.turns.as_slice())
+                .unwrap_or(&[]),
+        }
+    }
+
+    pub fn selected_is_archived(&self) -> bool {
+        matches!(
+            self.transcript_selection,
+            FlowTranscriptSelection::Archived(_)
+        )
+    }
+
+    pub fn archive_active_and_start_empty(&mut self) {
+        let archived_at = chrono::Utc::now().to_rfc3339();
+        self.archived_threads.push(FlowArchivedThread {
+            id: self.active_thread_id.clone(),
+            parent_thread_id: self.active_parent_thread_id.clone(),
+            created_at: self.active_thread_created_at.clone(),
+            archived_at,
+            inherited_turn_count: self.inherited_turn_count,
+            turns: std::mem::take(&mut self.turns),
+        });
+        self.active_thread_id = Self::new_thread_id();
+        self.active_thread_created_at = chrono::Utc::now().to_rfc3339();
+        self.active_parent_thread_id = None;
+        self.transcript_selection = FlowTranscriptSelection::Active;
+        self.inherited_turn_count = 0;
+    }
+
+    pub fn continue_archive_as_new(&mut self, archived_id: &str) -> bool {
+        let Some(source) = self
+            .archived_threads
+            .iter()
+            .find(|thread| thread.id == archived_id)
+            .cloned()
+        else {
+            return false;
+        };
+        if !self.turns.is_empty() {
+            self.archive_active_and_start_empty();
+        }
+        self.active_thread_id = Self::new_thread_id();
+        self.active_thread_created_at = chrono::Utc::now().to_rfc3339();
+        self.active_parent_thread_id = Some(source.id);
+        self.turns = source.turns;
+        self.inherited_turn_count = self.turns.len();
+        self.transcript_selection = FlowTranscriptSelection::Active;
+        true
+    }
+
+    pub fn select_archive(&mut self, archived_id: &str) -> bool {
+        if self
+            .archived_threads
+            .iter()
+            .any(|thread| thread.id == archived_id)
+        {
+            self.transcript_selection = FlowTranscriptSelection::Archived(archived_id.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn select_active(&mut self) {
+        self.transcript_selection = FlowTranscriptSelection::Active;
+    }
+
+    pub fn delete_selected_thread(&mut self) -> DeletedFlowThread {
+        let deleted = match self.transcript_selection.clone() {
+            FlowTranscriptSelection::Active => {
+                let deleted = DeletedFlowThread {
+                    id: self.active_thread_id.clone(),
+                    kind: DeletedFlowThreadKind::Active,
+                    turn_count: self.turns.len(),
+                };
+                self.turns.clear();
+                self.active_thread_id = Self::new_thread_id();
+                self.active_thread_created_at = chrono::Utc::now().to_rfc3339();
+                self.active_parent_thread_id = None;
+                self.inherited_turn_count = 0;
+                deleted
+            }
+            FlowTranscriptSelection::Archived(id) => {
+                let turn_count = self
+                    .archived_threads
+                    .iter()
+                    .find(|thread| thread.id == id)
+                    .map_or(0, |thread| thread.turns.len());
+                self.archived_threads.retain(|thread| thread.id != id);
+                DeletedFlowThread {
+                    id,
+                    kind: DeletedFlowThreadKind::Archived,
+                    turn_count,
+                }
+            }
+        };
+        self.transcript_selection = FlowTranscriptSelection::Active;
+        deleted
+    }
+
+    pub fn persisted_snapshot_at_revision(&self, revision: u64) -> PersistedFlowConversation {
+        let mut threads: Vec<PersistedFlowThread> = self
+            .archived_threads
+            .iter()
+            .map(|thread| PersistedFlowThread {
+                id: thread.id.clone(),
+                state: PersistedFlowThreadState::Archived,
+                parent_thread_id: thread.parent_thread_id.clone(),
+                created_at: thread.created_at.clone(),
+                archived_at: Some(thread.archived_at.clone()),
+                inherited_turn_count: thread.inherited_turn_count,
+                turns: thread.turns.iter().map(PersistedFlowTurn::from).collect(),
+            })
+            .collect();
+        threads.push(PersistedFlowThread {
+            id: self.active_thread_id.clone(),
+            state: PersistedFlowThreadState::Active,
+            parent_thread_id: self.active_parent_thread_id.clone(),
+            created_at: self.active_thread_created_at.clone(),
+            archived_at: None,
+            inherited_turn_count: self.inherited_turn_count,
+            turns: self.turns.iter().map(PersistedFlowTurn::from).collect(),
+        });
+        PersistedFlowConversation {
+            flow_id: self.flow_id.clone(),
+            flow_path: self.flow_path.clone(),
+            saved_at: chrono::Utc::now().to_rfc3339(),
+            version: SNAPSHOT_VERSION,
+            revision: revision.max(1),
+            active_thread_id: self.active_thread_id.clone(),
+            threads,
+            turns: Vec::new(),
+        }
+    }
+
+    pub fn persisted_snapshot(&self) -> PersistedFlowConversation {
+        self.persisted_snapshot_at_revision(self.persistence_revision.max(1))
+    }
+
+    pub fn next_persisted_snapshot(&mut self) -> PersistedFlowConversation {
+        self.persistence_revision = self.persistence_revision.saturating_add(1).max(1);
+        self.persisted_snapshot_at_revision(self.persistence_revision)
+    }
+
     /// Record semantic activity at an explicit time. Tests call this with a
     /// controlled clock so ordering is provable without sleeping.
     pub fn touch_at(&mut self, at: std::time::SystemTime) {
@@ -876,6 +1163,138 @@ impl FlowSessionMeta {
         } else {
             format!("{}h", secs / 3600)
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowSessionIdentitySnapshot {
+    pub session_id: u64,
+    pub flow_id: String,
+    pub friendly_name: String,
+    pub engine: String,
+    pub model: Option<String>,
+    pub model_source: FlowModelSource,
+    pub origin_kind: FlowOriginKind,
+    pub origin_label: &'static str,
+    pub cwd_display: String,
+    pub cwd_fingerprint: String,
+    pub selection: &'static str,
+    pub read_only: bool,
+    pub active_thread_fingerprint: String,
+    pub selected_thread_fingerprint: String,
+    pub parent_thread_fingerprint: Option<String>,
+    pub parent_retained: Option<bool>,
+    pub inherited_turn_count: usize,
+    pub active_turn_count: usize,
+    pub selected_turn_count: usize,
+    pub archive_count: usize,
+    pub thread_count: usize,
+    pub total_turn_count: usize,
+    pub needs_rethread: bool,
+    pub thread_ready: bool,
+    pub runtime_generation: u64,
+    pub draft_chars: usize,
+    pub draft_fingerprint: Option<String>,
+    pub draft_generation: u64,
+    pub persistence_revision: u64,
+}
+
+pub fn safe_cwd_display(cwd: &str) -> String {
+    let path = std::path::Path::new(cwd);
+    if std::env::var_os("HOME")
+        .as_deref()
+        .is_some_and(|home| path == std::path::Path::new(home))
+    {
+        return "~".to_string();
+    }
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+    if components.is_empty() {
+        "Working directory".to_string()
+    } else {
+        components[components.len().saturating_sub(2)..].join("/")
+    }
+}
+
+impl FlowSessionIdentitySnapshot {
+    pub fn from_meta(meta: &FlowSessionMeta) -> Self {
+        let fingerprint = |value: &str| crate::ai::reliability::redacted_fingerprint(value);
+        let selected_archive = match &meta.transcript_selection {
+            FlowTranscriptSelection::Active => None,
+            FlowTranscriptSelection::Archived(id) => {
+                meta.archived_threads.iter().find(|thread| &thread.id == id)
+            }
+        };
+        let selected_thread_id = selected_archive
+            .map(|thread| thread.id.as_str())
+            .unwrap_or(meta.active_thread_id.as_str());
+        let parent_thread_id = selected_archive
+            .and_then(|thread| thread.parent_thread_id.as_deref())
+            .or(meta.active_parent_thread_id.as_deref());
+        let parent_retained = parent_thread_id.map(|parent| {
+            parent == meta.active_thread_id
+                || meta
+                    .archived_threads
+                    .iter()
+                    .any(|thread| thread.id == parent)
+        });
+        let selected_turn_count = meta.selected_turns().len();
+        let total_turn_count = meta.turns.len()
+            + meta
+                .archived_threads
+                .iter()
+                .map(|thread| thread.turns.len())
+                .sum::<usize>();
+        Self {
+            session_id: meta.id,
+            flow_id: meta.flow_id.clone(),
+            friendly_name: meta.friendly_name.clone(),
+            engine: meta.engine.clone(),
+            model: meta.model.clone(),
+            model_source: meta.model_source,
+            origin_kind: meta.origin_kind,
+            origin_label: meta.origin_kind.label(),
+            cwd_display: safe_cwd_display(&meta.cwd),
+            cwd_fingerprint: fingerprint(&meta.cwd),
+            selection: if meta.selected_is_archived() {
+                "archive"
+            } else {
+                "active"
+            },
+            read_only: meta.selected_is_archived(),
+            active_thread_fingerprint: fingerprint(&meta.active_thread_id),
+            selected_thread_fingerprint: fingerprint(selected_thread_id),
+            parent_thread_fingerprint: parent_thread_id.map(fingerprint),
+            parent_retained,
+            inherited_turn_count: selected_archive
+                .map(|thread| thread.inherited_turn_count)
+                .unwrap_or(meta.inherited_turn_count),
+            active_turn_count: meta.turns.len(),
+            selected_turn_count,
+            archive_count: meta.archived_threads.len(),
+            thread_count: meta.archived_threads.len() + 1,
+            total_turn_count,
+            needs_rethread: meta.needs_rethread,
+            thread_ready: meta.thread_ready,
+            runtime_generation: meta.runtime_generation,
+            draft_chars: meta.active_draft.chars().count(),
+            draft_fingerprint: (!meta.active_draft.is_empty())
+                .then(|| fingerprint(&meta.active_draft)),
+            draft_generation: meta.draft_generation,
+            persistence_revision: meta.persistence_revision,
+        }
+    }
+
+    pub fn retention_text(&self) -> String {
+        format!(
+            "No Script Kit turn cap · {} turns retained across {} threads",
+            self.total_turn_count, self.thread_count
+        )
     }
 }
 
@@ -957,6 +1376,27 @@ fn resolve_mdflow_turn_arg_with_deadline(
     prompt: &str,
     deadline: Instant,
 ) -> Result<MdflowTurnArg, String> {
+    resolve_mdflow_turn_arg_with_runner(
+        binary,
+        flow_path,
+        cwd,
+        prompt,
+        deadline,
+        run_md_explain_with_deadline,
+    )
+}
+
+fn resolve_mdflow_turn_arg_with_runner<F>(
+    binary: &str,
+    flow_path: &str,
+    cwd: &str,
+    prompt: &str,
+    deadline: Instant,
+    mut run_explain: F,
+) -> Result<MdflowTurnArg, String>
+where
+    F: FnMut(&str, &str, &str, &[&str], Instant) -> std::io::Result<MdExplainOutput>,
+{
     let resolves_all_template_vars = |result: &MdExplainOutput| {
         result.output.status.success()
             && result
@@ -966,15 +1406,14 @@ fn resolve_mdflow_turn_arg_with_deadline(
     };
 
     let positional_args = [prompt];
-    let positional =
-        run_md_explain_with_deadline(binary, flow_path, cwd, &positional_args, deadline)
-            .map_err(|err| format!("mdflow explain failed for positional input: {err}"))?;
+    let positional = run_explain(binary, flow_path, cwd, &positional_args, deadline)
+        .map_err(|err| format!("mdflow explain failed for positional input: {err}"))?;
     if resolves_all_template_vars(&positional) {
         return Ok(MdflowTurnArg::Positional(prompt.to_string()));
     }
 
     let named_args = ["--_task", prompt];
-    let named = run_md_explain_with_deadline(binary, flow_path, cwd, &named_args, deadline)
+    let named = run_explain(binary, flow_path, cwd, &named_args, deadline)
         .map_err(|err| format!("mdflow explain failed for --_task input: {err}"))?;
     if resolves_all_template_vars(&named) {
         return Ok(MdflowTurnArg::NamedTask(prompt.to_string()));
@@ -1128,7 +1567,7 @@ fn strip_frontmatter(markdown: &str) -> &str {
 /// `<source>:<slug>` (`project:review`), so two different projects can carry
 /// the same id — keying by id alone restored the WRONG project's transcript
 /// into the wrong agent (2026-07-11 audit P0, correctness + privacy).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PersistedFlowConversation {
     pub flow_id: String,
     /// Definition path this conversation belongs to (empty on legacy
@@ -1145,12 +1584,47 @@ pub struct PersistedFlowConversation {
     /// written and is classified into a typed record while loading.
     #[serde(default)]
     pub version: u32,
+    /// Monotonic model revision. Version-4 writers start at one; the store uses
+    /// it with per-thread tombstones to reject stale asynchronous snapshots.
+    #[serde(default)]
+    pub revision: u64,
+    /// Version-4 active thread identity. Empty on legacy v0-v3 snapshots.
+    #[serde(default)]
+    pub active_thread_id: String,
+    /// Version-4 thread manifest. Legacy snapshots migrate their `turns` into
+    /// one active thread without dropping any rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub threads: Vec<PersistedFlowThread>,
+    /// Legacy v0-v3 turn vector. Read-only compatibility; v4 never writes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turns: Vec<PersistedFlowTurn>,
 }
 
-/// Current snapshot format: raw assistant text + structured outcome +
-/// typed persisted failures.
-pub const SNAPSHOT_VERSION: u32 = 3;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PersistedFlowThreadState {
+    Active,
+    Archived,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedFlowThread {
+    pub id: String,
+    pub state: PersistedFlowThreadState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_thread_id: Option<String>,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+    #[serde(default)]
+    pub inherited_turn_count: usize,
+    pub turns: Vec<PersistedFlowTurn>,
+}
+
+/// Current snapshot format: a v4 active-thread manifest plus immutable
+/// archives. Turns retain raw assistant text, structured outcome, and typed
+/// persisted failures.
+pub const SNAPSHOT_VERSION: u32 = 4;
 
 /// Convert a persisted snapshot into the ONE canonical in-memory turn vector
 /// (Oracle 2026-07-21, WP-A4): restore must render and store from this same
@@ -1165,17 +1639,32 @@ pub const SNAPSHOT_VERSION: u32 = 3;
 ///   assistant text; strip exactly one canonical caption suffix so
 ///   `assistant` is raw engine output.
 pub fn canonical_session_turns(snapshot: &PersistedFlowConversation) -> Vec<SessionTurn> {
-    /// Caption stripping applies to snapshots written before version 2
-    /// introduced outcome-derived display captions.
+    let persisted_turns = if snapshot.version >= 4 {
+        snapshot
+            .threads
+            .iter()
+            .find(|thread| {
+                thread.id == snapshot.active_thread_id
+                    && thread.state == PersistedFlowThreadState::Active
+            })
+            .map(|thread| thread.turns.as_slice())
+            .unwrap_or(&[])
+    } else {
+        snapshot.turns.as_slice()
+    };
+    canonical_persisted_turns(snapshot.version, persisted_turns)
+}
+
+pub fn canonical_persisted_turns(
+    version: u32,
+    persisted_turns: &[PersistedFlowTurn],
+) -> Vec<SessionTurn> {
     const CAPTION_DERIVED_VERSION: u32 = 2;
-    snapshot
-        .turns
+    persisted_turns
         .iter()
         .map(|turn| {
             let mut assistant = turn.assistant.clone();
-            if snapshot.version < CAPTION_DERIVED_VERSION
-                && turn.outcome == PersistedTurnOutcome::Stopped
-            {
+            if version < CAPTION_DERIVED_VERSION && turn.outcome == PersistedTurnOutcome::Stopped {
                 if assistant == FLOW_STOPPED_CAPTION {
                     assistant.clear();
                 } else if let Some(stripped) =
@@ -1207,7 +1696,7 @@ pub fn canonical_session_turns(snapshot: &PersistedFlowConversation) -> Vec<Sess
         .collect()
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PersistedFlowTurn {
     pub user: String,
     pub assistant: String,
@@ -1222,6 +1711,18 @@ pub struct PersistedFlowTurn {
     pub failure: Option<PersistedAiFailure>,
 }
 
+impl From<&SessionTurn> for PersistedFlowTurn {
+    fn from(turn: &SessionTurn) -> Self {
+        Self {
+            user: turn.user.clone(),
+            assistant: turn.assistant.clone(),
+            outcome: turn.outcome,
+            error: None,
+            failure: turn.failure.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PersistedTurnOutcome {
     #[default]
@@ -1229,11 +1730,6 @@ pub enum PersistedTurnOutcome {
     Stopped,
     Failed,
 }
-
-/// Newest persisted turns kept per flow — comfortably above what
-/// `build_turn_task`'s `HISTORY_CHAR_BUDGET` can roll up, without letting
-/// the snapshot grow unbounded.
-const PERSISTED_TURN_CAP: usize = 12;
 
 fn conversation_store_dir() -> std::path::PathBuf {
     crate::setup::get_kit_path()
@@ -1274,39 +1770,301 @@ fn legacy_conversation_file_name(flow_id: &str) -> String {
     format!("{}.json", sanitize_component(flow_id))
 }
 
+fn migrated_thread_id(flow_id: &str, flow_path: &str) -> String {
+    format!(
+        "flow-thread-migrated-{}",
+        crate::ai::reliability::redacted_fingerprint(&format!("{flow_id}:{flow_path}"))
+    )
+}
+
+fn snapshot_from_turns(
+    flow_id: &str,
+    flow_path: &str,
+    turns: &[SessionTurn],
+) -> PersistedFlowConversation {
+    let thread_id = migrated_thread_id(flow_id, flow_path);
+    let now = chrono::Utc::now().to_rfc3339();
+    PersistedFlowConversation {
+        flow_id: flow_id.to_string(),
+        flow_path: flow_path.to_string(),
+        saved_at: now.clone(),
+        version: SNAPSHOT_VERSION,
+        revision: 1,
+        active_thread_id: thread_id.clone(),
+        threads: vec![PersistedFlowThread {
+            id: thread_id,
+            state: PersistedFlowThreadState::Active,
+            parent_thread_id: None,
+            created_at: now,
+            archived_at: None,
+            inherited_turn_count: 0,
+            turns: turns.iter().map(PersistedFlowTurn::from).collect(),
+        }],
+        turns: Vec::new(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistedConversationLoadError {
+    FutureVersion(u32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalizedConversation {
+    pub snapshot: PersistedFlowConversation,
+    pub changed: bool,
+}
+
+fn canonical_timestamp(value: &str, fallback: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        })
+        .unwrap_or_else(|_| fallback.to_string())
+}
+
+fn recovered_thread_id(flow_id: &str, flow_path: &str, index: usize, raw_id: &str) -> String {
+    format!(
+        "flow-thread-recovered-{}",
+        crate::ai::reliability::redacted_fingerprint(&format!(
+            "{flow_id}:{flow_path}:{index}:{raw_id}"
+        ))
+    )
+}
+
+fn remove_retained_parent_cycles(threads: &mut [PersistedFlowThread]) {
+    let parent_by_id: std::collections::HashMap<String, Option<String>> = threads
+        .iter()
+        .map(|thread| (thread.id.clone(), thread.parent_thread_id.clone()))
+        .collect();
+    for thread in threads.iter_mut() {
+        let start = thread.id.clone();
+        let mut cursor = thread.parent_thread_id.clone();
+        let mut visited = std::collections::HashSet::new();
+        while let Some(parent) = cursor {
+            if parent == start || !visited.insert(parent.clone()) {
+                thread.parent_thread_id = None;
+                break;
+            }
+            cursor = parent_by_id.get(&parent).cloned().flatten();
+        }
+    }
+}
+
+/// Normalize any persisted conversation into the single canonical v4 shape.
+/// The caller captures `now` once so repairs never depend on repeated clock
+/// reads. Future versions fail closed and are never rewritten.
+pub fn canonicalize_persisted_conversation(
+    raw: PersistedFlowConversation,
+    expected_flow_id: &str,
+    expected_flow_path: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<CanonicalizedConversation, PersistedConversationLoadError> {
+    if raw.version > SNAPSHOT_VERSION {
+        return Err(PersistedConversationLoadError::FutureVersion(raw.version));
+    }
+
+    let original = raw.clone();
+    let now = now.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+    let saved_at = canonical_timestamp(&raw.saved_at, &now);
+
+    if raw.version < SNAPSHOT_VERSION {
+        let turns = canonical_persisted_turns(raw.version, &raw.turns);
+        let thread_id = migrated_thread_id(expected_flow_id, expected_flow_path);
+        let snapshot = PersistedFlowConversation {
+            flow_id: expected_flow_id.to_string(),
+            flow_path: expected_flow_path.to_string(),
+            saved_at: saved_at.clone(),
+            version: SNAPSHOT_VERSION,
+            revision: 1,
+            active_thread_id: thread_id.clone(),
+            threads: vec![PersistedFlowThread {
+                id: thread_id,
+                state: PersistedFlowThreadState::Active,
+                parent_thread_id: None,
+                created_at: saved_at,
+                archived_at: None,
+                inherited_turn_count: 0,
+                turns: turns.iter().map(PersistedFlowTurn::from).collect(),
+            }],
+            turns: Vec::new(),
+        };
+        return Ok(CanonicalizedConversation {
+            changed: snapshot != original,
+            snapshot,
+        });
+    }
+
+    let raw_threads = raw.threads;
+    let active_index = if !raw.active_thread_id.is_empty() {
+        let matches: Vec<usize> = raw_threads
+            .iter()
+            .enumerate()
+            .filter_map(|(index, thread)| (thread.id == raw.active_thread_id).then_some(index))
+            .collect();
+        (matches.len() == 1).then_some(matches[0])
+    } else {
+        None
+    }
+    .or_else(|| {
+        let active: Vec<usize> = raw_threads
+            .iter()
+            .enumerate()
+            .filter_map(|(index, thread)| {
+                (thread.state == PersistedFlowThreadState::Active).then_some(index)
+            })
+            .collect();
+        match active.as_slice() {
+            [] => None,
+            [only] => Some(*only),
+            many => many.last().copied(),
+        }
+    })
+    .or_else(|| raw_threads.len().checked_sub(1));
+
+    let mut id_counts = std::collections::HashMap::<String, usize>::new();
+    for thread in &raw_threads {
+        *id_counts.entry(thread.id.clone()).or_default() += 1;
+    }
+    let mut used_ids = std::collections::HashSet::new();
+    let canonical_ids: Vec<String> = raw_threads
+        .iter()
+        .enumerate()
+        .map(|(index, thread)| {
+            if !thread.id.is_empty() && used_ids.insert(thread.id.clone()) {
+                thread.id.clone()
+            } else {
+                let mut recovered =
+                    recovered_thread_id(expected_flow_id, expected_flow_path, index, &thread.id);
+                while !used_ids.insert(recovered.clone()) {
+                    recovered.push('x');
+                }
+                recovered
+            }
+        })
+        .collect();
+
+    let mut threads = Vec::with_capacity(raw_threads.len().max(1));
+    for (index, thread) in raw_threads.into_iter().enumerate() {
+        let is_active = Some(index) == active_index;
+        let created_at = canonical_timestamp(&thread.created_at, &saved_at);
+        let id = canonical_ids[index].clone();
+        let parent_thread_id = thread.parent_thread_id.and_then(|parent| {
+            if parent == thread.id || parent == id {
+                return None;
+            }
+            match id_counts.get(&parent).copied() {
+                Some(1) => original
+                    .threads
+                    .iter()
+                    .position(|candidate| candidate.id == parent)
+                    .map(|parent_index| canonical_ids[parent_index].clone()),
+                Some(_) => None,
+                None if parent.is_empty() => None,
+                None => Some(parent),
+            }
+        });
+        let archived_at = if is_active {
+            None
+        } else {
+            let candidate = thread
+                .archived_at
+                .as_deref()
+                .map(|value| canonical_timestamp(value, &saved_at))
+                .unwrap_or_else(|| saved_at.clone());
+            let created = chrono::DateTime::parse_from_rfc3339(&created_at).ok();
+            let archived = chrono::DateTime::parse_from_rfc3339(&candidate).ok();
+            Some(
+                if created
+                    .zip(archived)
+                    .is_some_and(|(created, archived)| archived >= created)
+                {
+                    candidate
+                } else {
+                    created_at.clone()
+                },
+            )
+        };
+        let turns = canonical_persisted_turns(SNAPSHOT_VERSION, &thread.turns);
+        threads.push(PersistedFlowThread {
+            id,
+            state: if is_active {
+                PersistedFlowThreadState::Active
+            } else {
+                PersistedFlowThreadState::Archived
+            },
+            parent_thread_id,
+            created_at,
+            archived_at,
+            inherited_turn_count: thread.inherited_turn_count.min(turns.len()),
+            turns: turns.iter().map(PersistedFlowTurn::from).collect(),
+        });
+    }
+
+    if threads.is_empty() {
+        let thread_id = migrated_thread_id(expected_flow_id, expected_flow_path);
+        let turns = canonical_persisted_turns(SNAPSHOT_VERSION, &raw.turns);
+        threads.push(PersistedFlowThread {
+            id: thread_id,
+            state: PersistedFlowThreadState::Active,
+            parent_thread_id: None,
+            created_at: saved_at.clone(),
+            archived_at: None,
+            inherited_turn_count: 0,
+            turns: turns.iter().map(PersistedFlowTurn::from).collect(),
+        });
+    } else if let Some(active_position) = threads
+        .iter()
+        .position(|thread| thread.state == PersistedFlowThreadState::Active)
+    {
+        let active = threads.remove(active_position);
+        threads.push(active);
+    }
+
+    remove_retained_parent_cycles(&mut threads);
+    let active_thread_id = threads
+        .last()
+        .expect("canonical v4 always has an active thread")
+        .id
+        .clone();
+    let snapshot = PersistedFlowConversation {
+        flow_id: expected_flow_id.to_string(),
+        flow_path: expected_flow_path.to_string(),
+        saved_at,
+        version: SNAPSHOT_VERSION,
+        revision: raw.revision.max(1),
+        active_thread_id,
+        threads,
+        turns: Vec::new(),
+    };
+    Ok(CanonicalizedConversation {
+        changed: snapshot != original,
+        snapshot,
+    })
+}
+
+pub fn persist_conversation_snapshot_to(
+    dir: &std::path::Path,
+    snapshot: &PersistedFlowConversation,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(conversation_file_name(
+        &snapshot.flow_id,
+        &snapshot.flow_path,
+    ));
+    let bytes = serde_json::to_vec_pretty(snapshot).map_err(std::io::Error::other)?;
+    crate::atomic_file::write_atomic(&path, &bytes)
+}
+
 pub fn persist_conversation_to(
     dir: &std::path::Path,
     flow_id: &str,
     flow_path: &str,
     turns: &[SessionTurn],
 ) -> std::io::Result<()> {
-    let kept: Vec<PersistedFlowTurn> = turns
-        .iter()
-        .rev()
-        .take(PERSISTED_TURN_CAP)
-        .rev()
-        .map(|turn| PersistedFlowTurn {
-            user: turn.user.clone(),
-            assistant: turn.assistant.clone(),
-            outcome: turn.outcome,
-            // v3 never writes the legacy raw caption field.
-            error: None,
-            failure: turn.failure.clone(),
-        })
-        .collect();
-    let snapshot = PersistedFlowConversation {
-        flow_id: flow_id.to_string(),
-        flow_path: flow_path.to_string(),
-        saved_at: chrono::Utc::now().to_rfc3339(),
-        version: SNAPSHOT_VERSION,
-        turns: kept,
-    };
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join(conversation_file_name(flow_id, flow_path));
-    // Unique-temp atomic write (see src/atomic_file.rs): a fixed temp path let
-    // concurrent savers corrupt the persisted conversation.
-    let bytes = serde_json::to_vec_pretty(&snapshot).map_err(std::io::Error::other)?;
-    crate::atomic_file::write_atomic(&path, &bytes)
+    persist_conversation_snapshot_to(dir, &snapshot_from_turns(flow_id, flow_path, turns))
 }
 
 pub fn load_persisted_conversation_from(
@@ -1317,7 +2075,13 @@ pub fn load_persisted_conversation_from(
     let path = dir.join(conversation_file_name(flow_id, flow_path));
     if let Ok(raw) = std::fs::read_to_string(&path) {
         let snapshot: PersistedFlowConversation = serde_json::from_str(&raw).ok()?;
-        return (!snapshot.turns.is_empty()).then_some(snapshot);
+        let canonical =
+            canonicalize_persisted_conversation(snapshot, flow_id, flow_path, chrono::Utc::now())
+                .ok()?;
+        if canonical.changed {
+            let _ = persist_conversation_snapshot_to(dir, &canonical.snapshot);
+        }
+        return Some(canonical.snapshot);
     }
     // Legacy adoption (one-shot): a pre-identity snapshot keyed by id alone
     // is claimed by the FIRST flow that opens it, re-persisted under the
@@ -1326,45 +2090,21 @@ pub fn load_persisted_conversation_from(
     let legacy = dir.join(legacy_conversation_file_name(flow_id));
     let raw = std::fs::read_to_string(&legacy).ok()?;
     let snapshot: PersistedFlowConversation = serde_json::from_str(&raw).ok()?;
-    if snapshot.turns.is_empty() {
+    if !snapshot.flow_path.is_empty() && snapshot.flow_path != flow_path {
         return None;
     }
-    // Adopt through the ONE canonical conversion so the re-persisted file
-    // is a fully migrated current-version snapshot (typed failures included).
-    let turns: Vec<SessionTurn> = canonical_session_turns(&snapshot);
-    if persist_conversation_to(dir, flow_id, flow_path, &turns).is_ok() {
+    if snapshot.version < SNAPSHOT_VERSION && snapshot.turns.is_empty() {
+        let _ = std::fs::remove_file(&legacy);
+        return None;
+    }
+    let snapshot =
+        canonicalize_persisted_conversation(snapshot, flow_id, flow_path, chrono::Utc::now())
+            .ok()?
+            .snapshot;
+    if persist_conversation_snapshot_to(dir, &snapshot).is_ok() {
         let _ = std::fs::remove_file(&legacy);
     }
-    Some(PersistedFlowConversation {
-        flow_path: flow_path.to_string(),
-        ..snapshot
-    })
-}
-
-/// Erase a conversation's persisted history (both the path-qualified file
-/// and any legacy id-only file). "Terminate Flow" promises permanent
-/// removal — before this existed, the next activation silently restored the
-/// supposedly terminated conversation (2026-07-11 audit P0).
-pub fn delete_persisted_conversation_from(
-    dir: &std::path::Path,
-    flow_id: &str,
-    flow_path: &str,
-) -> std::io::Result<()> {
-    // NotFound is success (the promise is "no transcript remains"); every
-    // other failure — e.g. permissions — must surface, because a silently
-    // surviving file resurrects a "permanently ended" conversation.
-    let mut result = Ok(());
-    for path in [
-        dir.join(conversation_file_name(flow_id, flow_path)),
-        dir.join(legacy_conversation_file_name(flow_id)),
-    ] {
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => result = Err(err),
-        }
-    }
-    result
+    Some(snapshot)
 }
 
 /// One FIFO worker owns every conversation-store mutation (Oracle 2026-07-21
@@ -1374,19 +2114,122 @@ pub fn delete_persisted_conversation_from(
 /// from the UI thread, so on-disk order always matches user-visible order.
 pub struct FlowConversationStore {
     tx: std::sync::mpsc::Sender<ConversationStoreCommand>,
+    helper_revision: std::sync::atomic::AtomicU64,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationStoreReceipt {
+    Written,
+    IgnoredStaleRevision,
+    IgnoredTombstonedThread,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationStoreError {
+    ChannelClosed,
+    Timeout,
+    WriteFailed,
+}
+
+type ConversationStoreAck =
+    std::sync::mpsc::Sender<Result<ConversationStoreReceipt, ConversationStoreError>>;
 
 enum ConversationStoreCommand {
     Persist {
-        flow_id: String,
-        flow_path: String,
-        turns: Vec<SessionTurn>,
+        snapshot: PersistedFlowConversation,
+        ack: Option<ConversationStoreAck>,
     },
-    Delete {
-        flow_id: String,
-        flow_path: String,
+    PersistSelectedDeletion {
+        snapshot: PersistedFlowConversation,
+        deleted_thread_id: String,
+        ack: Option<ConversationStoreAck>,
     },
-    Flush(std::sync::mpsc::Sender<()>),
+    Flush(std::sync::mpsc::Sender<Result<(), ConversationStoreError>>),
+}
+
+#[derive(Default)]
+struct ConversationStoreKeyState {
+    highest_revision: u64,
+    tombstoned_thread_ids: std::collections::HashSet<String>,
+}
+
+fn conversation_store_key(snapshot: &PersistedFlowConversation) -> (String, String) {
+    (snapshot.flow_id.clone(), snapshot.flow_path.clone())
+}
+
+fn initial_conversation_store_state(
+    dir: &std::path::Path,
+    snapshot: &PersistedFlowConversation,
+) -> ConversationStoreKeyState {
+    let highest_revision =
+        load_persisted_conversation_from(dir, &snapshot.flow_id, &snapshot.flow_path)
+            .map_or(0, |persisted| persisted.revision);
+    ConversationStoreKeyState {
+        highest_revision,
+        tombstoned_thread_ids: std::collections::HashSet::new(),
+    }
+}
+
+/// Debug-only runtime seam for the stale-write negative control. When the app
+/// is launched with SCRIPT_KIT_TEST_STATUS=1 and the named marker exists, the
+/// FIFO worker publishes `<marker>.held` and pauses the next ordinary Persist
+/// until the marker is removed. Selected deletion remains queued behind it,
+/// proving that release cannot resurrect the tombstoned thread.
+fn wait_for_flow_persist_test_release() {
+    if std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() != Some("1") {
+        return;
+    }
+    let Some(marker) = std::env::var_os("SCRIPT_KIT_TEST_HOLD_FLOW_PERSIST_MARKER") else {
+        return;
+    };
+    let marker = std::path::PathBuf::from(marker);
+    if !marker.exists() {
+        return;
+    }
+    let held = std::path::PathBuf::from(format!("{}.held", marker.to_string_lossy()));
+    let _ = std::fs::write(&held, b"held");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let _ = std::fs::remove_file(held);
+}
+
+fn persist_snapshot_in_worker(
+    dir: &std::path::Path,
+    states: &mut std::collections::HashMap<(String, String), ConversationStoreKeyState>,
+    snapshot: PersistedFlowConversation,
+    deleted_thread_id: Option<String>,
+) -> Result<ConversationStoreReceipt, ConversationStoreError> {
+    let key = conversation_store_key(&snapshot);
+    let state = states
+        .entry(key)
+        .or_insert_with(|| initial_conversation_store_state(dir, &snapshot));
+    if snapshot.revision <= state.highest_revision {
+        return Ok(ConversationStoreReceipt::IgnoredStaleRevision);
+    }
+    if snapshot
+        .threads
+        .iter()
+        .any(|thread| state.tombstoned_thread_ids.contains(&thread.id))
+    {
+        return Ok(ConversationStoreReceipt::IgnoredTombstonedThread);
+    }
+    if deleted_thread_id
+        .as_ref()
+        .is_some_and(|deleted| snapshot.threads.iter().any(|thread| &thread.id == deleted))
+    {
+        return Ok(ConversationStoreReceipt::IgnoredTombstonedThread);
+    }
+    if persist_conversation_snapshot_to(dir, &snapshot).is_err() {
+        return Err(ConversationStoreError::WriteFailed);
+    }
+    state.highest_revision = snapshot.revision;
+    if let Some(deleted_thread_id) = deleted_thread_id {
+        state.tombstoned_thread_ids.insert(deleted_thread_id);
+    }
+    Ok(ConversationStoreReceipt::Written)
 }
 
 impl FlowConversationStore {
@@ -1397,50 +2240,57 @@ impl FlowConversationStore {
         let spawned = std::thread::Builder::new()
             .name("flow-conversation-store".into())
             .spawn(move || {
+                let mut states = std::collections::HashMap::new();
                 while let Ok(command) = rx.recv() {
                     match command {
-                        ConversationStoreCommand::Persist {
-                            flow_id,
-                            flow_path,
-                            turns,
-                        } => {
-                            if turns.is_empty() {
-                                continue;
-                            }
-                            if let Err(err) =
-                                persist_conversation_to(&dir, &flow_id, &flow_path, &turns)
-                            {
+                        ConversationStoreCommand::Persist { snapshot, ack } => {
+                            wait_for_flow_persist_test_release();
+                            let flow_id = snapshot.flow_id.clone();
+                            let result =
+                                persist_snapshot_in_worker(&dir, &mut states, snapshot, None);
+                            if result.is_err() {
                                 tracing::warn!(
                                     target: "script_kit::flows",
                                     event = "flow_conversation_persist_failed",
                                     flow_id = %flow_id,
-                                    error = %err,
                                     "Failed to persist flow conversation"
                                 );
                             }
+                            if let Some(ack) = ack {
+                                let _ = ack.send(result);
+                            }
                         }
-                        ConversationStoreCommand::Delete { flow_id, flow_path } => {
-                            if let Err(err) =
-                                delete_persisted_conversation_from(&dir, &flow_id, &flow_path)
-                            {
+                        ConversationStoreCommand::PersistSelectedDeletion {
+                            snapshot,
+                            deleted_thread_id,
+                            ack,
+                        } => {
+                            let flow_id = snapshot.flow_id.clone();
+                            let result = persist_snapshot_in_worker(
+                                &dir,
+                                &mut states,
+                                snapshot,
+                                Some(deleted_thread_id),
+                            );
+                            if result.is_err() {
                                 tracing::warn!(
                                     target: "script_kit::flows",
-                                    event = "flow_conversation_delete_failed",
+                                    event = "flow_conversation_selected_delete_failed",
                                     flow_id = %flow_id,
-                                    error = %err,
-                                    "Failed to delete persisted flow conversation"
+                                    "Failed to persist selected Flow deletion"
                                 );
+                            }
+                            if let Some(ack) = ack {
+                                let _ = ack.send(result);
                             }
                         }
                         ConversationStoreCommand::Flush(done) => {
-                            let _ = done.send(());
+                            let _ = done.send(Ok(()));
                         }
                     }
                 }
             });
         if let Err(err) = spawned {
-            // Thread creation failure must be loud — a store with no worker
-            // silently drops every persistence command.
             tracing::error!(
                 target: "script_kit::flows",
                 event = "flow_conversation_store_spawn_failed",
@@ -1448,35 +2298,86 @@ impl FlowConversationStore {
                 "Flow conversation store worker failed to start"
             );
         }
-        Self { tx }
+        Self {
+            tx,
+            helper_revision: std::sync::atomic::AtomicU64::new(1),
+        }
     }
 
+    #[cfg(test)]
     pub fn persist(&self, flow_id: &str, flow_path: &str, turns: Vec<SessionTurn>) {
+        let mut snapshot = snapshot_from_turns(flow_id, flow_path, &turns);
+        snapshot.revision = self
+            .helper_revision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.persist_snapshot(snapshot);
+    }
+
+    pub fn persist_snapshot(&self, snapshot: PersistedFlowConversation) {
         let _ = self.tx.send(ConversationStoreCommand::Persist {
-            flow_id: flow_id.to_string(),
-            flow_path: flow_path.to_string(),
-            turns,
+            snapshot,
+            ack: None,
         });
     }
 
-    pub fn delete(&self, flow_id: &str, flow_path: &str) {
-        let _ = self.tx.send(ConversationStoreCommand::Delete {
-            flow_id: flow_id.to_string(),
-            flow_path: flow_path.to_string(),
-        });
+    pub fn persist_snapshot_and_wait(
+        &self,
+        snapshot: PersistedFlowConversation,
+    ) -> Result<ConversationStoreReceipt, ConversationStoreError> {
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        self.tx
+            .send(ConversationStoreCommand::Persist {
+                snapshot,
+                ack: Some(ack_tx),
+            })
+            .map_err(|_| ConversationStoreError::ChannelClosed)?;
+        ack_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| ConversationStoreError::Timeout)?
+    }
+
+    pub fn persist_selected_deletion(
+        &self,
+        snapshot: PersistedFlowConversation,
+        deleted_thread_id: String,
+    ) {
+        let _ = self
+            .tx
+            .send(ConversationStoreCommand::PersistSelectedDeletion {
+                snapshot,
+                deleted_thread_id,
+                ack: None,
+            });
+    }
+
+    pub fn persist_selected_deletion_and_wait(
+        &self,
+        snapshot: PersistedFlowConversation,
+        deleted_thread_id: String,
+    ) -> Result<ConversationStoreReceipt, ConversationStoreError> {
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        self.tx
+            .send(ConversationStoreCommand::PersistSelectedDeletion {
+                snapshot,
+                deleted_thread_id,
+                ack: Some(ack_tx),
+            })
+            .map_err(|_| ConversationStoreError::ChannelClosed)?;
+        ack_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| ConversationStoreError::Timeout)?
     }
 
     /// Barrier: returns once every previously enqueued command has reached
     /// disk. Used by tests and shutdown.
-    pub fn flush(&self) {
+    pub fn flush(&self) -> Result<(), ConversationStoreError> {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
-        if self
-            .tx
+        self.tx
             .send(ConversationStoreCommand::Flush(done_tx))
-            .is_ok()
-        {
-            let _ = done_rx.recv_timeout(std::time::Duration::from_secs(10));
-        }
+            .map_err(|_| ConversationStoreError::ChannelClosed)?;
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| ConversationStoreError::Timeout)?
     }
 }
 
@@ -1488,9 +2389,6 @@ pub fn conversation_store() -> &'static FlowConversationStore {
 
 /// Persist under the active workspace (`~/.scriptkit`, `SK_PATH` override).
 pub fn persist_conversation(flow_id: &str, flow_path: &str, turns: &[SessionTurn]) {
-    if turns.is_empty() {
-        return;
-    }
     if let Err(err) = persist_conversation_to(&conversation_store_dir(), flow_id, flow_path, turns)
     {
         tracing::warn!(
@@ -1508,20 +2406,6 @@ pub fn load_persisted_conversation(
     flow_path: &str,
 ) -> Option<PersistedFlowConversation> {
     load_persisted_conversation_from(&conversation_store_dir(), flow_id, flow_path)
-}
-
-pub fn delete_persisted_conversation(flow_id: &str, flow_path: &str) {
-    if let Err(err) =
-        delete_persisted_conversation_from(&conversation_store_dir(), flow_id, flow_path)
-    {
-        tracing::warn!(
-            target: "script_kit::flows",
-            event = "flow_conversation_delete_failed",
-            flow_id = %flow_id,
-            error = %err,
-            "Failed to delete persisted flow conversation"
-        );
-    }
 }
 
 /// Definition-file mtime in ms (0 when unreadable) — the cheap staleness
@@ -1620,12 +2504,11 @@ mod tests {
         }
     }
 
-    /// The reset writes an EMPTY snapshot rather than deleting the file. That
-    /// only works as a replacement if an empty snapshot reads back as "no
-    /// conversation" — otherwise a restart would reattach a zero-turn session
-    /// and the replaced transcript's fate would depend on load order.
+    /// Empty active-thread metadata is a real persisted conversation state.
+    /// New Conversation must not turn emptiness into deletion or revive the
+    /// replaced transcript.
     #[test]
-    fn an_empty_persisted_snapshot_does_not_reattach() {
+    fn an_empty_active_thread_persists_without_restoring_old_turns() {
         let dir = std::env::temp_dir().join(format!(
             "sk-flow-empty-snapshot-{}",
             std::process::id() as u64
@@ -1652,9 +2535,13 @@ mod tests {
         );
 
         persist_conversation_to(&dir, flow_id, flow_path, &[]).expect("replacement snapshot");
-        assert!(
-            load_persisted_conversation_from(&dir, flow_id, flow_path).is_none(),
-            "the replaced transcript must not reattach after a new conversation"
+        let replacement = load_persisted_conversation_from(&dir, flow_id, flow_path)
+            .expect("empty active metadata remains loadable");
+        assert!(canonical_session_turns(&replacement).is_empty());
+        assert_eq!(replacement.threads.len(), 1);
+        assert_eq!(
+            replacement.threads[0].state,
+            PersistedFlowThreadState::Active
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1718,43 +2605,57 @@ mod tests {
     #[cfg(unix)]
     mod of38 {
         use super::*;
+        use std::os::unix::process::ExitStatusExt;
         use std::time::Duration;
+
+        fn rejected_explain() -> MdExplainOutput {
+            MdExplainOutput {
+                output: std::process::Output {
+                    status: std::process::ExitStatus::from_raw(1 << 8),
+                    stdout: Vec::new(),
+                    stderr: b"positional rejected".to_vec(),
+                },
+                explain: None,
+            }
+        }
 
         #[test]
         fn turn_arg_resolution_uses_one_deadline_for_both_shapes() {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let binary = dir.path().join("md");
-            let attempts = dir.path().join("of38-attempts.txt");
-            let named_overbudget = dir.path().join("of38-named-overbudget.txt");
-            write_fake_md(
-            &binary,
-            "#!/bin/sh\nprintf '%s %s\\n' \"$$\" \"$3\" >> of38-attempts.txt\nif [ \"$3\" != \"--_task\" ]; then\n  sleep 0.02\n  printf 'positional rejected\\n' >&2\n  exit 1\nfi\nsleep 300 &\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\" >> of38-attempts.txt\n(sleep 0.04; touch of38-named-overbudget.txt) &\nwait \"$child\"\n",
-        );
+            for iteration in 0..20 {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                let mut calls: Vec<(Vec<String>, Instant)> = Vec::new();
+                let result = resolve_mdflow_turn_arg_with_runner(
+                    "md",
+                    "flow.md",
+                    "/tmp",
+                    "hello",
+                    deadline,
+                    |_binary, _flow_path, _cwd, args, received_deadline| {
+                        calls.push((
+                            args.iter().map(|arg| (*arg).to_string()).collect(),
+                            received_deadline,
+                        ));
+                        if calls.len() == 1 {
+                            Ok(rejected_explain())
+                        } else {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "shared deadline exhausted",
+                            ))
+                        }
+                    },
+                );
 
-            let started = Instant::now();
-            let result = resolve_mdflow_turn_arg_with_deadline(
-                binary.to_str().expect("utf8 binary"),
-                "flow.md",
-                dir.path().to_str().expect("utf8 cwd"),
-                "hello",
-                started + Duration::from_millis(50),
-            );
-
-            assert!(result.is_err(), "the named fallback must time out");
-            assert!(started.elapsed() < Duration::from_secs(1));
-            let attempt_log = std::fs::read_to_string(attempts).expect("both attempts logged");
-            assert!(
-                attempt_log.contains(" hello"),
-                "positional shape was attempted"
-            );
-            assert!(
-                attempt_log.contains(" --_task"),
-                "named shape was attempted"
-            );
-            assert!(
-                !named_overbudget.exists(),
-                "named fallback received a fresh deadline instead of the remaining total budget"
-            );
+                assert!(result.is_err(), "iteration {iteration} must fail closed");
+                assert_eq!(calls.len(), 2, "both shapes are attempted in order");
+                assert_eq!(calls[0].0, ["hello"]);
+                assert_eq!(calls[1].0, ["--_task", "hello"]);
+                assert_eq!(calls[0].1, deadline);
+                assert_eq!(
+                    calls[1].1, deadline,
+                    "iteration {iteration} must not grant a fresh deadline"
+                );
+            }
         }
     }
 
@@ -1806,7 +2707,7 @@ mod tests {
     const GMAIL_PATH: &str = "/pkg/flows/flow-gog-gmail.codex.md";
 
     #[test]
-    fn conversation_persistence_round_trips_and_caps_turns() {
+    fn conversation_persistence_round_trips_every_turn_without_a_cap() {
         let dir = tempfile::tempdir().expect("tempdir");
         let turns: Vec<SessionTurn> = (0..20)
             .map(|i| SessionTurn {
@@ -1824,10 +2725,266 @@ mod tests {
                 .expect("snapshot must load");
         assert_eq!(restored.flow_id, "package:flow-gog-gmail");
         assert_eq!(restored.flow_path, GMAIL_PATH);
-        // Newest PERSISTED_TURN_CAP turns survive, oldest fall off.
-        assert_eq!(restored.turns.len(), 12);
-        assert_eq!(restored.turns.first().unwrap().user, "question 8");
-        assert_eq!(restored.turns.last().unwrap().assistant, "answer 19");
+        let restored_turns = canonical_session_turns(&restored);
+        assert_eq!(restored_turns.len(), 20);
+        assert_eq!(restored_turns.first().unwrap().user, "question 0");
+        assert_eq!(restored_turns.last().unwrap().assistant, "answer 19");
+    }
+
+    fn thousand_turn_fixture() -> Vec<SessionTurn> {
+        (0..1_000)
+            .map(|index| {
+                let outcome = match index % 3 {
+                    0 => PersistedTurnOutcome::Ok,
+                    1 => PersistedTurnOutcome::Stopped,
+                    _ => PersistedTurnOutcome::Failed,
+                };
+                SessionTurn {
+                    user: format!("question-{index:04}"),
+                    assistant: format!("answer-{index:04}"),
+                    outcome,
+                    failure: (outcome == PersistedTurnOutcome::Failed)
+                        .then(PersistedAiFailure::unknown_default),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_thousand_turns_round_trip_without_a_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let turns = thousand_turn_fixture();
+        persist_conversation_to(
+            dir.path(),
+            "project:thousand",
+            "/p/flows/thousand.md",
+            &turns,
+        )
+        .expect("persist one thousand turns");
+        let restored = load_persisted_conversation_from(
+            dir.path(),
+            "project:thousand",
+            "/p/flows/thousand.md",
+        )
+        .expect("restore one thousand turns");
+        let restored_turns = canonical_session_turns(&restored);
+        assert_eq!(restored_turns.len(), 1_000);
+        for index in [0, 500, 999] {
+            assert_eq!(restored_turns[index].user, turns[index].user);
+            assert_eq!(restored_turns[index].assistant, turns[index].assistant);
+            assert_eq!(restored_turns[index].outcome, turns[index].outcome);
+            assert_eq!(restored_turns[index].failure, turns[index].failure);
+        }
+    }
+
+    #[test]
+    #[ignore = "architecture benchmark; run twice in fresh test processes"]
+    fn benchmark_v4_manifest_1000_turns() {
+        let turns = thousand_turn_fixture();
+        let snapshot = snapshot_from_turns(
+            "project:thousand-benchmark",
+            "/p/flows/thousand-benchmark.md",
+            &turns,
+        );
+
+        for _ in 0..3 {
+            let bytes = serde_json::to_vec(&snapshot).expect("warm serialization");
+            let _: PersistedFlowConversation =
+                serde_json::from_slice(&bytes).expect("warm deserialization");
+        }
+
+        let mut serialize_ms = Vec::new();
+        let mut deserialize_ms = Vec::new();
+        let mut encoded_len = 0;
+        for _ in 0..21 {
+            let started = Instant::now();
+            let bytes = serde_json::to_vec(&snapshot).expect("serialize benchmark snapshot");
+            serialize_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+            encoded_len = bytes.len();
+
+            let started = Instant::now();
+            let restored: PersistedFlowConversation =
+                serde_json::from_slice(&bytes).expect("deserialize benchmark snapshot");
+            deserialize_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+            assert_eq!(canonical_session_turns(&restored).len(), 1_000);
+        }
+        serialize_ms.sort_by(f64::total_cmp);
+        deserialize_ms.sort_by(f64::total_cmp);
+        let serialize_median_ms = serialize_ms[serialize_ms.len() / 2];
+        let deserialize_median_ms = deserialize_ms[deserialize_ms.len() / 2];
+        let combined_median_ms = serialize_median_ms + deserialize_median_ms;
+        println!(
+            "{{\"event\":\"flowManifestBenchmark\",\"turns\":1000,\"samples\":21,\"serializeMedianMs\":{serialize_median_ms:.3},\"deserializeMedianMs\":{deserialize_median_ms:.3},\"combinedMedianMs\":{combined_median_ms:.3},\"encodedBytes\":{encoded_len}}}"
+        );
+    }
+
+    #[test]
+    fn new_conversation_archives_populated_and_empty_active_metadata() {
+        for populated in [false, true] {
+            let mut meta = FlowSessionMeta::test_fixture();
+            let original_id = meta.active_thread_id.clone();
+            if populated {
+                meta.turns.push(turn("question", "answer"));
+            }
+            meta.archive_active_and_start_empty();
+
+            assert_ne!(meta.active_thread_id, original_id);
+            assert!(meta.turns.is_empty());
+            assert_eq!(meta.archived_threads.len(), 1);
+            assert_eq!(meta.archived_threads[0].id, original_id);
+            assert_eq!(meta.archived_threads[0].turns.len(), usize::from(populated));
+            assert_eq!(meta.transcript_selection, FlowTranscriptSelection::Active);
+        }
+    }
+
+    #[test]
+    fn continue_as_new_retains_archive_and_records_lineage() {
+        let mut meta = FlowSessionMeta::test_fixture();
+        meta.turns = vec![turn("source-1", "answer-1"), turn("source-2", "answer-2")];
+        meta.archive_active_and_start_empty();
+        let source_id = meta.archived_threads[0].id.clone();
+        let source_turns = meta.archived_threads[0].turns.clone();
+        assert!(meta.select_archive(&source_id));
+
+        assert!(meta.continue_archive_as_new(&source_id));
+        assert_eq!(meta.transcript_selection, FlowTranscriptSelection::Active);
+        assert_eq!(
+            meta.active_parent_thread_id.as_deref(),
+            Some(source_id.as_str())
+        );
+        assert_eq!(meta.turns, source_turns);
+        assert_eq!(meta.inherited_turn_count, source_turns.len());
+        assert!(meta
+            .archived_threads
+            .iter()
+            .any(|thread| thread.id == source_id));
+    }
+
+    #[test]
+    fn selected_delete_removes_only_active_or_selected_archive() {
+        let mut meta = FlowSessionMeta::test_fixture();
+        meta.turns = vec![turn("first", "one")];
+        meta.archive_active_and_start_empty();
+        meta.turns = vec![turn("second", "two")];
+        meta.archive_active_and_start_empty();
+        meta.turns = vec![turn("current", "three")];
+        let first_archive_id = meta.archived_threads[0].id.clone();
+        let second_archive_id = meta.archived_threads[1].id.clone();
+        let active_id = meta.active_thread_id.clone();
+        let runtime_generation = meta.runtime_generation;
+
+        assert!(meta.select_archive(&first_archive_id));
+        let deleted_archive = meta.delete_selected_thread();
+        assert_eq!(deleted_archive.id, first_archive_id);
+        assert_eq!(deleted_archive.kind, DeletedFlowThreadKind::Archived);
+        assert!(meta
+            .archived_threads
+            .iter()
+            .any(|thread| thread.id == second_archive_id));
+        assert_eq!(meta.active_thread_id, active_id);
+        assert_eq!(meta.turns, vec![turn("current", "three")]);
+        assert_eq!(meta.runtime_generation, runtime_generation);
+
+        let deleted_active = meta.delete_selected_thread();
+        assert_eq!(deleted_active.id, active_id);
+        assert_eq!(deleted_active.kind, DeletedFlowThreadKind::Active);
+        assert!(meta.turns.is_empty());
+        assert_ne!(meta.active_thread_id, active_id);
+        assert!(meta
+            .archived_threads
+            .iter()
+            .any(|thread| thread.id == second_archive_id));
+    }
+
+    #[test]
+    fn archive_navigation_preserves_the_hidden_active_draft() {
+        let mut meta = FlowSessionMeta::test_fixture();
+        meta.active_draft = "private draft canary".to_string();
+        meta.turns.push(turn("question", "answer"));
+        meta.archive_active_and_start_empty();
+        let archive_id = meta.archived_threads[0].id.clone();
+        assert!(meta.select_archive(&archive_id));
+        assert_eq!(meta.active_draft, "private draft canary");
+        meta.select_active();
+        assert_eq!(meta.active_draft, "private draft canary");
+    }
+
+    #[test]
+    fn flow_identity_snapshot_is_typed_redacted_and_lineage_aware() {
+        let mut meta = FlowSessionMeta::test_fixture();
+        meta.engine = "codex".to_string();
+        meta.model = Some("gpt-test".to_string());
+        meta.model_source = FlowModelSource::Runtime;
+        meta.cwd = "/private/path-canary/project-alpha".to_string();
+        meta.active_draft = "PRIVATE_DRAFT_CANARY".to_string();
+        meta.draft_generation = 4;
+        meta.runtime_generation = 7;
+        meta.needs_rethread = true;
+        meta.turns = vec![turn("active", "answer")];
+        meta.archived_threads.push(FlowArchivedThread {
+            id: "archive-child".to_string(),
+            parent_thread_id: Some("missing-parent".to_string()),
+            created_at: "2026-08-04T00:00:00Z".to_string(),
+            archived_at: "2026-08-04T01:00:00Z".to_string(),
+            inherited_turn_count: 1,
+            turns: vec![turn("archived", "answer")],
+        });
+        meta.transcript_selection = FlowTranscriptSelection::Archived("archive-child".to_string());
+
+        let identity = FlowSessionIdentitySnapshot::from_meta(&meta);
+        assert_eq!(identity.engine, "codex");
+        assert_eq!(identity.model.as_deref(), Some("gpt-test"));
+        assert_eq!(identity.model_source, FlowModelSource::Runtime);
+        assert_eq!(identity.cwd_display, "path-canary/project-alpha");
+        assert!(!identity.cwd_fingerprint.contains("/private/"));
+        assert_eq!(identity.selection, "archive");
+        assert!(identity.read_only);
+        assert_eq!(identity.parent_retained, Some(false));
+        assert_eq!(identity.inherited_turn_count, 1);
+        assert_eq!(identity.active_turn_count, 1);
+        assert_eq!(identity.selected_turn_count, 1);
+        assert_eq!(identity.total_turn_count, 2);
+        assert_eq!(identity.draft_chars, "PRIVATE_DRAFT_CANARY".chars().count());
+        assert!(!identity
+            .draft_fingerprint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("PRIVATE_DRAFT_CANARY"));
+        let debug = format!("{identity:?}");
+        assert!(!debug.contains("/private/path-canary"));
+        assert!(!debug.contains("PRIVATE_DRAFT_CANARY"));
+    }
+
+    #[test]
+    fn flow_identity_origin_and_cwd_labels_are_closed_typed_sets() {
+        let home = std::env::var("HOME").expect("HOME");
+        assert_eq!(safe_cwd_display(&home), "~");
+        assert_eq!(safe_cwd_display(""), "Working directory");
+        assert_eq!(safe_cwd_display("/a/b/c"), "b/c");
+
+        for (kind, label) in [
+            (FlowOriginKind::Project, "Project"),
+            (FlowOriginKind::Package, "Package"),
+            (FlowOriginKind::Global, "Global"),
+            (FlowOriginKind::BuiltIn, "Built-in"),
+            (FlowOriginKind::Unknown, "Unknown"),
+        ] {
+            let mut meta = FlowSessionMeta::test_fixture();
+            meta.origin_kind = kind;
+            let identity = FlowSessionIdentitySnapshot::from_meta(&meta);
+            assert_eq!(identity.origin_label, label);
+        }
+    }
+
+    #[test]
+    fn retention_copy_states_the_app_policy_without_promising_storage() {
+        let mut meta = FlowSessionMeta::test_fixture();
+        meta.turns = thousand_turn_fixture();
+        let identity = FlowSessionIdentitySnapshot::from_meta(&meta);
+        assert_eq!(
+            identity.retention_text(),
+            "No Script Kit turn cap · 1000 turns retained across 1 threads"
+        );
     }
 
     #[test]
@@ -1874,10 +3031,10 @@ mod tests {
         assert_eq!(legacy.failure, None);
     }
 
-    /// S09: a v3 snapshot persists ONLY the typed failure — the legacy raw
+    /// S09: a v4 snapshot persists ONLY the typed failure — the legacy raw
     /// caption field is never written again.
     #[test]
-    fn v3_snapshots_never_write_the_legacy_error_field() {
+    fn v4_snapshots_never_write_the_legacy_error_field() {
         let dir = tempfile::tempdir().expect("tempdir");
         let turns = vec![SessionTurn {
             user: "q".into(),
@@ -1952,13 +3109,231 @@ mod tests {
     }
 
     fn snapshot_with(version: u32, turns: Vec<PersistedFlowTurn>) -> PersistedFlowConversation {
+        let (active_thread_id, threads, legacy_turns) = if version >= SNAPSHOT_VERSION {
+            let id = "flow-thread-test".to_string();
+            (
+                id.clone(),
+                vec![PersistedFlowThread {
+                    id,
+                    state: PersistedFlowThreadState::Active,
+                    parent_thread_id: None,
+                    created_at: "2026-07-21T00:00:00Z".into(),
+                    archived_at: None,
+                    inherited_turn_count: 0,
+                    turns,
+                }],
+                Vec::new(),
+            )
+        } else {
+            (String::new(), Vec::new(), turns)
+        };
         PersistedFlowConversation {
             flow_id: "project:test".into(),
             flow_path: "/w/flows/test.md".into(),
             saved_at: "2026-07-21T00:00:00Z".into(),
             version,
-            turns,
+            revision: u64::from(version >= SNAPSHOT_VERSION),
+            active_thread_id,
+            threads,
+            turns: legacy_turns,
         }
+    }
+
+    fn fixed_canonical_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-04T12:00:00Z")
+            .expect("fixed timestamp")
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn legacy_turns_for_version(version: u32) -> Vec<PersistedFlowTurn> {
+        vec![
+            PersistedFlowTurn {
+                user: "question one".into(),
+                assistant: if version < 2 {
+                    format!("partial\n\n{FLOW_STOPPED_CAPTION}")
+                } else {
+                    "partial".into()
+                },
+                outcome: PersistedTurnOutcome::Stopped,
+                error: None,
+                failure: None,
+            },
+            PersistedFlowTurn {
+                user: "question two".into(),
+                assistant: "answer two".into(),
+                outcome: PersistedTurnOutcome::Failed,
+                error: (version < 3).then(|| "protocol violation: legacy".into()),
+                failure: (version >= 3).then(PersistedAiFailure::unknown_default),
+            },
+        ]
+    }
+
+    fn assert_legacy_migration(version: u32) {
+        let raw = snapshot_with(version, legacy_turns_for_version(version));
+        let canonical = canonicalize_persisted_conversation(
+            raw,
+            "project:test",
+            "/w/flows/test.md",
+            fixed_canonical_now(),
+        )
+        .expect("legacy version migrates")
+        .snapshot;
+        assert_eq!(canonical.version, SNAPSHOT_VERSION);
+        assert_eq!(canonical.revision, 1);
+        assert!(canonical.turns.is_empty(), "v4 never writes legacy turns");
+        assert_eq!(canonical.threads.len(), 1);
+        assert_eq!(canonical.active_thread_id, canonical.threads[0].id);
+        assert_eq!(canonical.threads[0].state, PersistedFlowThreadState::Active);
+        let turns = canonical_session_turns(&canonical);
+        assert_eq!(turns.len(), 2, "migration must not lose turns");
+        assert_eq!(turns[0].user, "question one");
+        assert_eq!(turns[0].assistant, "partial");
+        assert_eq!(turns[0].outcome, PersistedTurnOutcome::Stopped);
+        assert_eq!(turns[1].user, "question two");
+        assert_eq!(turns[1].assistant, "answer two");
+        assert_eq!(turns[1].outcome, PersistedTurnOutcome::Failed);
+        assert!(turns[1].failure.is_some());
+    }
+
+    #[test]
+    fn v0_migrates_to_one_v4_active_thread_without_turn_loss() {
+        assert_legacy_migration(0);
+    }
+
+    #[test]
+    fn v1_migrates_to_one_v4_active_thread_without_turn_loss() {
+        assert_legacy_migration(1);
+    }
+
+    #[test]
+    fn v2_migrates_legacy_failures_without_turn_loss() {
+        assert_legacy_migration(2);
+    }
+
+    #[test]
+    fn v3_migrates_typed_failures_without_turn_loss() {
+        assert_legacy_migration(3);
+    }
+
+    #[test]
+    fn malformed_v4_manifest_is_canonicalized_without_turn_loss() {
+        let make_turn = |label: &str| PersistedFlowTurn {
+            user: format!("user-{label}"),
+            assistant: format!("assistant-{label}"),
+            outcome: PersistedTurnOutcome::Ok,
+            error: None,
+            failure: None,
+        };
+        let mut raw = PersistedFlowConversation {
+            flow_id: "stale:id".into(),
+            flow_path: "/stale/path.md".into(),
+            saved_at: "not-a-time".into(),
+            version: SNAPSHOT_VERSION,
+            revision: 0,
+            active_thread_id: "duplicate".into(),
+            threads: vec![
+                PersistedFlowThread {
+                    id: "duplicate".into(),
+                    state: PersistedFlowThreadState::Archived,
+                    parent_thread_id: Some("duplicate".into()),
+                    created_at: "bad".into(),
+                    archived_at: None,
+                    inherited_turn_count: 99,
+                    turns: vec![make_turn("first")],
+                },
+                PersistedFlowThread {
+                    id: "duplicate".into(),
+                    state: PersistedFlowThreadState::Active,
+                    parent_thread_id: Some("missing-parent".into()),
+                    created_at: "2026-08-04T10:00:00Z".into(),
+                    archived_at: Some("2026-08-04T09:00:00Z".into()),
+                    inherited_turn_count: 1,
+                    turns: vec![make_turn("second")],
+                },
+                PersistedFlowThread {
+                    id: String::new(),
+                    state: PersistedFlowThreadState::Active,
+                    parent_thread_id: None,
+                    created_at: "bad".into(),
+                    archived_at: None,
+                    inherited_turn_count: 0,
+                    turns: vec![make_turn("third")],
+                },
+            ],
+            turns: vec![make_turn("ignored-top-level")],
+        };
+        let canonical = canonicalize_persisted_conversation(
+            raw.clone(),
+            "project:test",
+            "/w/flows/test.md",
+            fixed_canonical_now(),
+        )
+        .expect("malformed v4 is repairable")
+        .snapshot;
+        assert_eq!(canonical.flow_id, "project:test");
+        assert_eq!(canonical.flow_path, "/w/flows/test.md");
+        assert_eq!(canonical.revision, 1);
+        assert_eq!(canonical.threads.len(), 3);
+        assert_eq!(
+            canonical
+                .threads
+                .iter()
+                .map(|thread| thread.turns.len())
+                .sum::<usize>(),
+            3,
+            "non-empty v4 threads are authoritative; top-level turns are ignored"
+        );
+        assert!(canonical.turns.is_empty());
+        assert_eq!(
+            canonical
+                .threads
+                .iter()
+                .filter(|thread| thread.state == PersistedFlowThreadState::Active)
+                .count(),
+            1
+        );
+        assert_eq!(
+            canonical.active_thread_id,
+            canonical.threads.last().unwrap().id
+        );
+        let unique: std::collections::HashSet<_> =
+            canonical.threads.iter().map(|thread| &thread.id).collect();
+        assert_eq!(unique.len(), canonical.threads.len());
+        assert!(canonical.threads.iter().all(|thread| !thread.id.is_empty()));
+        assert!(canonical
+            .threads
+            .iter()
+            .all(|thread| thread.inherited_turn_count <= thread.turns.len()));
+        assert!(canonical.threads.last().unwrap().archived_at.is_none());
+
+        raw.version = SNAPSHOT_VERSION + 1;
+        assert_eq!(
+            canonicalize_persisted_conversation(
+                raw,
+                "project:test",
+                "/w/flows/test.md",
+                fixed_canonical_now(),
+            ),
+            Err(PersistedConversationLoadError::FutureVersion(
+                SNAPSHOT_VERSION + 1
+            ))
+        );
+    }
+
+    #[test]
+    fn empty_active_metadata_is_present_while_missing_store_is_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            load_persisted_conversation_from(dir.path(), "project:empty", "/w/flows/empty.md")
+                .is_none()
+        );
+        persist_conversation_to(dir.path(), "project:empty", "/w/flows/empty.md", &[])
+            .expect("persist empty active metadata");
+        let loaded =
+            load_persisted_conversation_from(dir.path(), "project:empty", "/w/flows/empty.md")
+                .expect("empty active metadata must remain present");
+        assert_eq!(loaded.threads.len(), 1);
+        assert!(canonical_session_turns(&loaded).is_empty());
     }
 
     /// WP-A4: canonical conversion migrates transitional caption-bearing
@@ -2040,46 +3415,172 @@ mod tests {
         }
     }
 
-    /// WP-A1: the FIFO store guarantees on-disk order matches enqueue order —
-    /// a newer snapshot can never be replaced by a stale one.
+    fn store_snapshot(revision: u64, turns: Vec<SessionTurn>) -> PersistedFlowConversation {
+        let mut snapshot = snapshot_from_turns("project:t", "/w/flows/t.md", &turns);
+        snapshot.revision = revision;
+        snapshot
+    }
+
     #[test]
-    fn conversation_store_newer_snapshot_wins() {
+    fn conversation_store_newer_revision_wins() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = FlowConversationStore::new(dir.path().to_path_buf());
-        store.persist("project:t", "/w/flows/t.md", vec![turn("q1", "a1")]);
-        store.persist(
-            "project:t",
-            "/w/flows/t.md",
-            vec![turn("q1", "a1"), turn("q2", "a2")],
+        assert_eq!(
+            store.persist_snapshot_and_wait(store_snapshot(1, vec![turn("q1", "a1")])),
+            Ok(ConversationStoreReceipt::Written)
         );
-        store.flush();
+        assert_eq!(
+            store.persist_snapshot_and_wait(store_snapshot(
+                2,
+                vec![turn("q1", "a1"), turn("q2", "a2")],
+            )),
+            Ok(ConversationStoreReceipt::Written)
+        );
+        assert_eq!(
+            store.persist_snapshot_and_wait(store_snapshot(1, vec![turn("old", "old")])),
+            Ok(ConversationStoreReceipt::IgnoredStaleRevision)
+        );
+        store.flush().expect("flush");
         let loaded = load_persisted_conversation_from(dir.path(), "project:t", "/w/flows/t.md")
             .expect("snapshot present");
-        assert_eq!(loaded.turns.len(), 2, "the newer 2-turn snapshot must win");
+        assert_eq!(loaded.revision, 2);
+        assert_eq!(canonical_session_turns(&loaded).len(), 2);
     }
 
-    /// WP-A1: a delete enqueued after a persist is a tombstone — the pending
-    /// persist cannot resurrect the terminated conversation.
+    fn snapshot_with_archive(revision: u64) -> PersistedFlowConversation {
+        let mut snapshot = store_snapshot(revision, vec![turn("active", "answer")]);
+        snapshot.threads.insert(
+            0,
+            PersistedFlowThread {
+                id: "archive-b".into(),
+                state: PersistedFlowThreadState::Archived,
+                parent_thread_id: None,
+                created_at: "2026-08-04T10:00:00Z".into(),
+                archived_at: Some("2026-08-04T11:00:00Z".into()),
+                inherited_turn_count: 0,
+                turns: vec![PersistedFlowTurn::from(&turn("archived", "answer"))],
+            },
+        );
+        snapshot
+    }
+
     #[test]
-    fn conversation_store_delete_tombstone_survives_pending_persist() {
+    fn selected_thread_tombstone_rejects_late_stale_persist() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = FlowConversationStore::new(dir.path().to_path_buf());
-        store.persist("project:t", "/w/flows/t.md", vec![turn("q1", "a1")]);
-        store.delete("project:t", "/w/flows/t.md");
-        store.flush();
-        assert!(
-            load_persisted_conversation_from(dir.path(), "project:t", "/w/flows/t.md").is_none(),
-            "terminated conversation must stay deleted"
+        let held = snapshot_with_archive(1);
+        assert_eq!(
+            store.persist_snapshot_and_wait(held.clone()),
+            Ok(ConversationStoreReceipt::Written)
         );
+        let mut deletion = held.clone();
+        deletion.revision = 2;
+        deletion.threads.retain(|thread| thread.id != "archive-b");
+        assert_eq!(
+            store.persist_selected_deletion_and_wait(deletion, "archive-b".into()),
+            Ok(ConversationStoreReceipt::Written)
+        );
+        assert_eq!(
+            store.persist_snapshot_and_wait(held),
+            Ok(ConversationStoreReceipt::IgnoredStaleRevision)
+        );
+        store.flush().expect("flush");
+        let loaded = load_persisted_conversation_from(dir.path(), "project:t", "/w/flows/t.md")
+            .expect("manifest remains present");
+        assert_eq!(loaded.revision, 2);
+        assert!(loaded.threads.iter().all(|thread| thread.id != "archive-b"));
     }
 
-    /// Delete reports real I/O failures but treats NotFound as success.
     #[test]
-    fn delete_treats_missing_files_as_success() {
+    fn selected_thread_tombstone_rejects_forged_higher_revision() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert!(
-            delete_persisted_conversation_from(dir.path(), "project:none", "/w/none.md").is_ok()
+        let store = FlowConversationStore::new(dir.path().to_path_buf());
+        let original = snapshot_with_archive(1);
+        assert_eq!(
+            store.persist_snapshot_and_wait(original.clone()),
+            Ok(ConversationStoreReceipt::Written)
         );
+        let mut deletion = original.clone();
+        deletion.revision = 2;
+        deletion.threads.retain(|thread| thread.id != "archive-b");
+        assert_eq!(
+            store.persist_selected_deletion_and_wait(deletion, "archive-b".into()),
+            Ok(ConversationStoreReceipt::Written)
+        );
+        let mut forged = original;
+        forged.revision = 3;
+        assert_eq!(
+            store.persist_snapshot_and_wait(forged),
+            Ok(ConversationStoreReceipt::IgnoredTombstonedThread)
+        );
+        store.flush().expect("flush");
+        let loaded = load_persisted_conversation_from(dir.path(), "project:t", "/w/flows/t.md")
+            .expect("manifest remains present");
+        assert_eq!(loaded.revision, 2);
+        assert!(loaded.threads.iter().all(|thread| thread.id != "archive-b"));
+    }
+
+    #[test]
+    fn deleting_active_persists_one_empty_replacement_thread() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FlowConversationStore::new(dir.path().to_path_buf());
+        let original = store_snapshot(1, vec![turn("active", "answer")]);
+        let deleted_id = original.active_thread_id.clone();
+        assert_eq!(
+            store.persist_snapshot_and_wait(original.clone()),
+            Ok(ConversationStoreReceipt::Written)
+        );
+        let mut replacement = snapshot_from_turns("project:t", "/w/flows/t.md", &[]);
+        replacement.revision = 2;
+        replacement.active_thread_id = "active-replacement".into();
+        replacement.threads[0].id = replacement.active_thread_id.clone();
+        assert_eq!(
+            store.persist_selected_deletion_and_wait(replacement, deleted_id.clone()),
+            Ok(ConversationStoreReceipt::Written)
+        );
+        store.flush().expect("flush");
+        let loaded = load_persisted_conversation_from(dir.path(), "project:t", "/w/flows/t.md")
+            .expect("empty replacement remains present");
+        assert_eq!(loaded.threads.len(), 1);
+        assert_ne!(loaded.active_thread_id, deleted_id);
+        assert!(canonical_session_turns(&loaded).is_empty());
+    }
+
+    #[test]
+    fn deleting_archive_preserves_active_and_other_archives() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FlowConversationStore::new(dir.path().to_path_buf());
+        let mut original = snapshot_with_archive(1);
+        original.threads.insert(
+            1,
+            PersistedFlowThread {
+                id: "archive-c".into(),
+                state: PersistedFlowThreadState::Archived,
+                parent_thread_id: None,
+                created_at: "2026-08-04T10:00:00Z".into(),
+                archived_at: Some("2026-08-04T11:00:00Z".into()),
+                inherited_turn_count: 0,
+                turns: vec![PersistedFlowTurn::from(&turn("other", "answer"))],
+            },
+        );
+        let active_id = original.active_thread_id.clone();
+        assert_eq!(
+            store.persist_snapshot_and_wait(original.clone()),
+            Ok(ConversationStoreReceipt::Written)
+        );
+        let mut deletion = original;
+        deletion.revision = 2;
+        deletion.threads.retain(|thread| thread.id != "archive-b");
+        assert_eq!(
+            store.persist_selected_deletion_and_wait(deletion, "archive-b".into()),
+            Ok(ConversationStoreReceipt::Written)
+        );
+        store.flush().expect("flush");
+        let loaded = load_persisted_conversation_from(dir.path(), "project:t", "/w/flows/t.md")
+            .expect("manifest remains present");
+        assert_eq!(loaded.active_thread_id, active_id);
+        assert!(loaded.threads.iter().any(|thread| thread.id == "archive-c"));
+        assert!(loaded.threads.iter().all(|thread| thread.id != "archive-b"));
     }
 
     /// WP-A3: rollup is outcome-aware — stopped/failed partials are labeled
@@ -2121,7 +3622,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_conversation_missing_or_empty_is_none() {
+    fn persisted_conversation_distinguishes_missing_from_empty_active() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(
             load_persisted_conversation_from(dir.path(), "project:scout", "/a/flows/scout.md")
@@ -2129,11 +3630,10 @@ mod tests {
         );
         persist_conversation_to(dir.path(), "project:scout", "/a/flows/scout.md", &[])
             .expect("persist empty");
-        assert!(
+        let empty =
             load_persisted_conversation_from(dir.path(), "project:scout", "/a/flows/scout.md")
-                .is_none(),
-            "an empty snapshot must never restore a blank conversation"
-        );
+                .expect("empty active metadata is persisted");
+        assert!(canonical_session_turns(&empty).is_empty());
     }
 
     /// Two projects with the same `project:review` id must never share a
@@ -2177,8 +3677,8 @@ mod tests {
             "/work/beta/flows/review.md",
         )
         .expect("beta loads");
-        assert_eq!(alpha.turns[0].user, "alpha secrets");
-        assert_eq!(beta.turns[0].user, "beta question");
+        assert_eq!(canonical_session_turns(&alpha)[0].user, "alpha secrets");
+        assert_eq!(canonical_session_turns(&beta)[0].user, "beta question");
     }
 
     /// Legacy id-only snapshots are adopted once (re-keyed under the
@@ -2195,6 +3695,9 @@ mod tests {
             flow_path: String::new(),
             saved_at: "2026-07-10T00:00:00Z".into(),
             version: 0,
+            revision: 0,
+            active_thread_id: String::new(),
+            threads: Vec::new(),
             turns: vec![PersistedFlowTurn {
                 user: "old question".into(),
                 assistant: "old answer".into(),
@@ -2211,7 +3714,7 @@ mod tests {
             "/work/alpha/flows/review.md",
         )
         .expect("legacy snapshot adopted");
-        assert_eq!(adopted.turns[0].user, "old question");
+        assert_eq!(canonical_session_turns(&adopted)[0].user, "old question");
         assert_eq!(adopted.flow_path, "/work/alpha/flows/review.md");
         assert!(!legacy.exists(), "legacy file must be consumed");
         assert!(
@@ -2223,35 +3726,6 @@ mod tests {
             .is_none(),
             "a second project must not inherit the adopted transcript"
         );
-    }
-
-    /// Terminate promises "permanently end this conversation" — deletion
-    /// must actually remove the persisted history (2026-07-11 audit P0).
-    #[test]
-    fn delete_erases_persisted_history_including_legacy() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let turns = vec![SessionTurn {
-            user: "q".into(),
-            assistant: "a".into(),
-            outcome: PersistedTurnOutcome::Ok,
-            failure: None,
-        }];
-        persist_conversation_to(dir.path(), "project:review", "/w/flows/review.md", &turns)
-            .expect("persist");
-        let legacy = dir
-            .path()
-            .join(legacy_conversation_file_name("project:review"));
-        std::fs::write(&legacy, b"{}").unwrap();
-
-        let _ =
-            delete_persisted_conversation_from(dir.path(), "project:review", "/w/flows/review.md");
-        assert!(load_persisted_conversation_from(
-            dir.path(),
-            "project:review",
-            "/w/flows/review.md"
-        )
-        .is_none());
-        assert!(!legacy.exists());
     }
 
     #[test]

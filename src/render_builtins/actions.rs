@@ -909,7 +909,9 @@ impl ScriptListApp {
         match &self.current_view {
             AppView::FlowSessionView { session_id } => Some(FlowDeskSubject::Session {
                 id: *session_id,
-                working: self.flow_session_has_active_turn(*session_id),
+                facts: self.flow_conversation_command_facts(*session_id),
+                archives: self.flow_session_archives(*session_id),
+                open_required: false,
             }),
             AppView::FlowUxView {
                 filter,
@@ -920,13 +922,27 @@ impl ScriptListApp {
                 match rows.get(*selected_index)? {
                     FlowDeskRow::Session(id) => Some(FlowDeskSubject::Session {
                         id: *id,
-                        working: self.flow_session_has_active_turn(*id),
+                        facts: self.flow_conversation_command_facts(*id),
+                        archives: self.flow_session_archives(*id),
+                        open_required: true,
                     }),
                     FlowDeskRow::Run(id) => Some(FlowDeskSubject::Run(*id)),
                     FlowDeskRow::Flow(flow) => Some(FlowDeskSubject::Flow(flow.clone())),
-                    // Setup affordance rows carry exactly one verb — Enter
-                    // already is that verb, so ⌘K has nothing to add.
-                    FlowDeskRow::InstallMdflow | FlowDeskRow::InitFlows => None,
+                    FlowDeskRow::RetryRoster => {
+                        let descriptor = self.flow_desk_row_descriptor(&rows[*selected_index]);
+                        let failure = match self.flow_desk_state(filter) {
+                            FlowDeskState::RosterFailed { failure } => Some(failure),
+                            _ => None,
+                        };
+                        Some(FlowDeskSubject::Recovery {
+                            descriptor,
+                            failure,
+                        })
+                    }
+                    FlowDeskRow::InstallMdflow
+                    | FlowDeskRow::UpgradeMdflow
+                    | FlowDeskRow::ClearQuery
+                    | FlowDeskRow::InitFlows => None,
                     FlowDeskRow::CreateFlow => Some(FlowDeskSubject::Create),
                 }
             }
@@ -942,25 +958,50 @@ impl ScriptListApp {
 
         match subject {
             FlowDeskSubject::Flow(flow) => {
+                let descriptor = flow_desk_flow_row_descriptor(flow);
+                let (primary_id, primary_description, primary_icon) = match descriptor.primary {
+                    FlowDeskRowVerb::Converse => (
+                        "flow_desk_converse",
+                        format!("Talk to {} interactively", flow.friendly_name()),
+                        IconName::MessageCircle,
+                    ),
+                    FlowDeskRowVerb::OpenInTerminal => (
+                        "flow_desk_open_terminal",
+                        "Open this TTY-only flow in the shared terminal".to_string(),
+                        IconName::Terminal,
+                    ),
+                    FlowDeskRowVerb::RunOnce => (
+                        "flow_desk_run_once",
+                        "One `--events` run, supervised from the desk".to_string(),
+                        IconName::PlayFilled,
+                    ),
+                    _ => unreachable!("flow descriptors only expose flow-owned verbs"),
+                };
                 let mut actions = vec![
                     Action::new(
-                        "flow_desk_converse",
-                        "Start Conversation",
-                        Some(format!("Talk to {} interactively", flow.friendly_name())),
+                        primary_id,
+                        descriptor.primary.label(),
+                        Some(primary_description),
                         ActionCategory::ScriptContext,
                     )
                     .with_shortcut("↵")
                     .with_section("Flow")
-                    .with_icon(IconName::Terminal),
-                    Action::new(
-                        "flow_desk_run_once",
-                        "Run Once in Background",
-                        Some("One `--events` run, supervised from the desk".to_string()),
-                        ActionCategory::ScriptContext,
-                    )
-                    .with_shortcut("⇧↵")
-                    .with_section("Flow")
-                    .with_icon(IconName::PlayFilled),
+                    .with_icon(primary_icon),
+                ];
+                if descriptor.secondary == Some(FlowDeskRowVerb::RunOnce) {
+                    actions.push(
+                        Action::new(
+                            "flow_desk_run_once",
+                            FlowDeskRowVerb::RunOnce.label(),
+                            Some("One `--events` run, supervised from the desk".to_string()),
+                            ActionCategory::ScriptContext,
+                        )
+                        .with_shortcut("⇧↵")
+                        .with_section("Flow")
+                        .with_icon(IconName::PlayFilled),
+                    );
+                }
+                actions.extend([
                     Action::new(
                         "flow_desk_view",
                         "View Flow",
@@ -996,7 +1037,7 @@ impl ScriptListApp {
                     )
                     .with_section("Definition")
                     .with_icon(IconName::Copy),
-                ];
+                ]);
                 if flow.wrapper_command.is_some() {
                     actions.push(
                         Action::new(
@@ -1021,27 +1062,42 @@ impl ScriptListApp {
                 );
                 actions
             }
-            FlowDeskSubject::Session { working, .. } => {
+            FlowDeskSubject::Session {
+                facts,
+                archives,
+                open_required,
+                ..
+            } => {
                 use crate::components::conversation_actions::{
-                    flow_conversation_commands, ConversationCommandAvailability,
+                    flow_conversation_commands_for_facts, ConversationCommandAvailability,
                     FlowConversationCommand,
                 };
 
-                let mut actions = vec![Action::new(
-                    "flow_desk_session_open",
-                    "Open Conversation",
-                    Some("Reattach to the same live session".to_string()),
-                    ActionCategory::ScriptContext,
-                )
-                .with_shortcut("↵")
-                .with_section("Session")
-                .with_icon(IconName::Terminal)];
+                let mut actions = Vec::new();
+                if *open_required {
+                    actions.push(
+                        Action::new(
+                            "flow_desk_session_open",
+                            FlowDeskRowVerb::OpenConversation.label(),
+                            Some("Reattach to the same live session".to_string()),
+                            ActionCategory::ScriptContext,
+                        )
+                        .with_shortcut("↵")
+                        .with_section("Session")
+                        .with_icon(IconName::MessageCircle),
+                    );
+                }
 
-                for binding in flow_conversation_commands(*working) {
+                for binding in flow_conversation_commands_for_facts(*facts) {
                     if binding.handler == FlowConversationCommand::Send {
                         continue;
                     }
-                    let (action_id, description, section, icon) = match binding.handler {
+                    let (action_id, description, section, icon): (
+                        &str,
+                        &str,
+                        &str,
+                        IconName,
+                    ) = match binding.handler {
                         FlowConversationCommand::Send => unreachable!(),
                         FlowConversationCommand::Stop => (
                             "flow_desk_session_stop",
@@ -1055,11 +1111,35 @@ impl ScriptListApp {
                             "Session",
                             IconName::ArrowDown,
                         ),
+                        FlowConversationCommand::BackToCurrent => (
+                            "flow_desk_session_back_to_current",
+                            "Return to the writable current conversation",
+                            "History",
+                            IconName::ArrowRight,
+                        ),
                         FlowConversationCommand::NewConversation => (
                             "flow_desk_session_new_conversation",
                             "Start a fresh conversation with this flow",
                             "Session",
                             IconName::Plus,
+                        ),
+                        FlowConversationCommand::ConversationHistory => (
+                            "flow_desk_session_history",
+                            "Browse immutable archived conversations",
+                            "History",
+                            IconName::MagnifyingGlass,
+                        ),
+                        FlowConversationCommand::ContinueAsNewConversation => (
+                            "flow_desk_session_continue_as_new",
+                            "Clone this archive into a writable new conversation",
+                            "History",
+                            IconName::Plus,
+                        ),
+                        FlowConversationCommand::DeleteConversation => (
+                            "flow_desk_session_delete_conversation",
+                            "Delete only the selected conversation after confirmation",
+                            "Danger",
+                            IconName::Trash,
                         ),
                         FlowConversationCommand::CopyLastResponse => (
                             "flow_desk_session_copy_last_response",
@@ -1069,8 +1149,8 @@ impl ScriptListApp {
                         ),
                         FlowConversationCommand::TerminateRuntime => (
                             "flow_desk_session_terminate",
-                            "Permanently end this conversation after confirmation",
-                            "Danger",
+                            "Stop and forget the runtime while preserving conversation history",
+                            "Runtime",
                             IconName::Trash,
                         ),
                     };
@@ -1093,6 +1173,22 @@ impl ScriptListApp {
                     actions.push(action);
                 }
 
+                for (index, (archive_id, turn_count)) in archives.iter().rev().enumerate() {
+                    actions.push(
+                        Action::new(
+                            format!("flow_desk_session_open_archive:{archive_id}"),
+                            format!("Archived Conversation {}", index + 1),
+                            Some(format!(
+                                "Read-only · {turn_count} {}",
+                                if *turn_count == 1 { "turn" } else { "turns" }
+                            )),
+                            ActionCategory::ScriptContext,
+                        )
+                        .with_section("History")
+                        .with_icon(IconName::MagnifyingGlass),
+                    );
+                }
+
                 actions.extend([
                     Action::new(
                         "flow_desk_session_copy_transcript",
@@ -1111,7 +1207,11 @@ impl ScriptListApp {
                     .with_section("Create")
                     .with_icon(IconName::Plus),
                 ]);
-                actions
+                let (mut danger, mut normal): (Vec<_>, Vec<_>) = actions
+                    .into_iter()
+                    .partition(|action| action.section.as_deref() == Some("Danger"));
+                normal.append(&mut danger);
+                normal
             }
             FlowDeskSubject::Run(id) => {
                 let run = crate::flows::run_registry::flow_run_registry().get(*id);
@@ -1149,6 +1249,40 @@ impl ScriptListApp {
                     .with_section("Run")
                     .with_icon(IconName::Trash),
                 );
+                actions
+            }
+            FlowDeskSubject::Recovery {
+                descriptor,
+                failure,
+            } => {
+                let mut actions = vec![Action::new(
+                    "flow_desk_recovery_primary",
+                    descriptor.primary.label(),
+                    Some(descriptor.detail.clone()),
+                    ActionCategory::ScriptContext,
+                )
+                .with_shortcut("↵")
+                .with_section("Recovery")
+                .with_icon(IconName::Refresh)];
+                if let Some(failure) = failure {
+                    let code = format!("{:?}", failure.failure.code);
+                    let fingerprint = failure
+                        .failure
+                        .diagnostic
+                        .as_ref()
+                        .map(|diagnostic| diagnostic.fingerprint.0.as_str())
+                        .unwrap_or("unavailable");
+                    actions.push(
+                        Action::new(
+                            "flow_desk_recovery_copy_details",
+                            "Copy Details",
+                            Some(format!("{code} · diagnostic {fingerprint}")),
+                            ActionCategory::ScriptContext,
+                        )
+                        .with_section("Recovery")
+                        .with_icon(IconName::Copy),
+                    );
+                }
                 actions
             }
             FlowDeskSubject::Create => vec![Action::new(
@@ -1196,6 +1330,7 @@ impl ScriptListApp {
                     )
                 })
                 .unwrap_or_else(|| "Run actions".to_string()),
+            FlowDeskSubject::Recovery { descriptor, .. } => descriptor.title.clone(),
             FlowDeskSubject::Create => "Create a flow".to_string(),
         };
         let dialog = cx.new(move |cx| {
@@ -1271,6 +1406,9 @@ impl ScriptListApp {
             ("flow_desk_converse", Some(FlowDeskSubject::Flow(flow))) => {
                 self.resume_or_start_flow_session(&flow, None, cx);
             }
+            ("flow_desk_open_terminal", Some(FlowDeskSubject::Flow(flow))) => {
+                self.open_flow_in_terminal(&flow, cx);
+            }
             ("flow_desk_run_once", Some(FlowDeskSubject::Flow(flow))) => {
                 self.flow_desk_run_once(&flow, cx);
             }
@@ -1304,6 +1442,47 @@ impl ScriptListApp {
                 self.background_flow_session(window, cx);
             }
             (
+                "flow_desk_session_back_to_current",
+                Some(FlowDeskSubject::Session { id, .. }),
+            ) => {
+                self.show_current_flow_conversation(id, cx);
+            }
+            (
+                "flow_desk_session_history",
+                Some(FlowDeskSubject::Session { id, archives, .. }),
+            ) => {
+                if let Some((archive_id, _)) = archives.last() {
+                    self.show_flow_archive(id, archive_id, cx);
+                }
+            }
+            (
+                archive_action,
+                Some(FlowDeskSubject::Session { id, .. }),
+            ) if archive_action.starts_with("flow_desk_session_open_archive:") => {
+                if let Some(archive_id) = archive_action.split_once(':').map(|(_, id)| id) {
+                    self.show_flow_archive(id, archive_id, cx);
+                }
+            }
+            (
+                "flow_desk_session_continue_as_new",
+                Some(FlowDeskSubject::Session { id, .. }),
+            ) => {
+                let archive_id = self
+                    .conversations
+                    .flow_sessions
+                    .iter()
+                    .find(|(meta, _)| meta.id == id)
+                    .and_then(|(meta, _)| match &meta.transcript_selection {
+                        crate::flows::session::FlowTranscriptSelection::Archived(id) => {
+                            Some(id.clone())
+                        }
+                        crate::flows::session::FlowTranscriptSelection::Active => None,
+                    });
+                if let Some(archive_id) = archive_id {
+                    self.continue_flow_archive_as_new(id, &archive_id, cx);
+                }
+            }
+            (
                 "flow_desk_session_new_conversation",
                 Some(FlowDeskSubject::Session { id, .. }),
             ) => {
@@ -1327,7 +1506,7 @@ impl ScriptListApp {
             ("flow_desk_session_copy_transcript", Some(FlowDeskSubject::Session { id, .. })) => {
                 if let Some((meta, _)) = self.conversations.flow_sessions.iter().find(|(meta, _)| meta.id == id) {
                     let transcript = meta
-                        .turns
+                        .selected_turns()
                         .iter()
                         .map(|turn| format!("**You:** {}\n\n{}", turn.user, turn.assistant))
                         .collect::<Vec<_>>()
@@ -1338,22 +1517,83 @@ impl ScriptListApp {
             ("flow_desk_session_stop", Some(FlowDeskSubject::Session { id, .. })) => {
                 self.stop_flow_session(id, cx);
             }
+            (
+                "flow_desk_session_delete_conversation",
+                Some(FlowDeskSubject::Session { id, .. }),
+            ) => {
+                let summary = self
+                    .conversations
+                    .flow_sessions
+                    .iter()
+                    .find(|(meta, _)| meta.id == id)
+                    .map(|(meta, _)| {
+                        let kind = if meta.selected_is_archived() {
+                            "archived"
+                        } else {
+                            "active"
+                        };
+                        let turns = meta.selected_turns().len();
+                        format!(
+                            "Delete the {kind} conversation with {turns} {}? Other archives are preserved.",
+                            if turns == 1 { "turn" } else { "turns" }
+                        )
+                    })
+                    .unwrap_or_else(|| "Delete this conversation?".to_string());
+                let owner = cx.entity().downgrade();
+                let owner_for_confirm = owner.clone();
+                // Closing the Actions NSPanel explicitly activates its parent.
+                // Record that requested state before opening the attached popup,
+                // so the resulting focus event is not mistaken for a later user
+                // click on the parent and used to auto-cancel the confirmation.
+                self.was_window_focused = true;
+                crate::confirm::open_parent_confirm_dialog_for_entity(
+                    window,
+                    cx,
+                    owner,
+                    crate::confirm::ParentConfirmOptions::destructive(
+                        "Delete Conversation?",
+                        summary,
+                        "Delete",
+                    ),
+                    move |_window, cx| {
+                        if let Some(entity) = owner_for_confirm.upgrade() {
+                            entity.update(cx, |this, cx| {
+                                this.delete_selected_flow_conversation(
+                                    id,
+                                    ConfirmedFlowThreadDeletion(()),
+                                    cx,
+                                );
+                            });
+                        }
+                    },
+                    |_window, _cx| {},
+                );
+            }
             ("flow_desk_session_terminate", Some(FlowDeskSubject::Session { id, .. })) => {
                 let owner = cx.entity().downgrade();
                 let owner_for_confirm = owner.clone();
+                // Match Delete Conversation: Actions has requested parent
+                // activation, so acknowledge that expected transition before
+                // the new child popup enters the focus-dismiss state machine.
+                self.was_window_focused = true;
                 crate::confirm::open_parent_confirm_dialog_for_entity(
                     window,
                     cx,
                     owner,
                     crate::confirm::ParentConfirmOptions::destructive(
                         "Terminate Runtime?",
-                        "This permanently ends the current Flow conversation.",
-                        "Terminate",
+                        "Stop and forget only the runtime. Conversation history and drafts are preserved.",
+                        "Terminate Runtime",
                     ),
                     move |window, cx| {
                         if let Some(entity) = owner_for_confirm.upgrade() {
                             entity.update(cx, |this, cx| {
-                                this.terminate_flow_session(id, window, cx);
+                                this.terminate_flow_session(
+                                    id,
+                                    ConfirmedFlowRuntimeTermination(()),
+                                    window,
+                                    cx,
+                                );
                             });
                         }
                     },
@@ -1378,6 +1618,30 @@ impl ScriptListApp {
             }
             ("flow_desk_runs_clear_finished", _) => {
                 crate::flows::run_registry::flow_run_registry().clear_finished();
+            }
+            (
+                "flow_desk_recovery_primary",
+                Some(FlowDeskSubject::Recovery { .. }),
+            ) => {
+                self.flow_desk_activate_selected(false, window, cx);
+            }
+            (
+                "flow_desk_recovery_copy_details",
+                Some(FlowDeskSubject::Recovery {
+                    failure: Some(failure),
+                    ..
+                }),
+            ) => {
+                let code = format!("{:?}", failure.failure.code);
+                let fingerprint = failure
+                    .failure
+                    .diagnostic
+                    .as_ref()
+                    .map(|diagnostic| diagnostic.fingerprint.0.as_str())
+                    .unwrap_or("unavailable");
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(format!(
+                    "Flow discovery failure: {code}\nDiagnostic fingerprint: {fingerprint}"
+                )));
             }
             ("flow_desk_create", _) => {
                 self.start_flow_create_session(cx);
@@ -1534,16 +1798,35 @@ mod flow_desk_create_discoverability_tests {
         }
     }
 
+    fn session_subject(working: bool) -> FlowDeskSubject {
+        FlowDeskSubject::Session {
+            id: 7,
+            facts: crate::components::conversation_actions::FlowConversationCommandFacts {
+                response_in_progress: working,
+                viewing_archive: false,
+                has_archives: false,
+                selected_has_response: true,
+                composer_has_text: true,
+                hidden_draft_exists: false,
+                runtime_attached: true,
+            },
+            archives: Vec::new(),
+            open_required: true,
+        }
+    }
+
+    fn already_open_session_subject(working: bool) -> FlowDeskSubject {
+        let mut subject = session_subject(working);
+        if let FlowDeskSubject::Session { open_required, .. } = &mut subject {
+            *open_required = false;
+        }
+        subject
+    }
+
     fn subjects() -> Vec<(&'static str, FlowDeskSubject)> {
         vec![
             ("flow", FlowDeskSubject::Flow(sample_flow())),
-            (
-                "session",
-                FlowDeskSubject::Session {
-                    id: 7,
-                    working: false,
-                },
-            ),
+            ("session", session_subject(false)),
             ("create", FlowDeskSubject::Create),
         ]
     }
@@ -1577,10 +1860,7 @@ mod flow_desk_create_discoverability_tests {
 
     #[test]
     fn danger_actions_stay_last_for_sessions() {
-        let actions = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session {
-            id: 7,
-            working: false,
-        });
+        let actions = ScriptListApp::flow_desk_actions_for_dialog(&session_subject(false));
         let first_danger = actions
             .iter()
             .position(|action| action.section.as_deref() == Some("Danger"))
@@ -1598,10 +1878,6 @@ mod flow_desk_create_discoverability_tests {
     enum ChordOwner {
         /// `resolve_flow_session_key_action` answers it. Checkable right here.
         SessionKeyResolver(super::FlowSessionKeyAction),
-        /// A window-level interceptor answers it BEFORE the session resolver
-        /// ever runs, so the resolver correctly returns `Ignore`. Named, not
-        /// checked — the point is that a human declared where it lives.
-        HostInterceptor(&'static str),
     }
 
     /// Parse a menu badge (`⇧⌘C`) into the key + modifiers a keystroke
@@ -1646,15 +1922,12 @@ mod flow_desk_create_discoverability_tests {
 
         let owners: &[(&str, ChordOwner)] = &[
             (
-                "flow_desk_session_open",
-                ChordOwner::SessionKeyResolver(FlowSessionKeyAction::Submit),
+                "flow_desk_session_stop",
+                ChordOwner::SessionKeyResolver(FlowSessionKeyAction::Stop),
             ),
             (
                 "flow_desk_session_background",
-                // ⌘⇧D is intercepted at the window level so the agent TUI
-                // never sees it; the session resolver returning Ignore for it
-                // is correct, not a gap.
-                ChordOwner::HostInterceptor("src/app_impl/startup.rs (⌘⇧D flow-session chord)"),
+                ChordOwner::SessionKeyResolver(FlowSessionKeyAction::Background),
             ),
             (
                 "flow_desk_session_new_conversation",
@@ -1664,22 +1937,22 @@ mod flow_desk_create_discoverability_tests {
                 "flow_desk_session_copy_last_response",
                 ChordOwner::SessionKeyResolver(FlowSessionKeyAction::CopyLastResponse),
             ),
-            (
-                "flow_desk_session_terminate",
-                ChordOwner::SessionKeyResolver(FlowSessionKeyAction::Terminate),
-            ),
         ];
 
-        // `working: false` and `working: true` expose different action sets,
-        // so both are swept — a badge that only appears mid-turn is exactly
-        // the one nobody presses by hand.
+        // Idle and working sessions expose different enabled sets, so both are
+        // swept. Terminate is deliberately absent here because it has no chord.
         for working in [false, true] {
-            let actions = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session {
-                id: 7,
-                working,
-            });
+            let subject = already_open_session_subject(working);
+            let facts = match &subject {
+                FlowDeskSubject::Session { facts, .. } => *facts,
+                _ => unreachable!(),
+            };
+            let actions = ScriptListApp::flow_desk_actions_for_dialog(&subject);
 
             for action in actions.iter() {
+                if action.disabled_reason().is_some() {
+                    continue;
+                }
                 let Some(badge) = action.shortcut.as_deref() else {
                     continue;
                 };
@@ -1699,24 +1972,15 @@ mod flow_desk_create_discoverability_tests {
                     });
 
                 let (key, platform, shift) = parse_chord(badge);
-                let resolved = resolve_flow_session_key_action(&key, platform, shift, working, false);
+                let resolved = resolve_flow_session_key_action(&key, platform, shift, facts, false);
 
-                match owner {
-                    ChordOwner::SessionKeyResolver(expected) => assert_eq!(
-                        resolved, *expected,
-                        "{} advertises {badge:?}; pressing it (working={working}) must resolve \
-                         to {expected:?}, not {resolved:?}",
-                        action.id
-                    ),
-                    ChordOwner::HostInterceptor(where_) => assert_eq!(
-                        resolved,
-                        FlowSessionKeyAction::Ignore,
-                        "{} declares {where_} as the owner of {badge:?}, so the session \
-                         resolver must leave it alone — two owners for one chord is a race, \
-                         not redundancy",
-                        action.id
-                    ),
-                }
+                let ChordOwner::SessionKeyResolver(expected) = owner;
+                assert_eq!(
+                    resolved, *expected,
+                    "{} advertises {badge:?}; pressing it (working={working}) must resolve \
+                     to {expected:?}, not {resolved:?}",
+                    action.id
+                );
             }
         }
     }
@@ -1731,10 +1995,7 @@ mod flow_desk_create_discoverability_tests {
     /// exists to stop.
     #[test]
     fn flow_sessions_copy_the_last_response_the_same_way_agent_chat_does() {
-        let actions = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session {
-            id: 7,
-            working: false,
-        });
+        let actions = ScriptListApp::flow_desk_actions_for_dialog(&session_subject(false));
         let copy = actions
             .iter()
             .find(|action| action.id == "flow_desk_session_copy_last_response")
@@ -1772,10 +2033,7 @@ mod flow_desk_create_discoverability_tests {
             .find(|action| action.id == "agent_chat_new_conversation")
             .expect("Agent Chat owns the reference New Conversation action");
 
-        let actions = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session {
-            id: 7,
-            working: false,
-        });
+        let actions = ScriptListApp::flow_desk_actions_for_dialog(&session_subject(false));
         let flow = actions
             .iter()
             .find(|action| action.id == "flow_desk_session_new_conversation")
@@ -1792,10 +2050,7 @@ mod flow_desk_create_discoverability_tests {
     /// allowing a running turn to be orphaned.
     #[test]
     fn new_conversation_is_visible_but_disabled_while_a_turn_is_running() {
-        let working = ScriptListApp::flow_desk_actions_for_dialog(&FlowDeskSubject::Session {
-            id: 7,
-            working: true,
-        });
+        let working = ScriptListApp::flow_desk_actions_for_dialog(&session_subject(true));
         let new_conversation = working
             .iter()
             .find(|action| action.id == "flow_desk_session_new_conversation")

@@ -116,6 +116,31 @@ pub(crate) fn process_failure(
     )
 }
 
+/// Preserve an exact process diagnostic without letting its prose choose the
+/// user-facing failure kind. The typed process fact remains authoritative;
+/// `detail` is available only through the diagnostic vault/fingerprint.
+pub(crate) fn process_failure_with_detail(
+    component: ProtocolComponent,
+    facts: ProcessFailureFacts,
+    detail: &str,
+) -> AppFailureRecord {
+    let mut record = process_failure(component, facts);
+    record.failure.diagnostic = Some(runtime_vault().capture(detail));
+    record
+}
+
+/// Preserve malformed protocol bytes behind the diagnostic boundary while
+/// classifying from the typed protocol fact.
+pub(crate) fn protocol_failure_with_detail(
+    component: ProtocolComponent,
+    facts: ProtocolFailureFacts,
+    detail: &str,
+) -> AppFailureRecord {
+    let mut record = protocol_failure(component, facts);
+    record.failure.diagnostic = Some(runtime_vault().capture(detail));
+    record
+}
+
 pub(crate) fn protocol_failure(
     component: ProtocolComponent,
     facts: ProtocolFailureFacts,

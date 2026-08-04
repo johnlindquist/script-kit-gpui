@@ -36,8 +36,33 @@ pub struct SessionSnapshot {
     pub turn_in_flight: bool,
     /// `codexThread` or `mdflowTurns`.
     pub transport: &'static str,
-    /// Engine label as shown in the session chip (e.g. `codex · gpt-5.6-luna`).
+    /// Stable engine identity; model is a separate typed field.
     pub engine: String,
+    pub model: Option<String>,
+    pub model_source: &'static str,
+    pub friendly_name: String,
+    pub origin: &'static str,
+    pub cwd_display: String,
+    pub cwd_fingerprint: String,
+    pub selection: &'static str,
+    pub read_only: bool,
+    pub active_thread_fingerprint: String,
+    pub selected_thread_fingerprint: String,
+    pub parent_thread_fingerprint: Option<String>,
+    pub parent_retained: Option<bool>,
+    pub inherited_turn_count: usize,
+    pub active_turn_count: usize,
+    pub selected_turn_count: usize,
+    pub archive_count: usize,
+    pub thread_count: usize,
+    pub total_turn_count: usize,
+    pub needs_rethread: bool,
+    pub thread_ready: bool,
+    pub runtime_generation: u64,
+    pub draft_chars: usize,
+    pub draft_fingerprint: Option<String>,
+    pub draft_generation: u64,
+    pub persistence_revision: u64,
     /// Reducer-owned reliability phase tag (S09), camelCase — e.g. `ready`,
     /// `running`, `awaitingRecovery`.
     pub reliability_phase: String,
@@ -114,7 +139,15 @@ pub fn flow_ux_state(inputs: FlowUxSnapshotInputs<'_>) -> Value {
                 "status": entry.status.automation_label(),
                 "count": entry.flows.len(),
                 "cwd": cwd,
-                "warnings": entry.warnings,
+                "warningCount": entry.warnings.len(),
+                "failureCode": entry.failure.as_ref().map(|failure| {
+                    format!("{:?}", failure.failure.code)
+                }),
+                "diagnosticFingerprint": entry
+                    .failure
+                    .as_ref()
+                    .and_then(|failure| failure.failure.diagnostic.as_ref())
+                    .map(|diagnostic| diagnostic.fingerprint.0.clone()),
             })
         }),
         "preview": inputs.preview.map(|p| {
@@ -140,6 +173,33 @@ pub fn flow_ux_state(inputs: FlowUxSnapshotInputs<'_>) -> Value {
                     "turnInFlight": s.turn_in_flight,
                     "transport": s.transport,
                     "engine": s.engine,
+                    "model": s.model,
+                    "modelSource": s.model_source,
+                    "friendlyName": s.friendly_name,
+                    "origin": s.origin,
+                    "cwdDisplay": s.cwd_display,
+                    "cwdFingerprint": s.cwd_fingerprint,
+                    "selection": s.selection,
+                    "readOnly": s.read_only,
+                    "activeThreadFingerprint": s.active_thread_fingerprint,
+                    "selectedThreadFingerprint": s.selected_thread_fingerprint,
+                    "parentThreadFingerprint": s.parent_thread_fingerprint,
+                    "parentRetained": s.parent_retained,
+                    "inheritedTurnCount": s.inherited_turn_count,
+                    "activeTurnCount": s.active_turn_count,
+                    "selectedTurnCount": s.selected_turn_count,
+                    "archiveCount": s.archive_count,
+                    "threadCount": s.thread_count,
+                    "totalTurnCount": s.total_turn_count,
+                    "retentionPolicy": "uncappedByApp",
+                    "turnCap": serde_json::Value::Null,
+                    "needsRethread": s.needs_rethread,
+                    "threadReady": s.thread_ready,
+                    "runtimeGeneration": s.runtime_generation,
+                    "draftChars": s.draft_chars,
+                    "draftFingerprint": s.draft_fingerprint,
+                    "draftGeneration": s.draft_generation,
+                    "persistenceRevision": s.persistence_revision,
                     "reliabilityPhase": s.reliability_phase,
                     "failureCode": s.failure_code,
                     "lastFailureSummary": s.last_failure_summary,
@@ -190,7 +250,32 @@ mod tests {
                 turns: 2,
                 turn_in_flight: true,
                 transport: "codexThread",
-                engine: "codex · gpt-5.6-luna".into(),
+                engine: "codex".into(),
+                model: Some("gpt-5.6-luna".into()),
+                model_source: "runtime",
+                friendly_name: "Gmail".into(),
+                origin: "Package",
+                cwd_display: "tmp/p".into(),
+                cwd_fingerprint: "cwd-fingerprint".into(),
+                selection: "active",
+                read_only: false,
+                active_thread_fingerprint: "active-thread".into(),
+                selected_thread_fingerprint: "active-thread".into(),
+                parent_thread_fingerprint: None,
+                parent_retained: None,
+                inherited_turn_count: 0,
+                active_turn_count: 2,
+                selected_turn_count: 2,
+                archive_count: 0,
+                thread_count: 1,
+                total_turn_count: 2,
+                needs_rethread: false,
+                thread_ready: true,
+                runtime_generation: 1,
+                draft_chars: 0,
+                draft_fingerprint: None,
+                draft_generation: 0,
+                persistence_revision: 2,
                 reliability_phase: "running".into(),
                 failure_code: None,
                 last_failure_summary: None,
@@ -213,5 +298,39 @@ mod tests {
         assert_eq!(run["phase"], "Starting");
         assert_eq!(run["engagement"], "Inline");
         assert_eq!(run["variant"], "lens");
+    }
+
+    #[test]
+    fn roster_snapshot_exposes_only_typed_failure_identity() {
+        let canary = "PRIVATE_ROSTER_STDERR_CANARY";
+        let failure = crate::ai::reliability::process_failure_with_detail(
+            sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+            crate::ai::reliability::ProcessFailureFacts::ChildExited {
+                exit_code: Some(9),
+                signal: None,
+            },
+            canary,
+        );
+        let roster = crate::flows::catalog::RosterEntry {
+            status: crate::flows::catalog::RosterStatus::Error,
+            flows: std::sync::Arc::new(Vec::new()),
+            warnings: vec![canary.to_string()],
+            failure: Some(failure),
+            fetched_at: std::time::Instant::now(),
+        };
+        let value = flow_ux_state(FlowUxSnapshotInputs {
+            active_variant: None,
+            selected_flow_id: None,
+            roster: Some((&roster, "safe-cwd")),
+            preview: None,
+            manager_visible: false,
+            manager_focused_run_id: None,
+            sessions: Vec::new(),
+        });
+        let serialized = serde_json::to_string(&value).expect("snapshot serializes");
+        assert!(!serialized.contains(canary));
+        assert_eq!(value["roster"]["warningCount"], 1);
+        assert_eq!(value["roster"]["failureCode"], "ChildExited");
+        assert!(value["roster"]["diagnosticFingerprint"].is_string());
     }
 }

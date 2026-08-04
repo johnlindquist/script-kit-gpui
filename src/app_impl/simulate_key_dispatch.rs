@@ -2248,14 +2248,7 @@ impl ScriptListApp {
                     }
                 }
                 AppView::FlowSessionView { .. } => {
-                    if has_cmd && crate::ui_foundation::is_key_escape(&key_lower) {
-                        let session_id = match view.current_view {
-                            AppView::FlowSessionView { session_id } => session_id,
-                            _ => unreachable!(),
-                        };
-                        logging::log("STDIN", "SimulateKey: Cmd+Escape - terminate flow session");
-                        view.terminate_flow_session(session_id, window, ctx);
-                    } else if has_cmd && has_shift && key_lower == "d" {
+                    if has_cmd && has_shift && key_lower == "d" {
                         logging::log(
                             "STDIN",
                             "SimulateKey: Cmd+Shift+D - background flow session",

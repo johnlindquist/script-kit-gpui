@@ -51,8 +51,8 @@ pub use presentation::{
     AI_RECOVERY_PROGRESS_ID, AI_RECOVERY_TITLE_ID,
 };
 pub(crate) use runtime_boundary::{
-    context_unavailable_failure, process_failure, protocol_failure, provider_failure,
-    quick_ai_failure, runtime_closed_failure, setup_required_failure, spawn_failure,
-    AiAdapterError, AiAdapterResult, AiTurnRuntimeOutcome,
+    context_unavailable_failure, process_failure, process_failure_with_detail, protocol_failure,
+    protocol_failure_with_detail, provider_failure, quick_ai_failure, runtime_closed_failure,
+    setup_required_failure, spawn_failure, AiAdapterError, AiAdapterResult, AiTurnRuntimeOutcome,
 };
 pub use selection::{acknowledge_selection, decide_selection_change, SelectionDecision};

@@ -1,0 +1,17 @@
+#!/bin/sh
+# Deterministic conversation engine for C05 archive/history runtime proof.
+# Ordinary prompts return immediately. A prompt containing HISTORY_HOLD keeps
+# the turn active after emitting one partial line so Stop/Terminate ordering can
+# be exercised against a real child process.
+case "$*" in
+  *HISTORY_HOLD*)
+    printf 'HISTORYENG_PARTIAL\n'
+    trap 'exit 0' TERM INT
+    sleep 300 &
+    child=$!
+    wait "$child"
+    ;;
+  *)
+    printf 'HISTORYENG_OK: %s\n' "$1"
+    ;;
+esac

@@ -32,6 +32,7 @@ pub(crate) enum ConversationCommandId {
     Back,
     Close,
     NewConversation,
+    ConversationHistory,
     DeleteConversation,
     TerminateRuntime,
     ContinueAsNewConversation,
@@ -61,6 +62,8 @@ pub(crate) enum ConversationCommandDisabledReason {
     ResponseInProgress,
     NoResponseRunning,
     WaitingForPermission,
+    HiddenDraftMustBeResolved,
+    RuntimeAlreadyDetached,
 }
 
 impl ConversationCommandDisabledReason {
@@ -71,6 +74,10 @@ impl ConversationCommandDisabledReason {
             Self::ResponseInProgress => "Stop the current response first.",
             Self::NoResponseRunning => "No response is running.",
             Self::WaitingForPermission => "Resolve the permission request first.",
+            Self::HiddenDraftMustBeResolved => {
+                "Return to Current and send or clear the draft first."
+            }
+            Self::RuntimeAlreadyDetached => "The runtime is already terminated.",
         }
     }
 }
@@ -171,6 +178,13 @@ fn command_metadata(
             ConfirmPolicy::None,
             "conversation.new",
         ),
+        ConversationHistory => (
+            "Conversation History…",
+            None,
+            ConversationCommandRole::Secondary,
+            ConfirmPolicy::None,
+            "conversation.history",
+        ),
         DeleteConversation => (
             "Delete Conversation…",
             None,
@@ -180,7 +194,7 @@ fn command_metadata(
         ),
         TerminateRuntime => (
             "Terminate Runtime…",
-            Some("⇧⌘⎋"),
+            None,
             ConversationCommandRole::Destructive,
             ConfirmPolicy::Required,
             "conversation.terminateRuntime",
@@ -343,23 +357,91 @@ pub(crate) enum FlowConversationCommand {
     Send,
     Stop,
     Background,
+    BackToCurrent,
     NewConversation,
+    ConversationHistory,
+    ContinueAsNewConversation,
+    DeleteConversation,
     CopyLastResponse,
     TerminateRuntime,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlowConversationCommandFacts {
+    pub(crate) response_in_progress: bool,
+    pub(crate) viewing_archive: bool,
+    pub(crate) has_archives: bool,
+    pub(crate) selected_has_response: bool,
+    pub(crate) composer_has_text: bool,
+    pub(crate) hidden_draft_exists: bool,
+    pub(crate) runtime_attached: bool,
 }
 
 pub(crate) fn flow_conversation_commands(
     response_in_progress: bool,
 ) -> Vec<BoundConversationCommand<FlowConversationCommand>> {
-    vec![
-        if response_in_progress {
+    flow_conversation_commands_for_facts(FlowConversationCommandFacts {
+        response_in_progress,
+        selected_has_response: true,
+        composer_has_text: true,
+        runtime_attached: true,
+        ..FlowConversationCommandFacts::default()
+    })
+}
+
+pub(crate) fn flow_conversation_commands_for_facts(
+    facts: FlowConversationCommandFacts,
+) -> Vec<BoundConversationCommand<FlowConversationCommand>> {
+    if facts.viewing_archive {
+        let mut commands = vec![
+            BoundConversationCommand::enabled(
+                ConversationCommandId::Back,
+                FlowConversationCommand::BackToCurrent,
+            ),
+            if facts.hidden_draft_exists {
+                BoundConversationCommand::disabled(
+                    ConversationCommandId::ContinueAsNewConversation,
+                    ConversationCommandDisabledReason::HiddenDraftMustBeResolved,
+                    FlowConversationCommand::ContinueAsNewConversation,
+                )
+            } else {
+                BoundConversationCommand::enabled(
+                    ConversationCommandId::ContinueAsNewConversation,
+                    FlowConversationCommand::ContinueAsNewConversation,
+                )
+            },
+            BoundConversationCommand::enabled(
+                ConversationCommandId::DeleteConversation,
+                FlowConversationCommand::DeleteConversation,
+            ),
+        ];
+        if facts.selected_has_response {
+            commands.insert(
+                1,
+                BoundConversationCommand::enabled(
+                    ConversationCommandId::CopyLastResponse,
+                    FlowConversationCommand::CopyLastResponse,
+                ),
+            );
+        }
+        return commands;
+    }
+
+    let mut commands = vec![
+        if facts.response_in_progress {
             BoundConversationCommand::enabled(
                 ConversationCommandId::Stop,
                 FlowConversationCommand::Stop,
             )
-        } else {
+        } else if facts.composer_has_text {
             BoundConversationCommand::enabled(
                 ConversationCommandId::Send,
+                FlowConversationCommand::Send,
+            )
+        } else {
+            BoundConversationCommand::disabled(
+                ConversationCommandId::Send,
+                ConversationCommandDisabledReason::TypeMessageFirst,
                 FlowConversationCommand::Send,
             )
         },
@@ -367,7 +449,7 @@ pub(crate) fn flow_conversation_commands(
             ConversationCommandId::Background,
             FlowConversationCommand::Background,
         ),
-        if response_in_progress {
+        if facts.response_in_progress {
             BoundConversationCommand::disabled(
                 ConversationCommandId::NewConversation,
                 ConversationCommandDisabledReason::ResponseInProgress,
@@ -379,27 +461,59 @@ pub(crate) fn flow_conversation_commands(
                 FlowConversationCommand::NewConversation,
             )
         },
-        BoundConversationCommand::enabled(
+    ];
+    if facts.has_archives {
+        commands.push(if facts.response_in_progress {
+            BoundConversationCommand::disabled(
+                ConversationCommandId::ConversationHistory,
+                ConversationCommandDisabledReason::ResponseInProgress,
+                FlowConversationCommand::ConversationHistory,
+            )
+        } else {
+            BoundConversationCommand::enabled(
+                ConversationCommandId::ConversationHistory,
+                FlowConversationCommand::ConversationHistory,
+            )
+        });
+    }
+    if facts.selected_has_response {
+        commands.push(BoundConversationCommand::enabled(
             ConversationCommandId::CopyLastResponse,
             FlowConversationCommand::CopyLastResponse,
-        ),
-        BoundConversationCommand::disabled(
+        ));
+    }
+    if !facts.response_in_progress {
+        commands.push(BoundConversationCommand::disabled(
             ConversationCommandId::Stop,
             ConversationCommandDisabledReason::NoResponseRunning,
             FlowConversationCommand::Stop,
-        ),
+        ));
+    }
+    commands.push(if facts.runtime_attached || facts.response_in_progress {
         BoundConversationCommand::enabled(
             ConversationCommandId::TerminateRuntime,
             FlowConversationCommand::TerminateRuntime,
-        ),
-    ]
-    .into_iter()
-    .filter(|command| {
-        command.descriptor.id != ConversationCommandId::Stop
-            || command.descriptor.availability.is_enabled()
-            || !response_in_progress
-    })
-    .collect()
+        )
+    } else {
+        BoundConversationCommand::disabled(
+            ConversationCommandId::TerminateRuntime,
+            ConversationCommandDisabledReason::RuntimeAlreadyDetached,
+            FlowConversationCommand::TerminateRuntime,
+        )
+    });
+    commands.push(if facts.response_in_progress {
+        BoundConversationCommand::disabled(
+            ConversationCommandId::DeleteConversation,
+            ConversationCommandDisabledReason::ResponseInProgress,
+            FlowConversationCommand::DeleteConversation,
+        )
+    } else {
+        BoundConversationCommand::enabled(
+            ConversationCommandId::DeleteConversation,
+            FlowConversationCommand::DeleteConversation,
+        )
+    });
+    commands
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -463,7 +577,6 @@ pub(crate) fn match_conversation_command_shortcut<Handler: Copy>(
             Some("⌘L") => platform && !shift && key.eq_ignore_ascii_case("l"),
             Some("⇧⌘C") => platform && shift && key.eq_ignore_ascii_case("c"),
             Some("⇧⌘R") => platform && shift && key.eq_ignore_ascii_case("r"),
-            Some("⇧⌘⎋") => platform && shift && crate::ui_foundation::is_key_escape(key),
             _ => false,
         })
         .map(|command| (command.handler, command.descriptor.availability))
@@ -740,6 +853,82 @@ mod conversation_actions_tests {
             command.descriptor.id,
             ConversationCommandId::Background | ConversationCommandId::NewConversation
         )));
+    }
+
+    #[test]
+    fn flow_active_working_and_archive_command_sets_are_exact() {
+        let active = flow_conversation_commands_for_facts(FlowConversationCommandFacts {
+            composer_has_text: true,
+            has_archives: true,
+            selected_has_response: true,
+            runtime_attached: true,
+            ..Default::default()
+        });
+        validate_conversation_command_bindings(&active).unwrap();
+        assert!(active.iter().any(|command| {
+            command.handler == FlowConversationCommand::TerminateRuntime
+                && command.descriptor.shortcut.is_none()
+                && command.descriptor.confirmation == ConfirmPolicy::Required
+        }));
+        assert!(active.iter().any(|command| {
+            command.handler == FlowConversationCommand::ConversationHistory
+                && command.descriptor.availability.is_enabled()
+        }));
+
+        let working = flow_conversation_commands_for_facts(FlowConversationCommandFacts {
+            response_in_progress: true,
+            has_archives: true,
+            runtime_attached: true,
+            ..Default::default()
+        });
+        assert!(working.iter().any(|command| {
+            command.handler == FlowConversationCommand::NewConversation
+                && command.descriptor.availability.disabled_reason()
+                    == Some("Stop the current response first.")
+        }));
+        assert!(working.iter().any(|command| {
+            command.handler == FlowConversationCommand::DeleteConversation
+                && !command.descriptor.availability.is_enabled()
+        }));
+
+        let archive = flow_conversation_commands_for_facts(FlowConversationCommandFacts {
+            viewing_archive: true,
+            selected_has_response: true,
+            ..Default::default()
+        });
+        let archive_ids: Vec<_> = archive
+            .iter()
+            .map(|command| command.descriptor.id)
+            .collect();
+        assert_eq!(
+            archive_ids,
+            vec![
+                ConversationCommandId::Back,
+                ConversationCommandId::CopyLastResponse,
+                ConversationCommandId::ContinueAsNewConversation,
+                ConversationCommandId::DeleteConversation,
+            ]
+        );
+        assert!(archive.iter().all(|command| !matches!(
+            command.handler,
+            FlowConversationCommand::Send
+                | FlowConversationCommand::Stop
+                | FlowConversationCommand::Background
+                | FlowConversationCommand::NewConversation
+                | FlowConversationCommand::ConversationHistory
+                | FlowConversationCommand::TerminateRuntime
+        )));
+
+        let blocked_continue = flow_conversation_commands_for_facts(FlowConversationCommandFacts {
+            viewing_archive: true,
+            hidden_draft_exists: true,
+            ..Default::default()
+        });
+        assert!(blocked_continue.iter().any(|command| {
+            command.handler == FlowConversationCommand::ContinueAsNewConversation
+                && command.descriptor.availability.disabled_reason()
+                    == Some("Return to Current and send or clear the draft first.")
+        }));
     }
 
     #[test]

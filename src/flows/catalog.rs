@@ -46,7 +46,12 @@ impl RosterStatus {
 pub struct RosterEntry {
     pub status: RosterStatus,
     pub flows: Arc<Vec<FlowDescriptor>>,
+    /// Non-fatal roster warnings supplied by mdflow. These are diagnostic
+    /// context, not primary UI copy or automation payload.
     pub warnings: Vec<String>,
+    /// Typed failure for a failed roster fetch. Raw stderr/parse detail lives
+    /// only in its diagnostic vault descriptor.
+    pub failure: Option<crate::ai::reliability::AppFailureRecord>,
     pub fetched_at: Instant,
 }
 
@@ -56,7 +61,15 @@ impl RosterEntry {
             status,
             flows: Arc::new(Vec::new()),
             warnings: Vec::new(),
+            failure: None,
             fetched_at: Instant::now(),
+        }
+    }
+
+    fn failed(failure: crate::ai::reliability::AppFailureRecord) -> Self {
+        Self {
+            failure: Some(failure),
+            ..Self::empty(RosterStatus::Error)
         }
     }
 
@@ -295,25 +308,27 @@ fn run_roster_with_deadline(binary: &str, cwd: &str) -> std::io::Result<std::pro
 /// Blocking roster fetch — call only from background threads.
 pub fn fetch_roster_blocking(cwd: &str) -> RosterEntry {
     let Some(binary) = mdflow_binary() else {
-        let mut entry = RosterEntry::empty(RosterStatus::Error);
-        entry
-            .warnings
-            .push("mdflow CLI not found on PATH (npm i -g mdflow)".to_string());
-        return entry;
+        return RosterEntry::failed(crate::ai::reliability::process_failure_with_detail(
+            sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+            crate::ai::reliability::ProcessFailureFacts::SpawnFailed,
+            "mdflow CLI not found on PATH",
+        ));
     };
     if !Path::new(cwd).is_dir() {
-        let mut entry = RosterEntry::empty(RosterStatus::Error);
-        entry.warnings.push(format!("cwd does not exist: {cwd}"));
-        return entry;
+        return RosterEntry::failed(crate::ai::reliability::process_failure_with_detail(
+            sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+            crate::ai::reliability::ProcessFailureFacts::SpawnFailed,
+            &format!("cwd does not exist: {cwd}"),
+        ));
     }
     let output = match run_roster_with_deadline(binary, cwd) {
         Ok(output) => output,
         Err(err) => {
-            let mut entry = RosterEntry::empty(RosterStatus::Error);
-            entry
-                .warnings
-                .push(format!("failed to run {binary}: {err}"));
-            return entry;
+            return RosterEntry::failed(crate::ai::reliability::process_failure_with_detail(
+                sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+                crate::ai::reliability::ProcessFailureFacts::SpawnFailed,
+                &format!("failed to run {binary}: {err}"),
+            ));
         }
     };
     if !output.status.success() {
@@ -329,14 +344,19 @@ pub fn fetch_roster_blocking(cwd: &str) -> RosterEntry {
         if looks_pre_protocol {
             return RosterEntry::empty(RosterStatus::Legacy);
         }
-        let mut entry = RosterEntry::empty(RosterStatus::Error);
-        let excerpt: String = stderr.trim().chars().take(300).collect();
-        entry.warnings.push(if excerpt.is_empty() {
+        let detail = if stderr.trim().is_empty() {
             format!("{binary} roster exited {}", output.status)
         } else {
-            format!("{binary} roster exited {}: {excerpt}", output.status)
-        });
-        return entry;
+            format!("{binary} roster exited {}: {stderr}", output.status)
+        };
+        return RosterEntry::failed(crate::ai::reliability::process_failure_with_detail(
+            sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+            crate::ai::reliability::ProcessFailureFacts::ChildExited {
+                exit_code: output.status.code(),
+                signal: None,
+            },
+            &detail,
+        ));
     }
     parse_roster_output(&String::from_utf8_lossy(&output.stdout))
 }
@@ -347,14 +367,15 @@ fn parse_roster_output(stdout: &str) -> RosterEntry {
             status: RosterStatus::Ready,
             flows: Arc::new(snapshot.flows),
             warnings: snapshot.warnings,
+            failure: None,
             fetched_at: Instant::now(),
         },
         Ok(_) => RosterEntry::empty(RosterStatus::Legacy),
-        Err(err) => {
-            let mut entry = RosterEntry::empty(RosterStatus::Error);
-            entry.warnings.push(format!("roster parse error: {err}"));
-            entry
-        }
+        Err(err) => RosterEntry::failed(crate::ai::reliability::protocol_failure_with_detail(
+            sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
+            crate::ai::reliability::ProtocolFailureFacts::MalformedResponse,
+            &format!("roster parse error: {err}; payload: {stdout}"),
+        )),
     }
 }
 
@@ -448,7 +469,11 @@ mod tests {
     fn parse_roster_output_reports_garbage_as_error() {
         let entry = parse_roster_output("not json");
         assert_eq!(entry.status, RosterStatus::Error);
-        assert!(!entry.warnings.is_empty());
+        assert!(
+            entry.warnings.is_empty(),
+            "raw parse text is diagnostic-only"
+        );
+        assert!(entry.failure.is_some());
     }
 
     #[test]

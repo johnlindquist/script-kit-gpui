@@ -6,8 +6,8 @@
 - consult count: 1 / 1
 - plan status: complete (`plan.md`, 28/28 task IDs covered)
 - protocol/profile: v2 / `profile-b`
-- execution status: C01–C04 complete (`SAFE-001`, `WF-001`, `WF-003`, `WF-002`, `WF-008`, `WF-004`, `WF-005`); starting C05
-- audit verdict: C01–C04 local audit PASS; whole-premise audit pending
+- execution status: C01–C05 complete (`SAFE-001`, `WF-001`, `WF-003`, `WF-002`, `WF-008`, `WF-004`, `WF-005`, `SAFE-003`, `WF-011`); next slice pending
+- audit verdict: C01–C05 local audits PASS; whole-premise audit pending
 
 ## Receipts
 
@@ -75,3 +75,16 @@
 - **Governance:** Source-audit inventory remains 2,818 reader sites and is current; source-audit plus hardcoded-visual governance tests pass 34/34; hardcoded-visual inventory has no additions relative to C04 HEAD; `git diff --check` passes. Protected calibration owners/envelopes have no diff; glass static contracts pass 40/40 and the measured production fixture passes 1/1.
 - **Escalations:** Removed inherited Flow ChatPrompt command elements before appending Flow descriptors to eliminate duplicate `conversation.send`. Repaired the Day Page render-time self-read described above. Replaced a stale Agent Chat fixture command with the supported launcher action. Added the ordinary ChatPrompt fixture after a real script-run proved the script protocol owned the Driver channel. Serialized startup show before fixture open after a runtime log proved the delayed show reset ChatPrompt.
 - **Adversarial audit:** PASS. Exact roles/actions are closed and role-safe; every projected command carries a handler token; descriptor validation rejects duplicate IDs/semantic IDs, destructive-without-confirmation, and blank disabled reasons; shortcut routes consume the same descriptor lists; renderer/Actions/automation paths derive from the same host adapters; unsupported ChatPrompt commands are absent; Flow lifecycle remains Flow-owned; context and identity mutations remain separate; Dictation destination inspection/selection cannot deliver; all six runtime hosts are unique and clean; no locked calibration value changed.
+
+### C05 — SAFE-003 archive/history safety and WF-011 truthful Flow identity
+
+- **Status:** Complete; local adversarial audit PASS; ready for atomic commit `fix(flow): archive history and expose truthful session identity [SAFE-003 WF-011]`.
+- **Consult:** `flow-c05-archive`, exactly 1/1, completed successfully through round-robin browser profile-b. No follow-up consult.
+- **Implementation:** Canonical v4 active/archive manifests migrate v0–v3 without turn loss, distinguish present empty metadata from absence, retain every turn, repair malformed v4, and use monotonic revisions plus selected-thread tombstones. New archives current state; archives are retained/read-only; Continue clones with lineage; Terminate is confirmed Actions-only runtime forget; confirmed Delete removes only selected; dismissal paths never delete. Flow identity separates engine/model, summarizes cwd/origin safely, and reports selection/lineage/retention/rethread truth. Seven typed desk states and one selected-row descriptor drive render, state/elements, Actions, both footers, Enter, and Shift+Enter.
+- **Escalations:** Replaced the 50 ms explain test with one injected absolute-deadline seam and retained a separate owned-process test. Runtime found that fast mdflow could reach Succeeded before a Running observation; terminal acceptance now clears rethread. The first probe assumed an in-window `confirmPrompt`; it now targets the real `confirm-popup` automation window. A second rapid confirmation exposed expected Actions-parent focus restoration being mistaken for a parent click; destructive Flow actions acknowledge the requested parent activation before opening the child popup, with no hardcoded delay.
+- **Focused proof:** Flow session model 55 PASS/1 ignored; conversation actions 10/10; Flow Session binary 32/32; Flow Desk binary 10/10; sk-protocol reliability 15/15; `check --lib` PASS. Exact 20/1,000-turn tests pass. Two fresh-process combined serde medians are 1.837 ms and 1.815 ms, retaining one atomic manifest.
+- **Build/runtime:** `target-agent/artifacts/cons-flow-c05/script-kit-gpui`, SHA-256 `1bded18b685837831f5579ba3fcf4692c22908ae6f75c27633e491fd69398ece`. `.artifacts/consistency/cons-flow-ux/c05-flow-archive-v1/runtime/flow-history-receipt.json` passes nine scenarios: 15-turn seed/restart, New/archive/Continue, idle/active Terminate, Delete cancel/confirm, stale-write release, dismissal preservation, and all seven desk states.
+- **Cleanup/privacy:** Nine Driver rows each report `processExited:true`, `streamsDrained:true`, `logWriterClosed:true`, `ownedProcessCount:0`, `fixtureOwnedProcessCount:0`, no forced termination, and unchanged clipboard change count. All five privacy counters are zero.
+- **Governance:** Source-audit inventory reports no new guarded reader sites relative to `d4287ef3a`; no executable lane-governance script exists, so focused reliability/source/privacy/hardcoded-visual/glass gates are authoritative. Protected owner diff is empty; Bun glass suite 40/40 and production calibration fixture 1/1 pass. No surface-local visual values were added.
+- **Forward progress index:** 18 = prior 10 +2 product/model complete +2 focused/current-byte proof +2 stable artifact/runtime +1 governance/privacy/glass +1 docs/audit/commit readiness.
+- **Lifecycle:** Local commit authorized; push, deploy, tag, release, publication, and `.hitl-align` access remain unauthorized and were not performed.
