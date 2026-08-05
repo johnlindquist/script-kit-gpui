@@ -105,7 +105,7 @@ impl ScriptListApp {
     /// DevTools and visual smoke tests. This intentionally bypasses Pi warm-up.
     pub(crate) fn open_standard_agent_chat_mock_fixture(&mut self, cx: &mut Context<Self>) {
         let source_view = self.current_view.clone();
-        self.seed_agent_chat_return_origin_for_view(&source_view);
+        self.seed_agent_chat_return_origin_for_view(&source_view, cx);
 
         let (_broker, permission_rx) = crate::ai::agent_chat::ui::AgentChatPermissionBroker::new();
         let thread = cx.new(|cx| {

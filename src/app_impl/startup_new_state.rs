@@ -121,7 +121,7 @@
             flow_session_prompt_history_index: None,
             flow_session_prompt_draft: None,
             conversations: crate::ai::conversations::BackgroundedSessionStore::new(),
-            flow_session_return_to_desk: false,
+            flow_session_return_route: FlowConversationReturnRoute::Direct,
             flow_chat_sender: flow_chat_tx,
             flow_chat_receiver: flow_chat_rx,
             current_app_commands_scroll_handle: UniformListScrollHandle::new(),

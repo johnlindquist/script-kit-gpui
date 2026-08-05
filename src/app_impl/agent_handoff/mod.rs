@@ -62,11 +62,7 @@ impl ScriptListApp {
             let close_app = app_entity.clone();
             view.set_on_close_requested(move |window, cx| {
                 close_app.update(cx, |app, cx| {
-                    if app.opened_from_main_menu {
-                        app.close_tab_ai_harness_terminal_with_window(window, cx);
-                    } else {
-                        app.close_agent_chat_main_window_state_first(cx);
-                    }
+                    app.close_agent_chat_to_return_route(window, cx);
                 });
             });
 
@@ -919,7 +915,7 @@ impl ScriptListApp {
         let previous_return_view = self.tab_ai_harness_return_view.clone();
         let previous_return_focus_target = self.tab_ai_harness_return_focus_target;
         let source_view = self.current_view.clone();
-        self.seed_agent_chat_return_origin_for_view(&source_view);
+        self.seed_agent_chat_return_origin_for_view(&source_view, cx);
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "tab_ai_entry_intent_return_seeded",
@@ -1132,7 +1128,7 @@ impl ScriptListApp {
         let previous_return_view = self.tab_ai_harness_return_view.clone();
         let previous_return_focus_target = self.tab_ai_harness_return_focus_target;
         let source_view = self.current_view.clone();
-        self.seed_agent_chat_return_origin_for_view(&source_view);
+        self.seed_agent_chat_return_origin_for_view(&source_view, cx);
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "tab_ai_explicit_target_return_seeded",
@@ -3751,6 +3747,91 @@ impl ScriptListApp {
         cx.notify();
     }
 
+    fn restore_agent_chat_input_return_state(
+        &mut self,
+        state: &AgentChatInputReturnState,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.filter_text = state.value.clone();
+        self.pending_filter_sync = false;
+        let value = state.value.clone();
+        let selection = state.selection.clone();
+        let placeholder = placeholder.to_string();
+        self.gpui_input_state.update(cx, |input, cx| {
+            input.set_value(value, window, cx);
+            input.set_selection(selection.start, selection.end, window, cx);
+            input.set_placeholder(placeholder, window, cx);
+        });
+        self.focused_input = state.focused_input;
+        self.pending_focus = state.pending_focus.or_else(|| {
+            (state.focused_input == FocusedInput::MainFilter).then_some(FocusTarget::MainFilter)
+        });
+    }
+
+    pub(crate) fn close_agent_chat_to_return_route(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.agent_chat_return_route.clone() {
+            AgentChatReturnRoute::Direct => self.close_agent_chat_main_window_state_first(cx),
+            AgentChatReturnRoute::Source(origin) => {
+                self.tab_ai_harness_return_view = Some(origin.view.clone());
+                self.tab_ai_harness_return_focus_target = Some(origin.focus_target);
+                self.close_tab_ai_harness_terminal_impl(
+                    Some(window),
+                    TabAiHarnessCloseDisposition::RestoreOrigin,
+                    cx,
+                );
+                let placeholder = origin
+                    .pending_placeholder
+                    .as_deref()
+                    .unwrap_or(crate::ROOT_LAUNCHER_PLACEHOLDER);
+                self.restore_agent_chat_input_return_state(
+                    &origin.input,
+                    placeholder,
+                    window,
+                    cx,
+                );
+            }
+            AgentChatReturnRoute::Main(state) => {
+                self.tab_ai_harness_return_view = Some(state.view.clone());
+                self.tab_ai_harness_return_focus_target = Some(FocusTarget::MainFilter);
+                self.close_tab_ai_harness_terminal_impl(
+                    Some(window),
+                    TabAiHarnessCloseDisposition::RestoreOrigin,
+                    cx,
+                );
+                self.filter_text = state.raw_filter_text.clone();
+                self.computed_filter_text = state.computed_filter_text.clone();
+                self.pending_placeholder = state.pending_placeholder.clone();
+                self.invalidate_grouped_cache();
+                let _ = self.restore_main_menu_selection_from_snapshot(
+                    state.interaction.selection.clone(),
+                );
+                self.sync_list_state_for_filter_replacement(
+                    MainListReplacementPolicy::PreserveViewport(
+                        state.interaction.viewport.clone(),
+                    ),
+                );
+                let placeholder = state
+                    .pending_placeholder
+                    .as_deref()
+                    .unwrap_or(crate::ROOT_LAUNCHER_PLACEHOLDER);
+                self.restore_agent_chat_input_return_state(
+                    &state.input,
+                    placeholder,
+                    window,
+                    cx,
+                );
+                self.opened_from_main_menu = false;
+                cx.notify();
+            }
+        }
+    }
+
     pub(crate) fn close_tab_ai_harness_terminal_with_window(
         &mut self,
         window: &mut Window,
@@ -4052,15 +4133,94 @@ impl ScriptListApp {
         }
     }
 
-    fn seed_agent_chat_return_origin_for_view(&mut self, source_view: &AppView) {
-        self.tab_ai_harness_return_view = Some(source_view.clone());
-        self.tab_ai_harness_return_focus_target =
-            Some(Self::tab_ai_return_focus_target_for_view(source_view));
+    fn agent_chat_input_return_state(&self, cx: &App) -> AgentChatInputReturnState {
+        AgentChatInputReturnState {
+            value: self.filter_text.clone(),
+            selection: self.gpui_input_state.read(cx).selection(),
+            focused_input: self.focused_input,
+            pending_focus: self.pending_focus,
+        }
     }
 
-    pub(crate) fn seed_agent_chat_dictation_return_origin(&mut self) {
-        self.tab_ai_harness_return_view = Some(AppView::ScriptList);
-        self.tab_ai_harness_return_focus_target = Some(FocusTarget::MainFilter);
+    fn seed_agent_chat_return_origin_for_view(
+        &mut self,
+        source_view: &AppView,
+        cx: &mut Context<Self>,
+    ) {
+        let focus_target = Self::tab_ai_return_focus_target_for_view(source_view);
+        let input = self.agent_chat_input_return_state(cx);
+        self.agent_chat_return_route = if matches!(source_view, AppView::ScriptList) {
+            if self.opened_from_main_menu {
+                let interaction = self.main_menu_interaction_snapshot();
+                AgentChatReturnRoute::Main(AgentChatMainReturnState {
+                    view: source_view.clone(),
+                    raw_filter_text: self.filter_text.clone(),
+                    computed_filter_text: self.computed_filter_text.clone(),
+                    interaction,
+                    input,
+                    pending_placeholder: self.pending_placeholder.clone(),
+                })
+            } else {
+                AgentChatReturnRoute::Direct
+            }
+        } else {
+            AgentChatReturnRoute::Source(AgentChatReturnOrigin {
+                view: source_view.clone(),
+                focus_target,
+                input,
+                pending_placeholder: self.pending_placeholder.clone(),
+            })
+        };
+
+        // Quick Terminal still consumes these fields. Keep them synchronized as
+        // compatibility adapters, but Agent Chat dismissal reads only the typed route.
+        self.tab_ai_harness_return_view = Some(source_view.clone());
+        self.tab_ai_harness_return_focus_target = Some(focus_target);
+    }
+
+    pub(crate) fn set_agent_chat_return_route_fixture(
+        &mut self,
+        origin: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if !matches!(self.current_view, AppView::AgentChatView { .. }) {
+            return Err("Embedded Agent Chat view is not active".to_string());
+        }
+        self.agent_chat_return_route = match origin {
+            "source" => {
+                if matches!(self.agent_chat_return_route, AgentChatReturnRoute::Source(_)) {
+                    return Ok(());
+                }
+                return Err("Agent Chat source route was not captured by the real entry path".to_string());
+            }
+            "main" => {
+                let value = "c06-main-route".to_string();
+                AgentChatReturnRoute::Main(AgentChatMainReturnState {
+                    view: AppView::ScriptList,
+                    raw_filter_text: value.clone(),
+                    computed_filter_text: value.clone(),
+                    interaction: self.main_menu_interaction_snapshot(),
+                    input: AgentChatInputReturnState {
+                        value,
+                        selection: 0..0,
+                        focused_input: FocusedInput::MainFilter,
+                        pending_focus: Some(FocusTarget::MainFilter),
+                    },
+                    pending_placeholder: Some(crate::ROOT_LAUNCHER_PLACEHOLDER.to_string()),
+                })
+            }
+            "direct" => AgentChatReturnRoute::Direct,
+            other => return Err(format!("unsupported Agent Chat return-route fixture {other:?}")),
+        };
+        cx.notify();
+        Ok(())
+    }
+
+    pub(crate) fn seed_agent_chat_dictation_return_origin(&mut self, cx: &mut Context<Self>) {
+        let opened_from_main_menu = self.opened_from_main_menu;
+        self.opened_from_main_menu = true;
+        self.seed_agent_chat_return_origin_for_view(&AppView::ScriptList, cx);
+        self.opened_from_main_menu = opened_from_main_menu;
         self.tab_ai_harness_script_list_trigger = None;
         tracing::info!(
             target: "script_kit::tab_ai",

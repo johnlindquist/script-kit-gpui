@@ -58,11 +58,12 @@ pub(crate) const CHAT_LAYOUT_BORDER_ALPHA: u32 = 0x40;
 
 use self::types::{
     build_conversation_turns, default_conversation_starters, next_reveal_boundary,
-    resolve_chat_input_key_action, resolve_chat_input_key_action_with_facts,
-    resolve_chat_scroll_follow_after_scroll, resolve_setup_card_key, scroll_offset_is_at_bottom,
-    should_ignore_stream_reveal_update, should_show_script_generation_actions, AssistantTextUpdate,
-    ChatInputKeyAction, ChatScrollDirection, RunScriptCallback, ScriptGenerationAction,
-    ScriptSavedCallback, SetupCardAction, CHAT_SCROLL_BOTTOM_TOLERANCE_PX,
+    resolve_chat_input_key_action, resolve_chat_input_key_action_with_commands,
+    resolve_chat_input_key_action_with_facts, resolve_chat_scroll_follow_after_scroll,
+    resolve_setup_card_key, scroll_offset_is_at_bottom, should_ignore_stream_reveal_update,
+    should_show_script_generation_actions, AssistantTextUpdate, ChatInputKeyAction,
+    ChatScrollDirection, RunScriptCallback, ScriptGenerationAction, ScriptSavedCallback,
+    SetupCardAction, CHAT_SCROLL_BOTTOM_TOLERANCE_PX,
 };
 
 #[cfg(test)]
@@ -70,10 +71,12 @@ use self::types::next_chat_scroll_follow_state;
 
 pub use prompt::ChatPrompt;
 pub use types::{
-    default_models, ChatClaudeCodeCallback, ChatConfigureCallback, ChatContinueCallback,
-    ChatEscapeCallback, ChatModel, ChatPromptHostMode, ChatRecoveryCallback, ChatRetryCallback,
-    ChatShowActionsCallback, ChatSubmitCallback, ChatTranscriptAlignment, ConversationStarter,
-    ConversationTurn, ConversationTurnRenderKey,
+    default_models, ChatClaudeCodeCallback, ChatConfigureCallback, ChatContinueCallback, ChatModel,
+    ChatPromptDismissBinding, ChatPromptDismissCallback, ChatPromptDismissRequest,
+    ChatPromptDismissRoute, ChatPromptHostMode, ChatPromptPreparedRequest,
+    ChatPromptRecoveryBinding, ChatPromptRetryRequest, ChatPromptStopRequest, ChatRecoveryCallback,
+    ChatRetryCallback, ChatShowActionsCallback, ChatStopCallback, ChatSubmitCallback,
+    ChatTranscriptAlignment, ConversationStarter, ConversationTurn, ConversationTurnRenderKey,
 };
 
 // Internal render-plan resolution (pure logic, unit-tested).

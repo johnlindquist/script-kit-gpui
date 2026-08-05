@@ -37,45 +37,180 @@ fn next_transfer_to_agent_chat_ready_barrier_step(
 }
 
 impl ChatPrompt {
+    fn acknowledge_conversation_command_execution(
+        &mut self,
+        execution: crate::components::conversation_actions::ConversationCommandExecution,
+        cx: &mut Context<Self>,
+    ) -> crate::components::conversation_actions::ConversationCommandExecution {
+        use crate::components::conversation_actions::ConversationCommandExecution;
+
+        let status_changed = match execution {
+            ConversationCommandExecution::Executed => self.command_status.take().is_some(),
+            ConversationCommandExecution::Disabled(reason) => {
+                let status = reason.as_str();
+                if self.command_status.as_deref() == Some(status) {
+                    false
+                } else {
+                    self.command_status = Some(status.to_string());
+                    true
+                }
+            }
+            ConversationCommandExecution::Unsupported => false,
+        };
+        if status_changed {
+            cx.notify();
+        }
+        execution
+    }
+
+    pub(crate) fn execute_conversation_key_command(
+        &mut self,
+        key: &str,
+        platform: bool,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::components::conversation_actions::ConversationCommandExecution> {
+        use crate::components::conversation_actions::{
+            ChatPromptConversationCommand, ConversationDismissTrigger,
+        };
+        match resolve_chat_input_key_action_with_commands(
+            key,
+            platform,
+            shift,
+            &self.conversation_command_bindings(),
+        ) {
+            ChatInputKeyAction::Escape => {
+                Some(self.request_dismiss(ConversationDismissTrigger::Escape, cx))
+            }
+            ChatInputKeyAction::Submit => {
+                Some(self.execute_conversation_command(ChatPromptConversationCommand::Send, cx))
+            }
+            ChatInputKeyAction::StopStreaming => {
+                Some(self.execute_conversation_command(ChatPromptConversationCommand::Stop, cx))
+            }
+            ChatInputKeyAction::Retry => {
+                Some(self.execute_conversation_command(ChatPromptConversationCommand::Retry, cx))
+            }
+            ChatInputKeyAction::CopyLastResponse => {
+                Some(self.execute_conversation_command(
+                    ChatPromptConversationCommand::CopyLastResponse,
+                    cx,
+                ))
+            }
+            ChatInputKeyAction::DismissCommandW => {
+                Some(self.request_dismiss(ConversationDismissTrigger::CommandW, cx))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn execute_conversation_command(
         &mut self,
         command: crate::components::conversation_actions::ChatPromptConversationCommand,
         cx: &mut Context<Self>,
-    ) -> bool {
-        use crate::components::conversation_actions::ChatPromptConversationCommand;
+    ) -> crate::components::conversation_actions::ConversationCommandExecution {
+        use crate::components::conversation_actions::{
+            ChatPromptConversationCommand, ConversationCommandAvailability,
+            ConversationCommandExecution, ConversationDismissTrigger,
+        };
         let Some(binding) = self
             .conversation_command_bindings()
             .into_iter()
             .find(|binding| binding.handler == command)
         else {
-            return false;
+            return self.acknowledge_conversation_command_execution(
+                ConversationCommandExecution::Unsupported,
+                cx,
+            );
         };
-        if !binding.descriptor.availability.is_enabled() {
-            return false;
+        if let ConversationCommandAvailability::Disabled { reason } =
+            binding.descriptor.availability
+        {
+            return self.acknowledge_conversation_command_execution(
+                ConversationCommandExecution::Disabled(reason),
+                cx,
+            );
         }
         match command {
             ChatPromptConversationCommand::Send => self.handle_submit(cx),
             ChatPromptConversationCommand::Stop => self.stop_streaming(cx),
-            ChatPromptConversationCommand::Close => self.handle_escape(cx),
-            ChatPromptConversationCommand::CopyLastResponse => self.handle_copy_last_response(cx),
+            ChatPromptConversationCommand::Retry => {
+                if !self.retry_latest_failed_response(cx) {
+                    return self.acknowledge_conversation_command_execution(
+                        ConversationCommandExecution::Unsupported,
+                        cx,
+                    );
+                }
+            }
+            ChatPromptConversationCommand::Dismiss => {
+                return self.request_dismiss(ConversationDismissTrigger::CloseButton, cx);
+            }
+            ChatPromptConversationCommand::CopyLastResponse => {
+                if !self.handle_copy_last_response(cx) {
+                    return self.acknowledge_conversation_command_execution(
+                        ConversationCommandExecution::Unsupported,
+                        cx,
+                    );
+                }
+            }
         }
-        true
+        self.acknowledge_conversation_command_execution(ConversationCommandExecution::Executed, cx)
     }
 
-    pub(crate) fn handle_escape(&mut self, _cx: &mut Context<Self>) {
-        logging::log("CHAT", "Escape pressed - closing chat");
+    pub(crate) fn request_dismiss(
+        &mut self,
+        trigger: crate::components::conversation_actions::ConversationDismissTrigger,
+        cx: &mut Context<Self>,
+    ) -> crate::components::conversation_actions::ConversationCommandExecution {
+        use crate::components::conversation_actions::{
+            ConversationCommandExecution, ConversationDismissDecision, ConversationDismissFacts,
+            ConversationOverlayFacts,
+        };
+        let Some(binding) = self.dismiss_binding.clone() else {
+            return self.acknowledge_conversation_command_execution(
+                ConversationCommandExecution::Unsupported,
+                cx,
+            );
+        };
+        let execution =
+            match crate::components::conversation_actions::resolve_conversation_dismissal(
+                ConversationDismissFacts {
+                    overlays: ConversationOverlayFacts::default(),
+                    response_in_progress: self.is_streaming(),
+                    active_work: binding.active_work,
+                },
+                trigger,
+            ) {
+                ConversationDismissDecision::DismissConversation => {
+                    if should_persist_chat_before_prompt_dismissal(
+                        self.save_history,
+                        ChatPromptDismissalKind::CloseInline,
+                    ) {
+                        self.save_to_database();
+                    }
+                    (binding.callback)(ChatPromptDismissRequest {
+                        prompt_id: Arc::from(self.id.as_str()),
+                        trigger,
+                    });
+                    ConversationCommandExecution::Executed
+                }
+                ConversationDismissDecision::Blocked(reason) => {
+                    ConversationCommandExecution::Disabled(reason)
+                }
+                ConversationDismissDecision::DismissOverlay(_) => {
+                    // ChatPrompt owns no overlay. Parent hosts resolve their own
+                    // Actions/portal/modal stack before forwarding a route here.
+                    ConversationCommandExecution::Unsupported
+                }
+            };
+        self.acknowledge_conversation_command_execution(execution, cx)
+    }
 
-        // Save conversation to database if save_history is enabled
-        if should_persist_chat_before_prompt_dismissal(
-            self.save_history,
-            ChatPromptDismissalKind::CloseInline,
-        ) {
-            self.save_to_database();
-        }
-
-        if let Some(ref callback) = self.on_escape {
-            callback(self.id.clone());
-        }
+    pub(crate) fn handle_escape(&mut self, cx: &mut Context<Self>) {
+        let _ = self.request_dismiss(
+            crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+            cx,
+        );
     }
 
     /// Save the current conversation to the AI chats database
@@ -202,6 +337,11 @@ impl ChatPrompt {
         // Reset the inline prompt to empty state BEFORE the deferred Agent Chat open
         self.messages.clear();
         self.streaming_message_id = None;
+        self.pending_prepared_request = None;
+        self.prepared_requests_by_assistant_id.clear();
+        self.builtin_replay_payloads.clear();
+        self.terminal_outcomes.clear();
+        self.builtin_cancel_signal = None;
         self.user_has_scrolled_up = false;
         self.input.clear();
         self.pending_image = None;
@@ -217,13 +357,15 @@ impl ChatPrompt {
             "BEACHBALL TRACE: state reset done, about to dismiss"
         );
 
-        // Dismiss the main prompt window.
-        // Use on_continue (hides main window) for transfer, falling back to on_escape
-        // (returns to script list) if on_continue is not wired.
+        // Dismiss the main prompt window through the same typed route used by
+        // Back/Close; transfer never invents an ambiguous escape fallback.
         if let Some(ref callback) = self.on_continue {
             callback(self.id.clone());
-        } else if let Some(ref callback) = self.on_escape {
-            callback(self.id.clone());
+        } else {
+            let _ = self.request_dismiss(
+                crate::components::conversation_actions::ConversationDismissTrigger::CloseButton,
+                cx,
+            );
         }
 
         tracing::info!(
@@ -345,15 +487,21 @@ impl ChatPrompt {
         .detach();
     }
 
-    pub fn handle_copy_last_response(&mut self, cx: &mut Context<Self>) {
-        // Find the last assistant message
-        if let Some(last_assistant) = self.messages.iter().rev().find(|m| !m.is_user()) {
-            let content = last_assistant.get_content().to_string();
-            self.last_copied_response = Some(content.clone());
-            logging::log("CHAT", &format!("Copied response: {} chars", content.len()));
-            // Copy to clipboard via cx
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(content));
-        }
+    pub fn handle_copy_last_response(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(content) =
+            crate::components::conversation_actions::resolve_latest_copyable_assistant_response(
+                self.messages
+                    .iter()
+                    .filter(|message| !message.is_user())
+                    .map(|message| message.get_content()),
+            )
+        else {
+            return false;
+        };
+        self.last_copy_receipt = Some(
+            crate::components::conversation_actions::write_exact_conversation_copy(content, cx),
+        );
+        true
     }
 
     pub(super) fn handle_clear(&mut self, cx: &mut Context<Self>) {

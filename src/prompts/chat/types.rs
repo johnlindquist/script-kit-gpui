@@ -178,23 +178,125 @@ pub fn default_models() -> Vec<ChatModel> {
     ]
 }
 
-/// Callback type for when user submits a message: (prompt_id, message_text)
-pub type ChatSubmitCallback = Arc<dyn Fn(String, String) + Send + Sync>;
+/// One accepted, immutable request. Retry clones this Arc-backed value rather
+/// than rebuilding payload from mutable composer, selection, or context state.
+#[derive(Clone, Debug)]
+pub struct ChatPromptPreparedRequest(Arc<ChatPromptPreparedRequestInner>);
 
-/// Callback type for when user presses Escape: (prompt_id)
-pub type ChatEscapeCallback = Arc<dyn Fn(String) + Send + Sync>;
+#[derive(Debug)]
+struct ChatPromptPreparedRequestInner {
+    request_ref: sk_protocol::ai_reliability::TurnRequestRef,
+    prompt_id: Arc<str>,
+    display_text: Arc<str>,
+    outbound_text: Arc<str>,
+    payload_fingerprint: sk_protocol::ai_reliability::Fingerprint,
+}
+
+impl ChatPromptPreparedRequest {
+    pub(crate) fn new(prompt_id: &str, display_text: String, outbound_text: String) -> Self {
+        let request_ref = sk_protocol::ai_reliability::TurnRequestRef::from(format!(
+            "chat-prompt:{prompt_id}:{}",
+            uuid::Uuid::new_v4()
+        ));
+        let payload_fingerprint = sk_protocol::ai_reliability::Fingerprint(
+            crate::ai::message_parts::run_scoped_fingerprint(&outbound_text),
+        );
+        Self(Arc::new(ChatPromptPreparedRequestInner {
+            request_ref,
+            prompt_id: Arc::from(prompt_id),
+            display_text: Arc::from(display_text),
+            outbound_text: Arc::from(outbound_text),
+            payload_fingerprint,
+        }))
+    }
+
+    pub fn request_ref(&self) -> &sk_protocol::ai_reliability::TurnRequestRef {
+        &self.0.request_ref
+    }
+
+    pub fn prompt_id(&self) -> &str {
+        &self.0.prompt_id
+    }
+
+    pub fn display_text(&self) -> &str {
+        &self.0.display_text
+    }
+
+    pub fn outbound_text(&self) -> &str {
+        &self.0.outbound_text
+    }
+
+    pub fn payload_fingerprint(&self) -> &sk_protocol::ai_reliability::Fingerprint {
+        &self.0.payload_fingerprint
+    }
+}
+
+pub type ChatSubmitCallback = Arc<dyn Fn(ChatPromptPreparedRequest) + Send + Sync>;
+
+#[derive(Clone, Debug)]
+pub struct ChatPromptStopRequest {
+    pub prompt_id: Arc<str>,
+    pub assistant_message_id: Option<Arc<str>>,
+    pub request_ref: Option<sk_protocol::ai_reliability::TurnRequestRef>,
+}
+
+pub type ChatStopCallback = Arc<
+    dyn Fn(ChatPromptStopRequest) -> Result<(), crate::ai::reliability::AppFailureRecord>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone, Debug)]
+pub struct ChatPromptRetryRequest {
+    pub prompt_id: Arc<str>,
+    pub failed_assistant_message_id: Arc<str>,
+    pub prepared: ChatPromptPreparedRequest,
+}
+
+pub type ChatRetryCallback = Arc<
+    dyn Fn(ChatPromptRetryRequest) -> Result<(), crate::ai::reliability::AppFailureRecord>
+        + Send
+        + Sync,
+>;
+
+pub type ChatRecoveryCallback = Arc<
+    dyn Fn(
+            String,
+            sk_protocol::ai_reliability::AiRecoveryAction,
+        ) -> Result<(), crate::ai::reliability::AppFailureRecord>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone)]
+pub struct ChatPromptRecoveryBinding {
+    pub capabilities: crate::ai::reliability::SurfaceRecoveryCapabilities,
+    pub callback: ChatRecoveryCallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatPromptDismissRoute {
+    Back,
+    Close,
+}
+
+#[derive(Clone)]
+pub struct ChatPromptDismissBinding {
+    pub route: ChatPromptDismissRoute,
+    pub active_work: crate::components::conversation_actions::ActiveWorkDismissal,
+    pub callback: ChatPromptDismissCallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatPromptDismissRequest {
+    pub prompt_id: Arc<str>,
+    pub trigger: crate::components::conversation_actions::ConversationDismissTrigger,
+}
+
+pub type ChatPromptDismissCallback = Arc<dyn Fn(ChatPromptDismissRequest) + Send + Sync>;
 
 /// Callback type for "Continue in Chat": (prompt_id)
 pub type ChatContinueCallback = Arc<dyn Fn(String) + Send + Sync>;
-
-/// Callback type for retry: (prompt_id, message_id)
-pub type ChatRetryCallback = Arc<dyn Fn(String, String) + Send + Sync>;
-
-/// Host callback for shared recovery-card actions the prompt cannot perform
-/// itself: (message_id, action). Availability of the corresponding card
-/// buttons is derived from this callback's presence (S10).
-pub type ChatRecoveryCallback =
-    Arc<dyn Fn(String, sk_protocol::ai_reliability::AiRecoveryAction) + Send + Sync>;
 
 /// Callback type for "Configure API" action: () -> triggers API key setup
 pub type ChatConfigureCallback = Arc<dyn Fn() + Send + Sync>;
@@ -318,6 +420,8 @@ pub(crate) fn assistant_response_markdown_source<'a>(
 pub(crate) enum ChatInputKeyAction {
     Escape,
     StopStreaming,
+    Retry,
+    DismissCommandW,
     ToggleActions,
     ContinueInChat,
     Submit,
@@ -353,9 +457,24 @@ pub(crate) fn resolve_chat_input_key_action_with_facts(
     composer_has_text: bool,
     has_response: bool,
 ) -> ChatInputKeyAction {
+    let commands = crate::components::conversation_actions::chat_prompt_conversation_commands(
+        response_in_progress,
+        composer_has_text,
+        has_response,
+    );
+    resolve_chat_input_key_action_with_commands(key, cmd_pressed, shift_pressed, &commands)
+}
+
+pub(crate) fn resolve_chat_input_key_action_with_commands(
+    key: &str,
+    cmd_pressed: bool,
+    shift_pressed: bool,
+    commands: &[crate::components::conversation_actions::BoundConversationCommand<
+        crate::components::conversation_actions::ChatPromptConversationCommand,
+    >],
+) -> ChatInputKeyAction {
     use crate::components::conversation_actions::{
-        chat_prompt_conversation_commands, match_conversation_command_shortcut,
-        ChatPromptConversationCommand,
+        match_conversation_command_shortcut, ChatPromptConversationCommand,
     };
 
     if is_key_escape(key) {
@@ -366,15 +485,17 @@ pub(crate) fn resolve_chat_input_key_action_with_facts(
         return ChatInputKeyAction::JumpToLatest;
     }
 
-    let commands =
-        chat_prompt_conversation_commands(response_in_progress, composer_has_text, has_response);
-    if let Some((handler, _availability)) =
-        match_conversation_command_shortcut(&commands, key, cmd_pressed, shift_pressed)
+    if let Some((handler, availability)) =
+        match_conversation_command_shortcut(commands, key, cmd_pressed, shift_pressed)
     {
+        if !availability.is_enabled() && handler != ChatPromptConversationCommand::Dismiss {
+            return ChatInputKeyAction::Ignore;
+        }
         return match handler {
             ChatPromptConversationCommand::Send => ChatInputKeyAction::Submit,
             ChatPromptConversationCommand::Stop => ChatInputKeyAction::StopStreaming,
-            ChatPromptConversationCommand::Close => ChatInputKeyAction::Ignore,
+            ChatPromptConversationCommand::Retry => ChatInputKeyAction::Retry,
+            ChatPromptConversationCommand::Dismiss => ChatInputKeyAction::DismissCommandW,
             ChatPromptConversationCommand::CopyLastResponse => ChatInputKeyAction::CopyLastResponse,
         };
     }
@@ -481,6 +602,7 @@ pub struct ConversationTurn {
     pub streaming: bool,
     pub error: Option<String>,
     pub failure: Option<sk_protocol::ai_reliability::AiFailure>,
+    pub terminal_outcome: Option<sk_protocol::ai_reliability::AiOutcome>,
     pub message_id: Option<String>,
     pub user_image: Option<Arc<RenderImage>>,
     /// Stable identity for this turn's rendered answer region.
@@ -609,6 +731,7 @@ pub(super) fn build_conversation_turns(
                 streaming: false,
                 error: None,
                 failure: None,
+                terminal_outcome: None,
                 message_id: msg.id.clone(),
                 user_image,
                 render_key,
@@ -643,6 +766,7 @@ pub(super) fn build_conversation_turns(
                 streaming: msg.streaming,
                 error: msg.error.clone(),
                 failure: msg.failure.clone(),
+                terminal_outcome: None,
                 message_id: msg.id.clone(),
                 user_image: None,
                 render_key,
@@ -784,6 +908,31 @@ mod tests {
         assert_eq!(
             resolve_chat_input_key_action("enter", false, true),
             ChatInputKeyAction::InsertNewline
+        );
+    }
+
+    #[test]
+    fn disabled_command_w_still_routes_to_safe_dismiss_acknowledgement() {
+        let commands = crate::components::conversation_actions::chat_prompt_conversation_commands_for_facts(
+            crate::components::conversation_actions::ChatPromptConversationCommandFacts {
+                response_in_progress: true,
+                dismiss_command: Some(
+                    crate::components::conversation_actions::ConversationCommandId::Close,
+                ),
+                active_work:
+                    crate::components::conversation_actions::ActiveWorkDismissal::RequiresExplicitStop,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            resolve_chat_input_key_action_with_commands("w", true, false, &commands),
+            ChatInputKeyAction::DismissCommandW
+        );
+        assert_eq!(
+            resolve_chat_input_key_action_with_commands("c", true, false, &commands),
+            ChatInputKeyAction::Ignore,
+            "plain Cmd+C remains native selection copy"
         );
     }
 

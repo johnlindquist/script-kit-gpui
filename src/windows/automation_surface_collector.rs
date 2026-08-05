@@ -345,6 +345,141 @@ pub(crate) fn collect_conversation_command_elements<Handler>(
         .collect()
 }
 
+fn cancellation_semantic_kind(
+    kind: sk_protocol::ai_reliability::CancellationKind,
+) -> (&'static str, &'static str) {
+    use sk_protocol::ai_reliability::CancellationKind;
+    match kind {
+        CancellationKind::UserStopped => ("userStopped", "Stopped"),
+        CancellationKind::UserCancelled => ("userCancelled", "Cancelled"),
+        CancellationKind::AppShutdown => ("appShutdown", "Stopped when the app closed"),
+    }
+}
+
+fn project_agent_chat_conversation_elements(
+    assistant_messages: &[(u64, &str)],
+    cancellation: Option<sk_protocol::ai_reliability::CancellationKind>,
+    command_status: Option<&str>,
+) -> Vec<ElementInfo> {
+    let mut elements = Vec::new();
+    if let Some(status) = command_status {
+        elements.push(ElementInfo {
+            semantic_id: "conversation.commandStatus".to_string(),
+            element_type: ElementType::Panel,
+            text: Some(status.to_string()),
+            value: None,
+            selected: Some(false),
+            focused: Some(false),
+            index: None,
+            role: Some("conversationCommandStatus".to_string()),
+            kind: Some("disabledAcknowledgement".to_string()),
+            source: Some("ConversationCommandExecution".to_string()),
+            source_name: None,
+            selectable: Some(false),
+            status_kind: Some("disabled".to_string()),
+            action_disabled: Some(status.to_string()),
+            style: None,
+        });
+    }
+
+    for (message_id, _) in assistant_messages
+        .iter()
+        .filter(|(_, body)| !body.trim().is_empty())
+    {
+        elements.push(ElementInfo {
+            semantic_id: format!("conversation.copyTurn:{message_id}"),
+            element_type: ElementType::Button,
+            text: Some("Copy Response".to_string()),
+            value: None,
+            selected: Some(false),
+            focused: Some(false),
+            index: None,
+            role: Some("conversationCommand".to_string()),
+            kind: Some("copyTurn".to_string()),
+            source: Some("AgentChatThreadMessage".to_string()),
+            source_name: Some(message_id.to_string()),
+            selectable: Some(true),
+            status_kind: None,
+            action_disabled: None,
+            style: None,
+        });
+    }
+
+    if let Some(cancellation) = cancellation {
+        let (kind, text) = cancellation_semantic_kind(cancellation);
+        let turn_id = assistant_messages
+            .last()
+            .map(|(message_id, _)| message_id.to_string())
+            .unwrap_or_else(|| "latest".to_string());
+        elements.push(ElementInfo {
+            semantic_id: format!("conversation.turnStatus:{turn_id}"),
+            element_type: ElementType::Panel,
+            text: Some(text.to_string()),
+            value: None,
+            selected: Some(false),
+            focused: Some(false),
+            index: None,
+            role: Some("conversationTurnStatus".to_string()),
+            kind: Some(kind.to_string()),
+            source: Some("AiOperationState".to_string()),
+            source_name: None,
+            selectable: Some(false),
+            status_kind: Some("cancelled".to_string()),
+            action_disabled: None,
+            style: None,
+        });
+    }
+
+    elements
+}
+
+fn collect_agent_chat_thread_conversation_elements(
+    thread: &crate::ai::agent_chat::ui::thread::AgentChatThread,
+    command_status: Option<&str>,
+) -> Vec<ElementInfo> {
+    use crate::ai::agent_chat::ui::thread::AgentChatThreadMessageRole;
+    use sk_protocol::ai_reliability::AiPhase;
+
+    let assistant_messages: Vec<_> = thread
+        .messages
+        .iter()
+        .filter(|message| matches!(message.role, AgentChatThreadMessageRole::Assistant))
+        .map(|message| (message.id, message.body.as_ref()))
+        .collect();
+    let cancellation = match &thread.reliability_state().phase {
+        AiPhase::Cancelled { kind, .. } => Some(*kind),
+        _ => None,
+    };
+    project_agent_chat_conversation_elements(&assistant_messages, cancellation, command_status)
+}
+
+pub(crate) fn collect_agent_chat_conversation_elements(
+    entity: &gpui::Entity<crate::ai::agent_chat::ui::view::AgentChatView>,
+    cx: &gpui::App,
+) -> Vec<ElementInfo> {
+    let view = entity.read(cx);
+    let command_status = view.command_status_text();
+    match &view.session {
+        crate::ai::agent_chat::ui::AgentChatSession::Setup(_) => command_status
+            .map(|status| {
+                let mut element = ElementInfo::panel("conversation.commandStatus");
+                element.text = Some(status.to_string());
+                element.role = Some("conversationCommandStatus".to_string());
+                element.kind = Some("disabledAcknowledgement".to_string());
+                element.source = Some("ConversationCommandExecution".to_string());
+                element.selectable = Some(false);
+                element.status_kind = Some("disabled".to_string());
+                element.action_disabled = Some(status.to_string());
+                element
+            })
+            .into_iter()
+            .collect(),
+        crate::ai::agent_chat::ui::AgentChatSession::Live(thread) => {
+            collect_agent_chat_thread_conversation_elements(thread.read(cx), command_status)
+        }
+    }
+}
+
 /// Collect semantic elements for a resolved non-main automation window.
 ///
 /// Returns `None` for window kinds that do not yet have a collector.
@@ -630,6 +765,7 @@ pub(crate) fn collect_agent_chat_detached_elements(
     elements.extend(collect_conversation_command_elements(
         &entity.read(cx).conversation_command_bindings(cx),
     ));
+    elements.extend(collect_agent_chat_conversation_elements(entity, cx));
 
     if elements.len() > limit {
         elements.truncate(limit);
@@ -965,7 +1101,8 @@ fn collect_confirm_popup_snapshot(cx: &gpui::App) -> Option<SurfaceElementSnapsh
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_semantic_chip_element, collect_semantic_chip_elements, prompt_popup_semantic_cache,
+        collect_semantic_chip_element, collect_semantic_chip_elements,
+        project_agent_chat_conversation_elements, prompt_popup_semantic_cache,
         remove_dictation_microphone_prompt_popup_snapshot_if_generation,
         PromptPopupElementSnapshot,
     };
@@ -1002,6 +1139,43 @@ mod tests {
         let destination = collect_semantic_chip_element(&destination);
         assert_eq!(destination.role.as_deref(), Some("destinationSelector"));
         assert_eq!(destination.kind.as_deref(), Some("selectDestination"));
+    }
+
+    #[test]
+    fn agent_chat_conversation_projection_exposes_safe_status_and_copy_eligibility() {
+        use sk_protocol::ai_reliability::CancellationKind;
+
+        let elements = project_agent_chat_conversation_elements(
+            &[(7, "  exact bytes  "), (8, " \n\t ")],
+            Some(CancellationKind::UserStopped),
+            Some("Stop the current response first"),
+        );
+
+        let copy = elements
+            .iter()
+            .filter(|element| element.kind.as_deref() == Some("copyTurn"))
+            .collect::<Vec<_>>();
+        assert_eq!(copy.len(), 1, "whitespace-only turns expose no copy action");
+        assert_eq!(copy[0].semantic_id, "conversation.copyTurn:7");
+        assert_eq!(copy[0].source.as_deref(), Some("AgentChatThreadMessage"));
+
+        let status = elements
+            .iter()
+            .find(|element| element.semantic_id == "conversation.commandStatus")
+            .expect("blocked command acknowledgement");
+        assert_eq!(status.status_kind.as_deref(), Some("disabled"));
+        assert_eq!(
+            status.action_disabled.as_deref(),
+            Some("Stop the current response first")
+        );
+
+        let cancellation = elements
+            .iter()
+            .find(|element| element.status_kind.as_deref() == Some("cancelled"))
+            .expect("safe cancellation status");
+        assert_eq!(cancellation.kind.as_deref(), Some("userStopped"));
+        assert_eq!(cancellation.semantic_id, "conversation.turnStatus:8");
+        assert!(cancellation.value.is_none());
     }
 
     #[test]

@@ -91,25 +91,25 @@ impl ScriptListApp {
     ) -> bool {
         match intent {
             MainWindowActionsKeyIntent::ToggleActions => {
-                if self.dispatch_main_window_footer_shortcut(
-                    "cmd+k",
-                    window,
-                    cx,
-                    "footer_shortcut",
-                ) {
+                if self.dispatch_main_window_footer_shortcut("cmd+k", window, cx, "footer_shortcut")
+                {
                     true
                 } else {
                     self.handle_cmd_k_actions_toggle(window, cx)
                 }
             }
             MainWindowActionsKeyIntent::CloseEmbeddedAgentChatWindow => {
-                tracing::info!(
-                    target: "script_kit::keyboard",
-                    event = "embedded_agent_chat_cmd_w_close_window",
-                );
-                logging::log("KEY", "Interceptor: Cmd+W -> close window from Agent Chat");
-                self.close_tab_ai_harness_terminal_with_window(window, cx);
-                self.close_and_reset_window(cx);
+                let entity = match &self.current_view {
+                    AppView::AgentChatView { entity } => entity.clone(),
+                    _ => return false,
+                };
+                entity.update(cx, |chat, cx| {
+                    let _ = chat.request_conversation_dismiss(
+                        crate::components::conversation_actions::ConversationDismissTrigger::CommandW,
+                        window,
+                        cx,
+                    );
+                });
                 true
             }
         }
@@ -837,7 +837,7 @@ impl ScriptListApp {
             flow_session_prompt_history_index: None,
             flow_session_prompt_draft: None,
             conversations: crate::ai::conversations::BackgroundedSessionStore::new(),
-            flow_session_return_to_desk: false,
+            flow_session_return_route: FlowConversationReturnRoute::Direct,
             flow_chat_sender: flow_chat_tx,
             flow_chat_receiver: flow_chat_rx,
             current_app_commands_scroll_handle: UniformListScrollHandle::new(),
@@ -1017,6 +1017,7 @@ impl ScriptListApp {
             tab_ai_harness_capture_generation: 0,
             tab_ai_harness_return_view: None,
             tab_ai_harness_return_focus_target: None,
+            agent_chat_return_route: AgentChatReturnRoute::Direct,
             tab_ai_harness_script_list_trigger: None,
             tab_ai_harness_apply_back_route: None,
             embedded_agent_chat: None,
@@ -1244,6 +1245,28 @@ impl ScriptListApp {
                         });
                     }
                     if consumed {
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+
+                // The Flow composer is the shared main input, which is a sibling
+                // of the transcript renderer's local key listener. Route its copy
+                // chord at the main-window boundary too; both paths delegate to
+                // the same typed resolver and exact-copy transaction.
+                {
+                    let mut handled = false;
+                    if let Some(app) = app_entity.upgrade() {
+                        app.update(cx, |this, cx| {
+                            handled = this.try_handle_flow_session_copy_shortcut(
+                                key,
+                                event.keystroke.modifiers.platform,
+                                event.keystroke.modifiers.shift,
+                                cx,
+                            );
+                        });
+                    }
+                    if handled {
                         cx.stop_propagation();
                         return;
                     }
@@ -2972,6 +2995,20 @@ impl ScriptListApp {
                             return;
                         }
 
+                        // Flow composes in the shared main input, so its local
+                        // transcript listener is not on this focused event path.
+                        // Route ⇧⌘C through the same typed resolver and exact-copy
+                        // transaction used by the renderer and automation path.
+                        if this.try_handle_flow_session_copy_shortcut(
+                            key,
+                            has_cmd,
+                            has_shift,
+                            cx,
+                        ) {
+                            cx.stop_propagation();
+                            return;
+                        }
+
                         // A5 decision (2026-06-09): Cmd+V on the ScriptList must be
                         // intercepted BEFORE the focused filter input's paste handler,
                         // which strips newlines. Multi-line/large pastes route to
@@ -3010,88 +3047,22 @@ impl ScriptListApp {
                             }
                         }
 
-                        let agent_chat_escape_popup_open = match &this.current_view {
-                            AppView::AgentChatView { entity, .. } => {
-                                entity.read(cx).has_escape_dismissible_popup()
-                            }
-                            _ => false,
-                        };
-                        let agent_chat_escape_focused_text_origin = match &this.current_view {
-                            AppView::AgentChatView { entity, .. } => {
-                                let chat = entity.read(cx);
-                                chat.is_focused_text_mini()
-                                    || chat.focused_text_originated_from_quick_prompt()
-                            }
-                            _ => false,
-                        };
-
-                        let agent_chat_escape_cancelled_streaming = if crate::ui_foundation::is_key_escape(key)
-                            && !has_cmd
-                            && !has_shift
-                            && !agent_chat_escape_focused_text_origin
-                        {
-                            match &this.current_view {
-                                AppView::AgentChatView { entity, .. } => entity.update(cx, |chat, cx| {
-                                    chat.cancel_streaming_from_escape(cx)
-                                }),
-                                _ => false,
-                            }
-                        } else {
-                            false
-                        };
-                        if agent_chat_escape_cancelled_streaming {
-                            logging::log(
-                                "KEY",
-                                "Interceptor: Escape -> cancel Agent Chat streaming",
-                            );
-                            cx.stop_propagation();
-                            return;
-                        }
-
-                        // Handle Escape for AgentChatView.
                         if crate::ui_foundation::is_key_escape(key)
                             && !has_cmd
                             && !has_shift
-                            && !this.show_actions_popup
-                            && !agent_chat_escape_popup_open
-                            && matches!(this.current_view, AppView::AgentChatView { .. })
                         {
-                            if agent_chat_escape_focused_text_origin {
-                                tracing::info!(
-                                    target: "script_kit::keyboard",
-                                    event = "focused_text_quick_prompt_escape_hide_requested",
-                                );
-                                this.close_agent_chat_main_window_state_first(cx);
-                                logging::log(
-                                    "KEY",
-                                    "Interceptor: Escape -> hide focused-text quick prompt Agent Chat",
-                                );
+                            if let AppView::AgentChatView { entity } = &this.current_view {
+                                let entity = entity.clone();
+                                entity.update(cx, |chat, cx| {
+                                    let _ = chat.request_conversation_dismiss(
+                                        crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+                                        window,
+                                        cx,
+                                    );
+                                });
                                 cx.stop_propagation();
                                 return;
                             }
-                            if this.opened_from_main_menu {
-                                tracing::info!(
-                                    target: "script_kit::keyboard",
-                                    event = "embedded_agent_chat_escape_return_to_origin",
-                                );
-                                this.close_tab_ai_harness_terminal_with_window(window, cx);
-                                logging::log(
-                                    "KEY",
-                                    "Interceptor: Escape -> return to main menu from Agent Chat",
-                                );
-                            } else {
-                                tracing::info!(
-                                    target: "script_kit::keyboard",
-                                    event = "embedded_agent_chat_escape_close_window",
-                                );
-                                this.close_agent_chat_main_window_state_first(cx);
-                                logging::log(
-                                    "KEY",
-                                    "Interceptor: Escape -> close Agent Chat window",
-                                );
-                            }
-                            cx.stop_propagation();
-                            return;
                         }
 
                         // Window tweaker shortcuts (only enabled with SCRIPT_KIT_WINDOW_TWEAKER=1)

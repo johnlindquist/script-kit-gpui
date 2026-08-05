@@ -48,18 +48,29 @@ impl ChatPrompt {
         let default_stream_text = "First token and deterministic follow-up tokens.".to_string();
         let (assistant, streaming) = match phase {
             "waitingNoAssistant" | "waiting-no-assistant" => (None, true),
-            "emptyAssistant" | "empty-assistant" => (Some((String::new(), None)), true),
+            "emptyAssistant" | "empty-assistant" | "c06StreamingEmpty" | "c06-streaming-empty" => {
+                (Some((String::new(), None)), true)
+            }
             "firstToken" | "first-token" => (Some(("First".to_string(), None)), true),
-            "multiTokenStreaming" | "multi-token-streaming" => (
+            "multiTokenStreaming"
+            | "multi-token-streaming"
+            | "c06StreamingPartial"
+            | "c06-streaming-partial" => (
                 Some((
                     assistant_text.unwrap_or_else(|| default_stream_text.clone()),
                     None,
                 )),
                 true,
             ),
-            "completed" => (
+            "completed" | "c06Completed" | "c06-completed" => (
                 Some((
-                    assistant_text.unwrap_or_else(|| default_stream_text.clone()),
+                    assistant_text.unwrap_or_else(|| {
+                        if matches!(phase, "c06Completed" | "c06-completed") {
+                            " C06 synthetic answer\nsecond line with trailing spaces \n".to_string()
+                        } else {
+                            default_stream_text.clone()
+                        }
+                    }),
                     None,
                 )),
                 false,
@@ -98,6 +109,22 @@ impl ChatPrompt {
             // as real ingestion (S10).
             Self::normalize_message_failure(&mut message);
             messages.push(message);
+            if matches!(phase, "c06Completed" | "c06-completed") {
+                messages.push(ChatPromptMessage {
+                    id: Some("geometry-fixture-assistant-whitespace".to_string()),
+                    role: Some(ChatMessageRole::Assistant),
+                    content: Some(" \n\t ".to_string()),
+                    text: String::new(),
+                    position: ChatMessagePosition::Left,
+                    name: None,
+                    model: self.model.clone(),
+                    streaming: false,
+                    error: None,
+                    failure: None,
+                    created_at: None,
+                    image: None,
+                });
+            }
         }
 
         self.messages = messages;
@@ -234,10 +261,15 @@ impl ChatPrompt {
         // WP-B3: bytes scanned by the rebuild = the message content it walks.
         let bytes_scanned: usize = self.messages.iter().map(|m| m.get_content().len()).sum();
         let input_messages = self.messages.len();
-        self.conversation_turns_cache = Arc::new(build_conversation_turns(
-            &self.messages,
-            &self.image_render_cache,
-        ));
+        let mut turns = build_conversation_turns(&self.messages, &self.image_render_cache);
+        for turn in &mut turns {
+            turn.terminal_outcome = turn
+                .message_id
+                .as_ref()
+                .and_then(|message_id| self.terminal_outcomes.get(message_id))
+                .cloned();
+        }
+        self.conversation_turns_cache = Arc::new(turns);
         self.conversation_turns_dirty = false;
         // WP-B3: one rebuild tagged with input messages consumed, rows produced,
         // and bytes scanned — the amplification WP8/WP9 target.
@@ -517,6 +549,10 @@ impl ChatPrompt {
             image: None,
         };
         self.messages.push(message);
+        if let Some(prepared) = self.pending_prepared_request.take() {
+            self.prepared_requests_by_assistant_id
+                .insert(message_id.clone(), prepared);
+        }
         self.streaming_message_id = Some(message_id);
         self.mark_conversation_turns_dirty();
         self.force_scroll_turns_to_bottom();
@@ -603,6 +639,11 @@ impl ChatPrompt {
     pub fn clear_messages(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();
         self.streaming_message_id = None;
+        self.pending_prepared_request = None;
+        self.prepared_requests_by_assistant_id.clear();
+        self.builtin_replay_payloads.clear();
+        self.terminal_outcomes.clear();
+        self.builtin_cancel_signal = None;
         self.user_has_scrolled_up = false;
         self.mark_conversation_turns_dirty();
         self.ensure_conversation_turns_cache();
@@ -614,22 +655,68 @@ impl ChatPrompt {
         self.builtin_is_streaming || self.streaming_message_id.is_some()
     }
 
-    /// Stop streaming the current response (preserves partial content)
-    /// Triggered by Cmd+. or Escape
+    /// Explicitly stop the current response while preserving exact visible
+    /// partial output. Dismissal never calls this method.
     pub fn stop_streaming(&mut self, cx: &mut Context<Self>) {
-        logging::log("CHAT", "Stop streaming requested (Cmd+. or Escape)");
+        logging::log("CHAT", "Explicit Stop requested");
 
-        // Flush all accumulated content so the user sees everything received so far
-        if let Some(msg_id) = self.streaming_message_id.take() {
+        if let Some(signal) = self.builtin_cancel_signal.take() {
+            signal.store(true, Ordering::SeqCst);
+        }
+
+        let assistant_message_id = self.streaming_message_id.take();
+        let mut partial_content = String::new();
+        if let Some(msg_id) = assistant_message_id.as_deref() {
             if let Some(msg) = self
                 .messages
                 .iter_mut()
-                .find(|m| m.id.as_deref() == Some(&msg_id))
+                .find(|m| m.id.as_deref() == Some(msg_id))
             {
                 if !self.builtin_accumulated_content.is_empty() {
                     msg.set_content(&self.builtin_accumulated_content);
                 }
                 msg.streaming = false;
+                msg.error = None;
+                msg.failure = None;
+                partial_content = msg.get_content().to_string();
+            }
+        }
+
+        let partial = if partial_content.is_empty() {
+            sk_protocol::ai_reliability::PartialOutputState::None
+        } else {
+            sk_protocol::ai_reliability::PartialOutputState::Preserved {
+                fingerprint: sk_protocol::ai_reliability::Fingerprint(
+                    crate::ai::message_parts::run_scoped_fingerprint(&partial_content),
+                ),
+            }
+        };
+        if let Some(msg_id) = assistant_message_id.as_ref() {
+            self.terminal_outcomes.insert(
+                msg_id.clone(),
+                sk_protocol::ai_reliability::AiOutcome::Cancelled {
+                    kind: sk_protocol::ai_reliability::CancellationKind::UserStopped,
+                    partial: partial.clone(),
+                },
+            );
+        }
+
+        let prepared = assistant_message_id
+            .as_ref()
+            .and_then(|msg_id| self.prepared_requests_by_assistant_id.get(msg_id));
+        if let Some(callback) = self.on_stop.as_ref() {
+            let request = ChatPromptStopRequest {
+                prompt_id: Arc::from(self.id.as_str()),
+                assistant_message_id: assistant_message_id.as_deref().map(Arc::<str>::from),
+                request_ref: prepared.map(|prepared| prepared.request_ref().clone()),
+            };
+            if let Err(record) = callback(request) {
+                tracing::warn!(
+                    target: "script_kit::chat_stop",
+                    failure_code = ?record.failure.code,
+                    diagnostic_fingerprint = ?record.failure.diagnostic.as_ref().map(|d| &d.fingerprint.0),
+                    "Stop callback rejected after local response settled"
+                );
             }
         }
 
@@ -637,12 +724,19 @@ impl ChatPrompt {
         self.builtin_streaming_content.clear();
         self.builtin_accumulated_content.clear();
         self.builtin_reveal_offset = 0;
-        // WP-B3: terminal flush — forces a final rebuild off the scheduled clock.
         crate::chat_hot_counters::record_chat_terminal_flush();
         self.mark_conversation_turns_dirty();
         self.ensure_conversation_turns_cache();
         crate::chat_hot_counters::log_snapshot("chat_stop_streaming");
 
+        tracing::info!(
+            target: "script_kit::chat_stop",
+            assistant_message_id_present = assistant_message_id.is_some(),
+            partial_present = !partial_content.is_empty(),
+            partial_bytes = partial_content.len(),
+            cancellation_kind = "userStopped",
+            "ChatPrompt response stopped"
+        );
         cx.notify();
     }
 

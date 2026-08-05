@@ -526,7 +526,12 @@
                                     message_count = message_count.unwrap_or(0),
                                     "STDIN Agent Chat command received"
                                 );
-                                let result = match &view.current_view {
+                                let result = if let Some(origin) = phase.strip_prefix("c06AgentReturn:") {
+                                    view.set_agent_chat_return_route_fixture(origin, ctx)
+                                } else if let Some(origin) = phase.strip_prefix("c06FlowReturn:") {
+                                    view.set_flow_conversation_return_route_fixture(origin, ctx)
+                                } else {
+                                    match &view.current_view {
                                     AppView::AgentChatView { entity } => {
                                         let entity = entity.clone();
                                         entity.update(ctx, |chat, cx| {
@@ -539,23 +544,32 @@
                                             )
                                         })
                                     }
-                                    AppView::FlowSessionView { session_id } => view
-                                        .conversations.flow_sessions
-                                        .iter()
-                                        .find(|(meta, _)| meta.id == *session_id)
-                                        .map(|(_, entity)| entity.clone())
-                                        .ok_or_else(|| "FlowSession entity is not active".to_string())
-                                        .and_then(|entity| {
-                                            entity.update(ctx, |chat, cx| {
-                                                chat.apply_transcript_geometry_fixture(
-                                                    phase,
-                                                    user_text.clone(),
-                                                    assistant_text.clone(),
-                                                    cx,
-                                                )
-                                            })
-                                        }),
-                                    _ => Err("Agent Chat view is not active".to_string()),
+                                    AppView::FlowSessionView { .. } => view
+                                        .apply_flow_conversation_test_fixture(
+                                            phase,
+                                            user_text.clone(),
+                                            assistant_text.clone(),
+                                            ctx,
+                                        ),
+                                    AppView::ChatPrompt { entity, .. } => {
+                                        let entity = entity.clone();
+                                        entity.update(ctx, |chat, cx| {
+                                            chat.apply_transcript_geometry_fixture(
+                                                phase,
+                                                user_text.clone(),
+                                                assistant_text.clone(),
+                                                cx,
+                                            )
+                                        })
+                                    }
+                                    _ => crate::ai::agent_chat::ui::chat_window::apply_detached_agent_chat_test_fixture(
+                                        phase,
+                                        user_text.clone(),
+                                        assistant_text.clone(),
+                                        *message_count,
+                                        ctx,
+                                    ),
+                                    }
                                 };
                                 match &result {
                                     Ok(()) => {

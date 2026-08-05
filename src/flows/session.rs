@@ -474,8 +474,7 @@ pub fn resolve_last_copyable_response<'a>(
 ) -> Option<&'a str> {
     assistant_texts
         .rev()
-        .map(|assistant| assistant.trim())
-        .find(|assistant| !assistant.is_empty())
+        .find(|assistant| !assistant.trim().is_empty())
 }
 
 /// Which transcript the Flow session is presenting. The active transcript is
@@ -2476,10 +2475,10 @@ mod tests {
     }
 
     #[test]
-    fn the_copied_answer_is_trimmed() {
+    fn the_copied_answer_preserves_exact_assistant_bytes() {
         assert_eq!(
             resolve_last_copyable_response(["\n  answer body  \n"].iter().copied()),
-            Some("answer body")
+            Some("\n  answer body  \n")
         );
     }
 

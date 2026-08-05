@@ -1,4 +1,6 @@
 use super::*;
+use gpui::AppContext as _;
+use sk_protocol::ai_reliability::CancellationKind;
 
 /// Helper to build an `AgentChatThread` without a real connection or GPUI context.
 /// Only for testing pure logic methods that don't need cx or connection.
@@ -80,10 +82,16 @@ fn fork_completed_truncates_at_user_ordinal_and_prefills_composer() {
         fork_point("e0", "first ask"),
         fork_point("e1", "second ask"),
     ];
+    thread.seed_last_prepared_turn_test("second ask");
+    thread.apply_event_test(AgentChatEvent::failed(
+        sk_protocol::ai_reliability::ProtocolComponent::Provider,
+        "connection lost",
+    ));
+    assert!(thread.recovery_card_spec().is_some());
     thread.pending_fork_ordinal = Some(1);
 
     thread.apply_event_test(AgentChatEvent::ForkCompleted {
-        text: "second ask".to_string(),
+        text: "  second ask λ  ".to_string(),
     });
 
     assert_eq!(
@@ -93,8 +101,69 @@ fn fork_completed_truncates_at_user_ordinal_and_prefills_composer() {
     );
     assert_eq!(thread.messages[0].body.as_ref(), "first ask");
     assert_eq!(thread.messages[1].body.as_ref(), "first answer");
-    assert_eq!(thread.input.text(), "second ask");
+    assert_eq!(
+        thread.input.text(),
+        "  second ask λ  ",
+        "runtime-accepted edit text must remain byte-exact"
+    );
+    assert_eq!(thread.input.cursor(), "  second ask λ  ".chars().count());
     assert_eq!(thread.status, AgentChatThreadStatus::Idle);
+    assert!(matches!(thread.reliability_state.phase, AiPhase::Ready));
+    assert!(thread.recovery_card_spec().is_none());
+    assert!(
+        thread.last_prepared_turn.is_none(),
+        "Retry must not replay the abandoned branch after a successful rewind"
+    );
+    assert!(thread.pending_fork_ordinal.is_none());
+}
+
+#[test]
+fn fork_failure_preserves_branch_draft_selection_copy_and_retry_payload() {
+    let mut thread = test_thread(Vec::new(), false);
+    thread.push_message(AgentChatThreadMessageRole::User, "accepted request");
+    thread.push_message(
+        AgentChatThreadMessageRole::Assistant,
+        "  exact assistant bytes  ",
+    );
+    thread.seed_last_prepared_turn_test("accepted request");
+    thread.apply_event_test(AgentChatEvent::failed(
+        sk_protocol::ai_reliability::ProtocolComponent::Provider,
+        "connection lost",
+    ));
+    thread.input.set_text("  unsent draft λ  ");
+    thread.input.set_cursor(4);
+    thread.pending_fork_ordinal = Some(0);
+
+    let messages_before: Vec<_> = thread
+        .messages
+        .iter()
+        .map(|message| (message.role, message.body.to_string()))
+        .collect();
+    let selection_before = thread.reliability_state.selection.clone();
+    let retry_before = thread
+        .last_prepared_turn_fingerprint()
+        .expect("accepted payload")
+        .to_string();
+
+    assert!(thread.apply_fork_failed());
+
+    let messages_after: Vec<_> = thread
+        .messages
+        .iter()
+        .map(|message| (message.role, message.body.to_string()))
+        .collect();
+    assert_eq!(
+        messages_after, messages_before,
+        "transcript and copy target"
+    );
+    assert_eq!(thread.input.text(), "  unsent draft λ  ");
+    assert_eq!(thread.input.cursor(), 4);
+    assert_eq!(thread.reliability_state.selection, selection_before);
+    assert_eq!(
+        thread.last_prepared_turn_fingerprint(),
+        Some(retry_before.as_str())
+    );
+    assert!(thread.recovery_card_spec().is_some());
     assert!(thread.pending_fork_ordinal.is_none());
 }
 
@@ -281,6 +350,98 @@ fn test_thread_with_profile(
         selected_model_display_name: None,
         profile_display_name: None,
         profile_icon_name: None,
+    }
+}
+
+fn prime_running_reliability(thread: &mut AgentChatThread) {
+    let submitted = transition(
+        thread.reliability_state.clone(),
+        AiOperationEvent::SubmitRequested {
+            request: TurnRequestRef::from("explicit-stop-test"),
+            work: thread.current_work_snapshot(),
+            selection: thread.reliability_state.selection.clone(),
+            risk: TurnRisk::MayMutate,
+        },
+    )
+    .expect("submit transition");
+    thread.reliability_state = submitted.next;
+
+    let preflight = transition(
+        thread.reliability_state.clone(),
+        AiOperationEvent::CapabilityResolved(CapabilityDecision::Compatible),
+    )
+    .expect("capability transition");
+    let command_id = preflight
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            AiCommand::StartTurn(command) => Some(command.command_id),
+            _ => None,
+        })
+        .expect("start command");
+    thread.reliability_state = preflight.next;
+
+    let started = transition(
+        thread.reliability_state.clone(),
+        AiOperationEvent::RuntimeStarted {
+            command_id,
+            turn: TurnRef::from("explicit-stop-turn"),
+        },
+    )
+    .expect("runtime start transition");
+    thread.reliability_state = started.next;
+    thread.sync_status_from_reliability();
+}
+
+#[gpui::test]
+fn explicit_stop_preserves_partial_or_empty_output_as_quiet_user_stopped(
+    cx: &mut gpui::TestAppContext,
+) {
+    for assistant_body in [Some("  exact partial bytes  "), Some("")] {
+        let mut thread = test_thread(Vec::new(), false);
+        thread.push_message(AgentChatThreadMessageRole::User, "accepted request");
+        if let Some(body) = assistant_body {
+            thread.push_message(AgentChatThreadMessageRole::Assistant, body);
+        }
+        prime_running_reliability(&mut thread);
+        let entity = cx.new(|_| thread);
+
+        entity.update(cx, |thread, cx| thread.stop_streaming(cx));
+
+        cx.read_entity(&entity, |thread, _cx| {
+            let AiPhase::Cancelled { kind, partial } = thread.reliability_state.phase.clone()
+            else {
+                panic!("explicit Stop must settle as Cancelled");
+            };
+            assert_eq!(kind, CancellationKind::UserStopped);
+            match assistant_body {
+                Some(body) if !body.is_empty() => {
+                    assert!(matches!(partial, PartialOutputState::Preserved { .. }));
+                    assert_eq!(
+                        thread
+                            .messages
+                            .iter()
+                            .rev()
+                            .find(|message| {
+                                matches!(message.role, AgentChatThreadMessageRole::Assistant)
+                            })
+                            .map(|message| message.body.as_ref()),
+                        Some(body),
+                        "Stop must preserve exact partial assistant bytes"
+                    );
+                }
+                _ => assert_eq!(partial, PartialOutputState::None),
+            }
+            assert_eq!(thread.status, AgentChatThreadStatus::Idle);
+            assert!(thread.queue_paused);
+            assert!(
+                thread
+                    .messages
+                    .iter()
+                    .all(|message| !matches!(message.role, AgentChatThreadMessageRole::Error)),
+                "user Stop remains quiet instead of creating an error row"
+            );
+        });
     }
 }
 

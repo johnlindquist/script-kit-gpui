@@ -200,7 +200,7 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) {
         let source_view = self.current_view.clone();
-        self.seed_agent_chat_return_origin_for_view(&source_view);
+        self.seed_agent_chat_return_origin_for_view(&source_view, cx);
 
         tracing::info!(
             target: "script_kit::focused_text",
@@ -285,7 +285,7 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) {
         let source_view = self.current_view.clone();
-        self.seed_agent_chat_return_origin_for_view(&source_view);
+        self.seed_agent_chat_return_origin_for_view(&source_view, cx);
 
         tracing::info!(
             target: "script_kit::focused_text",
@@ -498,7 +498,7 @@ impl ScriptListApp {
     ) {
         let reason_code = error.reason_code();
         let source_view = self.current_view.clone();
-        self.seed_agent_chat_return_origin_for_view(&source_view);
+        self.seed_agent_chat_return_origin_for_view(&source_view, cx);
 
         tracing::warn!(
             target: "script_kit::focused_text",

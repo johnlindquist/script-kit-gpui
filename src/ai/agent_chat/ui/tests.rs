@@ -362,7 +362,6 @@ const TAB_AI_AGENT_CHAT_LAUNCH_SOURCE: &str =
     include_str!("../../../app_impl/agent_handoff/agent_chat_launch.rs");
 const ACTIONS_TOGGLE_SOURCE: &str = include_str!("../../../app_impl/actions_toggle.rs");
 const STARTUP_SOURCE: &str = include_str!("../../../app_impl/startup.rs");
-const STARTUP_NEW_ACTIONS_SOURCE: &str = include_str!("../../../app_impl/startup_new_actions.rs");
 const STARTUP_NEW_TAB_SOURCE: &str = include_str!("../../../app_impl/startup_new_tab.rs");
 const SIMULATE_KEY_DISPATCH_SOURCE: &str =
     include_str!("../../../app_impl/simulate_key_dispatch.rs");
@@ -526,131 +525,6 @@ fn startup_plain_enter_routes_to_agent_chat_picker_when_open() {
 }
 
 #[test]
-fn agent_chat_escape_defers_to_actions_dialog_before_unwinding_chat() {
-    for (name, source) in [
-        ("startup.rs", STARTUP_SOURCE),
-        ("startup_new_actions.rs", STARTUP_NEW_ACTIONS_SOURCE),
-    ] {
-        let escape_block_start = source
-            .find("// Handle Escape for AgentChatView.")
-            .unwrap_or_else(|| panic!("Agent Chat escape block not found in {name}"));
-        let escape_block_end = (escape_block_start + 1800).min(source.len());
-        let escape_block = &source[escape_block_start..escape_block_end];
-
-        assert!(
-            escape_block.contains("!this.show_actions_popup"),
-            "Agent Chat escape block must defer to the actions dialog while it is open in {name}"
-        );
-        assert!(
-            escape_block.contains("!agent_chat_escape_popup_open"),
-            "Agent Chat escape block must defer to Agent Chat-local popups while they are open in {name}"
-        );
-        assert!(
-            escape_block.contains("this.close_tab_ai_harness_terminal_with_window(window, cx);"),
-            "Agent Chat escape block must still close the Agent Chat chat when actions are closed in {name}"
-        );
-    }
-}
-
-#[test]
-fn agent_chat_plain_escape_cancels_streaming_before_host_close() {
-    let escape_block_start = AGENT_CHAT_VIEW_SOURCE
-        .find("event = \"agent_chat_escape_cancel_streaming_requested\"")
-        .expect("Agent Chat view must log the Escape streaming cancellation path");
-    let escape_block = &AGENT_CHAT_VIEW_SOURCE[escape_block_start.saturating_sub(400)
-        ..(escape_block_start + 800).min(AGENT_CHAT_VIEW_SOURCE.len())];
-
-    assert!(
-        escape_block.contains("AgentChatThreadStatus::Streaming")
-            && escape_block.contains("thread.cancel_streaming(cx)"),
-        "plain Escape helper must cancel active Agent Chat streaming"
-    );
-
-    let focused_escape_start = AGENT_CHAT_VIEW_SOURCE
-        .find("if self.cancel_streaming_from_escape(cx)")
-        .expect("focused Agent Chat Escape path must call the shared cancellation helper");
-    let focused_escape_block = &AGENT_CHAT_VIEW_SOURCE
-        [focused_escape_start..(focused_escape_start + 500).min(AGENT_CHAT_VIEW_SOURCE.len())];
-    assert!(
-        focused_escape_block.contains("cx.stop_propagation()")
-            && focused_escape_block.contains("return;"),
-        "focused Agent Chat Escape cancellation must stop before the host-close branch"
-    );
-    assert!(
-        focused_escape_start
-            < AGENT_CHAT_VIEW_SOURCE
-                .find("embedded_agent_chat_escape_host_close_requested")
-                .expect("focused Agent Chat Escape close path must remain present"),
-        "Escape cancellation must be checked before Escape closes Agent Chat"
-    );
-}
-
-#[test]
-fn agent_chat_root_escape_interceptor_cancels_streaming_before_returning_to_menu() {
-    for (name, source) in [
-        ("startup.rs", STARTUP_SOURCE),
-        ("startup_new_actions.rs", STARTUP_NEW_ACTIONS_SOURCE),
-    ] {
-        let cancel_pos = source
-            .find("chat.cancel_streaming_from_escape(cx)")
-            .unwrap_or_else(|| panic!("{name} must let Agent Chat consume Escape while streaming"));
-        let close_pos = source
-            .find("event = \"embedded_agent_chat_escape_return_to_origin\"")
-            .unwrap_or_else(|| panic!("{name} must retain idle Escape return-to-origin path"));
-        assert!(
-            cancel_pos < close_pos,
-            "{name} must try Agent Chat streaming cancellation before Escape returns to the main menu"
-        );
-        assert!(
-            source[cancel_pos..close_pos].contains("cx.stop_propagation()")
-                && source[cancel_pos..close_pos].contains("return;"),
-            "{name} must stop propagation after Agent Chat streaming cancellation"
-        );
-    }
-
-    assert!(
-        AGENT_CHAT_VIEW_SOURCE.contains("pub(crate) fn cancel_streaming_from_escape")
-            && AGENT_CHAT_VIEW_SOURCE.contains("thread.cancel_streaming(cx)")
-            && AGENT_CHAT_VIEW_SOURCE
-                .contains("event = \"agent_chat_escape_cancel_streaming_requested\""),
-        "AgentChatView should expose a shared Escape cancellation helper for focused and host routes"
-    );
-}
-
-#[test]
-fn agent_chat_stdin_simulate_key_escape_cancels_streaming_before_returning_to_menu() {
-    let cancel_pos = SIMULATE_KEY_DISPATCH_SOURCE
-        .find("chat.cancel_streaming_from_escape(cx)")
-        .expect(
-            "shared simulateKey dispatcher must route simulated Escape through Agent Chat cancel",
-        );
-    let close_pos = SIMULATE_KEY_DISPATCH_SOURCE
-        .find("SimulateKey: Escape - return to main menu from Agent Chat")
-        .expect("shared simulateKey dispatcher must retain idle simulated Escape close path");
-    assert!(
-        cancel_pos < close_pos,
-        "shared simulateKey dispatcher must cancel Agent Chat streaming before simulated Escape returns to the main menu"
-    );
-    assert!(
-        SIMULATE_KEY_DISPATCH_SOURCE[cancel_pos..close_pos]
-            .contains("SimulateKey: Escape - cancel Agent Chat streaming"),
-        "shared simulateKey dispatcher must log the simulated Escape streaming-cancel route"
-    );
-}
-
-#[test]
-fn agent_chat_cancel_streaming_sends_session_cancel_to_agent() {
-    assert!(
-        AGENT_CHAT_THREAD_SOURCE.contains("self.connection.cancel_turn(self.ui_thread_id.clone())"),
-        "AgentChatThread::cancel_streaming must enqueue an Agent Chat cancel request"
-    );
-    assert!(
-        AGENT_CHAT_THREAD_SOURCE.contains("self.connection.cancel_turn(self.ui_thread_id.clone())"),
-        "Agent Chat runtime seam must translate UI cancellation through the active backend"
-    );
-}
-
-#[test]
 fn agent_chat_plain_up_recalls_latest_user_prompt_when_composer_is_empty() {
     let up_block_start = AGENT_CHAT_VIEW_SOURCE
         .find("event = \"agent_chat_plain_up_recalled_last_user_prompt\"")
@@ -698,39 +572,6 @@ fn agent_chat_cmd_0_resets_agent_chat_zoom_through_theme_sync() {
             && AGENT_CHAT_VIEW_SOURCE.contains("self.reset_agent_chat_zoom(cx);")
             && AGENT_CHAT_VIEW_SOURCE.contains("\"agent_chat_cmd_0_reset_agent_chat_zoom\""),
         "Agent Chat key handling should route Cmd+0 to the zoom reset helper"
-    );
-}
-
-#[test]
-fn simulated_agent_chat_escape_closes_actions_before_unwinding_chat() {
-    let agent_chat_block_start = SIMULATE_KEY_DISPATCH_SOURCE
-        .find("AppView::AgentChatView { ref entity, .. } => {")
-        .expect("Agent Chat simulateKey branch not found in shared simulate_key_dispatch.rs");
-    // Scope to the whole AgentChatView match arm (up to the next `AppView::`
-    // arm) instead of a fixed char window, so unrelated growth inside the
-    // branch (e.g. spine projection handling) cannot truncate the slice.
-    let arm_search_start = agent_chat_block_start + "AppView::AgentChatView".len();
-    let agent_chat_block_end = SIMULATE_KEY_DISPATCH_SOURCE[arm_search_start..]
-        .find("AppView::")
-        .map(|offset| arm_search_start + offset)
-        .unwrap_or(SIMULATE_KEY_DISPATCH_SOURCE.len());
-    let agent_chat_block =
-        &SIMULATE_KEY_DISPATCH_SOURCE[agent_chat_block_start..agent_chat_block_end];
-
-    let close_actions_pos = agent_chat_block
-        .find("view.close_actions_popup(ActionsDialogHost::AgentChat, window, ctx);")
-        .expect("simulateKey Agent Chat branch must close Agent Chat actions popup");
-    let close_chat_pos = agent_chat_block
-        .find("view.close_tab_ai_harness_terminal_with_window(window, ctx);")
-        .expect("simulateKey Agent Chat branch must still close the Agent Chat chat");
-
-    assert!(
-        agent_chat_block.contains("view.show_actions_popup && key_lower == \"escape\""),
-        "simulateKey Agent Chat branch must guard Escape with the Agent Chat actions popup state"
-    );
-    assert!(
-        close_actions_pos < close_chat_pos,
-        "simulateKey Agent Chat Escape should close the Agent Chat actions popup before closing the Agent Chat chat"
     );
 }
 
@@ -937,52 +778,6 @@ fn agent_chat_picker_outside_dismiss_suppresses_unchanged_trigger_reopen() {
             && refresh.contains("active_dismissed_trigger = Some(active_trigger);")
             && refresh.contains("active_trigger: active_dismissed_trigger"),
         "refresh_composer_picker_session must keep the dismissed trigger closed until the input/cursor context changes"
-    );
-}
-
-#[test]
-fn agent_chat_close_paths_close_slash_and_composer_picker_session() {
-    let detached_cmd_w_block = agent_chat_source_between(
-        AGENT_CHAT_VIEW_SOURCE,
-        "event = \"detached_agent_chat_cmd_w_close_requested\"",
-        "this.handle_key_down(event, window, cx);",
-    );
-    let detached_cmd_w_prepare = detached_cmd_w_block
-        .find("this.prepare_for_host_hide(cx);")
-        .expect("detached Cmd+W block must prepare Agent Chat host hide");
-    let detached_cmd_w_remove = detached_cmd_w_block
-        .find("dematerialize_then_remove_gpui_window(")
-        .expect("detached Cmd+W block must dematerialize then remove the window");
-    assert!(
-        detached_cmd_w_prepare < detached_cmd_w_remove,
-        "detached Agent Chat Cmd+W must close slash/profile composer sessions before removing the window"
-    );
-
-    let detached_close_helper = agent_chat_source_between(
-        AGENT_CHAT_WINDOW_SOURCE,
-        "pub fn close_chat_window",
-        "// Detached Agent Chat action allowlist",
-    );
-    let detached_helper_prepare = detached_close_helper
-        .find("view.prepare_for_host_hide(cx);")
-        .expect("close_chat_window must prepare Agent Chat host hide");
-    let detached_helper_remove = detached_close_helper
-        .find("dematerialize_then_remove_gpui_window_from_app(")
-        .expect("close_chat_window must dematerialize then remove the window");
-    assert!(
-        detached_helper_prepare < detached_helper_remove,
-        "detached close_chat_window must close slash/profile composer sessions before removing the window"
-    );
-
-    let detached_titlebar_close = agent_chat_source_between(
-        AGENT_CHAT_WINDOW_SOURCE,
-        "pub fn open_chat_window_with_thread",
-        "/// Return a strong reference to the detached Agent Chat chat view entity",
-    );
-    assert!(
-        detached_titlebar_close.contains("view_entity_slot_on_close")
-            && detached_titlebar_close.contains("view.prepare_for_host_hide(cx);"),
-        "detached titlebar close must prepare the Agent Chat view so slash/profile composer sessions cannot outlive chat"
     );
 }
 

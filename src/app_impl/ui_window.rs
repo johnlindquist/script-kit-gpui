@@ -712,7 +712,7 @@ impl ScriptListApp {
                 if let AppView::AgentChatView { entity } = &self.current_view {
                     let entity = entity.clone();
                     entity.update(cx, |chat, cx| {
-                        let _ = chat.cancel_streaming_from_escape(cx);
+                        let _ = chat.stop_streaming_explicitly(cx);
                     });
                 } else if let AppView::FlowSessionView { session_id } = self.current_view {
                     // The flow session footer shows `⌘. Stop` while a turn is in

@@ -3,8 +3,8 @@
 
 pub use super::base::{DesignContext, PromptBase, ResolvedColors};
 pub use super::chat::{
-    ChatClaudeCodeCallback, ChatConfigureCallback, ChatEscapeCallback, ChatPrompt,
-    ChatSubmitCallback,
+    ChatClaudeCodeCallback, ChatConfigureCallback, ChatPrompt, ChatPromptDismissBinding,
+    ChatPromptDismissCallback, ChatPromptDismissRoute, ChatSubmitCallback,
 };
 pub use super::commands::{parse_command, CommandOption, SlashCommand, SlashCommandType};
 pub use super::div::{ContainerOptions, ContainerPadding, DivPrompt};

@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 29 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 33 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -18,7 +18,7 @@
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
-| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C05 complete; SAFE-003 and WF-011 verified |
+| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C06 complete; WF-006, WF-007, WF-009, and WF-010 verified |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
 ## How to view the baseline proposal explorer
@@ -685,6 +685,75 @@
   6. Select a session, run, interactive flow, workflow, and conversational flow; verify the footer's primary verb and Enter behavior match the selected row. Only conversational flows may show Shift+Enter **Run Once**.
   7. Run `SCRIPT_KIT_GPUI_BINARY="$PWD/target-agent/artifacts/cons-flow-c05/script-kit-gpui" CONSISTENCY_RECEIPT_DIR="$PWD/.artifacts/consistency/cons-flow-ux/c05-flow-archive-v1/runtime" bun scripts/agentic/cons-flow-ux/flow-history-probe.ts`; expect nine PASS scenarios, `failures: []`, zero privacy counts, and nine exact zero-process cleanup rows.
 - **Intentional differences preserved:** Setup recovery rows remain utilities rather than fake Flow results. Existing session/run/flow row families retain their own content while sharing the descriptor contract. Cwd output is intentionally summarized rather than exact. No glass motion/material, footer optical offsets, popup geometry, or generated design tokens changed.
+
+### WF-006 — Make conversation dismissal origin-aware and non-destructive
+
+- **Status:** Complete. Flow, embedded Agent Chat, detached Agent Chat, and ordinary ChatPrompt now resolve Back, Close, Escape, and Command+W through typed host-owned return routes after dismissing the topmost overlay.
+- **Commit boundary:** Workflow Safety C06 — `fix(conversations): align dismiss stop retry and copy across hosts [WF-006 WF-007 WF-009 WF-010]`.
+- **Changed behavior:** Flow captures an ephemeral Desk, Main, or Direct return snapshot instead of reconstructing a destination from a boolean. Embedded Agent Chat restores source, Main, or Direct origin; detached Agent Chat closes only its own window. Confirm modals, Actions, attachment portals, and composer pickers consume dismissal before the conversation route. A host whose active work cannot survive exposes the exact disabled reason `Stop the current response first; this host cannot keep it running after you leave.` rather than silently stopping. Popup-owned Escape and Command+K cannot execute a displayed host shortcut underneath the popup.
+- **Exact owners:** `src/components/conversation_actions.rs`; `src/render_builtins/flow_ux.rs`; `src/ai/agent_chat/ui/{view.rs,chat_window.rs}`; `src/app_impl/agent_handoff/{agent_chat_entry.rs,agent_chat_launch.rs,mod.rs}`; `src/app_impl/startup/navigation_routes.rs`; `src/app_impl/{startup.rs,simulate_key_dispatch.rs,ui_window.rs}`; `src/prompts/chat/{types.rs,actions.rs,prompt.rs}`; and `src/actions/window.rs`.
+- **Focused/runtime proof:** Shared dismissal/command model PASS (14/14); ChatPrompt PASS (78/78); Agent Chat PASS (625/625); Flow PASS (141 passed, 1 intentional architecture benchmark ignored). `.test-output/cons-flow-c06/conversation-hosts-receipt.json` is PASS for Flow Desk/Main/Direct, embedded Agent Chat source/Main/direct, detached Agent Chat, and ordinary ChatPrompt against stable binary SHA-256 `1241aca276d549250f3c115f2ac303a7ff897a35a711565790f51b29717c3bf1`.
+- **Negative controls:** One Actions Escape closes exactly one overlay. Dismissal never emits Stop, Delete, Terminate, Clear, or Rethread. Active unsafe ChatPrompt dismissal is disabled rather than translated into cancellation. The detached native close hook obeys the same capability decision as keyboard and visible controls.
+- **Cleanup:** All eight Driver scenarios report `processExited:true`, `streamsDrained:true`, `logWriterClosed:true`, exact executable-path `ownedProcessCount:0`, no forced signals, and exact clipboard restoration.
+- **User test/view:**
+  1. Open Flow Desk, enter a conversation, start a response, press Escape, and verify the exact Desk row/filter returns while the response continues.
+  2. Open a Flow from Main, press Escape, and verify the exact prior filter, selection, viewport, input selection, and focus return. Open a Flow directly and verify Escape closes without an empty Main intermediate.
+  3. Open embedded Agent Chat from a source row and press Escape; verify the exact source and focus return. Repeat from Main and direct entry.
+  4. Open detached Agent Chat and use Escape and Command+W; verify only the detached window closes.
+  5. With a confirm modal, Actions, attachment portal, or picker open, press Escape once; verify only that top layer closes.
+  6. Start work in a host that cannot preserve it and verify Close is disabled with the exact safe reason; confirm Back, Close, Escape, and Command+W never show Stop, Failed, Delete, or Terminate behavior.
+- **Intentional differences preserved:** Flow backgrounding keeps its retained runtime; embedded Agent Chat returns within the main window; detached Agent Chat owns a separate native window; ordinary ChatPrompt returns to its installing host. Those lifecycle differences remain explicit rather than being normalized into one global close behavior.
+
+### WF-007 — Derive Stop, Retry, and recovery from performable capabilities
+
+- **Status:** Complete. Send, Stop, Retry, recovery, and dismissal availability now comes from installed callback/host capability facts, and execution fails closed when a callback is missing.
+- **Commit boundary:** Same Workflow Safety C06 commit as WF-006.
+- **Changed behavior:** Explicit Stop flushes current output, emits typed `StopRequested`/`RuntimeStopped`, cancels the exact live turn, and settles as quiet `CancellationKind::UserStopped`. Empty Stop creates no placeholder or recovery card. Retry replays one accepted immutable prepared request rather than rereading the composer, model picker, selection, clipboard, context, or a reconstructed last-user string. Successful branch edit clears abandoned retry state. Flow Retry and Rethread Flow remain different command kinds and effects.
+- **Exact owners:** `crates/sk-protocol/src/ai_reliability/{types.rs,reducer.rs,model_tests.rs}`; `src/ai/reliability/presentation.rs`; `src/ai/agent_chat/ui/{thread.rs,thread/tests.rs,view.rs,chat_window.rs}`; `src/prompts/chat/{types.rs,state.rs,streaming.rs,actions.rs,tests.rs}`; `src/app_impl/prompt_ai.rs`; and migrated ChatPrompt callers in `src/{prompt_handler,render_builtins,main_sections,app_impl}/**`.
+- **Focused/runtime proof:** AI reliability domain PASS (17/17); app AI reliability PASS (28/28); Agent Chat PASS (625/625); ChatPrompt PASS (78/78). The real embedded and detached scenarios both preserve partial Stop output, keep empty Stop quiet, remove recovery after immutable Retry completes, and expose no unsupported control. Raw failure/path canaries remain absent from elements, receipts, app logs, and protocol responses.
+- **Negative controls:** Stop is not Error or generic user cancellation. Late cancelled chunks cannot turn the row into failure. Retry cannot read mutable composer/model/context state or duplicate the accepted user row. Missing callbacks omit controls instead of rendering enabled fiction. Flow Rethread cannot dispatch Retry and Retry cannot replace Flow thread identity.
+- **User test/view:**
+  1. Open each conversation host idle and verify Send appears only when that host installed a real submit owner.
+  2. Start a supported response and verify Send becomes Stop with Command+Period. Stop after partial output and verify every visible byte remains with no error card.
+  3. Stop before the first output and verify no empty-response placeholder or recovery card appears.
+  4. Trigger a retryable failure, then change the composer and model selection before choosing Retry; verify the original accepted request—not the edits—is replayed.
+  5. Open Flow recovery and verify Retry and Rethread Flow are separate commands with separate effects.
+  6. Open a host without Stop, Retry, or recovery callbacks and verify those controls are absent. Inspect failure details and verify only a safe summary, typed code, and diagnostic fingerprint are exposed.
+- **Intentional differences preserved:** Flow owns its runtime and Rethread recovery; Agent Chat owns provider-turn cancellation and immutable replay; SDK ChatPrompt exposes neither Stop nor Retry because its current protocol installs no such callback. Unsupported behavior was not simulated.
+
+### WF-009 — Preserve exact assistant bytes for explicit copy commands
+
+- **Status:** Complete. Plain Command+C remains native selected-text copy, while Shift+Command+C and per-turn copy return the original bytes of the newest eligible assistant answer.
+- **Commit boundary:** Same Workflow Safety C06 commit as WF-006.
+- **Changed behavior:** Eligibility uses trimming only to reject empty/whitespace-only assistant answers; it never returns normalized text. Leading space, trailing space, and final newline survive host-level and per-turn copy. User prompts are never a fallback. Empty or streaming placeholder answers expose no copy command, and “Copied response” appears only after an executed pasteboard write.
+- **Exact owners:** `src/components/conversation_actions.rs::{turn_copy_eligibility,resolve_last_copyable_assistant_response}`; `src/flows/session.rs::resolve_last_copyable_response`; `src/render_builtins/flow_ux.rs::try_handle_flow_session_copy_shortcut`; `src/prompts/chat/{actions.rs,render_turns.rs}`; `src/ai/agent_chat/ui/{view.rs,components/transcript.rs}`; `src/app_impl/{startup.rs,simulate_key_dispatch.rs}`; and semantic collectors in `src/{app_layout,windows}/**`.
+- **Focused/runtime proof:** The exact Flow regression returns `"\n  answer body  \n"` byte-for-byte (1/1). All eight real hosts pass Shift+Command+C and expose exactly one copy operation when a newer whitespace-only answer is present. Clipboard evidence is limited to byte length/run-scoped fingerprint, and the full NSPasteboard item/type archive restores exactly after every scenario.
+- **Negative controls:** Plain Command+C leaves an unselected sentinel untouched rather than invoking Copy Last. Whitespace-only answers produce no command. Per-turn copy cannot select a user row. No resolver maps the selected response through `trim()`, and no copy success acknowledgement is emitted for disabled, unsupported, or failed writes.
+- **User test/view:**
+  1. Select a substring in a transcript and press Command+C; verify only the selected text is copied.
+  2. Press Shift+Command+C; verify the newest non-empty assistant answer is copied with original leading/trailing whitespace and newlines.
+  3. Activate a per-turn Copy Turn control and verify that exact assistant answer is copied.
+  4. Inspect an empty waiting/stopped assistant row and a whitespace-only answer; verify neither has a copy control.
+  5. Force a failed pasteboard write and verify no “Copied response” acknowledgement appears.
+  6. Inspect the C06 receipt and verify copy proof contains no content—only privacy counters and scenario facts—while cleanup reports clipboard restoration.
+- **Intentional differences preserved:** Native selection copy remains owned by selectable transcript text. Shift+Command+C is the explicit whole-answer command. Flow’s shared main-input keyboard compatibility route remains host-owned while resolving through the same typed copy transaction.
+
+### WF-010 — Adopt ordinary ChatPrompt from installed capabilities
+
+- **Status:** Complete. Every production `ChatPrompt::new` site is classified, and ordinary ChatPrompt footer, Actions, keyboard execution, recovery, dismissal, selectable rendering, and `getElements` projection derive from the same installed bindings.
+- **Commit boundary:** Same Workflow Safety C06 commit as WF-006.
+- **Changed behavior:** The SDK script host advertises only performable Send/Back/copy behavior and blocks unsafe active dismissal; inline setup does not fabricate Send; the built-in AI host owns real cancellation, immutable Retry, and typed recovery; Flow remains `TranscriptOnly` and supplies no duplicate ChatPrompt input/footer/keyboard commands. Ordinary ChatPrompt never exposes Background or New Conversation. Footer, Actions, key handling, execution receipts, and semantic elements agree on label, shortcut, availability, and safe disabled reason.
+- **Exact owners:** `src/prompts/chat/{mod.rs,prompt.rs,types.rs,state.rs,actions.rs,render_core.rs,render_turns.rs,streaming.rs,tests.rs}`; callers in `src/prompt_handler/mod.rs`, `src/render_builtins/flow_ux.rs`, `src/app_impl/prompt_ai.rs`, and `src/main_sections/app_state.rs`; Actions builders in `src/actions/builders/{chat.rs,script_context.rs}`; and projection in `src/app_layout/prompt_and_script_list_collectors.rs` plus `src/windows/automation_surface_collector.rs`.
+- **Focused/runtime proof:** Current-byte inventory accounts for all 18 textual constructor sites, classifying four production constructions across three surfaces, two app-code `#[cfg(test)]` constructions, seven prompt-test constructions, and one logging string. ChatPrompt PASS (78/78); shared bindings PASS (14/14); app check/build and the stable real ordinary-host scenario PASS. The ordinary scenario exposes no Stop/Retry when callbacks are absent, no Background/New, exact copy, overlay precedence, and an explicit return route.
+- **Negative controls:** `with_escape_callback` and the legacy broad recovery callback are absent. A no-op closure cannot manufacture Send. TranscriptOnly has empty local command bindings. Missing callbacks remove footer, Actions, keyboard, and element controls together. No ordinary host inherits Flow lifecycle commands.
+- **User test/view:**
+  1. Open the production built-in AI ChatPrompt fixture and compare footer commands with Command+K Actions; inspect `getElements` and verify labels, shortcuts, enabled states, and disabled reasons match.
+  2. Start, Stop, and Retry through keyboard, footer, and Actions; verify every route reaches the same execution owner.
+  3. Select transcript text and verify native Command+C works; verify per-turn copy appears only for non-empty assistant answers.
+  4. Open the SDK ChatPrompt host and verify only callbacks installed by the script host appear; unsupported Stop/Retry/recovery controls are absent.
+  5. Verify ordinary ChatPrompt never shows Background or New Conversation.
+  6. Open a Flow conversation and verify its TranscriptOnly ChatPrompt renders the transcript but no duplicate local input, footer, Actions, or keyboard controls.
+- **Intentional differences preserved:** Setup, SDK, built-in AI, and Flow retain distinct owners and capabilities. The shared model standardizes truthful projection/execution, not provider transport or lifecycle ownership. No visual constants, glass values, geometry, or generated design tokens changed.
 
 ## Verification ledger
 

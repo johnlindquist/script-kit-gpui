@@ -155,7 +155,7 @@ fn copy_last_response_action() -> Action {
         Some("Copies the last assistant response".to_string()),
         ActionCategory::ScriptContext,
     )
-    .with_shortcut("⌘C")
+    .with_shortcut("⇧⌘C")
     .with_icon(IconName::Copy)
 }
 
@@ -331,7 +331,7 @@ pub(crate) fn get_chat_context_actions_with_facts(
     actions.retain(|action| action.id != "chat:copy_response");
     for binding in command_bindings {
         use crate::components::conversation_actions::{
-            ChatPromptConversationCommand, ConversationCommandAvailability,
+            ChatPromptConversationCommand, ConversationCommandAvailability, ConversationCommandId,
         };
         let (action_id, description, section, icon) = match binding.handler {
             ChatPromptConversationCommand::Send => (
@@ -346,12 +346,27 @@ pub(crate) fn get_chat_context_actions_with_facts(
                 "Conversation",
                 IconName::Close,
             ),
-            ChatPromptConversationCommand::Close => (
-                "chat:close",
-                "Close this script conversation",
+            ChatPromptConversationCommand::Retry => (
+                "chat:retry",
+                "Retry the same prepared request",
                 "Conversation",
-                IconName::Close,
+                IconName::Refresh,
             ),
+            ChatPromptConversationCommand::Dismiss => match binding.descriptor.id {
+                ConversationCommandId::Back => (
+                    "chat:back",
+                    "Return to the conversation origin",
+                    "Conversation",
+                    IconName::ArrowRight,
+                ),
+                ConversationCommandId::Close => (
+                    "chat:close",
+                    "Close this conversation",
+                    "Conversation",
+                    IconName::Close,
+                ),
+                _ => unreachable!("ChatPrompt dismiss bindings validate Back or Close"),
+            },
             ChatPromptConversationCommand::CopyLastResponse => (
                 "chat:copy_response",
                 "Copy the most recent assistant response",

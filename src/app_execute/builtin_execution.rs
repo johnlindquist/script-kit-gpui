@@ -6548,7 +6548,7 @@ impl ScriptListApp {
                         }
                     }
                     crate::dictation::DictationTarget::AiChatComposer => {
-                        self.seed_agent_chat_dictation_return_origin();
+                        self.seed_agent_chat_dictation_return_origin(cx);
                         self.open_agent_chat_with_composer_seed(
                             transcript.clone(),
                             crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
@@ -6557,7 +6557,7 @@ impl ScriptListApp {
                         true
                     }
                     crate::dictation::DictationTarget::TabAiHarness => {
-                        self.seed_agent_chat_dictation_return_origin();
+                        self.seed_agent_chat_dictation_return_origin(cx);
                         // A detached chat window is an independent workspace:
                         // dictation reveals the embedded chat without
                         // destroying the user's detached conversation.
@@ -6595,7 +6595,7 @@ impl ScriptListApp {
                         let submit = crate::config::load_user_preferences()
                             .dictation
                             .quick_ai_answers();
-                        self.seed_agent_chat_dictation_return_origin();
+                        self.seed_agent_chat_dictation_return_origin(cx);
                         if submit {
                             // Quick AI first turn: fresh zero-context session.
                             self.open_tab_ai_agent_chat_with_entry_intent_variant(

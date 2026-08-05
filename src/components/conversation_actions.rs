@@ -64,6 +64,7 @@ pub(crate) enum ConversationCommandDisabledReason {
     WaitingForPermission,
     HiddenDraftMustBeResolved,
     RuntimeAlreadyDetached,
+    ActiveWorkCannotSurviveDismissal,
 }
 
 impl ConversationCommandDisabledReason {
@@ -78,6 +79,9 @@ impl ConversationCommandDisabledReason {
                 "Return to Current and send or clear the draft first."
             }
             Self::RuntimeAlreadyDetached => "The runtime is already terminated.",
+            Self::ActiveWorkCannotSurviveDismissal => {
+                "Stop the current response first; this host cannot keep it running after you leave."
+            }
         }
     }
 }
@@ -105,6 +109,96 @@ impl ConversationCommandAvailability {
             Self::Disabled { reason } => Some(reason.as_str()),
         }
     }
+}
+
+/// The user gesture that asked a conversation host to leave its current
+/// presentation. This is intentionally separate from Stop: no dismissal
+/// trigger is ever allowed to cancel work as a side effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationDismissTrigger {
+    BackButton,
+    CloseButton,
+    Escape,
+    CommandW,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConversationOverlayKind {
+    BlockingModal,
+    Actions,
+    AttachmentPortal,
+    ComposerPicker,
+}
+
+/// Whether a host retains a strong, resumable owner for active work after its
+/// visible conversation surface is dismissed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveWorkDismissal {
+    Survives,
+    RequiresExplicitStop,
+}
+
+impl Default for ActiveWorkDismissal {
+    fn default() -> Self {
+        // Fail closed. A host must explicitly prove that active work survives.
+        Self::RequiresExplicitStop
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ConversationOverlayFacts {
+    pub(crate) blocking_modal_open: bool,
+    pub(crate) actions_open: bool,
+    pub(crate) attachment_portal_open: bool,
+    pub(crate) composer_picker_open: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConversationDismissFacts {
+    pub(crate) overlays: ConversationOverlayFacts,
+    pub(crate) response_in_progress: bool,
+    pub(crate) active_work: ActiveWorkDismissal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConversationDismissDecision {
+    DismissOverlay(ConversationOverlayKind),
+    DismissConversation,
+    Blocked(ConversationCommandDisabledReason),
+}
+
+/// Resolve one dismissal gesture. Exactly one transition is selected, with
+/// the top-most overlay winning before the host's return route.
+pub(crate) fn resolve_conversation_dismissal(
+    facts: ConversationDismissFacts,
+    _trigger: ConversationDismissTrigger,
+) -> ConversationDismissDecision {
+    if facts.overlays.blocking_modal_open {
+        ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::BlockingModal)
+    } else if facts.overlays.actions_open {
+        ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::Actions)
+    } else if facts.overlays.attachment_portal_open {
+        ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::AttachmentPortal)
+    } else if facts.overlays.composer_picker_open {
+        ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::ComposerPicker)
+    } else if facts.response_in_progress
+        && facts.active_work == ActiveWorkDismissal::RequiresExplicitStop
+    {
+        ConversationDismissDecision::Blocked(
+            ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal,
+        )
+    } else {
+        ConversationDismissDecision::DismissConversation
+    }
+}
+
+/// Fail-closed execution receipt shared by Actions, keys, footer controls, and
+/// semantic automation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConversationCommandExecution {
+    Executed,
+    Disabled(ConversationCommandDisabledReason),
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +326,22 @@ pub(crate) struct BoundConversationCommand<Handler> {
     pub(crate) handler: Handler,
 }
 
+pub(crate) fn conversation_command_descriptor(
+    id: ConversationCommandId,
+    availability: ConversationCommandAvailability,
+) -> ConversationCommandDescriptor {
+    let (label, shortcut, role, confirmation, semantic_action_id) = command_metadata(id);
+    ConversationCommandDescriptor {
+        id,
+        label,
+        shortcut,
+        role,
+        availability,
+        confirmation,
+        semantic_action_id,
+    }
+}
+
 impl<Handler> BoundConversationCommand<Handler> {
     pub(crate) fn enabled(id: ConversationCommandId, handler: Handler) -> Self {
         Self::with_availability(id, ConversationCommandAvailability::Enabled, handler)
@@ -254,17 +364,8 @@ impl<Handler> BoundConversationCommand<Handler> {
         availability: ConversationCommandAvailability,
         handler: Handler,
     ) -> Self {
-        let (label, shortcut, role, confirmation, semantic_action_id) = command_metadata(id);
         Self {
-            descriptor: ConversationCommandDescriptor {
-                id,
-                label,
-                shortcut,
-                role,
-                availability,
-                confirmation,
-                semantic_action_id,
-            },
+            descriptor: conversation_command_descriptor(id, availability),
             handler,
         }
     }
@@ -288,6 +389,8 @@ pub(crate) struct AgentChatConversationCommandFacts {
     pub(crate) composer_has_text: bool,
     pub(crate) retry_available: bool,
     pub(crate) has_response: bool,
+    pub(crate) dismiss_installed: bool,
+    pub(crate) active_work: ActiveWorkDismissal,
 }
 
 pub(crate) fn agent_chat_conversation_commands(
@@ -345,10 +448,24 @@ pub(crate) fn agent_chat_conversation_commands(
             AgentChatConversationCommand::CopyLastResponse,
         ));
     }
-    commands.push(BoundConversationCommand::enabled(
-        ConversationCommandId::Close,
-        AgentChatConversationCommand::Close,
-    ));
+    if facts.dismiss_installed {
+        commands.push(
+            if facts.response_in_progress
+                && facts.active_work == ActiveWorkDismissal::RequiresExplicitStop
+            {
+                BoundConversationCommand::disabled(
+                    ConversationCommandId::Close,
+                    ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal,
+                    AgentChatConversationCommand::Close,
+                )
+            } else {
+                BoundConversationCommand::enabled(
+                    ConversationCommandId::Close,
+                    AgentChatConversationCommand::Close,
+                )
+            },
+        );
+    }
     commands
 }
 
@@ -520,22 +637,52 @@ pub(crate) fn flow_conversation_commands_for_facts(
 pub(crate) enum ChatPromptConversationCommand {
     Send,
     Stop,
-    Close,
+    Retry,
+    Dismiss,
     CopyLastResponse,
 }
 
-pub(crate) fn chat_prompt_conversation_commands(
-    response_in_progress: bool,
-    composer_has_text: bool,
-    has_response: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ChatPromptConversationCommandFacts {
+    pub(crate) response_in_progress: bool,
+    pub(crate) composer_has_text: bool,
+    pub(crate) has_response: bool,
+    pub(crate) submit_installed: bool,
+    pub(crate) stop_installed: bool,
+    pub(crate) retry_available: bool,
+    pub(crate) dismiss_command: Option<ConversationCommandId>,
+    pub(crate) active_work: ActiveWorkDismissal,
+}
+
+pub(crate) fn validate_chat_prompt_command_facts(
+    facts: ChatPromptConversationCommandFacts,
+) -> Result<(), &'static str> {
+    if facts.dismiss_command.is_some_and(|id| {
+        !matches!(
+            id,
+            ConversationCommandId::Back | ConversationCommandId::Close
+        )
+    }) {
+        return Err("ChatPrompt dismiss command must be Back or Close");
+    }
+    Ok(())
+}
+
+pub(crate) fn chat_prompt_conversation_commands_for_facts(
+    facts: ChatPromptConversationCommandFacts,
 ) -> Vec<BoundConversationCommand<ChatPromptConversationCommand>> {
-    let mut commands = vec![
-        if response_in_progress {
-            BoundConversationCommand::enabled(
+    debug_assert!(validate_chat_prompt_command_facts(facts).is_ok());
+    let mut commands = Vec::new();
+
+    if facts.response_in_progress {
+        if facts.stop_installed {
+            commands.push(BoundConversationCommand::enabled(
                 ConversationCommandId::Stop,
                 ChatPromptConversationCommand::Stop,
-            )
-        } else if composer_has_text {
+            ));
+        }
+    } else if facts.submit_installed {
+        commands.push(if facts.composer_has_text {
             BoundConversationCommand::enabled(
                 ConversationCommandId::Send,
                 ChatPromptConversationCommand::Send,
@@ -546,19 +693,64 @@ pub(crate) fn chat_prompt_conversation_commands(
                 ConversationCommandDisabledReason::TypeMessageFirst,
                 ChatPromptConversationCommand::Send,
             )
-        },
-        BoundConversationCommand::enabled(
-            ConversationCommandId::Close,
-            ChatPromptConversationCommand::Close,
-        ),
-    ];
-    if has_response {
+        });
+    }
+
+    if !facts.response_in_progress && facts.retry_available {
+        commands.push(BoundConversationCommand::enabled(
+            ConversationCommandId::Retry,
+            ChatPromptConversationCommand::Retry,
+        ));
+    }
+
+    if let Some(dismiss_command @ (ConversationCommandId::Back | ConversationCommandId::Close)) =
+        facts.dismiss_command
+    {
+        commands.push(
+            if facts.response_in_progress
+                && facts.active_work == ActiveWorkDismissal::RequiresExplicitStop
+            {
+                BoundConversationCommand::disabled(
+                    dismiss_command,
+                    ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal,
+                    ChatPromptConversationCommand::Dismiss,
+                )
+            } else {
+                BoundConversationCommand::enabled(
+                    dismiss_command,
+                    ChatPromptConversationCommand::Dismiss,
+                )
+            },
+        );
+    }
+
+    if facts.has_response {
         commands.push(BoundConversationCommand::enabled(
             ConversationCommandId::CopyLastResponse,
             ChatPromptConversationCommand::CopyLastResponse,
         ));
     }
     commands
+}
+
+/// Transitional wrapper retained while all constructors migrate to explicit
+/// capability facts. It preserves the old standalone assumptions only for
+/// test callers; production ChatPrompt projects through the facts API.
+pub(crate) fn chat_prompt_conversation_commands(
+    response_in_progress: bool,
+    composer_has_text: bool,
+    has_response: bool,
+) -> Vec<BoundConversationCommand<ChatPromptConversationCommand>> {
+    chat_prompt_conversation_commands_for_facts(ChatPromptConversationCommandFacts {
+        response_in_progress,
+        composer_has_text,
+        has_response,
+        submit_installed: true,
+        stop_installed: true,
+        dismiss_command: Some(ConversationCommandId::Close),
+        active_work: ActiveWorkDismissal::Survives,
+        ..Default::default()
+    })
 }
 
 pub(crate) fn match_conversation_command_shortcut<Handler: Copy>(
@@ -621,6 +813,41 @@ pub(crate) fn validate_conversation_command_bindings<Handler>(
         }
     }
     Ok(())
+}
+
+/// Return the newest assistant response that contains non-whitespace bytes.
+/// Whitespace is an eligibility test only; callers copy the original slice.
+pub(crate) fn resolve_latest_copyable_assistant_response<'a>(
+    responses: impl DoubleEndedIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    responses.rev().find(|response| !response.trim().is_empty())
+}
+
+/// Privacy-safe proof that an exact copy happened. The fingerprint is salted
+/// for this process and cannot be used as a stable content identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConversationCopyReceipt {
+    pub(crate) byte_len: usize,
+    pub(crate) fingerprint: String,
+}
+
+pub(crate) fn write_exact_conversation_copy(
+    content: &str,
+    cx: &mut gpui::App,
+) -> ConversationCopyReceipt {
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(content.to_string()));
+    let receipt = ConversationCopyReceipt {
+        byte_len: content.len(),
+        fingerprint: crate::ai::message_parts::run_scoped_fingerprint(content),
+    };
+    tracing::info!(
+        target: "script_kit::conversation_copy",
+        operation = "exact_assistant_copy",
+        byte_len = receipt.byte_len,
+        fingerprint = %receipt.fingerprint,
+        "Conversation response copied"
+    );
+    receipt
 }
 
 /// What a conversation row should do about a per-turn copy control.
@@ -827,6 +1054,8 @@ mod conversation_actions_tests {
             composer_has_text: true,
             retry_available: false,
             has_response: true,
+            dismiss_installed: true,
+            active_work: ActiveWorkDismissal::RequiresExplicitStop,
         });
         validate_conversation_command_bindings(&agent).unwrap();
         assert!(agent.iter().any(|command| {
@@ -929,6 +1158,163 @@ mod conversation_actions_tests {
                 && command.descriptor.availability.disabled_reason()
                     == Some("Return to Current and send or clear the draft first.")
         }));
+    }
+
+    #[test]
+    fn dismissal_resolver_closes_one_overlay_before_considering_active_work() {
+        let triggers = [
+            ConversationDismissTrigger::BackButton,
+            ConversationDismissTrigger::CloseButton,
+            ConversationDismissTrigger::Escape,
+            ConversationDismissTrigger::CommandW,
+        ];
+        let precedence = [
+            (
+                ConversationOverlayFacts {
+                    blocking_modal_open: true,
+                    actions_open: true,
+                    attachment_portal_open: true,
+                    composer_picker_open: true,
+                },
+                ConversationOverlayKind::BlockingModal,
+            ),
+            (
+                ConversationOverlayFacts {
+                    actions_open: true,
+                    attachment_portal_open: true,
+                    composer_picker_open: true,
+                    ..Default::default()
+                },
+                ConversationOverlayKind::Actions,
+            ),
+            (
+                ConversationOverlayFacts {
+                    attachment_portal_open: true,
+                    composer_picker_open: true,
+                    ..Default::default()
+                },
+                ConversationOverlayKind::AttachmentPortal,
+            ),
+            (
+                ConversationOverlayFacts {
+                    composer_picker_open: true,
+                    ..Default::default()
+                },
+                ConversationOverlayKind::ComposerPicker,
+            ),
+        ];
+
+        for trigger in triggers {
+            for (overlays, expected) in precedence {
+                assert_eq!(
+                    resolve_conversation_dismissal(
+                        ConversationDismissFacts {
+                            overlays,
+                            response_in_progress: true,
+                            active_work: ActiveWorkDismissal::RequiresExplicitStop,
+                        },
+                        trigger,
+                    ),
+                    ConversationDismissDecision::DismissOverlay(expected),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dismissal_blocks_only_active_work_that_cannot_survive() {
+        let blocked = resolve_conversation_dismissal(
+            ConversationDismissFacts {
+                overlays: ConversationOverlayFacts::default(),
+                response_in_progress: true,
+                active_work: ActiveWorkDismissal::RequiresExplicitStop,
+            },
+            ConversationDismissTrigger::Escape,
+        );
+        assert_eq!(
+            blocked,
+            ConversationDismissDecision::Blocked(
+                ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal
+            )
+        );
+        assert_eq!(
+            ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal.as_str(),
+            "Stop the current response first; this host cannot keep it running after you leave."
+        );
+
+        for facts in [
+            ConversationDismissFacts {
+                overlays: ConversationOverlayFacts::default(),
+                response_in_progress: true,
+                active_work: ActiveWorkDismissal::Survives,
+            },
+            ConversationDismissFacts {
+                overlays: ConversationOverlayFacts::default(),
+                response_in_progress: false,
+                active_work: ActiveWorkDismissal::RequiresExplicitStop,
+            },
+        ] {
+            assert_eq!(
+                resolve_conversation_dismissal(facts, ConversationDismissTrigger::CommandW),
+                ConversationDismissDecision::DismissConversation
+            );
+        }
+    }
+
+    #[test]
+    fn chat_prompt_commands_are_capability_derived_and_fail_closed() {
+        let unsupported =
+            chat_prompt_conversation_commands_for_facts(ChatPromptConversationCommandFacts {
+                response_in_progress: true,
+                composer_has_text: true,
+                has_response: true,
+                submit_installed: false,
+                stop_installed: false,
+                retry_available: false,
+                dismiss_command: Some(ConversationCommandId::Back),
+                active_work: ActiveWorkDismissal::RequiresExplicitStop,
+            });
+        assert!(unsupported.iter().all(|binding| !matches!(
+            binding.handler,
+            ChatPromptConversationCommand::Send
+                | ChatPromptConversationCommand::Stop
+                | ChatPromptConversationCommand::Retry
+        )));
+        let dismiss = unsupported
+            .iter()
+            .find(|binding| binding.handler == ChatPromptConversationCommand::Dismiss)
+            .expect("installed dismiss route is projected");
+        assert_eq!(dismiss.descriptor.id, ConversationCommandId::Back);
+        assert_eq!(
+            dismiss.descriptor.availability.disabled_reason(),
+            Some(
+                "Stop the current response first; this host cannot keep it running after you leave."
+            )
+        );
+        assert!(unsupported
+            .iter()
+            .any(|binding| { binding.handler == ChatPromptConversationCommand::CopyLastResponse }));
+
+        assert_eq!(
+            validate_chat_prompt_command_facts(ChatPromptConversationCommandFacts {
+                dismiss_command: Some(ConversationCommandId::Background),
+                ..Default::default()
+            }),
+            Err("ChatPrompt dismiss command must be Back or Close")
+        );
+    }
+
+    #[test]
+    fn latest_assistant_copy_uses_trim_only_for_eligibility() {
+        let responses = ["first", "\t \n", "  exact final\r\n"];
+        assert_eq!(
+            resolve_latest_copyable_assistant_response(responses.into_iter()),
+            Some("  exact final\r\n")
+        );
+        assert_eq!(
+            resolve_latest_copyable_assistant_response(["", " \n\t"].into_iter()),
+            None
+        );
     }
 
     #[test]

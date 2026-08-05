@@ -1776,56 +1776,67 @@ impl ScriptListApp {
                                     if !has_cmd && !_has_alt && !_has_ctrl {
                                         if let Some(ch) = key_lower.chars().next() {
                                             if ch.is_alphanumeric()
-                                            || ch.is_whitespace()
-                                            || ch == '-'
-                                            || ch == '_'
-                                        {
-                                            logging::log(
-                                                "STDIN",
-                                                &format!(
-                                                    "SimulateKey: Char '{}' in chat actions dialog",
-                                                    ch
-                                                ),
-                                            );
-                                            dialog.update(ctx, |d, cx| {
-                                                d.insert_search_text(ch.to_string(), window, cx);
-                                            });
-                                        } else {
-                                            logging::log(
-                                                "STDIN",
-                                                &format!(
-                                                    "SimulateKey: Unhandled key '{}' in ChatPrompt actions dialog",
-                                                    key_lower
-                                                ),
-                                            );
+                                                || ch.is_whitespace()
+                                                || ch == '-'
+                                                || ch == '_'
+                                            {
+                                                logging::log(
+                                                    "STDIN",
+                                                    &format!(
+                                                        "SimulateKey: Char '{}' in chat actions dialog",
+                                                        ch
+                                                    ),
+                                                );
+                                                dialog.update(ctx, |d, cx| {
+                                                    d.insert_search_text(
+                                                        ch.to_string(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            } else {
+                                                logging::log(
+                                                    "STDIN",
+                                                    &format!(
+                                                        "SimulateKey: Unhandled key '{}' in ChatPrompt actions dialog",
+                                                        key_lower
+                                                    ),
+                                                );
+                                            }
                                         }
                                     }
-                                }
                                 }
                             }
                             // Notify the actions window to re-render
                             crate::actions::notify_actions_window(ctx);
                         }
                     } else {
-                        // Route setup keys (tab, arrows, enter, escape) to ChatPrompt
+                        // Route the same capability-derived conversation commands used by
+                        // live keys, footer controls, Actions, and semantic automation.
                         entity.update(ctx, |chat, cx| {
-                            if key_lower == "escape" {
+                            if key_lower == "escape" || key_lower == "esc" {
                                 chat.handle_escape(cx);
                                 logging::log("STDIN", "SimulateKey: Escape handled by ChatPrompt");
-                            } else if chat.handle_setup_key(&key_lower, has_shift, cx) {
+                                return;
+                            }
+                            if chat.handle_setup_key(&key_lower, has_shift, cx) {
                                 logging::log(
                                     "STDIN",
                                     &format!("SimulateKey: Setup handled '{}'", key_lower),
                                 );
-                            } else {
-                                logging::log(
-                                    "STDIN",
-                                    &format!(
-                                        "SimulateKey: Unhandled '{}' in ChatPrompt",
-                                        key_lower
-                                    ),
-                                );
+                                return;
                             }
+
+                            let execution = chat.execute_conversation_key_command(
+                                &key_lower, has_cmd, has_shift, cx,
+                            );
+                            logging::log(
+                                "STDIN",
+                                &format!(
+                                    "SimulateKey: ChatPrompt shared-command execution={:?}",
+                                    execution
+                                ),
+                            );
                         });
                     }
                 }
@@ -2083,48 +2094,30 @@ impl ScriptListApp {
                             "SimulateKey: Escape - close Agent Chat actions dialog",
                         );
                         view.close_actions_popup(ActionsDialogHost::AgentChat, window, ctx);
-                    } else if key_lower == "escape" {
-                        let cancelled_streaming = entity_clone.update(ctx, |chat, cx| {
-                            if chat.is_focused_text_mini()
-                                || chat.focused_text_originated_from_quick_prompt()
-                            {
-                                false
-                            } else {
-                                chat.cancel_streaming_from_escape(cx)
-                            }
+                    } else if key_lower == "escape" || key_lower == "esc" {
+                        let execution = entity_clone.update(ctx, |chat, cx| {
+                            chat.request_conversation_dismiss(
+                                crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+                                window,
+                                cx,
+                            )
                         });
-                        if cancelled_streaming {
-                            logging::log(
-                                "STDIN",
-                                "SimulateKey: Escape - cancel Agent Chat streaming",
-                            );
-                        } else if ({
-                            let chat = entity_clone.read(ctx);
-                            chat.is_focused_text_mini()
-                                || chat.focused_text_originated_from_quick_prompt()
-                        }) {
-                            logging::log(
-                                "STDIN",
-                                "SimulateKey: Escape - hide focused-text quick prompt Agent Chat",
-                            );
-                            view.close_agent_chat_main_window_state_first(ctx);
-                        } else if view.opened_from_main_menu {
-                            logging::log(
-                                "STDIN",
-                                "SimulateKey: Escape - return to main menu from Agent Chat (opened from main menu)",
-                            );
-                            view.close_tab_ai_harness_terminal_with_window(window, ctx);
-                        } else {
-                            logging::log(
-                                "STDIN",
-                                "SimulateKey: Escape - close Agent Chat window (opened directly)",
-                            );
-                            view.close_agent_chat_main_window_state_first(ctx);
-                        }
+                        logging::log(
+                            "STDIN",
+                            &format!("SimulateKey: Agent Chat Escape execution={execution:?}"),
+                        );
                     } else if has_cmd && key_lower == "w" {
-                        logging::log("STDIN", "SimulateKey: Cmd+W - close window from Agent Chat");
-                        view.close_tab_ai_harness_terminal_with_window(window, ctx);
-                        view.close_and_reset_window(ctx);
+                        let execution = entity_clone.update(ctx, |chat, cx| {
+                            chat.request_conversation_dismiss(
+                                crate::components::conversation_actions::ConversationDismissTrigger::CommandW,
+                                window,
+                                cx,
+                            )
+                        });
+                        logging::log(
+                            "STDIN",
+                            &format!("SimulateKey: Agent Chat Cmd+W execution={execution:?}"),
+                        );
                     } else if has_cmd && key_lower == "enter" && !has_shift {
                         // Spine prompt submission takes precedence in Agent Chat. If the
                         // composer parses a valid prompt plan (resolved context,
@@ -2248,7 +2241,17 @@ impl ScriptListApp {
                     }
                 }
                 AppView::FlowSessionView { .. } => {
-                    if has_cmd && has_shift && key_lower == "d" {
+                    if view.try_handle_flow_session_copy_shortcut(
+                        &key_lower,
+                        has_cmd,
+                        has_shift,
+                        ctx,
+                    ) {
+                        logging::log(
+                            "STDIN",
+                            "SimulateKey: Cmd+Shift+C - copy Flow response",
+                        );
+                    } else if has_cmd && has_shift && key_lower == "d" {
                         logging::log(
                             "STDIN",
                             "SimulateKey: Cmd+Shift+D - background flow session",

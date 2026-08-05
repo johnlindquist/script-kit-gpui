@@ -5,6 +5,9 @@ impl ChatPrompt {
     fn footer_status_text(&self) -> gpui::SharedString {
         let mut parts: Vec<String> = Vec::new();
 
+        if let Some(status) = &self.command_status {
+            parts.push(status.clone());
+        }
         if self.is_streaming() {
             parts.push("Streaming".to_string());
         } else if self.script_generation_mode {
@@ -33,12 +36,44 @@ impl ChatPrompt {
             crate::components::conversation_actions::ChatPromptConversationCommand,
         >,
     > {
-        crate::components::conversation_actions::chat_prompt_conversation_commands(
-            self.is_streaming(),
-            !self.input.text().trim().is_empty(),
-            self.messages
-                .iter()
-                .any(|message| !message.is_user() && !message.get_content().trim().is_empty()),
+        use crate::components::conversation_actions::{
+            ChatPromptConversationCommandFacts, ConversationCommandId,
+        };
+        if self.is_transcript_only() {
+            return Vec::new();
+        }
+        let dismiss_command = self
+            .dismiss_binding
+            .as_ref()
+            .map(|binding| match binding.route {
+                ChatPromptDismissRoute::Back => ConversationCommandId::Back,
+                ChatPromptDismissRoute::Close => ConversationCommandId::Close,
+            });
+        let active_work = self
+            .dismiss_binding
+            .as_ref()
+            .map(|binding| binding.active_work)
+            .unwrap_or_default();
+        crate::components::conversation_actions::chat_prompt_conversation_commands_for_facts(
+            ChatPromptConversationCommandFacts {
+                response_in_progress: self.is_streaming(),
+                composer_has_text: !self.input.text().trim().is_empty(),
+                has_response: crate::components::conversation_actions::resolve_latest_copyable_assistant_response(
+                    self.messages
+                        .iter()
+                        .filter(|message| !message.is_user())
+                        .map(|message| message.get_content()),
+                )
+                .is_some(),
+                submit_installed: !self.needs_setup
+                    && !self.loading_providers
+                    && (self.on_submit.is_some() || self.has_builtin_ai()),
+                stop_installed: self.on_stop.is_some()
+                    || (self.has_builtin_ai() && self.builtin_cancel_signal.is_some()),
+                retry_available: self.latest_retryable_assistant_id().is_some(),
+                dismiss_command,
+                active_work,
+            },
         )
     }
 
@@ -239,33 +274,38 @@ impl Render for ChatPrompt {
             // Note: Actions menu keyboard navigation is handled by ActionsDialog window
             // We just need to handle ⌘K to open it via callback
 
-            let has_response = this
-                .messages
-                .iter()
-                .any(|message| !message.is_user() && !message.get_content().trim().is_empty());
-            match resolve_chat_input_key_action_with_facts(
+            let commands = this.conversation_command_bindings();
+            match resolve_chat_input_key_action_with_commands(
                 key,
                 modifiers.platform,
                 modifiers.shift,
-                this.is_streaming(),
-                !this.input.text().trim().is_empty(),
-                has_response,
+                &commands,
             ) {
                 ChatInputKeyAction::Escape => {
-                    // Escape - stop streaming if active, otherwise close chat.
-                    // This handler is installed for Standalone hosts only;
-                    // a transcript-only host owns its own escape ladder and
-                    // never reaches this code.
-                    if this.is_streaming() {
-                        this.stop_streaming(cx);
-                    } else {
-                        this.handle_escape(cx);
-                    }
+                    // Dismissal is never Stop. Non-surviving active work is
+                    // blocked by the typed dismiss binding until explicit ⌘..
+                    let _ = this.request_dismiss(
+                        crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+                        cx,
+                    );
                 }
                 ChatInputKeyAction::StopStreaming => {
-                    if this.is_streaming() {
-                        this.stop_streaming(cx);
-                    }
+                    let _ = this.execute_conversation_command(
+                        crate::components::conversation_actions::ChatPromptConversationCommand::Stop,
+                        cx,
+                    );
+                }
+                ChatInputKeyAction::Retry => {
+                    let _ = this.execute_conversation_command(
+                        crate::components::conversation_actions::ChatPromptConversationCommand::Retry,
+                        cx,
+                    );
+                }
+                ChatInputKeyAction::DismissCommandW => {
+                    let _ = this.request_dismiss(
+                        crate::components::conversation_actions::ConversationDismissTrigger::CommandW,
+                        cx,
+                    );
                 }
                 ChatInputKeyAction::JumpToLatest => {
                     this.force_scroll_turns_to_bottom();
@@ -283,13 +323,23 @@ impl Render for ChatPrompt {
                         this.handle_continue_in_chat(cx);
                     }
                 }
-                ChatInputKeyAction::Submit => this.handle_submit(cx),
+                ChatInputKeyAction::Submit => {
+                    let _ = this.execute_conversation_command(
+                        crate::components::conversation_actions::ChatPromptConversationCommand::Send,
+                        cx,
+                    );
+                }
                 ChatInputKeyAction::InsertNewline => {
                     this.input.insert_char('\n');
                     this.reset_cursor_blink();
                     cx.notify();
                 }
-                ChatInputKeyAction::CopyLastResponse => this.handle_copy_last_response(cx),
+                ChatInputKeyAction::CopyLastResponse => {
+                    let _ = this.execute_conversation_command(
+                        crate::components::conversation_actions::ChatPromptConversationCommand::CopyLastResponse,
+                        cx,
+                    );
+                }
                 ChatInputKeyAction::ClearConversation => this.handle_clear(cx),
                 ChatInputKeyAction::Paste => {
                     if !this.handle_paste_for_image(cx) {

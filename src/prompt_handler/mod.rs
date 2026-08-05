@@ -241,7 +241,7 @@ fn resolve_prompt_popup_subtype(
         other => {
             return Err(crate::protocol::TransactionError::action_failed(format!(
                 "PromptPopup target {other} is not a batch-addressable popup subtype"
-            )))
+            )));
         }
     };
 
@@ -279,12 +279,13 @@ fn revalidate_prompt_popup_target(
             id: expected.id.clone(),
         },
     };
-    let current = crate::windows::resolve_automation_window(Some(&exact_target)).map_err(|error| {
-        crate::protocol::TransactionError::action_failed(format!(
-            "PromptPopup target {} became stale: {error}",
-            expected.id
-        ))
-    })?;
+    let current =
+        crate::windows::resolve_automation_window(Some(&exact_target)).map_err(|error| {
+            crate::protocol::TransactionError::action_failed(format!(
+                "PromptPopup target {} became stale: {error}",
+                expected.id
+            ))
+        })?;
     let current_subtype = resolve_prompt_popup_subtype(&current)?;
     if current_subtype != subtype || current.generation != expected.generation {
         return Err(crate::protocol::TransactionError::action_failed(format!(
@@ -4467,7 +4468,7 @@ impl ScriptListApp {
                 fixture_id,
             } => {
                 use crate::ai::message_parts::{
-                    prepare_user_message, AiContextPart, ContextPreparationItem,
+                    AiContextPart, ContextPreparationItem, prepare_user_message,
                 };
 
                 if std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() != Some("1") {
@@ -4542,8 +4543,8 @@ impl ScriptListApp {
 
                 let prepared = prepare_user_message(authored, &items, &[], &[]);
                 let final_content = &prepared.final_user_content;
-                let serialized_receipt = serde_json::to_string(&prepared.receipt)
-                    .unwrap_or_else(|_| "{}".to_string());
+                let serialized_receipt =
+                    serde_json::to_string(&prepared.receipt).unwrap_or_else(|_| "{}".to_string());
                 let private_checks = serde_json::json!({
                     "payloadChars": final_content.chars().count(),
                     "nonbinaryFieldPreserved": final_content.contains(nonbinary_canary),
@@ -5675,11 +5676,7 @@ impl ScriptListApp {
                 };
 
                 let prompt_popup_batch_target =
-                    if let AutomationReadTarget::PromptPopup {
-                        ref info,
-                        subtype,
-                    } = batch_target
-                    {
+                    if let AutomationReadTarget::PromptPopup { ref info, subtype } = batch_target {
                         Some((info.clone(), subtype))
                     } else {
                         None
@@ -8151,28 +8148,31 @@ impl ScriptListApp {
                 // Store SDK actions for the actions panel (Cmd+K)
                 self.sdk_actions = actions;
 
-                let escape_sender = self.inline_chat_escape_sender.clone();
-                let escape_main_window_mode = self.main_window_mode;
-                let escape_callback: prompts::ChatEscapeCallback =
-                    std::sync::Arc::new(move |prompt_id| {
+                let dismiss_sender = self.inline_chat_escape_sender.clone();
+                let dismiss_main_window_mode = self.main_window_mode;
+                let dismiss_callback: crate::prompts::ChatPromptDismissCallback =
+                    std::sync::Arc::new(move |request| {
                         tracing::info!(
                             target: "script_kit::mini_ai",
                             event = "mini_ai_window_close_requested",
-                            prompt_id = %prompt_id,
-                            main_window_mode = ?escape_main_window_mode,
-                            source = MiniAiCloseSource::Escape.as_str(),
-                            "SDK ChatPrompt close requested"
+                            prompt_id = %request.prompt_id,
+                            main_window_mode = ?dismiss_main_window_mode,
+                            trigger = ?request.trigger,
+                            "SDK ChatPrompt dismiss requested"
                         );
-                        let _ = escape_sender.try_send(());
+                        let _ = dismiss_sender.try_send(());
                     });
 
                 // Create submit callback for chat prompt
                 let response_sender = self.response_sender.clone();
                 let chat_submit_callback: prompts::ChatSubmitCallback =
-                    std::sync::Arc::new(move |id, text| {
+                    std::sync::Arc::new(move |request| {
                         if let Some(ref sender) = response_sender {
-                            // Send ChatSubmit message back to SDK
-                            let response = Message::ChatSubmit { id, text };
+                            // Send the exact immutable accepted payload back to the SDK.
+                            let response = Message::ChatSubmit {
+                                id: request.prompt_id().to_string(),
+                                text: request.outbound_text().to_string(),
+                            };
                             match sender.try_send(response) {
                                 Ok(()) => {}
                                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
@@ -8200,10 +8200,14 @@ impl ScriptListApp {
                     hint,
                     footer,
                     focus_handle,
-                    chat_submit_callback,
+                    Some(chat_submit_callback),
                     std::sync::Arc::clone(&self.theme),
                 )
-                .with_escape_callback(escape_callback)
+                .with_dismiss_binding(crate::prompts::ChatPromptDismissBinding {
+                    route: crate::prompts::ChatPromptDismissRoute::Back,
+                    active_work: crate::components::conversation_actions::ActiveWorkDismissal::RequiresExplicitStop,
+                    callback: dismiss_callback,
+                })
                 .with_mini_mode(self.main_window_mode == MainWindowMode::Mini);
 
                 // Apply model configuration from SDK

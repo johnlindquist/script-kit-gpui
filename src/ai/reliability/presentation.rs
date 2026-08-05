@@ -93,6 +93,11 @@ impl SurfaceRecoveryCapabilities {
         self.supported_actions.contains(&kind)
     }
 
+    pub fn with_action(mut self, kind: RecoveryActionKind) -> Self {
+        self.supported_actions.insert(kind);
+        self
+    }
+
     pub fn layout(mut self, layout: AiRecoveryLayout) -> Self {
         self.layout_override = Some(layout);
         self

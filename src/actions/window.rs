@@ -117,6 +117,10 @@ const ACTIONS_WINDOW_PAGE_JUMP: usize = 8;
 #[cfg(target_os = "macos")]
 const NS_WINDOW_ABOVE: i64 = 1;
 
+fn actions_window_reserves_shortcut(canonical: &str) -> bool {
+    matches!(canonical, "escape" | "cmd+k")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActionsWindowKeyIntent {
     MoveUp,
@@ -455,6 +459,13 @@ impl ActionsWindow {
         let mut bindings = Vec::new();
         let registered_before = self.registered_displayed_shortcuts.len();
         for spec in specs {
+            // Popup-owned navigation always wins over row shortcuts. A host may
+            // advertise Escape as its conversation Back action, but while the
+            // Actions window is open that same key must close exactly one
+            // overlay rather than execute the host action underneath it.
+            if actions_window_reserves_shortcut(&spec.canonical) {
+                continue;
+            }
             if !self
                 .registered_displayed_shortcuts
                 .insert(spec.canonical.clone())
@@ -1114,6 +1125,13 @@ mod window_lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_actions_window_reserves_overlay_dismissal_shortcuts() {
+        assert!(actions_window_reserves_shortcut("escape"));
+        assert!(actions_window_reserves_shortcut("cmd+k"));
+        assert!(!actions_window_reserves_shortcut("cmd+shift+c"));
+    }
 
     #[test]
     fn test_actions_window_key_intent_supports_aliases_and_jump_keys() {

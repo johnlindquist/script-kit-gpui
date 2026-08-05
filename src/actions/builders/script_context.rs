@@ -980,6 +980,7 @@ pub fn get_agent_chat_actions() -> Vec<Action> {
             composer_has_text: false,
             retry_available: false,
             has_response: true,
+            ..Default::default()
         },
     )
 }

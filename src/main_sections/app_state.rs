@@ -622,6 +622,39 @@ pub(crate) struct MainMenuInteractionSnapshot {
     pub(crate) viewport: MainMenuViewportSnapshot,
 }
 
+#[derive(Clone, Debug)]
+struct AgentChatInputReturnState {
+    value: String,
+    selection: std::ops::Range<usize>,
+    focused_input: FocusedInput,
+    pending_focus: Option<FocusTarget>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentChatReturnOrigin {
+    view: AppView,
+    focus_target: FocusTarget,
+    input: AgentChatInputReturnState,
+    pending_placeholder: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentChatMainReturnState {
+    view: AppView,
+    raw_filter_text: String,
+    computed_filter_text: String,
+    interaction: MainMenuInteractionSnapshot,
+    input: AgentChatInputReturnState,
+    pending_placeholder: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum AgentChatReturnRoute {
+    Source(AgentChatReturnOrigin),
+    Main(AgentChatMainReturnState),
+    Direct,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainMenuRefreshSelectionPolicy {
     SnapToFirst,
@@ -1060,13 +1093,10 @@ pub(crate) struct ScriptListApp {
     /// `close_and_reset_window`, and filtering-cache rebuilds, and shrinks
     /// only on explicit session close/removal.
     pub(crate) conversations: crate::ai::conversations::BackgroundedSessionStore,
-    /// Escape origin for the CURRENT flow session view: true when the
-    /// session was entered from the Conversation Desk (FlowUxView), false
-    /// when entered from the main launcher or anywhere else. Escape must
-    /// return exactly one step to the surface the user actually came from —
-    /// a main-menu-launched session escaping through the desk reads as a
-    /// swallowed Escape (see `flow_session_returns_to_desk`).
-    pub(crate) flow_session_return_to_desk: bool,
+    /// Ephemeral origin snapshot for the current Flow conversation. This
+    /// preserves the exact Desk/Main view, filter, selection, viewport, and
+    /// input focus without changing C05's persisted conversation schema.
+    pub(crate) flow_session_return_route: FlowConversationReturnRoute,
     /// Sender for flow-session chat requests (submit/background). Cloned
     /// into ChatPrompt callbacks, which have no app access.
     pub(crate) flow_chat_sender: mpsc::SyncSender<crate::flows::session::FlowChatRequest>,
@@ -1421,6 +1451,10 @@ pub(crate) struct ScriptListApp {
     pub(crate) tab_ai_harness_return_view: Option<AppView>,
     /// Previous focus target to restore when leaving Tab AI quick terminal.
     pub(crate) tab_ai_harness_return_focus_target: Option<FocusTarget>,
+    /// Typed Agent Chat-only return route. Quick Terminal retains the legacy
+    /// harness fields above; Agent Chat dismissal no longer branches on them or
+    /// on `opened_from_main_menu`.
+    pub(crate) agent_chat_return_route: AgentChatReturnRoute,
     /// Main-menu trigger that launched the current Agent Chat session, if any.
     pub(crate) tab_ai_harness_script_list_trigger: Option<char>,
     /// Pending explicit apply-back route for the active Tab AI harness session.
@@ -1664,7 +1698,7 @@ mod backgrounded_session_store_tests {
                 None,
                 None,
                 focus_handle,
-                std::sync::Arc::new(|_, _| {}) as crate::prompts::ChatSubmitCallback,
+                Some(std::sync::Arc::new(|_| {}) as crate::prompts::ChatSubmitCallback),
                 std::sync::Arc::new(crate::theme::Theme::default()),
             )
         })

@@ -285,12 +285,6 @@ mod tests {
             "FooterAction::Actions must not bypass dispatch_actions_toggle_for_current_view()"
         );
 
-        let stop_arm = match_arm_body(dispatcher, "crate::footer_popup::FooterAction::Stop =>");
-        assert!(
-            stop_arm.contains("cancel_streaming_from_escape"),
-            "FooterAction::Stop must dispatch through the Agent Chat streaming cancellation path"
-        );
-
         let paste_arm = match_arm_body(
             dispatcher,
             "crate::footer_popup::FooterAction::PasteResponse =>",

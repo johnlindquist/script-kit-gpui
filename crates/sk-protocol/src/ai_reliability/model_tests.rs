@@ -487,6 +487,78 @@ fn cancellation_is_an_outcome_not_a_failure() {
 }
 
 #[test]
+fn explicit_stop_is_quiet_user_stopped_for_partial_and_empty_output() {
+    for partial in [
+        PartialOutputState::None,
+        PartialOutputState::Preserved {
+            fingerprint: Fingerprint::from("run-scoped-partial"),
+        },
+    ] {
+        let stopping = transition_ok(running_state(), AiOperationEvent::StopRequested);
+        assert!(matches!(
+            stopping.next.phase,
+            AiPhase::Cancelling {
+                kind: CancellationKind::UserStopped,
+                ..
+            }
+        ));
+        assert!(matches!(
+            stopping.commands.as_slice(),
+            [AiCommand::CancelTurn { .. }]
+        ));
+
+        let stopped = transition_ok(
+            stopping.next,
+            AiOperationEvent::RuntimeStopped {
+                partial: partial.clone(),
+            },
+        );
+        assert_eq!(
+            stopped.next.phase,
+            AiPhase::Cancelled {
+                kind: CancellationKind::UserStopped,
+                partial: partial.clone(),
+            }
+        );
+        assert_eq!(
+            stopped.outcome,
+            Some(AiOutcome::Cancelled {
+                kind: CancellationKind::UserStopped,
+                partial,
+            })
+        );
+        assert!(stopped.commands.is_empty());
+        assert!(stopped.next.diagnostic.is_none());
+    }
+}
+
+#[test]
+fn stop_and_legacy_cancel_terminal_events_cannot_cross_classify() {
+    let stopping = transition_ok(running_state(), AiOperationEvent::StopRequested);
+    let wrong_cancel = transition(
+        stopping.next,
+        AiOperationEvent::RuntimeCancelled {
+            partial: PartialOutputState::None,
+        },
+    )
+    .expect_err("legacy runtime cancellation cannot settle an explicit Stop");
+    assert_eq!(
+        wrong_cancel.reason,
+        InvalidTransitionReason::EventNotAllowed
+    );
+
+    let cancelling = transition_ok(running_state(), AiOperationEvent::CancelRequested);
+    let wrong_stop = transition(
+        cancelling.next,
+        AiOperationEvent::RuntimeStopped {
+            partial: PartialOutputState::None,
+        },
+    )
+    .expect_err("explicit Stop terminal cannot relabel legacy cancellation");
+    assert_eq!(wrong_stop.reason, InvalidTransitionReason::EventNotAllowed);
+}
+
+#[test]
 fn selection_change_cannot_start_until_effect_acknowledges_it() {
     let mut state = submit(ready()).next;
     state.selection.requested = Some(AiModelSelection {
@@ -702,6 +774,8 @@ fn cartesian_state_event_table_is_deterministic_and_explicit() {
             | AiEventTag::Failed
             | AiEventTag::CancelRequested
             | AiEventTag::RuntimeCancelled
+            | AiEventTag::StopRequested
+            | AiEventTag::RuntimeStopped
             | AiEventTag::RecoverySelected
             | AiEventTag::RecoveryCommandSucceeded
             | AiEventTag::RecoveryCommandFailed
@@ -796,7 +870,10 @@ fn assert_command_invariants(
             }
         }
     }
-    if matches!(event, AiOperationEvent::RuntimeCancelled { .. }) {
+    if matches!(
+        event,
+        AiOperationEvent::RuntimeCancelled { .. } | AiOperationEvent::RuntimeStopped { .. }
+    ) {
         assert!(!result.commands.iter().any(|command| matches!(
             command,
             AiCommand::ScheduleBackoff { .. } | AiCommand::StartTurn(_)
@@ -822,8 +899,17 @@ fn representative_states() -> Vec<AiOperationState> {
     cancelling.phase = AiPhase::Cancelling {
         turn: TurnRef::from("turn-1"),
         partial: PartialOutputState::None,
+        kind: CancellationKind::UserCancelled,
     };
     states.push(cancelling);
+
+    let mut stopping = running_state();
+    stopping.phase = AiPhase::Cancelling {
+        turn: TurnRef::from("turn-1"),
+        partial: PartialOutputState::None,
+        kind: CancellationKind::UserStopped,
+    };
+    states.push(stopping);
 
     let failure = unknown_failure();
     let plan = recovery_plan_for(
@@ -913,6 +999,10 @@ fn representative_events() -> Vec<AiOperationEvent> {
         AiOperationEvent::Failed(unknown_failure()),
         AiOperationEvent::CancelRequested,
         AiOperationEvent::RuntimeCancelled {
+            partial: PartialOutputState::None,
+        },
+        AiOperationEvent::StopRequested,
+        AiOperationEvent::RuntimeStopped {
             partial: PartialOutputState::None,
         },
         AiOperationEvent::RecoverySelected(AiRecoveryAction::Retry),

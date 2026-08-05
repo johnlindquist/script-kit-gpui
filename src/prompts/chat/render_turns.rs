@@ -18,6 +18,19 @@ pub(super) fn assistant_answer_region_source(
     turn: &ConversationTurn,
     script_generation_mode: bool,
 ) -> Option<Cow<'_, str>> {
+    if matches!(
+        turn.terminal_outcome,
+        Some(sk_protocol::ai_reliability::AiOutcome::Cancelled { .. })
+    ) {
+        let response = turn.assistant_response.as_deref()?;
+        if response.is_empty() {
+            return None;
+        }
+        return Some(super::types::assistant_response_markdown_source(
+            script_generation_mode,
+            response,
+        ));
+    }
     if turn.failure.is_some() || turn.error.is_some() {
         // Failure rows show a safe partial answer ONLY when there is one; the
         // recovery card carries the rest and is not markdown.
@@ -221,18 +234,14 @@ impl ChatPrompt {
         // quiet kind of drift: the two agreed today and nothing forced them to
         // keep agreeing tomorrow.
         //
-        // Flow's eligibility is deliberately NOT the assistant-body rule Agent
-        // Chat uses. Flow's `copy_turn_response` falls back to the user prompt
-        // when there is no assistant response yet, so a Flow row genuinely has
-        // something to copy earlier than an Agent Chat row does. Converging the
-        // *anatomy* is the goal; converging the eligibility would delete a
-        // working affordance.
+        // Copy is assistant-only across every conversation host. A pending or
+        // terminal-empty answer has no control; user prompts are never a hidden
+        // fallback for a control labelled Copy Response.
         let show_streaming_indicator = conversation_turn_pending_indicator_visible(turn);
         let has_anything_to_copy = turn
             .assistant_response
             .as_deref()
-            .is_some_and(|response| !response.trim().is_empty())
-            || !turn.user_prompt.trim().is_empty();
+            .is_some_and(|response| !response.trim().is_empty());
         let eligibility = if !has_anything_to_copy {
             crate::components::conversation_actions::TurnCopyEligibility::Absent
         } else if show_streaming_indicator {
@@ -279,32 +288,28 @@ impl ChatPrompt {
     /// actions need the host recovery callback; CopyDetails is always safe.
     pub(crate) fn turn_recovery_capabilities(
         &self,
+        message_id: Option<&str>,
     ) -> crate::ai::reliability::SurfaceRecoveryCapabilities {
         use sk_protocol::ai_reliability::RecoveryActionKind;
-        let mut kinds = vec![RecoveryActionKind::CopyDetails];
-        if self.on_retry.is_some() {
-            kinds.push(RecoveryActionKind::Retry);
+        let mut capabilities = self
+            .recovery_binding
+            .as_ref()
+            .map(|binding| binding.capabilities.clone())
+            .unwrap_or_else(|| crate::ai::reliability::SurfaceRecoveryCapabilities::only([]));
+        capabilities = capabilities.with_action(RecoveryActionKind::CopyDetails);
+        if message_id.is_some_and(|message_id| {
+            self.prepared_requests_by_assistant_id
+                .get(message_id)
+                .is_some_and(|prepared| {
+                    self.on_retry.is_some()
+                        || self
+                            .builtin_replay_payloads
+                            .contains_key(prepared.request_ref())
+                })
+        }) {
+            capabilities = capabilities.with_action(RecoveryActionKind::Retry);
         }
-        if self.on_recovery.is_some() {
-            kinds.extend([
-                RecoveryActionKind::ChooseCompatibleModel,
-                RecoveryActionKind::ChooseProvider,
-                RecoveryActionKind::UpdateClient,
-                RecoveryActionKind::CheckAgain,
-                RecoveryActionKind::SignIn,
-                RecoveryActionKind::SwitchAccount,
-                RecoveryActionKind::ConfigureProvider,
-                RecoveryActionKind::RepairComponent,
-                RecoveryActionKind::TrimContext,
-                // A flow conversation's engine death is repaired by starting
-                // a fresh thread. The flow session host performs it in
-                // `dispatch_flow_recovery_action`; omitting it here hid the
-                // button on exactly the failure it fixes.
-                RecoveryActionKind::RethreadFlow,
-            ]);
-        }
-        crate::ai::reliability::SurfaceRecoveryCapabilities::only(kinds)
-            .layout(crate::ai::reliability::AiRecoveryLayout::TranscriptCard)
+        capabilities.layout(crate::ai::reliability::AiRecoveryLayout::TranscriptCard)
     }
 
     /// One shared recovery card for a failed transcript turn (S10). Same
@@ -338,7 +343,7 @@ impl ChatPrompt {
                 attachments: PreservationReceipt::NotApplicable,
                 partial_output: PreservationReceipt::NotApplicable,
             };
-        let capabilities = self.turn_recovery_capabilities();
+        let capabilities = self.turn_recovery_capabilities(message_id.as_deref());
         let Some(spec) = crate::ai::reliability::standalone_failure_recovery_spec(
             identity,
             failure,
@@ -397,7 +402,7 @@ impl ChatPrompt {
         match action {
             AiRecoveryAction::Retry => {
                 if let Some(message_id) = message_id {
-                    self.handle_retry(message_id);
+                    let _ = self.handle_retry(message_id, cx);
                 }
             }
             AiRecoveryAction::CopyDetails => {
@@ -426,54 +431,131 @@ impl ChatPrompt {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(details));
             }
             other => {
-                if let (Some(message_id), Some(callback)) = (message_id, self.on_recovery.as_ref())
+                if let (Some(message_id), Some(binding)) =
+                    (message_id, self.recovery_binding.as_ref())
                 {
-                    callback(message_id, other);
+                    if let Err(record) = (binding.callback)(message_id, other) {
+                        tracing::warn!(
+                            target: "script_kit::chat_recovery",
+                            failure_code = ?record.failure.code,
+                            diagnostic_fingerprint = ?record.failure.diagnostic.as_ref().map(|d| &d.fingerprint.0),
+                            "ChatPrompt recovery callback rejected"
+                        );
+                    }
                 }
             }
         }
     }
 
-    /// Handle retry for a failed message
-    pub(super) fn handle_retry(&self, message_id: String) {
-        logging::log(
-            "CHAT",
-            &format!("Retry requested for message: {}", message_id),
-        );
-        if let Some(ref callback) = self.on_retry {
-            callback(self.id.clone(), message_id);
+    pub(super) fn latest_retryable_assistant_id(&self) -> Option<&str> {
+        self.messages.iter().rev().find_map(|message| {
+            let message_id = message.id.as_deref()?;
+            let failed = message.failure.is_some() || message.error.is_some();
+            let prepared = self
+                .prepared_requests_by_assistant_id
+                .contains_key(message_id);
+            let executable = self.on_retry.is_some()
+                || self
+                    .prepared_requests_by_assistant_id
+                    .get(message_id)
+                    .is_some_and(|request| {
+                        self.builtin_replay_payloads
+                            .contains_key(request.request_ref())
+                    });
+            (failed && prepared && executable).then_some(message_id)
+        })
+    }
+
+    pub(super) fn retry_latest_failed_response(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(message_id) = self.latest_retryable_assistant_id().map(str::to_string) else {
+            return false;
+        };
+        self.handle_retry(message_id, cx)
+    }
+
+    /// Retry exactly the immutable request retained for this failed assistant
+    /// row. No composer, picker, clipboard, or current selection is consulted.
+    pub(super) fn handle_retry(&mut self, message_id: String, cx: &mut Context<Self>) -> bool {
+        let Some(prepared) = self
+            .prepared_requests_by_assistant_id
+            .get(&message_id)
+            .cloned()
+        else {
+            return false;
+        };
+
+        if let Some(payload) = self
+            .builtin_replay_payloads
+            .get(prepared.request_ref())
+            .cloned()
+        {
+            if let Some(message) = self
+                .messages
+                .iter_mut()
+                .rev()
+                .find(|message| message.id.as_deref() == Some(&message_id))
+            {
+                message.set_content("");
+                message.error = None;
+                message.failure = None;
+                message.streaming = true;
+            }
+            self.terminal_outcomes.remove(&message_id);
+            self.streaming_message_id = Some(message_id.clone());
+            self.builtin_is_streaming = true;
+            self.mark_conversation_turns_dirty();
+            self.ensure_conversation_turns_cache();
+            self.force_scroll_turns_to_bottom();
+            self.spawn_streaming_reveal(
+                payload.provider,
+                payload.api_messages,
+                payload.model_id,
+                message_id,
+                cx,
+            );
+            return true;
+        }
+
+        let Some(callback) = self.on_retry.as_ref() else {
+            return false;
+        };
+        let request = ChatPromptRetryRequest {
+            prompt_id: Arc::from(self.id.as_str()),
+            failed_assistant_message_id: Arc::from(message_id.as_str()),
+            prepared,
+        };
+        match callback(request) {
+            Ok(()) => {
+                self.clear_message_error(&message_id, cx);
+                true
+            }
+            Err(record) => {
+                tracing::warn!(
+                    target: "script_kit::chat_retry",
+                    failure_code = ?record.failure.code,
+                    diagnostic_fingerprint = ?record.failure.diagnostic.as_ref().map(|d| &d.fingerprint.0),
+                    "Immutable retry callback rejected"
+                );
+                false
+            }
         }
     }
 
-    /// Copy the assistant response from a specific turn
+    /// Copy the exact assistant bytes from one turn. Whitespace only affects
+    /// eligibility; no trimming, role label, newline rewrite, or user fallback.
     pub(super) fn copy_turn_response(&mut self, turn_index: usize, cx: &mut Context<Self>) {
         self.ensure_conversation_turns_cache();
-        if let Some(turn) = self.conversation_turns_cache.get(turn_index) {
-            if let Some(ref response) = turn.assistant_response {
-                let content = response.clone();
-                logging::log(
-                    "CHAT",
-                    &format!(
-                        "Copied turn {} response: {} chars",
-                        turn_index,
-                        content.len()
-                    ),
-                );
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(content));
-            } else if !turn.user_prompt.is_empty() {
-                // If no assistant response, copy the user prompt
-                let content = turn.user_prompt.clone();
-                logging::log(
-                    "CHAT",
-                    &format!(
-                        "Copied turn {} user prompt: {} chars",
-                        turn_index,
-                        content.len()
-                    ),
-                );
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(content));
-            }
-        }
+        let Some(content) = self
+            .conversation_turns_cache
+            .get(turn_index)
+            .and_then(|turn| turn.assistant_response.as_deref())
+            .filter(|response| !response.trim().is_empty())
+        else {
+            return;
+        };
+        self.last_copy_receipt = Some(
+            crate::components::conversation_actions::write_exact_conversation_copy(content, cx),
+        );
     }
 }
 
@@ -590,6 +672,7 @@ mod tests {
                 streaming,
                 error: error.map(str::to_string),
                 failure: None,
+                terminal_outcome: None,
                 message_id: None,
                 user_image: None,
                 render_key: super::ConversationTurnRenderKey::resolve(None, None, 0),
@@ -649,6 +732,7 @@ mod tests {
             streaming,
             error: error.map(str::to_string),
             failure: None,
+            terminal_outcome: None,
             message_id: None,
             user_image: None,
             render_key: super::ConversationTurnRenderKey::resolve(None, None, 0),

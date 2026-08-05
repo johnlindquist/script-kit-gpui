@@ -55,11 +55,12 @@ impl ScriptListApp {
                     });
                 }
             }
-            "send" | "stop" | "close" => {
+            "send" | "stop" | "retry" | "back" | "close" => {
                 let command = match action_id {
                     "send" => crate::components::conversation_actions::ChatPromptConversationCommand::Send,
                     "stop" => crate::components::conversation_actions::ChatPromptConversationCommand::Stop,
-                    "close" => crate::components::conversation_actions::ChatPromptConversationCommand::Close,
+                    "retry" => crate::components::conversation_actions::ChatPromptConversationCommand::Retry,
+                    "back" | "close" => crate::components::conversation_actions::ChatPromptConversationCommand::Dismiss,
                     _ => unreachable!(),
                 };
                 if let AppView::ChatPrompt { entity, .. } = &self.current_view {
@@ -76,7 +77,10 @@ impl ScriptListApp {
                             cx,
                         )
                     });
-                    if copied {
+                    if matches!(
+                        copied,
+                        crate::components::conversation_actions::ConversationCommandExecution::Executed
+                    ) {
                         self.show_hud("Copied response".to_string(), Some(HUD_SHORT_MS), cx);
                     }
                 }

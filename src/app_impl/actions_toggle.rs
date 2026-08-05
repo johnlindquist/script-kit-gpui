@@ -899,6 +899,7 @@ impl ScriptListApp {
                                     composer_has_text: false,
                                     retry_available: false,
                                     has_response: false,
+                                    ..Default::default()
                                 },
                             ),
                             crate::ai::agent_chat::ui::AgentChatSession::Live(thread) => {

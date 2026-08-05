@@ -661,7 +661,9 @@ await div("Hello");"#;
 #[cfg(test)]
 mod chat_prompt_host_mode_lifecycle {
     use super::super::{
-        ChatPrompt, ChatPromptHostMode, ChatSubmitCallback, ChatTranscriptAlignment,
+        ChatPrompt, ChatPromptDismissBinding, ChatPromptDismissRoute, ChatPromptHostMode,
+        ChatPromptPreparedRequest, ChatPromptRetryRequest, ChatSubmitCallback,
+        ChatTranscriptAlignment,
     };
     use crate::protocol::ChatPromptMessage;
     use crate::theme;
@@ -697,7 +699,7 @@ mod chat_prompt_host_mode_lifecycle {
                 None,
                 None,
                 cx.focus_handle(),
-                Arc::new(|_, _| {}) as ChatSubmitCallback,
+                Some(Arc::new(|_| {}) as ChatSubmitCallback),
                 Arc::new(theme::Theme::default()),
             )
             .with_host_mode(TRANSCRIPT_ONLY)
@@ -710,7 +712,7 @@ mod chat_prompt_host_mode_lifecycle {
                 None,
                 None,
                 cx.focus_handle(),
-                Arc::new(|_, _| {}) as ChatSubmitCallback,
+                Some(Arc::new(|_| {}) as ChatSubmitCallback),
                 Arc::new(theme::Theme::default()),
             )
             .with_mini_mode(true)
@@ -746,7 +748,7 @@ mod chat_prompt_host_mode_lifecycle {
                         None,
                         None,
                         focus_handle,
-                        Arc::new(|_, _| {}) as ChatSubmitCallback,
+                        Some(Arc::new(|_| {}) as ChatSubmitCallback),
                         Arc::new(theme::Theme::default()),
                     )
                     .with_host_mode(TRANSCRIPT_ONLY)
@@ -799,7 +801,7 @@ mod chat_prompt_host_mode_lifecycle {
                         None,
                         None,
                         focus_handle,
-                        Arc::new(|_, _| {}) as ChatSubmitCallback,
+                        Some(Arc::new(|_| {}) as ChatSubmitCallback),
                         Arc::new(theme::Theme::default()),
                     )
                     // TranscriptOnly, like every real host of this prompt.
@@ -849,12 +851,9 @@ mod chat_prompt_host_mode_lifecycle {
 
     /// S10: the recovery card's buttons are reachable, not decorative.
     ///
-    /// `turn_recovery_capabilities` derives which actions render from which
-    /// callbacks the host installed, so a host that forgets
-    /// `with_recovery_callback` silently ships a card whose only button is
-    /// "Copy details" — every action that could FIX the failure is hidden.
-    /// `with_recovery_callback` had zero callers until the flow session was
-    /// wired to it, which is what made this worth locking down.
+    /// `turn_recovery_capabilities` derives which actions render from the
+    /// host's explicit capability set. Retry additionally requires the exact
+    /// failed turn to retain an immutable prepared request.
     #[gpui::test]
     fn recovery_actions_appear_only_when_the_host_can_perform_them(cx: &mut gpui::TestAppContext) {
         use sk_protocol::ai_reliability::RecoveryActionKind;
@@ -868,21 +867,29 @@ mod chat_prompt_host_mode_lifecycle {
                 None,
                 None,
                 focus_handle,
-                Arc::new(|_, _| {}) as ChatSubmitCallback,
+                Some(Arc::new(|_| {}) as ChatSubmitCallback),
                 Arc::new(theme::Theme::default()),
             )
             .with_host_mode(TRANSCRIPT_ONLY);
             if with_callbacks {
                 prompt
-                    .with_retry_callback(Arc::new(|_, _| {}))
-                    .with_recovery_callback(Arc::new(|_, _| {}))
+                    .with_retry_callback(Arc::new(|_| Ok(())))
+                    .with_recovery_binding(super::super::ChatPromptRecoveryBinding {
+                        capabilities: crate::ai::reliability::SurfaceRecoveryCapabilities::only([
+                            RecoveryActionKind::SignIn,
+                            RecoveryActionKind::SwitchAccount,
+                            RecoveryActionKind::RepairComponent,
+                            RecoveryActionKind::RethreadFlow,
+                        ]),
+                        callback: Arc::new(|_, _| Ok(())),
+                    })
             } else {
                 prompt
             }
         };
 
         cx.update(|cx| {
-            let bare = build(false, cx).turn_recovery_capabilities();
+            let bare = build(false, cx).turn_recovery_capabilities(None);
             assert!(
                 bare.supports(RecoveryActionKind::CopyDetails),
                 "copying safe details never needs a host"
@@ -898,7 +905,16 @@ mod chat_prompt_host_mode_lifecycle {
                 );
             }
 
-            let hosted = build(true, cx).turn_recovery_capabilities();
+            let mut hosted_prompt = build(true, cx);
+            hosted_prompt.prepared_requests_by_assistant_id.insert(
+                "failed-1".to_string(),
+                super::super::ChatPromptPreparedRequest::new(
+                    "recovery-capabilities",
+                    "ask".to_string(),
+                    "ask".to_string(),
+                ),
+            );
+            let hosted = hosted_prompt.turn_recovery_capabilities(Some("failed-1"));
             for reachable in [
                 RecoveryActionKind::Retry,
                 RecoveryActionKind::SignIn,
@@ -932,7 +948,7 @@ mod chat_prompt_host_mode_lifecycle {
                         None,
                         None,
                         focus_handle,
-                        Arc::new(|_, _| {}) as ChatSubmitCallback,
+                        Some(Arc::new(|_| {}) as ChatSubmitCallback),
                         Arc::new(theme::Theme::default()),
                     )
                     // TranscriptOnly, like every real host of this prompt.
@@ -987,7 +1003,7 @@ mod chat_prompt_host_mode_lifecycle {
             cx.open_window(window_options(), |_, cx| {
                 let focus_handle = cx.focus_handle();
                 cx.new(|_| {
-                    let on_submit: ChatSubmitCallback = Arc::new(move |_id, _text| {
+                    let on_submit: ChatSubmitCallback = Arc::new(move |_request| {
                         submits_cb.fetch_add(1, Ordering::SeqCst);
                     });
                     let mut prompt = ChatPrompt::new(
@@ -997,7 +1013,7 @@ mod chat_prompt_host_mode_lifecycle {
                         None,
                         None,
                         focus_handle,
-                        on_submit,
+                        Some(on_submit),
                         Arc::new(theme::Theme::default()),
                     )
                     .with_pending_submit(true)
@@ -1031,6 +1047,274 @@ mod chat_prompt_host_mode_lifecycle {
                 );
             })
             .expect("hosted chat window updates");
+    }
+
+    #[test]
+    fn prepared_request_is_arc_immutable_and_privacy_receipted() {
+        let prepared = ChatPromptPreparedRequest::new(
+            "immutable",
+            "  display\r\n".to_string(),
+            "outbound\nexact".to_string(),
+        );
+        let clone = prepared.clone();
+        assert_eq!(clone.prompt_id(), "immutable");
+        assert_eq!(clone.display_text(), "  display\r\n");
+        assert_eq!(clone.outbound_text(), "outbound\nexact");
+        assert_eq!(clone.request_ref(), prepared.request_ref());
+        assert_eq!(clone.payload_fingerprint(), prepared.payload_fingerprint());
+        assert!(!clone.payload_fingerprint().0.contains("outbound"));
+    }
+
+    #[gpui::test]
+    fn assistant_copy_preserves_exact_bytes_and_empty_copy_is_a_no_op(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".to_string()));
+            let prompt = cx.new(|cx| {
+                ChatPrompt::new(
+                    "copy-contract".to_string(),
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    cx.focus_handle(),
+                    None,
+                    Arc::new(theme::Theme::default()),
+                )
+            });
+            prompt.update(cx, |prompt, cx| {
+                assert!(!prompt.handle_copy_last_response(cx));
+                assert_eq!(
+                    cx.read_from_clipboard().and_then(|item| item.text()),
+                    Some("sentinel".to_string()),
+                    "ineligible copy must not touch the pasteboard"
+                );
+                prompt.add_message(ChatPromptMessage::assistant("  exact response\r\n"), cx);
+                assert!(prompt.handle_copy_last_response(cx));
+                assert_eq!(
+                    cx.read_from_clipboard().and_then(|item| item.text()),
+                    Some("  exact response\r\n".to_string())
+                );
+                let receipt = prompt.last_copy_receipt.as_ref().expect("copy receipt");
+                assert_eq!(receipt.byte_len, "  exact response\r\n".len());
+                assert!(!receipt.fingerprint.contains("exact response"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn explicit_stop_preserves_partial_and_empty_as_user_stopped(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let stopped = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let stopped_cb = Arc::clone(&stopped);
+            let prompt = cx.new(|cx| {
+                ChatPrompt::new(
+                    "stop-contract".to_string(),
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    cx.focus_handle(),
+                    Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                    Arc::new(theme::Theme::default()),
+                )
+                .with_save_history(false)
+                .with_stop_callback(Arc::new(move |request| {
+                    stopped_cb.lock().unwrap().push(request);
+                    Ok(())
+                }))
+            });
+
+            prompt.update(cx, |prompt, cx| {
+                prompt.input.set_text("ask".to_string());
+                prompt.submit(cx);
+                prompt.start_streaming(
+                    "assistant-partial".to_string(),
+                    crate::protocol::ChatMessagePosition::Left,
+                    cx,
+                );
+                prompt.append_chunk("assistant-partial", "  exact partial\r\n", cx);
+                prompt.stop_streaming(cx);
+                let partial_message = prompt
+                    .messages
+                    .iter()
+                    .find(|message| message.id.as_deref() == Some("assistant-partial"))
+                    .unwrap();
+                assert_eq!(partial_message.get_content(), "  exact partial\r\n");
+                assert!(partial_message.failure.is_none() && partial_message.error.is_none());
+                assert!(matches!(
+                    prompt.terminal_outcomes.get("assistant-partial"),
+                    Some(sk_protocol::ai_reliability::AiOutcome::Cancelled {
+                        kind: sk_protocol::ai_reliability::CancellationKind::UserStopped,
+                        partial: sk_protocol::ai_reliability::PartialOutputState::Preserved { .. },
+                    })
+                ));
+
+                prompt.pending_prepared_request = Some(ChatPromptPreparedRequest::new(
+                    "stop-contract",
+                    "empty ask".to_string(),
+                    "empty ask".to_string(),
+                ));
+                prompt.start_streaming(
+                    "assistant-empty".to_string(),
+                    crate::protocol::ChatMessagePosition::Left,
+                    cx,
+                );
+                prompt.stop_streaming(cx);
+                assert!(matches!(
+                    prompt.terminal_outcomes.get("assistant-empty"),
+                    Some(sk_protocol::ai_reliability::AiOutcome::Cancelled {
+                        kind: sk_protocol::ai_reliability::CancellationKind::UserStopped,
+                        partial: sk_protocol::ai_reliability::PartialOutputState::None,
+                    })
+                ));
+                prompt.ensure_conversation_turns_cache();
+                let empty_turn = prompt
+                    .conversation_turns_cache
+                    .iter()
+                    .find(|turn| turn.message_id.as_deref() == Some("assistant-empty"))
+                    .unwrap();
+                assert!(
+                    super::render_turns::assistant_answer_region_source(empty_turn, false)
+                        .is_none(),
+                    "empty user Stop must not render a no-response placeholder"
+                );
+                assert_eq!(stopped.lock().unwrap().len(), 2);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn retry_replays_the_same_prepared_request_after_mutable_state_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let retried = Arc::new(std::sync::Mutex::new(None::<ChatPromptRetryRequest>));
+            let retried_cb = Arc::clone(&retried);
+            let prompt = cx.new(|cx| {
+                ChatPrompt::new(
+                    "retry-contract".to_string(),
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    cx.focus_handle(),
+                    Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                    Arc::new(theme::Theme::default()),
+                )
+                .with_retry_callback(Arc::new(move |request| {
+                    *retried_cb.lock().unwrap() = Some(request);
+                    Ok(())
+                }))
+            });
+            prompt.update(cx, |prompt, cx| {
+                prompt.input.set_text("original request".to_string());
+                prompt.submit(cx);
+                prompt.start_streaming(
+                    "failed-assistant".to_string(),
+                    crate::protocol::ChatMessagePosition::Left,
+                    cx,
+                );
+                prompt.set_message_error(
+                    "failed-assistant",
+                    "temporarily unavailable".to_string(),
+                    cx,
+                );
+                prompt.input.set_text("mutated composer".to_string());
+                prompt.model = Some("mutated model".to_string());
+
+                assert!(prompt.retry_latest_failed_response(cx));
+                let request = retried.lock().unwrap().clone().expect("retry dispatched");
+                assert_eq!(
+                    request.failed_assistant_message_id.as_ref(),
+                    "failed-assistant"
+                );
+                assert_eq!(request.prepared.outbound_text(), "original request");
+                assert_eq!(prompt.input.text(), "mutated composer");
+                assert_eq!(prompt.model.as_deref(), Some("mutated model"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn dismissal_blocks_active_non_surviving_work_without_stopping(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let dismissals = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let dismissals_cb = Arc::clone(&dismissals);
+            let prompt = cx.new(|cx| {
+                ChatPrompt::new(
+                    "dismiss-contract".to_string(),
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    cx.focus_handle(),
+                    Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                    Arc::new(theme::Theme::default()),
+                )
+                .with_save_history(false)
+                .with_stop_callback(Arc::new(|_| Ok(())))
+                .with_dismiss_binding(ChatPromptDismissBinding {
+                    route: ChatPromptDismissRoute::Back,
+                    active_work: crate::components::conversation_actions::ActiveWorkDismissal::RequiresExplicitStop,
+                    callback: Arc::new(move |request| {
+                        dismissals_cb.lock().unwrap().push(request);
+                    }),
+                })
+            });
+            prompt.update(cx, |prompt, cx| {
+            prompt.pending_prepared_request = Some(ChatPromptPreparedRequest::new(
+                "dismiss-contract",
+                "ask".to_string(),
+                "ask".to_string(),
+            ));
+            prompt.start_streaming(
+                "active-assistant".to_string(),
+                crate::protocol::ChatMessagePosition::Left,
+                cx,
+            );
+
+            assert!(matches!(
+                prompt.request_dismiss(
+                    crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+                    cx,
+                ),
+                crate::components::conversation_actions::ConversationCommandExecution::Disabled(
+                    crate::components::conversation_actions::ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal
+                )
+            ));
+            assert!(prompt.is_streaming());
+            assert_eq!(
+                prompt.command_status.as_deref(),
+                Some("Stop the current response first; this host cannot keep it running after you leave.")
+            );
+            assert!(dismissals.lock().unwrap().is_empty());
+
+            let stop_execution = prompt.execute_conversation_command(
+                crate::components::conversation_actions::ChatPromptConversationCommand::Stop,
+                cx,
+            );
+            assert!(matches!(
+                stop_execution,
+                crate::components::conversation_actions::ConversationCommandExecution::Executed
+            ));
+            assert!(prompt.command_status.is_none());
+            assert!(matches!(
+                prompt.request_dismiss(
+                    crate::components::conversation_actions::ConversationDismissTrigger::CommandW,
+                    cx,
+                ),
+                crate::components::conversation_actions::ConversationCommandExecution::Executed
+            ));
+            let dismissals = dismissals.lock().unwrap();
+            assert_eq!(dismissals.len(), 1);
+            assert_eq!(
+                dismissals[0].trigger,
+                crate::components::conversation_actions::ConversationDismissTrigger::CommandW
+            );
+            });
+        });
     }
 
     // Contrast: a standalone host DOES own the lifecycle. A full real-entity

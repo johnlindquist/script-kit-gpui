@@ -212,6 +212,20 @@
                             return;
                         }
 
+                        // Flow composes in the shared main input, so its local
+                        // transcript listener is not on the focused event path.
+                        // Route ⇧⌘C here through the same typed owner used by the
+                        // local renderer and legacy automation path.
+                        if this.try_handle_flow_session_copy_shortcut(
+                            key,
+                            has_cmd,
+                            has_shift,
+                            cx,
+                        ) {
+                            cx.stop_propagation();
+                            return;
+                        }
+
                         // Handle Cmd+K to toggle actions popup (works in ScriptList, FileSearchView, ArgPrompt, etc.)
                         // This MUST be intercepted here because the Input component has focus and
                         // normal on_key_down handlers won't receive the event.
@@ -224,92 +238,34 @@
                             }
                         }
 
-                        // Handle Cmd+W for AgentChatView (close the window entirely)
-                        if has_cmd && key.eq_ignore_ascii_case("w") && !has_shift
-                            && matches!(this.current_view, AppView::AgentChatView { .. })
-                        {
-                            tracing::info!(
-                                target: "script_kit::keyboard",
-                                event = "embedded_agent_chat_cmd_w_close_window",
-                            );
-                            logging::log("KEY", "Interceptor: Cmd+W -> close window from Agent Chat");
-                            this.close_tab_ai_harness_terminal_with_window(window, cx);
-                            this.close_and_reset_window(cx);
-                            cx.stop_propagation();
-                            return;
-                        }
-
-                        let agent_chat_escape_popup_open = match &this.current_view {
-                            AppView::AgentChatView { entity, .. } => {
-                                entity.read(cx).has_escape_dismissible_popup()
-                            }
-                            _ => false,
-                        };
-                        let agent_chat_escape_focused_text_origin = match &this.current_view {
-                            AppView::AgentChatView { entity, .. } => {
-                                let chat = entity.read(cx);
-                                chat.is_focused_text_mini()
-                                    || chat.focused_text_originated_from_quick_prompt()
-                            }
-                            _ => false,
-                        };
-
-                        let agent_chat_escape_cancelled_streaming = if crate::ui_foundation::is_key_escape(key)
-                            && !has_cmd
-                            && !has_shift
-                            && !agent_chat_escape_focused_text_origin
-                        {
-                            match &this.current_view {
-                                AppView::AgentChatView { entity, .. } => entity.update(cx, |chat, cx| {
-                                    chat.cancel_streaming_from_escape(cx)
-                                }),
-                                _ => false,
-                            }
-                        } else {
-                            false
-                        };
-                        if agent_chat_escape_cancelled_streaming {
-                            logging::log(
-                                "KEY",
-                                "Interceptor: Escape -> cancel Agent Chat streaming",
-                            );
-                            cx.stop_propagation();
-                            return;
-                        }
-
-                        // Handle Escape for AgentChatView.
-                        if crate::ui_foundation::is_key_escape(key) && !has_cmd && !has_shift
-                            && !this.show_actions_popup
-                            && !agent_chat_escape_popup_open
-                            && matches!(this.current_view, AppView::AgentChatView { .. })
-                        {
-                            if agent_chat_escape_focused_text_origin {
-                                tracing::info!(
-                                    target: "script_kit::keyboard",
-                                    event = "focused_text_quick_prompt_escape_hide_requested",
-                                );
-                                this.close_agent_chat_main_window_state_first(cx);
-                                logging::log("KEY", "Interceptor: Escape -> hide focused-text quick prompt Agent Chat");
+                        if has_cmd && key.eq_ignore_ascii_case("w") && !has_shift {
+                            if let AppView::AgentChatView { entity } = &this.current_view {
+                                let entity = entity.clone();
+                                entity.update(cx, |chat, cx| {
+                                    let _ = chat.request_conversation_dismiss(
+                                        crate::components::conversation_actions::ConversationDismissTrigger::CommandW,
+                                        window,
+                                        cx,
+                                    );
+                                });
                                 cx.stop_propagation();
                                 return;
                             }
-                            if this.opened_from_main_menu {
-                                tracing::info!(
-                                    target: "script_kit::keyboard",
-                                    event = "embedded_agent_chat_escape_return_to_origin",
-                                );
-                                this.close_tab_ai_harness_terminal_with_window(window, cx);
-                                logging::log("KEY", "Interceptor: Escape -> return to main menu from Agent Chat");
-                            } else {
-                                tracing::info!(
-                                    target: "script_kit::keyboard",
-                                    event = "embedded_agent_chat_escape_close_window",
-                                );
-                                this.close_agent_chat_main_window_state_first(cx);
-                                logging::log("KEY", "Interceptor: Escape -> close Agent Chat window");
+                        }
+
+                        if crate::ui_foundation::is_key_escape(key) && !has_cmd && !has_shift {
+                            if let AppView::AgentChatView { entity } = &this.current_view {
+                                let entity = entity.clone();
+                                entity.update(cx, |chat, cx| {
+                                    let _ = chat.request_conversation_dismiss(
+                                        crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                                cx.stop_propagation();
+                                return;
                             }
-                            cx.stop_propagation();
-                            return;
                         }
 
                         // Handle Cmd+I to toggle info panel in ScriptList

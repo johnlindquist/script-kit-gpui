@@ -1248,7 +1248,9 @@ impl AgentChatTranscript {
             style_def,
             theme,
             move |_event, _window, cx| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(payload.clone()));
+                let _ = crate::components::conversation_actions::write_exact_conversation_copy(
+                    &payload, cx,
+                );
             },
         ) else {
             return shell;

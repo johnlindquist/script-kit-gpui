@@ -277,6 +277,19 @@ pub fn open_chat_window_with_thread(
     let handle = cx.open_window(chat_window_options(inherit_bounds), |window, cx| {
         // Save bounds and clear handle when window closes
         window.on_window_should_close(cx, move |window, cx| {
+            let close_allowed = if let Ok(slot) = view_entity_slot_on_close.lock() {
+                slot.as_ref()
+                    .and_then(|weak| weak.upgrade())
+                    .is_none_or(|entity| {
+                        entity.update(cx, |view, cx| view.allow_native_close_request(cx))
+                    })
+            } else {
+                false
+            };
+            if !close_allowed {
+                return false;
+            }
+
             let wb = window.window_bounds();
             crate::window_state::save_window_from_gpui(
                 crate::window_state::WindowRole::AgentChat,
@@ -316,7 +329,12 @@ pub fn open_chat_window_with_thread(
         view.update(cx, |view, _cx| {
             view.set_allowed_portal_kinds(vec![ContextPortalKind::AgentChatHistory]);
             view.set_on_toggle_actions(move |_window, cx| {
-                toggle_detached_actions(cx);
+                // The callback runs while the detached host window is updating.
+                // Opening Actions immediately would re-enter that same window
+                // handle to measure its bounds and the nested update is rejected.
+                // Defer to the next App turn so the real popup owner can read the
+                // host safely; the user still gets one Cmd+K transition.
+                cx.defer(toggle_detached_actions);
             });
             view.set_on_close_requested(move |_window, cx| {
                 close_chat_window(cx);
@@ -413,6 +431,23 @@ pub fn get_detached_agent_chat_view_entity() -> Option<Entity<AgentChatView>> {
         .as_ref()
         .and_then(|state| state.view_entity.as_ref())
         .and_then(|weak| weak.upgrade())
+}
+
+/// Apply the existing deterministic Agent Chat fixture to the detached host.
+/// This is the narrow automation seam used to prove identical Stop/Retry/copy
+/// behavior across embedded and detached windows.
+pub(crate) fn apply_detached_agent_chat_test_fixture(
+    phase: &str,
+    user_text: Option<String>,
+    assistant_text: Option<String>,
+    message_count: Option<usize>,
+    cx: &mut App,
+) -> Result<(), String> {
+    let entity = get_detached_agent_chat_view_entity()
+        .ok_or_else(|| "Detached Agent Chat view is not active".to_string())?;
+    entity.update(cx, |view, cx| {
+        view.apply_test_fixture(phase, user_text, assistant_text, message_count, cx)
+    })
 }
 
 fn open_picker_in_detached_chat_window(
@@ -611,6 +646,38 @@ pub fn submit_reused_entry_intent_with_host_context_in_detached_chat(
         part_count,
     );
     Ok(reused)
+}
+
+pub(crate) fn request_detached_conversation_dismiss(
+    trigger: crate::components::conversation_actions::ConversationDismissTrigger,
+    cx: &mut App,
+) -> bool {
+    let state = {
+        let slot = CHAT_WINDOW.get_or_init(|| Mutex::new(None));
+        let guard = match slot.lock() {
+            Ok(guard) => guard,
+            Err(error) => error.into_inner(),
+        };
+        guard
+            .as_ref()
+            .map(|state| (state.handle, state.view_entity.clone()))
+    };
+    let Some((handle, Some(view_weak))) = state else {
+        return false;
+    };
+    handle
+        .update(cx, move |_root, window, cx| {
+            let Some(view) = view_weak.upgrade() else {
+                return false;
+            };
+            view.update(cx, |chat, cx| {
+                matches!(
+                    chat.request_conversation_dismiss(trigger, window, cx),
+                    crate::components::conversation_actions::ConversationCommandExecution::Executed
+                )
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Close the detached Agent Chat Chat window.
@@ -861,6 +928,7 @@ pub fn toggle_detached_actions(cx: &mut App) {
                         composer_has_text: false,
                         retry_available: false,
                         has_response: false,
+                        ..Default::default()
                     },
                 ),
                 crate::ai::agent_chat::ui::AgentChatSession::Live(thread) => {
@@ -902,6 +970,7 @@ pub fn toggle_detached_actions(cx: &mut App) {
                 composer_has_text: false,
                 retry_available: false,
                 has_response: false,
+                ..Default::default()
             },
         )
     });
@@ -1515,29 +1584,11 @@ fn dispatch_detached_action(
         }
         "agent_chat_retry_last" => {
             if let Some(entity) = entity_weak.upgrade() {
-                let last_user_msg = {
-                    let view = entity.read(cx);
-                    view.thread().and_then(|thread| {
-                        thread
-                            .read(cx)
-                            .messages
-                            .iter()
-                            .rev()
-                            .find(|m| {
-                                matches!(m.role, super::thread::AgentChatThreadMessageRole::User)
-                            })
-                            .map(|m| m.body.to_string())
-                    })
-                };
-                if let Some(text) = last_user_msg {
-                    entity.update(cx, |chat, cx| {
-                        chat.live_thread().update(cx, |thread, cx| {
-                            thread.set_input(text, cx);
-                            let _ = thread.submit_input(cx);
-                        });
-                    });
-                    tracing::info!(event = "detached_action_retry_last");
-                }
+                entity.update(cx, |chat, cx| chat.retry_last_user_turn(cx));
+                tracing::info!(
+                    event = "detached_action_retry_last",
+                    replay = "immutable_prepared_turn"
+                );
             }
         }
         "agent_chat_new_conversation" => {
@@ -1645,8 +1696,11 @@ fn dispatch_detached_action(
             tracing::info!(event = "detached_action_reattach_panel", reattached);
         }
         "agent_chat_close" => {
-            close_chat_window(cx);
-            tracing::info!(event = "detached_action_close");
+            let dismissed = request_detached_conversation_dismiss(
+                crate::components::conversation_actions::ConversationDismissTrigger::CloseButton,
+                cx,
+            );
+            tracing::info!(event = "detached_action_close", dismissed);
         }
         other => {
             tracing::warn!(

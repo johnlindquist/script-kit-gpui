@@ -1,5 +1,5 @@
 use super::*;
-use anyhow::{anyhow, Context as AnyhowContext, Result};
+use anyhow::{Context as AnyhowContext, Result, anyhow};
 
 #[derive(Debug, Clone, Copy, strum::Display, strum::EnumString)]
 #[strum(serialize_all = "snake_case", ascii_case_insensitive)]
@@ -415,7 +415,7 @@ impl ScriptListApp {
     /// Prefers Vercel AI Gateway if configured, otherwise uses the first available provider.
     pub fn show_inline_ai_chat(&mut self, initial_query: Option<String>, cx: &mut Context<Self>) {
         use crate::ai::ProviderRegistry;
-        use crate::prompts::{ChatEscapeCallback, ChatPrompt, ChatSubmitCallback};
+        use crate::prompts::ChatPrompt;
 
         // Mark as opened from main menu so ESC returns to main menu
         self.opened_from_main_menu = true;
@@ -424,23 +424,23 @@ impl ScriptListApp {
         let handoff_source = Some("mini_ai_launcher".to_string());
         let return_origin = Some("scriptList".to_string());
 
-        // Create escape callback that signals via channel
-        let escape_sender = self.inline_chat_escape_sender.clone();
-        let escape_callback: ChatEscapeCallback = std::sync::Arc::new(move |_id| {
-            tracing::info!(
-                target: "script_kit::mini_ai",
-                event = "mini_ai_window_close_requested",
-                prompt_id = "inline-ai",
-                main_window_mode = ?main_window_mode,
-                source = MiniAiCloseSource::Escape.as_str(),
-                draft_len = 0usize,
-                pending_submit = false,
-                handoff_source = ?handoff_source,
-                return_origin = ?return_origin,
-                "Mini AI close requested"
-            );
-            let _ = escape_sender.try_send(());
-        });
+        let dismiss_sender = self.inline_chat_escape_sender.clone();
+        let dismiss_callback: crate::prompts::ChatPromptDismissCallback =
+            std::sync::Arc::new(move |request| {
+                tracing::info!(
+                    target: "script_kit::mini_ai",
+                    event = "mini_ai_window_close_requested",
+                    prompt_id = %request.prompt_id,
+                    main_window_mode = ?main_window_mode,
+                    trigger = ?request.trigger,
+                    draft_len = 0usize,
+                    pending_submit = false,
+                    handoff_source = ?handoff_source,
+                    return_origin = ?return_origin,
+                    "Mini AI dismiss requested"
+                );
+                let _ = dismiss_sender.try_send(());
+            });
 
         // Use cached registry if available, otherwise build synchronously as fallback
         let registry = self
@@ -467,11 +467,6 @@ impl ScriptListApp {
                     let _ = claude_code_sender.try_send(());
                 });
 
-            // Create a no-op submit callback since we're in setup mode
-            let noop_callback: ChatSubmitCallback = std::sync::Arc::new(|_id, _text| {
-                crate::logging::log("CHAT", "No providers - submission ignored (setup mode)");
-            });
-
             let chat_prompt = ChatPrompt::new(
                 "inline-ai-setup".to_string(),
                 Some("Configure API key to continue...".to_string()),
@@ -479,12 +474,16 @@ impl ScriptListApp {
                 None, // No hint needed - setup card is the UI
                 None,
                 self.focus_handle.clone(),
-                noop_callback,
+                None,
                 std::sync::Arc::clone(&self.theme),
             )
             .with_title("Ask AI")
             .with_save_history(false) // Don't save setup state to history
-            .with_escape_callback(escape_callback.clone())
+            .with_dismiss_binding(crate::prompts::ChatPromptDismissBinding {
+                route: crate::prompts::ChatPromptDismissRoute::Back,
+                active_work: crate::components::conversation_actions::ActiveWorkDismissal::RequiresExplicitStop,
+                callback: dismiss_callback.clone(),
+            })
             .with_needs_setup(true)
             .with_configure_callback(configure_callback)
             .with_claude_code_callback(claude_code_callback)
@@ -513,11 +512,6 @@ impl ScriptListApp {
             ),
         );
 
-        // Create a no-op callback since built-in AI handles submissions internally
-        let noop_callback: ChatSubmitCallback = std::sync::Arc::new(|_id, _text| {
-            // Built-in AI mode handles this internally
-        });
-
         let placeholder = Some("Ask anything...".to_string());
 
         let mut chat_prompt = ChatPrompt::new(
@@ -527,12 +521,17 @@ impl ScriptListApp {
             None,
             None,
             self.focus_handle.clone(),
-            noop_callback,
+            None,
             std::sync::Arc::clone(&self.theme),
         )
         .with_title("Ask AI")
         .with_save_history(true)
-        .with_escape_callback(escape_callback)
+        .with_dismiss_binding(crate::prompts::ChatPromptDismissBinding {
+            route: crate::prompts::ChatPromptDismissRoute::Back,
+            active_work:
+                crate::components::conversation_actions::ActiveWorkDismissal::RequiresExplicitStop,
+            callback: dismiss_callback,
+        })
         .with_builtin_ai(registry, true) // true = prefer Vercel AI Gateway
         .with_mini_mode(self.main_window_mode == MainWindowMode::Mini);
 
@@ -853,9 +852,13 @@ import "@scriptkit/sdk";
     #[test]
     fn test_ai_script_generation_system_prompt_defaults_to_main_menu_dimensions() {
         assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains("main-menu-sized prompt flow"));
-        assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT
-            .contains("expanded split-view previews as rare exceptions"));
-        assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT
-            .contains("Avoid `setPreview()`, `setPanel()`, and choice `preview` fields"));
+        assert!(
+            AI_SCRIPT_GENERATION_SYSTEM_PROMPT
+                .contains("expanded split-view previews as rare exceptions")
+        );
+        assert!(
+            AI_SCRIPT_GENERATION_SYSTEM_PROMPT
+                .contains("Avoid `setPreview()`, `setPanel()`, and choice `preview` fields")
+        );
     }
 }

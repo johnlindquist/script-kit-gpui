@@ -10,7 +10,16 @@ impl ChatPrompt {
         if display_text.trim().is_empty() && pending_image.is_none() {
             return;
         }
-        logging::log("CHAT", &format!("User submitted: {}", display_text));
+        let prepared =
+            ChatPromptPreparedRequest::new(&self.id, display_text.clone(), outbound_text.clone());
+        logging::log(
+            "CHAT",
+            &format!(
+                "User submitted: bytes={} fingerprint={}",
+                prepared.outbound_text().len(),
+                prepared.payload_fingerprint().0
+            ),
+        );
         self.input.clear();
         self.pasted_text_tokens.clear();
         self.clear_script_generation_status();
@@ -19,28 +28,24 @@ impl ChatPrompt {
         if self.has_builtin_ai() {
             // Cache the render image for conversation history display
             // We need the user message ID, which will be generated in handle_builtin_ai_submit
-            self.handle_builtin_ai_submit(
-                display_text,
-                outbound_text,
-                pending_image,
-                pending_render,
-                cx,
-            );
-        } else {
-            // Use SDK callback for script-driven chat
-            (self.on_submit)(self.id.clone(), outbound_text);
+            self.handle_builtin_ai_submit(prepared, pending_image, pending_render, cx);
+        } else if let Some(callback) = self.on_submit.as_ref() {
+            // External hosts receive the exact immutable request accepted here.
+            self.pending_prepared_request = Some(prepared.clone());
+            callback(prepared);
         }
     }
 
     /// Handle submission in built-in AI mode - calls AI provider directly
     pub(super) fn handle_builtin_ai_submit(
         &mut self,
-        display_text: String,
-        outbound_text: String,
+        prepared: ChatPromptPreparedRequest,
         pending_image: Option<String>,
         pending_render: Option<Arc<RenderImage>>,
         cx: &mut Context<Self>,
     ) {
+        let display_text = prepared.display_text().to_string();
+        let outbound_text = prepared.outbound_text().to_string();
         // Don't allow new messages while streaming
         if self.builtin_is_streaming {
             return;
@@ -170,13 +175,24 @@ impl ChatPrompt {
         logging::log(
             "CHAT",
             &format!(
-                "Starting built-in AI call: model={}, provider={}, messages={}",
+                "Starting built-in AI call: model={}, provider={}, messages={}, request={}",
                 model_id,
                 provider,
-                api_messages.len()
+                api_messages.len(),
+                prepared.payload_fingerprint().0
             ),
         );
 
+        self.prepared_requests_by_assistant_id
+            .insert(assistant_msg_id.clone(), prepared.clone());
+        self.builtin_replay_payloads.insert(
+            prepared.request_ref().clone(),
+            super::prompt::BuiltinPreparedPayload {
+                provider: ai_provider.clone(),
+                api_messages: api_messages.clone(),
+                model_id: model_id.clone(),
+            },
+        );
         self.spawn_streaming_reveal(ai_provider, api_messages, model_id, assistant_msg_id, cx);
     }
 
@@ -275,14 +291,33 @@ impl ChatPrompt {
         self.force_scroll_turns_to_bottom();
         cx.notify();
 
+        let initial_text = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.is_user())
+            .map(|message| message.get_content().to_string())
+            .unwrap_or_default();
+        let prepared = ChatPromptPreparedRequest::new(&self.id, initial_text.clone(), initial_text);
         logging::log(
             "CHAT",
             &format!(
-                "Starting built-in AI initial response: model={}, provider={}, messages={}",
+                "Starting built-in AI initial response: model={}, provider={}, messages={}, request={}",
                 model_id,
                 provider,
-                api_messages.len()
+                api_messages.len(),
+                prepared.payload_fingerprint().0
             ),
+        );
+        self.prepared_requests_by_assistant_id
+            .insert(assistant_msg_id.clone(), prepared.clone());
+        self.builtin_replay_payloads.insert(
+            prepared.request_ref().clone(),
+            super::prompt::BuiltinPreparedPayload {
+                provider: ai_provider.clone(),
+                api_messages: api_messages.clone(),
+                model_id: model_id.clone(),
+            },
         );
 
         self.spawn_streaming_reveal(ai_provider, api_messages, model_id, assistant_msg_id, cx);
@@ -311,6 +346,8 @@ impl ChatPrompt {
         let shared_error = Arc::new(std::sync::Mutex::new(
             None::<crate::ai::reliability::AppFailureRecord>,
         ));
+        let cancel_signal = Arc::new(AtomicBool::new(false));
+        self.builtin_cancel_signal = Some(cancel_signal.clone());
 
         let content_clone = shared_content.clone();
         let done_clone = shared_done.clone();
@@ -320,6 +357,7 @@ impl ChatPrompt {
 
         // Background thread: accumulate raw chunks from the provider
         let model_id_for_thread = model_id.clone();
+        let cancel_for_thread = cancel_signal.clone();
         std::thread::spawn(move || {
             logging::log(
                 "CHAT",
@@ -337,10 +375,13 @@ impl ChatPrompt {
                     if count == 0 {
                         logging::log("CHAT", "First chunk received from provider");
                     }
+                    if cancel_for_thread.load(Ordering::SeqCst) {
+                        return false;
+                    }
                     if let Ok(mut content) = content_clone.lock() {
                         content.push_str(&chunk);
                     }
-                    true
+                    !cancel_for_thread.load(Ordering::SeqCst)
                 }),
                 Some(&session_id),
             );
@@ -422,6 +463,7 @@ impl ChatPrompt {
                                 &format!("Built-in AI error: {:?}", failure.failure.code),
                             );
                             chat.builtin_is_streaming = false;
+                            chat.builtin_cancel_signal = None;
                             chat.streaming_message_id = None;
                             if let Some(msg) = chat
                                 .messages
@@ -488,6 +530,7 @@ impl ChatPrompt {
                                 &format!("Built-in AI complete: {} chars", full_text.len()),
                             );
                             chat.builtin_is_streaming = false;
+                            chat.builtin_cancel_signal = None;
                             chat.streaming_message_id = None;
                             if let Some(msg) = chat
                                 .messages

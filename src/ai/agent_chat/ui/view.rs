@@ -964,6 +964,8 @@ pub(crate) struct AgentChatView {
     on_open_history_command: Option<AgentChatFooterActionHandler>,
     /// Host-owned callback for pasting the latest assistant response.
     on_paste_response_requested: Option<AgentChatFooterActionHandler>,
+    /// Safe acknowledgement for a blocked capability-derived command.
+    command_status: Option<&'static str>,
     /// Host-owned callback for expanding focused-text mini into full Agent Chat.
     on_focused_text_expand_requested: Option<AgentChatHostAppHandler>,
     /// Host-owned callback for collapsing focused-text Agent Chat back to mini mode.
@@ -2475,6 +2477,9 @@ impl AgentChatView {
                         || !thread.pending_context_items().is_empty(),
                     retry_available: Self::retryable_recovery_active(thread),
                     has_response: Self::has_pastable_assistant_response(thread),
+                    dismiss_installed: self.on_close_requested.is_some()
+                        || self.on_close_window_requested.is_some(),
+                    active_work: crate::components::conversation_actions::ActiveWorkDismissal::RequiresExplicitStop,
                 },
             );
         let command = |handler| {
@@ -2613,6 +2618,10 @@ impl AgentChatView {
                 || !thread.pending_context_items().is_empty(),
             retry_available: Self::retryable_recovery_active(thread),
             has_response: Self::has_pastable_assistant_response(thread),
+            dismiss_installed: self.on_close_requested.is_some()
+                || self.on_close_window_requested.is_some(),
+            active_work:
+                crate::components::conversation_actions::ActiveWorkDismissal::RequiresExplicitStop,
         }
     }
 
@@ -2650,7 +2659,7 @@ impl AgentChatView {
         match command {
             AgentChatConversationCommand::Send => self.submit_with_expanded_tokens(cx),
             AgentChatConversationCommand::Stop => {
-                let _ = self.cancel_streaming_from_escape(cx);
+                let _ = self.stop_streaming_explicitly(cx);
             }
             AgentChatConversationCommand::Retry => self.retry_last_user_turn(cx),
             AgentChatConversationCommand::NewConversation => {
@@ -2879,13 +2888,15 @@ impl AgentChatView {
                 .filter(|message| matches!(message.role, AgentChatThreadMessageRole::Assistant))
                 .map(|message| message.body.to_string())
                 .collect();
-            crate::flows::session::resolve_last_copyable_response(bodies.iter().map(String::as_str))
-                .map(str::to_string)
+            crate::components::conversation_actions::resolve_latest_copyable_assistant_response(
+                bodies.iter().map(String::as_str),
+            )
+            .map(str::to_string)
         };
         let Some(text) = last else {
             return false;
         };
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        let _ = crate::components::conversation_actions::write_exact_conversation_copy(&text, cx);
         true
     }
 
@@ -3915,7 +3926,7 @@ impl AgentChatView {
                 }
             }
             FocusedTextMiniAction::Stop => {
-                success = self.cancel_streaming_from_escape(cx);
+                success = self.stop_streaming_explicitly(cx);
                 if !success {
                     error_code = Some("not_streaming".to_string());
                 }
@@ -4221,7 +4232,6 @@ impl AgentChatView {
                     return Ok(());
                 }
                 Some(FocusedTextMiniPhase::Streaming) => {
-                    let _ = self.cancel_streaming_from_escape(cx);
                     return Ok(());
                 }
                 Some(FocusedTextMiniPhase::Result | FocusedTextMiniPhase::Error)
@@ -4389,7 +4399,7 @@ impl AgentChatView {
             }
             FooterAction::PasteResponse => self.trigger_paste_response_requested(window, cx),
             FooterAction::Stop => {
-                let _ = self.cancel_streaming_from_escape(cx);
+                let _ = self.stop_streaming_explicitly(cx);
             }
             FooterAction::Actions => self.trigger_toggle_actions(window, cx),
             FooterAction::Close => self.trigger_close_requested(window, cx),
@@ -4443,11 +4453,19 @@ impl AgentChatView {
         }
     }
 
+    pub(crate) fn command_status_text(&self) -> Option<&'static str> {
+        self.command_status
+    }
+
     pub(crate) fn footer_status_text(&self, cx: &App) -> Option<&'static str> {
         use crate::ai::agent_chat::ui::thread::AgentChatThreadStatus;
 
         if self.is_setup_mode() {
             return None;
+        }
+
+        if let Some(status) = self.command_status {
+            return Some(status);
         }
 
         if self.context_capture_pending {
@@ -5908,17 +5926,9 @@ impl AgentChatView {
         false
     }
 
-    /// Cancel an active Agent Chat turn from an Escape shortcut.
-    ///
-    /// Returns true when Escape was consumed by cancellation. Host-level
-    /// interceptors call this before falling back to "return to main menu",
-    /// because focused child routing is not guaranteed for every Escape path.
-    pub(crate) fn cancel_streaming_from_escape(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Explicit Stop owner for Agent Chat. Dismissal routes never call this.
+    pub(crate) fn stop_streaming_explicitly(&mut self, cx: &mut Context<Self>) -> bool {
         if self.is_setup_mode() {
-            tracing::info!(
-                target: "script_kit::keyboard",
-                event = "agent_chat_escape_cancel_ignored_setup_mode",
-            );
             return false;
         }
 
@@ -5932,7 +5942,7 @@ impl AgentChatView {
 
         tracing::info!(
             target: "script_kit::keyboard",
-            event = "agent_chat_escape_cancel_streaming_requested",
+            event = "agent_chat_explicit_stop_requested",
             variation_generation = self.focused_text_variation_generation,
         );
         self.focused_text_variation_generation += 1;
@@ -5941,12 +5951,149 @@ impl AgentChatView {
         for variation in &mut self.focused_text_variations {
             if variation.status == FocusedTextVariationStatus::Streaming {
                 variation.status = FocusedTextVariationStatus::Error;
-                variation.error = Some("cancelled".to_string());
+                variation.error = Some("stopped".to_string());
             }
         }
         self.live_thread()
-            .update(cx, |thread, cx| thread.cancel_streaming(cx));
+            .update(cx, |thread, cx| thread.stop_streaming(cx));
+        self.command_status = None;
         true
+    }
+
+    pub(crate) fn request_conversation_dismiss(
+        &mut self,
+        trigger: crate::components::conversation_actions::ConversationDismissTrigger,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> crate::components::conversation_actions::ConversationCommandExecution {
+        use crate::components::conversation_actions::{
+            ActiveWorkDismissal, ConversationCommandExecution, ConversationDismissDecision,
+            ConversationDismissFacts, ConversationDismissTrigger, ConversationOverlayFacts,
+            ConversationOverlayKind,
+        };
+
+        let response_in_progress = matches!(
+            self.live_thread().read(cx).status,
+            AgentChatThreadStatus::Streaming
+        );
+        let decision = crate::components::conversation_actions::resolve_conversation_dismissal(
+            ConversationDismissFacts {
+                overlays: ConversationOverlayFacts {
+                    blocking_modal_open: self.permission_options_open,
+                    actions_open: crate::actions::is_actions_window_open(),
+                    attachment_portal_open: self.pending_portal_session.is_some(),
+                    composer_picker_open: self.has_escape_dismissible_popup(),
+                },
+                response_in_progress,
+                // Both embedded and detached surfaces fail closed until a
+                // behavior proof demonstrates a strong owner after host removal.
+                active_work: ActiveWorkDismissal::RequiresExplicitStop,
+            },
+            trigger,
+        );
+
+        let execution = match decision {
+            ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::BlockingModal) => {
+                self.permission_options_open = false;
+                cx.notify();
+                ConversationCommandExecution::Executed
+            }
+            ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::Actions) => {
+                crate::actions::close_actions_window(cx);
+                ConversationCommandExecution::Executed
+            }
+            ConversationDismissDecision::DismissOverlay(
+                ConversationOverlayKind::AttachmentPortal,
+            ) => {
+                self.pending_portal_session = None;
+                cx.notify();
+                ConversationCommandExecution::Executed
+            }
+            ConversationDismissDecision::DismissOverlay(
+                ConversationOverlayKind::ComposerPicker,
+            ) => {
+                if self.dismiss_escape_popup(cx) {
+                    ConversationCommandExecution::Executed
+                } else {
+                    ConversationCommandExecution::Unsupported
+                }
+            }
+            ConversationDismissDecision::Blocked(reason) => {
+                self.command_status = Some(reason.as_str());
+                cx.notify();
+                ConversationCommandExecution::Disabled(reason)
+            }
+            ConversationDismissDecision::DismissConversation => {
+                self.command_status = None;
+                match trigger {
+                    ConversationDismissTrigger::Escape | ConversationDismissTrigger::BackButton => {
+                        self.trigger_close_requested(window, cx)
+                    }
+                    ConversationDismissTrigger::CloseButton
+                    | ConversationDismissTrigger::CommandW => {
+                        self.trigger_close_window_requested(window, cx)
+                    }
+                }
+                ConversationCommandExecution::Executed
+            }
+        };
+        execution
+    }
+
+    pub(crate) fn allow_native_close_request(&mut self, cx: &mut Context<Self>) -> bool {
+        use crate::components::conversation_actions::{
+            ActiveWorkDismissal, ConversationDismissDecision, ConversationDismissFacts,
+            ConversationDismissTrigger, ConversationOverlayFacts, ConversationOverlayKind,
+        };
+        let response_in_progress = matches!(
+            self.live_thread().read(cx).status,
+            AgentChatThreadStatus::Streaming
+        );
+        match crate::components::conversation_actions::resolve_conversation_dismissal(
+            ConversationDismissFacts {
+                overlays: ConversationOverlayFacts {
+                    blocking_modal_open: self.permission_options_open,
+                    actions_open: crate::actions::is_actions_window_open(),
+                    attachment_portal_open: self.pending_portal_session.is_some(),
+                    composer_picker_open: self.has_escape_dismissible_popup(),
+                },
+                response_in_progress,
+                active_work: ActiveWorkDismissal::RequiresExplicitStop,
+            },
+            ConversationDismissTrigger::CloseButton,
+        ) {
+            ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::BlockingModal) => {
+                self.permission_options_open = false;
+                cx.notify();
+                false
+            }
+            ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::Actions) => {
+                crate::actions::close_actions_window(cx);
+                false
+            }
+            ConversationDismissDecision::DismissOverlay(
+                ConversationOverlayKind::AttachmentPortal,
+            ) => {
+                self.pending_portal_session = None;
+                cx.notify();
+                false
+            }
+            ConversationDismissDecision::DismissOverlay(
+                ConversationOverlayKind::ComposerPicker,
+            ) => {
+                let _ = self.dismiss_escape_popup(cx);
+                false
+            }
+            ConversationDismissDecision::Blocked(reason) => {
+                self.command_status = Some(reason.as_str());
+                cx.notify();
+                false
+            }
+            ConversationDismissDecision::DismissConversation => {
+                self.command_status = None;
+                true
+            }
+        }
     }
 
     pub(crate) fn has_escape_dismissible_popup(&self) -> bool {
@@ -7236,6 +7383,7 @@ impl AgentChatView {
             on_close_window_requested: None,
             on_open_history_command: None,
             on_paste_response_requested: None,
+            command_status: None,
             on_focused_text_expand_requested: None,
             on_focused_text_collapse_requested: None,
             on_open_portal: None,
@@ -7347,6 +7495,7 @@ impl AgentChatView {
             on_close_window_requested: None,
             on_open_history_command: None,
             on_paste_response_requested: None,
+            command_status: None,
             on_focused_text_expand_requested: None,
             on_focused_text_collapse_requested: None,
             on_open_portal: None,
@@ -10669,30 +10818,27 @@ impl AgentChatView {
                 Some(FocusedTextMiniPhase::InputOnly) => {
                     self.trigger_close_window_requested(window, cx);
                 }
-                Some(FocusedTextMiniPhase::Loading) => {
-                    let _ = self.cancel_streaming_from_escape(cx);
-                    self.scope_input.clear();
-                    self.scope_visible = false;
-                    self.scope_focused = false;
-                    self.live_thread().update(cx, |thread, cx| {
-                        thread.input.clear();
-                        cx.notify();
-                    });
-                    self.resize_focused_text_mini_for_scope_change(&*cx);
+                Some(FocusedTextMiniPhase::Loading | FocusedTextMiniPhase::Streaming) => {
+                    let _ = self.request_conversation_dismiss(
+                        crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+                        window,
+                        cx,
+                    );
                 }
-                Some(FocusedTextMiniPhase::Streaming) => {
-                    let _ = self.cancel_streaming_from_escape(cx);
-                }
-                Some(FocusedTextMiniPhase::Result | FocusedTextMiniPhase::Error) => {
-                    self.trigger_close_window_requested(window, cx);
-                }
-                None => {
-                    let _ = self.cancel_streaming_from_escape(cx);
-                    self.trigger_close_window_requested(window, cx);
+                Some(FocusedTextMiniPhase::Result | FocusedTextMiniPhase::Error) | None => {
+                    let _ = self.request_conversation_dismiss(
+                        crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+                        window,
+                        cx,
+                    );
                 }
             }
-        } else if !self.cancel_streaming_from_escape(cx) {
-            self.trigger_close_requested(window, cx);
+        } else {
+            let _ = self.request_conversation_dismiss(
+                crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+                window,
+                cx,
+            );
         }
     }
 
@@ -11751,7 +11897,7 @@ impl AgentChatView {
         container.into_any_element()
     }
 
-    fn retry_last_user_turn(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn retry_last_user_turn(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = self
             .live_thread()
             .update(cx, |thread, cx| thread.retry_last_user_turn(cx))
@@ -12907,7 +13053,7 @@ impl AgentChatView {
             // affordance; clicking the dot still cancels for mouse users.
             (true, false) => (
                 "\u{25CF}",
-                "Streaming \u{2014} press Esc to stop",
+                "Streaming \u{2014} press ⌘. to stop",
                 "agent_chat-streaming-dot",
             ),
             (false, true) => ("\u{2191}", "Send message", "agent_chat-send-btn"),
@@ -12933,8 +13079,7 @@ impl AgentChatView {
             btn = btn.cursor_pointer().on_click(move |_event, _window, cx| {
                 if let Some(view) = weak_view.upgrade() {
                     view.update(cx, |this, cx| {
-                        this.live_thread()
-                            .update(cx, |thread, cx| thread.cancel_streaming(cx));
+                        let _ = this.stop_streaming_explicitly(cx);
                     });
                 }
             });
@@ -15429,12 +15574,14 @@ impl AgentChatView {
                 AgentChatConversationCommand, ConversationCommandAvailability,
             };
             if command != AgentChatConversationCommand::Send {
-                if availability == ConversationCommandAvailability::Enabled {
-                    if command == AgentChatConversationCommand::Close {
-                        self.trigger_close_window_requested(window, cx);
-                    } else {
-                        let _ = self.execute_conversation_command(command, cx);
-                    }
+                if command == AgentChatConversationCommand::Close {
+                    let _ = self.request_conversation_dismiss(
+                        crate::components::conversation_actions::ConversationDismissTrigger::CommandW,
+                        window,
+                        cx,
+                    );
+                } else if availability == ConversationCommandAvailability::Enabled {
+                    let _ = self.execute_conversation_command(command, cx);
                 }
                 cx.stop_propagation();
                 return;
@@ -15889,41 +16036,34 @@ impl AgentChatView {
                     Some(FocusedTextMiniPhase::InputOnly) => {
                         self.trigger_close_window_requested(window, cx);
                     }
-                    Some(FocusedTextMiniPhase::Loading) => {
-                        let _ = self.cancel_streaming_from_escape(cx);
-                        self.scope_input.clear();
-                        self.scope_visible = false;
-                        self.scope_focused = false;
-                        self.live_thread().update(cx, |thread, cx| {
-                            thread.input.clear();
-                            cx.notify();
-                        });
-                        self.resize_focused_text_mini_for_scope_change(&*cx);
+                    Some(FocusedTextMiniPhase::Loading | FocusedTextMiniPhase::Streaming) => {
+                        let _ = self.request_conversation_dismiss(
+                            crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+                            window,
+                            cx,
+                        );
                     }
-                    Some(FocusedTextMiniPhase::Streaming) => {
-                        let _ = self.cancel_streaming_from_escape(cx);
-                    }
-                    Some(FocusedTextMiniPhase::Result | FocusedTextMiniPhase::Error) => {
-                        self.trigger_close_window_requested(window, cx);
-                    }
-                    None => {
-                        let _ = self.cancel_streaming_from_escape(cx);
-                        self.trigger_close_window_requested(window, cx);
+                    Some(FocusedTextMiniPhase::Result | FocusedTextMiniPhase::Error) | None => {
+                        let _ = self.request_conversation_dismiss(
+                            crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+                            window,
+                            cx,
+                        );
                     }
                 }
 
                 cx.stop_propagation();
                 return;
             }
-            if self.cancel_streaming_from_escape(cx) {
-                cx.stop_propagation();
-                return;
-            }
             tracing::info!(
                 target: "script_kit::keyboard",
-                event = "embedded_agent_chat_escape_host_close_requested",
+                event = "embedded_agent_chat_escape_host_dismiss_requested",
             );
-            self.trigger_close_requested(window, cx);
+            let _ = self.request_conversation_dismiss(
+                crate::components::conversation_actions::ConversationDismissTrigger::Escape,
+                window,
+                cx,
+            );
             cx.stop_propagation();
             return;
         }
@@ -16503,27 +16643,15 @@ impl Render for AgentChatView {
                 let modifiers = &event.keystroke.modifiers;
                 this.cache_composer_parent_window(window, cx);
 
-                // Cmd+W in detached window: close the window directly.
-                // In the main panel, Cmd+W is handled by the interceptor.
+                // Detached Cmd+W uses the same overlay/active-work decision as
+                // Escape, Actions Close, and the native title-bar request.
                 let is_detached_host =
                     crate::ai::agent_chat::ui::chat_window::is_chat_window(window);
                 if modifiers.platform && key.eq_ignore_ascii_case("w") && is_detached_host {
-                    tracing::info!(
-                        target: "script_kit::keyboard",
-                        event = "detached_agent_chat_cmd_w_close_requested",
-                    );
-                    let wb = window.window_bounds();
-                    crate::window_state::save_window_from_gpui(
-                        crate::window_state::WindowRole::AgentChat,
-                        wb,
-                    );
-                    this.prepare_for_host_hide(cx);
-                    crate::ai::agent_chat::ui::chat_window::clear_chat_window_handle();
-                    crate::platform::dematerialize_then_remove_gpui_window(
+                    let _ = this.request_conversation_dismiss(
+                        crate::components::conversation_actions::ConversationDismissTrigger::CommandW,
                         window,
                         cx,
-                        "AGENT_CHAT",
-                        "Agent Chat",
                     );
                     cx.stop_propagation();
                     return;

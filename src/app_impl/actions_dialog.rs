@@ -2396,7 +2396,7 @@ mod modal_backdrop_policy_tests {
                         None,
                         None,
                         focus_handle,
-                        Arc::new(|_, _| {}) as crate::prompts::ChatSubmitCallback,
+                        Some(Arc::new(|_| {}) as crate::prompts::ChatSubmitCallback),
                         Arc::new(crate::theme::Theme::default()),
                     )
                 });

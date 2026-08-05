@@ -710,6 +710,10 @@ pub enum AiPhase {
     Cancelling {
         turn: TurnRef,
         partial: PartialOutputState,
+        /// Serialized cancellation meaning. Older persisted states did not
+        /// carry this field, so they retain the legacy UserCancelled default.
+        #[serde(default = "default_user_cancelled")]
+        kind: CancellationKind,
     },
     AwaitingRecovery {
         failure: AiFailure,
@@ -798,6 +802,12 @@ pub enum AiOperationEvent {
     RuntimeCancelled {
         partial: PartialOutputState,
     },
+    /// An explicit user Stop. Dismissal and legacy cancellation retain their
+    /// existing events and cannot be mistaken for this intent.
+    StopRequested,
+    RuntimeStopped {
+        partial: PartialOutputState,
+    },
     RecoverySelected(AiRecoveryAction),
     RecoveryCommandSucceeded {
         command_id: CommandId,
@@ -832,6 +842,8 @@ pub enum AiEventTag {
     Failed,
     CancelRequested,
     RuntimeCancelled,
+    StopRequested,
+    RuntimeStopped,
     RecoverySelected,
     RecoveryCommandSucceeded,
     RecoveryCommandFailed,
@@ -855,6 +867,8 @@ impl AiOperationEvent {
             Self::Failed(_) => AiEventTag::Failed,
             Self::CancelRequested => AiEventTag::CancelRequested,
             Self::RuntimeCancelled { .. } => AiEventTag::RuntimeCancelled,
+            Self::StopRequested => AiEventTag::StopRequested,
+            Self::RuntimeStopped { .. } => AiEventTag::RuntimeStopped,
             Self::RecoverySelected(_) => AiEventTag::RecoverySelected,
             Self::RecoveryCommandSucceeded { .. } => AiEventTag::RecoveryCommandSucceeded,
             Self::RecoveryCommandFailed { .. } => AiEventTag::RecoveryCommandFailed,
@@ -1066,6 +1080,10 @@ pub enum CancellationKind {
     UserCancelled,
     UserStopped,
     AppShutdown,
+}
+
+fn default_user_cancelled() -> CancellationKind {
+    CancellationKind::UserCancelled
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

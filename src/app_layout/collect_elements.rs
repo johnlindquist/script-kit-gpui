@@ -330,6 +330,11 @@ impl ScriptListApp {
                             &entity.read(cx).conversation_command_bindings(cx),
                         ),
                     );
+                    elements.extend(
+                        crate::windows::automation_surface_collector::collect_agent_chat_conversation_elements(
+                            entity, cx,
+                        ),
+                    );
                     if state.message_count == 0 {
                         let snapshot =
                             crate::components::agent_chat_empty_guidance_spec().semantic_snapshot();
@@ -1862,7 +1867,8 @@ impl ScriptListApp {
                     elements.retain(|el| {
                         el.semantic_id != "input:chat-input"
                             && el.semantic_id != "input:chat-model"
-                            && el.role.as_deref() != Some("conversationCommand")
+                            && (el.role.as_deref() != Some("conversationCommand")
+                                || el.semantic_id.starts_with("conversation.copyTurn:"))
                     });
                     total_count = total_count.saturating_sub(removed - elements.len());
                     let placeholder = chat

@@ -1,4 +1,12 @@
 use super::*;
+
+#[derive(Clone)]
+pub(super) struct BuiltinPreparedPayload {
+    pub(super) provider: Arc<dyn crate::ai::providers::AiProvider>,
+    pub(super) api_messages: Vec<ProviderMessage>,
+    pub(super) model_id: String,
+}
+
 pub struct ChatPrompt {
     pub id: String,
     pub messages: Vec<ChatPromptMessage>,
@@ -10,11 +18,12 @@ pub struct ChatPrompt {
     pub title: Option<String>,
     pub focus_handle: FocusHandle,
     pub input: TextInputState,
-    pub on_submit: ChatSubmitCallback,
-    pub on_escape: Option<ChatEscapeCallback>,
+    pub on_submit: Option<ChatSubmitCallback>,
+    pub on_stop: Option<ChatStopCallback>,
+    pub dismiss_binding: Option<ChatPromptDismissBinding>,
     pub on_continue: Option<ChatContinueCallback>,
     pub on_retry: Option<ChatRetryCallback>,
-    pub on_recovery: Option<ChatRecoveryCallback>,
+    pub recovery_binding: Option<ChatPromptRecoveryBinding>,
     pub theme: Arc<theme::Theme>,
     pub turns_list_state: ListState,
     pub(super) prompt_colors: theme::PromptColors,
@@ -27,7 +36,14 @@ pub struct ChatPrompt {
     // wheel-scroll frames.
     pub(super) stream_flush_pending: bool,
     pub(super) last_stream_flush_at: Option<std::time::Instant>,
-    pub(super) last_copied_response: Option<String>,
+    pub(super) last_copy_receipt:
+        Option<crate::components::conversation_actions::ConversationCopyReceipt>,
+    pub(super) command_status: Option<String>,
+    pub(super) pending_prepared_request: Option<ChatPromptPreparedRequest>,
+    pub(super) prepared_requests_by_assistant_id: HashMap<String, ChatPromptPreparedRequest>,
+    pub(super) builtin_replay_payloads:
+        HashMap<sk_protocol::ai_reliability::TurnRequestRef, BuiltinPreparedPayload>,
+    pub(super) terminal_outcomes: HashMap<String, sk_protocol::ai_reliability::AiOutcome>,
     // Database persistence
     pub(super) save_history: bool,
     // Built-in AI provider support (for inline chat without SDK)
@@ -37,6 +53,7 @@ pub struct ChatPrompt {
     pub(super) builtin_system_prompt: Option<String>,
     pub(super) builtin_streaming_content: String,
     pub(super) builtin_is_streaming: bool,
+    pub(super) builtin_cancel_signal: Option<Arc<AtomicBool>>,
     // Word-buffered reveal: full accumulated content from provider and reveal watermark
     pub(super) builtin_accumulated_content: String,
     pub(super) builtin_reveal_offset: usize,
@@ -113,7 +130,7 @@ impl ChatPrompt {
         hint: Option<String>,
         footer: Option<String>,
         focus_handle: FocusHandle,
-        on_submit: ChatSubmitCallback,
+        on_submit: Option<ChatSubmitCallback>,
         theme: Arc<theme::Theme>,
     ) -> Self {
         let prompt_colors = theme.colors.prompt_colors();
@@ -143,10 +160,11 @@ impl ChatPrompt {
             focus_handle,
             input: TextInputState::new(),
             on_submit,
-            on_escape: None,
+            on_stop: None,
+            dismiss_binding: None,
             on_continue: None,
             on_retry: None,
-            on_recovery: None,
+            recovery_binding: None,
             theme,
             turns_list_state: {
                 // WP-B3: chat prompt (Quick AI / Flow chat) transcript list —
@@ -161,7 +179,12 @@ impl ChatPrompt {
             streaming_message_id: None,
             stream_flush_pending: false,
             last_stream_flush_at: None,
-            last_copied_response: None,
+            last_copy_receipt: None,
+            command_status: None,
+            pending_prepared_request: None,
+            prepared_requests_by_assistant_id: HashMap::new(),
+            builtin_replay_payloads: HashMap::new(),
+            terminal_outcomes: HashMap::new(),
             save_history: true, // Default to saving
             // Built-in AI fields (disabled by default)
             provider_registry: None,
@@ -170,6 +193,7 @@ impl ChatPrompt {
             builtin_system_prompt: None,
             builtin_streaming_content: String::new(),
             builtin_is_streaming: false,
+            builtin_cancel_signal: None,
             builtin_accumulated_content: String::new(),
             builtin_reveal_offset: 0,
             user_has_scrolled_up: false,
@@ -402,9 +426,13 @@ impl ChatPrompt {
         self
     }
 
-    /// Set the escape callback
-    pub fn with_escape_callback(mut self, callback: ChatEscapeCallback) -> Self {
-        self.on_escape = Some(callback);
+    pub fn with_stop_callback(mut self, callback: ChatStopCallback) -> Self {
+        self.on_stop = Some(callback);
+        self
+    }
+
+    pub fn with_dismiss_binding(mut self, binding: ChatPromptDismissBinding) -> Self {
+        self.dismiss_binding = Some(binding);
         self
     }
 
@@ -427,11 +455,9 @@ impl ChatPrompt {
         self
     }
 
-    /// Set the host recovery-action callback (S10): enables the recovery
-    /// card's non-retry actions (model/provider/auth/config) for hosts that
-    /// can actually perform them.
-    pub fn with_recovery_callback(mut self, callback: ChatRecoveryCallback) -> Self {
-        self.on_recovery = Some(callback);
+    /// Install only the recovery actions the host can actually perform.
+    pub fn with_recovery_binding(mut self, binding: ChatPromptRecoveryBinding) -> Self {
+        self.recovery_binding = Some(binding);
         self
     }
 
@@ -586,6 +612,17 @@ impl ChatPrompt {
     pub fn with_claude_code_callback(mut self, callback: ChatClaudeCodeCallback) -> Self {
         self.on_claude_code = Some(callback);
         self
+    }
+
+    pub(crate) fn command_status_text(&self) -> Option<&str> {
+        self.command_status.as_deref()
+    }
+
+    pub(crate) fn terminal_outcome_for_message(
+        &self,
+        message_id: &str,
+    ) -> Option<&sk_protocol::ai_reliability::AiOutcome> {
+        self.terminal_outcomes.get(message_id)
     }
 
     /// Whether the setup card is showing (no providers configured)

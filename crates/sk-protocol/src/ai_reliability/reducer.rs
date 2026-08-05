@@ -27,6 +27,8 @@ pub fn transition(
         AiOperationEvent::RuntimeCancelled { partial } => {
             runtime_cancelled(state, event_tag, partial)
         }
+        AiOperationEvent::StopRequested => stop_requested(state, event_tag),
+        AiOperationEvent::RuntimeStopped { partial } => runtime_stopped(state, event_tag, partial),
         AiOperationEvent::RecoverySelected(action) => recovery_selected(state, event_tag, action),
         AiOperationEvent::RecoveryCommandSucceeded { command_id, result } => {
             recovery_command_succeeded(state, event_tag, command_id, result)
@@ -656,6 +658,7 @@ fn cancel_requested(
             state.phase = AiPhase::Cancelling {
                 turn: turn.clone(),
                 partial,
+                kind: CancellationKind::UserCancelled,
             };
             Ok(AiTransition {
                 commands: vec![AiCommand::CancelTurn { turn }],
@@ -691,25 +694,92 @@ fn cancel_requested(
 }
 
 fn runtime_cancelled(
-    mut state: AiOperationState,
+    state: AiOperationState,
     event: AiEventTag,
     partial: PartialOutputState,
 ) -> Result<AiTransition, InvalidTransition> {
-    if state.phase.tag() != AiPhaseTag::Cancelling {
-        return invalid(&state, event, InvalidTransitionReason::EventNotAllowed);
+    settle_runtime_cancellation(state, event, partial, CancellationKind::UserCancelled)
+}
+
+fn stop_requested(
+    mut state: AiOperationState,
+    event: AiEventTag,
+) -> Result<AiTransition, InvalidTransition> {
+    match state.phase.clone() {
+        AiPhase::Running { turn, progress, .. } => {
+            let partial = partial_output(&state.work, &progress);
+            state.phase = AiPhase::Cancelling {
+                turn: turn.clone(),
+                partial,
+                kind: CancellationKind::UserStopped,
+            };
+            Ok(AiTransition {
+                commands: vec![AiCommand::CancelTurn { turn }],
+                next: state,
+                outcome: None,
+            })
+        }
+        AiPhase::Preflighting { .. } | AiPhase::Recovering { .. } => {
+            settle_immediate_cancellation(state, CancellationKind::UserStopped)
+        }
+        AiPhase::Ready
+        | AiPhase::Cancelling { .. }
+        | AiPhase::AwaitingRecovery { .. }
+        | AiPhase::Recovered { .. }
+        | AiPhase::Succeeded { .. }
+        | AiPhase::Cancelled { .. }
+        | AiPhase::Dismissed { .. } => {
+            invalid(&state, event, InvalidTransitionReason::EventNotAllowed)
+        }
     }
+}
+
+fn runtime_stopped(
+    state: AiOperationState,
+    event: AiEventTag,
+    partial: PartialOutputState,
+) -> Result<AiTransition, InvalidTransition> {
+    settle_runtime_cancellation(state, event, partial, CancellationKind::UserStopped)
+}
+
+fn settle_immediate_cancellation(
+    mut state: AiOperationState,
+    kind: CancellationKind,
+) -> Result<AiTransition, InvalidTransition> {
+    let partial = partial_from_work(&state.work);
     state.phase = AiPhase::Cancelled {
-        kind: CancellationKind::UserCancelled,
+        kind,
         partial: partial.clone(),
     };
     state.pending = None;
     Ok(AiTransition {
         next: state,
         commands: Vec::new(),
-        outcome: Some(AiOutcome::Cancelled {
-            kind: CancellationKind::UserCancelled,
-            partial,
-        }),
+        outcome: Some(AiOutcome::Cancelled { kind, partial }),
+    })
+}
+
+fn settle_runtime_cancellation(
+    mut state: AiOperationState,
+    event: AiEventTag,
+    partial: PartialOutputState,
+    expected_kind: CancellationKind,
+) -> Result<AiTransition, InvalidTransition> {
+    let AiPhase::Cancelling { kind, .. } = state.phase.clone() else {
+        return invalid(&state, event, InvalidTransitionReason::EventNotAllowed);
+    };
+    if kind != expected_kind {
+        return invalid(&state, event, InvalidTransitionReason::EventNotAllowed);
+    }
+    state.phase = AiPhase::Cancelled {
+        kind,
+        partial: partial.clone(),
+    };
+    state.pending = None;
+    Ok(AiTransition {
+        next: state,
+        commands: Vec::new(),
+        outcome: Some(AiOutcome::Cancelled { kind, partial }),
     })
 }
 

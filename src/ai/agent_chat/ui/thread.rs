@@ -4365,11 +4365,12 @@ impl AgentChatThread {
                                 failure_code = ?failure.failure.code,
                                 diagnostic_fingerprint = ?failure.failure.diagnostic.as_ref().map(|d| &d.fingerprint.0),
                             );
-                            if this.pending_fork_ordinal.take().is_some() {
-                                this.push_system_message(
-                                    format!("Rewind failed: {}", failure.primary_message()),
-                                    cx,
-                                );
+                            if this.apply_fork_failed() {
+                                // The runtime rejected the rewind, so the existing
+                                // branch remains authoritative. Preserve transcript,
+                                // draft, selection, copy target, and immutable Retry
+                                // payload exactly; only release the in-flight guard.
+                                cx.notify();
                             }
                         }
                     });
@@ -4379,29 +4380,55 @@ impl AgentChatThread {
         .detach();
     }
 
-    /// Apply a completed session rewind: truncate the transcript at the
-    /// forked user message and stage its text in the composer for editing.
-    fn apply_fork_completed(&mut self, text: String, cx: &mut Context<Self>) -> bool {
-        let Some(ordinal) = self.pending_fork_ordinal.take() else {
-            tracing::warn!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_fork_completed_without_request",
-            );
-            return false;
-        };
+    /// Release a rejected rewind without mutating the authoritative branch.
+    /// The request guard is transport state; transcript, draft, selection,
+    /// copy target, and immutable Retry payload remain byte-for-byte intact.
+    fn apply_fork_failed(&mut self) -> bool {
+        self.pending_fork_ordinal.take().is_some()
+    }
+
+    /// Commit the state mutation for a runtime-accepted rewind. Keeping this
+    /// context-free lets focused tests exercise the same production mutation.
+    fn apply_fork_completed_state(&mut self, text: String) -> Option<usize> {
+        let ordinal = self.pending_fork_ordinal.take()?;
         Self::truncate_messages_at_user_ordinal(&mut self.messages, ordinal);
         self.active_tool_calls.clear();
         self.tool_call_lookup.clear();
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
         self.input.set_text(text.clone());
         self.input.set_cursor(text.chars().count());
-        self.set_status(AgentChatThreadStatus::Idle);
+
+        // The accepted request belonged to the abandoned branch. A successful
+        // rewind must not let Retry replay it or keep its failure card alive.
+        self.last_prepared_turn = None;
+        self.reliability_state = AiOperationState::ready(
+            self.reliability_state.identity.clone(),
+            self.reliability_state.selection.clone(),
+            self.current_work_snapshot(),
+            self.reliability_state.retry.policy,
+        );
+        self.sync_status_from_reliability();
+        Some(ordinal)
+    }
+
+    /// Apply a completed session rewind: truncate the transcript at the
+    /// forked user message and stage its exact text in the composer for editing.
+    fn apply_fork_completed(&mut self, text: String, cx: &mut Context<Self>) -> bool {
+        let prefill_chars = text.chars().count();
+        let Some(ordinal) = self.apply_fork_completed_state(text) else {
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_fork_completed_without_request",
+            );
+            return false;
+        };
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_fork_completed",
             ordinal,
             message_count = self.messages.len(),
-            prefill_chars = text.chars().count(),
+            prefill_chars,
+            retry_payload_cleared = true,
         );
         // Pi rebuilt the session with fresh entry ids; refetch the list.
         self.fork_points.clear();
@@ -4680,6 +4707,75 @@ impl AgentChatThread {
         } else {
             self.push_message(AgentChatThreadMessageRole::User, user_text.to_string());
             match phase {
+                "c06Completed" | "c06-completed" => {
+                    self.push_message(
+                        AgentChatThreadMessageRole::Assistant,
+                        assistant_text.unwrap_or_else(|| {
+                            " C06 synthetic answer\nsecond line with trailing spaces \n".to_string()
+                        }),
+                    );
+                    self.push_message(AgentChatThreadMessageRole::Assistant, " \n\t ");
+                    self.set_status(AgentChatThreadStatus::Idle);
+                }
+                "c06StreamingPartial" | "c06-streaming-partial" => {
+                    self.push_message(
+                        AgentChatThreadMessageRole::Assistant,
+                        assistant_text.unwrap_or_else(|| {
+                            "C06 synthetic partial\nwith exact final newline\n".to_string()
+                        }),
+                    );
+                    let command_id = self
+                        .begin_reliability_turn(CapabilityDecision::Compatible, cx)?
+                        .ok_or_else(|| "c06_fixture_missing_start_command".to_string())?;
+                    self.transition_reliability(
+                        AiOperationEvent::RuntimeStarted {
+                            command_id,
+                            turn: TurnRef::from("c06-fixture-partial"),
+                        },
+                        cx,
+                    )
+                    .map_err(|error| format!("c06_fixture_runtime_start:{:?}", error.reason))?;
+                }
+                "c06StreamingEmpty" | "c06-streaming-empty" => {
+                    self.push_message(AgentChatThreadMessageRole::Assistant, String::new());
+                    let command_id = self
+                        .begin_reliability_turn(CapabilityDecision::Compatible, cx)?
+                        .ok_or_else(|| "c06_fixture_missing_start_command".to_string())?;
+                    self.transition_reliability(
+                        AiOperationEvent::RuntimeStarted {
+                            command_id,
+                            turn: TurnRef::from("c06-fixture-empty"),
+                        },
+                        cx,
+                    )
+                    .map_err(|error| format!("c06_fixture_runtime_start:{:?}", error.reason))?;
+                }
+                "c06RetryableFailure" | "c06-retryable-failure" => {
+                    self.store_prepared_turn_payload(
+                        user_text.to_string(),
+                        vec![ContentBlock::Text(TextContent::new(user_text))],
+                        Vec::new(),
+                    );
+                    let command_id = self
+                        .begin_reliability_turn(CapabilityDecision::Compatible, cx)?
+                        .ok_or_else(|| "c06_fixture_missing_start_command".to_string())?;
+                    self.transition_reliability(
+                        AiOperationEvent::RuntimeStarted {
+                            command_id,
+                            turn: TurnRef::from("c06-fixture-retry"),
+                        },
+                        cx,
+                    )
+                    .map_err(|error| format!("c06_fixture_runtime_start:{:?}", error.reason))?;
+                    let failure = provider_failure(
+                        ProtocolComponent::Provider,
+                        "C06_SYNTHETIC_RETRYABLE_FAILURE",
+                    );
+                    let message = failure.primary_message().to_string();
+                    self.transition_reliability(AiOperationEvent::Failed(failure.failure), cx)
+                        .map_err(|error| format!("c06_fixture_failure:{:?}", error.reason))?;
+                    self.push_message(AgentChatThreadMessageRole::Error, message);
+                }
                 "awaitingFirstAssistantText"
                 | "awaiting-first-assistant-text"
                 | "awaiting"
@@ -4833,18 +4929,18 @@ impl AgentChatThread {
         cx.notify();
     }
 
-    pub(crate) fn cancel_streaming(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn stop_streaming(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.status, AgentChatThreadStatus::Streaming) {
             return;
         }
         self.flush_streaming_text_buffer();
         self.queue_paused = true;
         self.context_resolution_id = self.context_resolution_id.wrapping_add(1);
-        let _ = self.transition_reliability(AiOperationEvent::CancelRequested, cx);
+        let _ = self.transition_reliability(AiOperationEvent::StopRequested, cx);
         if let Err(error) = self.connection.cancel_turn(self.ui_thread_id.clone()) {
             tracing::warn!(
                 target: "script_kit::tab_ai",
-                event = "agent_chat_cancel_turn_enqueue_failed",
+                event = "agent_chat_stop_turn_enqueue_failed",
                 error_code = ?error.code(),
             );
         }
@@ -4860,7 +4956,7 @@ impl AgentChatThread {
                 fingerprint: Fingerprint(redacted_fingerprint(message.body.as_ref())),
             })
             .unwrap_or(PartialOutputState::None);
-        let _ = self.transition_reliability(AiOperationEvent::RuntimeCancelled { partial }, cx);
+        let _ = self.transition_reliability(AiOperationEvent::RuntimeStopped { partial }, cx);
     }
 
     fn clear_context_for_saved_messages(&mut self) {
@@ -5708,16 +5804,9 @@ impl AgentChatThread {
                 self.fork_points = entries;
             }
             super::AgentChatEvent::ForkCompleted { text } => {
-                // Test path mirrors `apply_fork_completed` minus the GPUI
-                // refresh: truncate locally and stage the text for editing.
-                if let Some(ordinal) = self.pending_fork_ordinal.take() {
-                    Self::truncate_messages_at_user_ordinal(&mut self.messages, ordinal);
-                    self.active_tool_calls.clear();
-                    self.tool_call_lookup.clear();
-                    self.input.set_text(text.clone());
-                    self.input.set_cursor(text.chars().count());
-                    self.set_status(AgentChatThreadStatus::Idle);
-                }
+                // Production and tests share the exact accepted-rewind mutation;
+                // only the GPUI fork-point refresh is omitted here.
+                self.apply_fork_completed_state(text);
             }
             super::AgentChatEvent::TurnCompleted { .. } => {
                 self.set_status(AgentChatThreadStatus::Idle);

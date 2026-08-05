@@ -158,19 +158,27 @@ impl ScriptListApp {
 
         if crate::confirm::is_confirm_window_open() {
             crate::confirm::route_key_to_confirm_popup("escape", cx);
+            return;
         }
 
         if crate::actions::is_actions_window_open() || self.show_actions_popup {
             self.close_actions_popup_for_current_view(window, cx);
+            return;
         }
 
         match &self.current_view {
             AppView::QuickTerminalView { .. } => {
                 self.close_quick_terminal_main_window_state_first(cx);
             }
-            AppView::AgentChatView { .. } => {
-                self.close_tab_ai_harness_terminal_with_window(window, cx);
-                self.close_and_reset_window(cx);
+            AppView::AgentChatView { entity } => {
+                let entity = entity.clone();
+                entity.update(cx, |chat, cx| {
+                    let _ = chat.request_conversation_dismiss(
+                        crate::components::conversation_actions::ConversationDismissTrigger::CommandW,
+                        window,
+                        cx,
+                    );
+                });
             }
             AppView::ThemeChooserView { .. } => {
                 // Memory-only restore: a cancelled Theme Designer session never

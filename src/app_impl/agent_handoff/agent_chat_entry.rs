@@ -126,6 +126,22 @@ pub(crate) struct AgentChatContextStageOutcome {
     pub(crate) reason_code: Option<&'static str>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum AgentChatReturnRouteKind {
+    Source,
+    Main,
+    Direct,
+}
+
+fn agent_chat_return_route_kind(return_origin: Option<&AppView>) -> AgentChatReturnRouteKind {
+    match return_origin {
+        Some(AppView::ScriptList) => AgentChatReturnRouteKind::Main,
+        Some(_) => AgentChatReturnRouteKind::Source,
+        None => AgentChatReturnRouteKind::Direct,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentChatEntryOutcome {
@@ -139,7 +155,7 @@ pub(crate) struct AgentChatEntryOutcome {
     pub(crate) context: Vec<AgentChatContextStageOutcome>,
     pub(crate) submission: AgentChatSubmissionOutcome,
     pub(crate) blocked_reason: Option<&'static str>,
-    pub(crate) return_route: Option<&'static str>,
+    pub(crate) return_route: AgentChatReturnRouteKind,
 }
 
 #[derive(Debug)]
@@ -374,7 +390,7 @@ struct AgentChatEntryCompletionPlan {
     verb: AgentChatEntryVerb,
     seed_text: Option<String>,
     expects_context: bool,
-    return_route: Option<&'static str>,
+    return_route: AgentChatReturnRouteKind,
     baseline: AgentChatEntryBaseline,
 }
 
@@ -643,15 +659,23 @@ impl ScriptListApp {
                     AgentChatSubmissionOutcome::NotRequested
                 },
                 blocked_reason: Some("portal_active"),
-                return_route: req.return_origin.as_ref().map(|_| "source"),
+                return_route: agent_chat_return_route_kind(req.return_origin.as_ref()),
             });
         }
 
+        let route_kind = agent_chat_return_route_kind(req.return_origin.as_ref());
         let source_view = req
             .return_origin
             .clone()
             .unwrap_or_else(|| self.current_view.clone());
-        self.seed_agent_chat_return_origin_for_view(&source_view);
+        let opened_from_main_menu = self.opened_from_main_menu;
+        match route_kind {
+            AgentChatReturnRouteKind::Main => self.opened_from_main_menu = true,
+            AgentChatReturnRouteKind::Direct => self.opened_from_main_menu = false,
+            AgentChatReturnRouteKind::Source => {}
+        }
+        self.seed_agent_chat_return_origin_for_view(&source_view, cx);
+        self.opened_from_main_menu = opened_from_main_menu;
 
         let entry_verb = req.intent.verb();
         let seed_text = req.intent.seed_text().map(str::to_string);
@@ -663,7 +687,7 @@ impl ScriptListApp {
                 req.context_policy,
                 AgentChatContextPolicy::SuppressFocused | AgentChatContextPolicy::NoContext
             ),
-            return_route: req.return_origin.as_ref().map(|_| "source"),
+            return_route: agent_chat_return_route_kind(req.return_origin.as_ref()),
             baseline: self.agent_chat_entry_baseline(cx),
         };
         tracing::info!(
@@ -1038,7 +1062,7 @@ mod quick_question_contract {
             context: Vec::new(),
             submission: AgentChatSubmissionOutcome::Accepted,
             blocked_reason: None,
-            return_route: Some("source"),
+            return_route: AgentChatReturnRouteKind::Source,
         };
         assert_eq!(outcome.feedback_verb(), "Asked");
         assert!(outcome.source_consumed());
@@ -1071,7 +1095,7 @@ mod quick_question_contract {
                 context: Vec::new(),
                 submission,
                 blocked_reason: None,
-                return_route: None,
+                return_route: AgentChatReturnRouteKind::Direct,
             };
             assert_eq!(outcome.feedback_verb(), "Refused");
             assert!(!outcome.source_consumed());
