@@ -2723,6 +2723,8 @@ impl ActionsDialog {
             "titleFingerprint": Self::devtools_text_fingerprint(&action.title),
             "descriptionLength": action.description.as_ref().map(|value| value.chars().count()),
             "descriptionFingerprint": action.description.as_ref().map(|value| Self::devtools_text_fingerprint(value)),
+            "valueLength": action.value.as_ref().map(|value| value.chars().count()),
+            "valueFingerprint": action.value.as_ref().map(|value| Self::devtools_text_fingerprint(value)),
             "section": action.section.as_deref(),
             "category": format!("{:?}", action.category),
             "enabled": action.is_enabled(),
@@ -3068,6 +3070,10 @@ impl ActionsDialog {
             "schemaVersion": 1,
             "surface": surface,
             "redacted": true,
+            "context": {
+                "titleLength": self.context_title.as_ref().map(|value| value.chars().count()),
+                "titleFingerprint": self.context_title.as_ref().map(|value| Self::devtools_text_fingerprint(value)),
+            },
             "search": {
                 "textLength": self.search_text.chars().count(),
                 "textFingerprint": Self::devtools_text_fingerprint(&self.search_text),

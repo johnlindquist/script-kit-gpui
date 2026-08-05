@@ -775,11 +775,9 @@ impl ScriptListApp {
                 }
                 true
             }
-            AppView::NotesBrowseView {
-                filter,
-                selected_index,
-            } => {
-                if Self::sync_builtin_query_state(filter, selected_index, text) {
+            AppView::NotesBrowseView { search } => {
+                if search.query != text {
+                    search.refresh(text.to_string(), &crate::notes::notes_brain_days_dir());
                     self.notes_browse_scroll_handle.scroll_to_item(0);
                     tracked_reset = true;
                 }

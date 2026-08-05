@@ -569,12 +569,10 @@ impl ScriptListApp {
                 }
                 return; // Don't run main menu filter logic
             }
-            AppView::NotesBrowseView {
-                filter,
-                selected_index,
-            } => {
+            AppView::NotesBrowseView { search } => {
                 self.filter_text = new_text.clone();
-                if Self::sync_builtin_query_state(filter, selected_index, &new_text) {
+                if search.query != new_text {
+                    search.refresh(new_text, &crate::notes::notes_brain_days_dir());
                     self.notes_browse_scroll_handle.scroll_to_top_of_item(0);
                     self.begin_list_viewport_scroll(
                         crate::scrolling::list_interaction::ListViewportInputSource::Filter,

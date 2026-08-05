@@ -25,12 +25,27 @@ pub(crate) fn parse_day_note_action_id(id: &str) -> Option<NaiveDate> {
 }
 
 pub(crate) fn load_day_note_switcher_entries(days_dir: &Path) -> Vec<DayNoteSwitcherEntry> {
+    load_day_note_switcher_entries_result(days_dir).unwrap_or_default()
+}
+
+/// Load day-note rows without collapsing an IO failure into an empty corpus.
+///
+/// The compatibility helper above retains the historical best-effort contract
+/// for callers that have not adopted typed search state. Canonical Notes search
+/// uses this strict result so a failed load remains distinguishable from an
+/// honestly empty result set.
+pub(crate) fn load_day_note_switcher_entries_result(
+    days_dir: &Path,
+) -> std::io::Result<Vec<DayNoteSwitcherEntry>> {
     let mut entries = Vec::new();
-    let Ok(read_dir) = fs::read_dir(days_dir) else {
-        return entries;
+    let read_dir = match fs::read_dir(days_dir) {
+        Ok(read_dir) => read_dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
+        Err(error) => return Err(error),
     };
 
-    for entry in read_dir.flatten() {
+    for entry in read_dir {
+        let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
             continue;
@@ -41,14 +56,10 @@ pub(crate) fn load_day_note_switcher_entries(days_dir: &Path) -> Vec<DayNoteSwit
         let Ok(date) = NaiveDate::parse_from_str(stem, "%Y-%m-%d") else {
             continue;
         };
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
+        let content = fs::read_to_string(&path)?;
         let updated_at = fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
-            .ok()
-            .map(DateTime::<Utc>::from)
-            .unwrap_or_else(Utc::now);
+            .map(DateTime::<Utc>::from)?;
         entries.push(DayNoteSwitcherEntry {
             date,
             path,
@@ -59,7 +70,7 @@ pub(crate) fn load_day_note_switcher_entries(days_dir: &Path) -> Vec<DayNoteSwit
     }
 
     entries.sort_by(|a, b| b.date.cmp(&a.date));
-    entries
+    Ok(entries)
 }
 
 pub(crate) fn day_note_switcher_infos(

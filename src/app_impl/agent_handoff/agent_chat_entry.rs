@@ -980,7 +980,8 @@ mod quick_question_contract {
     // `test` macro would shadow the builtin `#[test]` attribute.
     use super::{
         AgentChatContextPolicy, AgentChatEntryIntent, AgentChatEntryOutcome, AgentChatEntryRequest,
-        AgentChatEntryVerb, AgentChatOpenDisposition, AgentChatSubmissionOutcome,
+        AgentChatEntryVerb, AgentChatOpenDisposition, AgentChatReturnRouteKind,
+        AgentChatSubmissionOutcome,
     };
 
     /// Double-tap of the main hotkey means "fastest path to a clean chat for

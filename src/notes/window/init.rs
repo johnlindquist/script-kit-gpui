@@ -118,28 +118,19 @@ impl NotesApp {
             "Applied Notes window style"
         );
 
-        // Pre-compute note switcher actions before moving notes into struct
-        let mut note_switcher_actions = get_note_switcher_actions(
-            &notes
-                .iter()
-                .map(|n| NoteSwitcherNoteInfo {
-                    id: n.id.as_str().to_string(),
-                    title: if n.title.is_empty() {
-                        "Untitled Note".to_string()
-                    } else {
-                        n.title.clone()
-                    },
-                    char_count: n.char_count(),
-                    is_current: Some(n.id) == selected_note_id,
-                    is_pinned: n.is_pinned,
-                    preview: Self::note_switcher_preview(n),
-                    relative_time: Self::format_relative_time(n.updated_at),
-                })
-                .collect::<Vec<_>>(),
-        );
-        note_switcher_actions.extend(get_day_note_switcher_actions(
+        // Seed the popup from the same canonical regular/day corpus used by
+        // Today and Notes Browse. `open_browse_panel` refreshes this state on
+        // every open, so startup errors cannot later masquerade as empty data.
+        let note_search_state = crate::notes::search_model::load_note_search_state(
+            "",
             &crate::notes::notes_brain_days_dir(),
-        ));
+            1,
+            None,
+        );
+        let note_switcher_actions = crate::actions::get_canonical_note_search_actions(
+            &note_search_state,
+            selected_note_id.map(crate::notes::search_model::NoteSearchDocumentId::Note),
+        );
 
         Self {
             notes,

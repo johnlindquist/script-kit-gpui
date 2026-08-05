@@ -365,10 +365,9 @@ enum AppView {
         filter: String,
         selected_index: usize,
     },
-    /// Browsing notes from Agent Chat as an attachment portal
+    /// Browsing the canonical Notes search corpus standalone or as an Agent Chat portal.
     NotesBrowseView {
-        filter: String,
-        selected_index: usize,
+        search: crate::notes::search_model::NoteSearchHostState,
     },
     /// Showing the Agent Chat surface for the default Tab path.
     ///

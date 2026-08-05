@@ -5130,11 +5130,12 @@ impl ScriptListApp {
 
         self.pending_focus = None;
 
+        let keeps_main_window_open = matches!(action, NotesCommandBuiltinAction::SearchNotes);
         let result = match action {
             NotesCommandBuiltinAction::OpenNotes => {
                 notes::open_notes_window_without_launcher_restore(cx)
             }
-            NotesCommandBuiltinAction::SearchNotes => notes::open_notes_search(cx),
+            NotesCommandBuiltinAction::SearchNotes => self.open_standalone_notes_browse(cx),
             NotesCommandBuiltinAction::NewNote | NotesCommandBuiltinAction::QuickCapture => {
                 notes::quick_capture(cx)
             }
@@ -5150,7 +5151,9 @@ impl ScriptListApp {
                 action.failure_detail(),
             )
         } else {
-            self.close_and_reset_window(cx);
+            if !keeps_main_window_open {
+                self.close_and_reset_window(cx);
+            }
             Self::builtin_success(dctx, action.success_detail())
         }
     }

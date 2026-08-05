@@ -27,10 +27,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 // Use the unified ActionsDialog/CommandBar system
-use crate::actions::{
-    get_day_note_switcher_actions, get_note_switcher_actions, get_notes_command_bar_actions,
-    CommandBar, CommandBarConfig, NoteSwitcherNoteInfo, NotesInfo,
-};
+use crate::actions::{get_notes_command_bar_actions, CommandBar, CommandBarConfig, NotesInfo};
 use crate::confirm;
 use crate::theme;
 

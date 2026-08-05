@@ -48,7 +48,9 @@ pub use file_path::{
     get_file_context_actions, get_file_search_directory_actions, get_path_context_actions,
     FileSearchDirectoryInfo, FileSearchSortMode,
 };
-pub(crate) use notes::get_notes_command_bar_actions_for_context;
+pub(crate) use notes::{
+    get_canonical_note_search_actions, get_notes_command_bar_actions_for_context,
+};
 pub use notes::{
     get_day_note_switcher_actions, get_new_chat_actions, get_note_switcher_actions,
     get_notes_command_bar_actions,

@@ -752,7 +752,7 @@ impl ScriptListApp {
             AppView::DictationHistoryView { filter, .. } if !filter.is_empty() => {
                 Some("DictationHistory filter")
             }
-            AppView::NotesBrowseView { filter, .. } if !filter.is_empty() => {
+            AppView::NotesBrowseView { search } if !search.query.is_empty() => {
                 Some("NotesBrowse filter")
             }
             AppView::ThemeChooserView { filter, .. } if !filter.is_empty() => {
@@ -889,11 +889,8 @@ impl ScriptListApp {
                 self.dictation_history_scroll_handle
                     .scroll_to_top_of_item(0);
             }
-            AppView::NotesBrowseView {
-                filter,
-                selected_index,
-            } => {
-                Self::clear_builtin_query_state(filter, selected_index);
+            AppView::NotesBrowseView { search } => {
+                search.refresh(String::new(), &crate::notes::notes_brain_days_dir());
                 self.notes_browse_scroll_handle.scroll_to_top_of_item(0);
             }
             AppView::ThemeChooserView {

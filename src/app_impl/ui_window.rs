@@ -89,21 +89,27 @@ fn create_ai_preset_footer_buttons(
 
 fn notes_browse_footer_buttons(
     enabled: bool,
-    in_portal: bool,
+    destination: crate::notes::search_model::NoteSearchDestination,
     has_selection: bool,
 ) -> Vec<crate::footer_popup::FooterButtonConfig> {
     use crate::footer_popup::{FooterAction, FooterButtonConfig};
 
-    let close_label = if in_portal { "Cancel" } else { "Back" };
-    let mut buttons = Vec::new();
-    if in_portal {
-        buttons.push(
-            FooterButtonConfig::new(FooterAction::Run, "↵", "Attach Note")
-                .enabled(enabled && has_selection),
-        );
-    }
-    buttons.push(FooterButtonConfig::new(FooterAction::Close, "Esc", close_label).enabled(enabled));
-    buttons
+    let close_label = if destination
+        == crate::notes::search_model::NoteSearchDestination::AttachNote
+    {
+        "Cancel"
+    } else {
+        "Back"
+    };
+    vec![
+        FooterButtonConfig::new(
+            FooterAction::Run,
+            "↵",
+            destination.primary_verb(),
+        )
+        .enabled(enabled && has_selection),
+        FooterButtonConfig::new(FooterAction::Close, "Esc", close_label).enabled(enabled),
+    ]
 }
 
 static MAIN_FOOTER_ACTION_LISTENER: Once = Once::new();
@@ -410,24 +416,20 @@ impl ScriptListApp {
         true
     }
 
-    fn attach_selected_note_from_footer(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.is_in_attachment_portal() {
-            return false;
-        }
-        let selected_note = match &self.current_view {
-            AppView::NotesBrowseView {
-                filter,
-                selected_index,
-            } => Self::notes_browse_selected_visible_row(filter, *selected_index),
+    fn activate_selected_note_search_result_from_footer(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let selected_row = match &self.current_view {
+            AppView::NotesBrowseView { search } => {
+                Self::notes_browse_selected_visible_row(search)
+            }
             _ => None,
         };
-        let Some(note) = selected_note else {
+        let Some(row) = selected_row else {
             return false;
         };
-
-        let part = self.build_notes_browse_portal_part(&note);
-        self.close_attachment_portal_with_part(part, cx);
-        true
+        self.activate_notes_browse_row(&row, cx)
     }
 
     /// Route a footer action to the Day Page kit:// resource preview when one
@@ -610,7 +612,7 @@ impl ScriptListApp {
                 } else if matches!(self.current_view, AppView::CreateAiPresetView { .. }) {
                     self.handle_create_ai_preset_key("enter", window, cx);
                 } else if matches!(self.current_view, AppView::NotesBrowseView { .. }) {
-                    let _ = self.attach_selected_note_from_footer(cx);
+                    let _ = self.activate_selected_note_search_result_from_footer(cx);
                 } else if let AppView::FlowSessionView { session_id } = self.current_view {
                     // One shared draft transaction with the keyboard Enter
                     // path: the draft clears only when the submit consumed it,
@@ -1256,18 +1258,9 @@ impl ScriptListApp {
             return create_ai_preset_footer_buttons(enabled, !name.trim().is_empty());
         }
 
-        if let AppView::NotesBrowseView {
-            filter,
-            selected_index,
-        } = &self.current_view
-        {
-            let has_selection =
-                Self::notes_browse_selected_visible_row(filter, *selected_index).is_some();
-            return notes_browse_footer_buttons(
-                enabled,
-                self.is_in_attachment_portal(),
-                has_selection,
-            );
+        if let AppView::NotesBrowseView { search } = &self.current_view {
+            let has_selection = Self::notes_browse_selected_visible_row(search).is_some();
+            return notes_browse_footer_buttons(enabled, search.destination, has_selection);
         }
 
         // ConfirmPrompt: Apply (Confirm) + Close (Cancel) labeled per options.
@@ -2760,18 +2753,9 @@ impl ScriptListApp {
                 ViewType::MainWindow,
                 crate::dictation::search_history(filter, 100).len(),
             )),
-            AppView::NotesBrowseView { filter, .. } => Some((
-                ViewType::MainWindow,
-                if filter.is_empty() {
-                    crate::notes::get_all_notes()
-                        .map(|notes| notes.len())
-                        .unwrap_or(0)
-                } else {
-                    crate::notes::search_notes(filter)
-                        .map(|notes| notes.len())
-                        .unwrap_or(0)
-                },
-            )),
+            AppView::NotesBrowseView { search } => {
+                Some((ViewType::MainWindow, search.state.rows().len()))
+            }
             AppView::AgentChatView { entity } => {
                 if let Some(cx) = cx {
                     if let Some(item_count) = entity.read(cx).focused_text_mini_sizing_count(cx) {

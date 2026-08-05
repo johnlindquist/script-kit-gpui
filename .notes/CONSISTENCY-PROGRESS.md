@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 34 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 36 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -18,7 +18,7 @@
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
-| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C07 complete; SAFE-004 verified |
+| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C08 complete; WF-012 and WF-017 verified |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
 ## How to view the baseline proposal explorer
@@ -774,6 +774,40 @@
   5. Move a synthetic note to Trash. Verify Restore and Delete Permanently appear in Actions and the titlebar; Delete Permanently and Empty Trash both require confirmation, and cancel leaves Trash unchanged.
   6. Run `SCRIPT_KIT_GPUI_BINARY="$PWD/target-agent/artifacts/cons-flow-c07/script-kit-gpui" bun scripts/agentic/cons-flow-ux/notes-actions-probe.ts`; expect `status:"PASS"`, six projection modes, `advertisedShortcutCount:18`, `activatedShortcutCount:18`, complete cleanup, and exact clipboard restoration.
 - **Intentional differences preserved:** Notes keeps host-local editor formatting shortcuts that are not visible `NotesAction` commands. Actions-only commands do not acquire fake chords. Read-only and no-current modes omit inapplicable actions instead of showing enabled fiction. Existing Notes layout, theme tokens, popup geometry, glass material, and locked motion timing are unchanged.
+
+### WF-012 — Share one canonical Notes search corpus, ranking, and metadata projection
+
+- **Status:** Complete. Notes Window, Day Page, standalone Notes Browse, and the Agent Chat Notes portal now consume the same regular-note/day-note corpus, ranking, stable identity, preview, and automation metadata.
+- **Commit boundary:** Workflow Safety C08 — `fix(notes-search): share results and truthful host destinations [WF-012 WF-017]`.
+- **Changed behavior:** A seeded query returns the same ordered regular-note and day-note IDs in all four hosts. Selection and scroll anchoring reconcile by stable document ID rather than stale list index. Stable machine metadata uses note kind, RFC3339 update time, character count, and pinned state, so automation remains exact while user-facing relative-time copy can continue to age naturally. Strict day-note loading reports IO failure instead of converting it to an empty result.
+- **Exact owners:** `src/notes/search_model.rs::{NoteSearchDocumentId,NoteSearchRow,NoteSearchSnapshot,NoteSearchHostState,load_note_search_state}`; `src/notes/day_switcher.rs::load_day_note_switcher_entries_result`; `src/actions/builders/notes.rs::get_canonical_note_search_actions`; `src/notes/window/{init.rs,panels.rs}`; `src/main_sections/day_page_switcher.rs`; `src/render_builtins/notes_browse.rs`; `src/app_layout/collect_elements.rs`; and `src/actions/dialog.rs`.
+- **Focused tests/build:** Canonical model PASS (5/5); Notes Actions builders PASS (15/15); native footer contract PASS (1/1); source-audit inventory regenerated and `--base main` reports no new guarded reader sites; library check, binary check, and stable product build PASS. Artifact: `target-agent/artifacts/cons-flow-c08/script-kit-gpui`; SHA-256 `03d413be22cc9390bd47ee499aee0ef57d3088c45abcc48562d147145a25c774`.
+- **Runtime receipt:** `.test-output/cons-flow-c08/notes-search-receipt.json` is PASS. All four hosts expose ordered IDs `00000000-0000-0000-0000-000000000081`, `00000000-0000-0000-0000-000000000082`, and `day:2026-07-03` with identical titles, kinds, and stable metadata fingerprints. The matrix also proves NoMatch, stable selected ID after reorder, Loading with prior rows, Failed with prior rows, and ReadyEmpty.
+- **Negative controls:** Failed refresh appends a disabled recovery/status row after retained results rather than replacing results or pretending the corpus is empty. Loading and failure preserve prior snapshots. Empty-corpus and no-match states remain distinct. Deleted selections reconcile to a surviving stable ID. Three eager empty-list subtractions found by the real ReadyEmpty probe now use saturating bounds, eliminating runtime panic without weakening assertions.
+- **Cleanup/governance:** Two isolated Driver sessions report `processExited:true`, `streamsDrained:true`, `logWriterClosed:true`, `ownedProcessCount:0`, `forcedSignals:[]`, and `databaseRemoved:true`; runtime panics are zero. Protected glass source/model checks pass (40/40 plus calibration fixture 1/1), Actions entry and rapid-toggle runtime probes pass, and protected owners are unchanged. The full lifecycle capture gives the same pre-existing under-resolved main-entry and Notes pre-reveal predicates on both C07 and C08 artifacts; this is a matched baseline limitation, not a C08 regression.
+- **User test/view:**
+  1. Seed or create two ordinary notes plus a Day Page entry containing the same search word.
+  2. In Notes, open the note switcher; in Day Page, open its switcher; from the launcher choose **Search Notes**; and in Agent Chat open the Notes attachment portal.
+  3. Type the shared word in each host. Verify the same ordinary notes and day note appear in the same order, with matching titles and previews.
+  4. Select the second result, then narrow and clear the query. Verify selection returns to the same note by identity rather than jumping to the previous numeric row.
+  5. Run `SCRIPT_KIT_GPUI_BINARY="$PWD/target-agent/artifacts/cons-flow-c08/script-kit-gpui" bun scripts/agentic/cons-flow-ux/notes-search-probe.ts`; expect `status:"PASS"`, all four cross-host comparisons true, `runtimePanics:0`, and complete cleanup.
+- **Intentional differences preserved:** Relative-time description text remains presentation copy and may change with wall clock time; stable machine metadata is separate. Notes Window and Day Page remain popup hosts, while standalone Browse and Agent Chat remain main-window modes.
+
+### WF-017 — Make Notes Browse destinations and portal restoration truthful
+
+- **Status:** Complete. Every Notes search host names and performs its real destination, and standalone versus portal activation now share one typed row-activation owner.
+- **Commit boundary:** Same Workflow Safety C08 commit as WF-012.
+- **Changed behavior:** Notes Window says **Open in Notes**; Day Page says **Open Here**; standalone Notes Browse says **Open in Notes Window**; Agent Chat says **Attach Note**. Standalone Enter and second click open the selected ordinary/day note in Notes. Portal Enter and second click attach exactly one selected note and return. Portal Escape restores draft/query, cursor, context, selection evidence, and composer focus.
+- **Exact owners:** `src/notes/search_model.rs::NoteSearchDestination`; `src/render_builtins/notes_browse.rs::{open_standalone_notes_browse,activate_notes_browse_row}`; `src/app_impl/ui_window.rs::activate_selected_note_search_result_from_footer`; `src/app_impl/attachment_portal.rs`; `src/app_execute/builtin_execution.rs`; `src/main_sections/app_view_state.rs`; `src/app_impl/{filter_input_change.rs,filter_input_updates.rs,lifecycle_reset.rs}`; `src/prompt_handler/mod.rs`; and `src/app_impl/agent_handoff/mod.rs`.
+- **Runtime proof:** The C08 receipt proves all four exact verbs from rendered/semantic state. Real GPUI pointer dispatch proves standalone and portal second-click behavior; keyboard Enter proves both routes. Portal attachment is asserted by exactly one `attachmentPortal` context part with note target kind, rather than by a misleading total-chip increase. Cancellation restores all five required state/focus facts.
+- **Negative controls:** Standalone activation cannot attach to Agent Chat. Portal activation cannot open a standalone Notes destination. Portal cancellation makes no attachment and does not discard the composer snapshot. Native footer, keyboard Enter, and second-click all route through the same destination-aware activation function. Errors render Notes-specific safe copy and never raw provider/IO detail.
+- **User test/view:**
+  1. Open Notes switcher and verify the destination heading is **Open in Notes**; activate a row and verify Notes changes to it.
+  2. Open Day Page switcher and verify the destination heading is **Open Here**; activate a day row and verify the Day Page host navigates in place.
+  3. Choose **Search Notes** from the launcher. Verify the footer says **Enter Open in Notes Window**. Press Enter, then repeat by selecting and clicking the same row a second time; both routes open Notes.
+  4. Open Agent Chat’s Notes portal. Verify the footer says **Enter Attach Note**. Attach once with Enter and once with a second click; each attempt adds exactly one selected note attachment and returns to the composer.
+  5. Reopen the portal after entering draft text and positioning the cursor. Change the query/selection, then press Escape; verify the original draft, cursor, context, selection evidence, and composer focus return.
+- **Intentional differences preserved:** Destination verbs differ because host effects differ. Portal Escape means **Cancel** and restores the parent snapshot; standalone Escape means **Back**. The shared search/result model does not collapse Notes Window, Day Page, standalone Browse, and Agent Chat into one renderer.
 
 ## Verification ledger
 

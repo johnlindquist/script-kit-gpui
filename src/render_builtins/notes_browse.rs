@@ -1,56 +1,58 @@
 impl ScriptListApp {
-    fn notes_browse_display_title(note: &crate::notes::Note) -> String {
-        if note.title.trim().is_empty() {
-            "Untitled Note".to_string()
-        } else {
-            note.title.clone()
-        }
+    pub(crate) fn open_standalone_notes_browse(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        crate::notes::init_notes_db()?;
+        let query = String::new();
+        self.open_builtin_filterable_view_with_filter(
+            AppView::NotesBrowseView {
+                search: crate::notes::search_model::NoteSearchHostState::load(
+                    query.clone(),
+                    crate::notes::search_model::NoteSearchDestination::OpenInNotesWindow,
+                    &crate::notes::notes_brain_days_dir(),
+                ),
+            },
+            &query,
+            "Search notes...",
+            true,
+            cx,
+        );
+        Ok(())
     }
 
-    fn notes_browse_filtered_notes(filter: &str) -> Vec<crate::notes::Note> {
-        let result = if filter.trim().is_empty() {
-            crate::notes::get_all_notes()
-        } else {
-            crate::notes::search_notes(filter)
-        };
-
-        match result {
-            Ok(notes) => notes,
-            Err(error) => {
-                tracing::warn!(
-                    event = "notes_browse_portal_load_failed",
-                    filter = %filter,
-                    error = %error,
-                );
-                Vec::new()
-            }
-        }
-    }
-
-    pub(crate) fn notes_browse_visible_rows(filter: &str) -> Vec<crate::notes::Note> {
-        Self::notes_browse_filtered_notes(filter)
+    pub(crate) fn notes_browse_visible_rows(
+        search: &crate::notes::search_model::NoteSearchHostState,
+    ) -> Vec<crate::notes::search_model::NoteSearchRow> {
+        search.state.rows().to_vec()
     }
 
     fn notes_browse_selected_visible_row(
-        filter: &str,
-        selected_index: usize,
-    ) -> Option<crate::notes::Note> {
-        Self::notes_browse_visible_rows(filter)
-            .get(selected_index)
-            .cloned()
+        search: &crate::notes::search_model::NoteSearchHostState,
+    ) -> Option<crate::notes::search_model::NoteSearchRow> {
+        search.selected_row().cloned()
     }
 
-    fn notes_browse_dataset_and_visible_counts(filter: &str) -> (usize, usize) {
-        (
-            Self::notes_browse_filtered_notes("").len(),
-            Self::notes_browse_visible_rows(filter).len(),
-        )
+    fn notes_browse_dataset_and_visible_counts(
+        search: &crate::notes::search_model::NoteSearchHostState,
+    ) -> (usize, usize) {
+        let visible_count = search.state.rows().len();
+        let dataset_count = search
+            .state
+            .snapshot()
+            .map(|snapshot| snapshot.total_count)
+            .unwrap_or(visible_count);
+        (dataset_count, visible_count)
     }
 
-    pub(crate) fn notes_browse_visible_row_labels(filter: &str) -> Vec<String> {
-        Self::notes_browse_visible_rows(filter)
-            .into_iter()
-            .map(|note| Self::notes_browse_display_title(&note))
+    pub(crate) fn notes_browse_visible_row_labels(
+        search: &crate::notes::search_model::NoteSearchHostState,
+    ) -> Vec<String> {
+        search
+            .state
+            .rows()
+            .iter()
+            .map(|row| row.title.clone())
             .collect()
     }
 
@@ -69,35 +71,95 @@ impl ScriptListApp {
 
     fn build_notes_browse_portal_part(
         &self,
-        note: &crate::notes::Note,
-    ) -> crate::ai::message_parts::AiContextPart {
-        let title = Self::notes_browse_display_title(note);
-        let note_id = note.id.as_str();
+        row: &crate::notes::search_model::NoteSearchRow,
+    ) -> Result<crate::ai::message_parts::AiContextPart, crate::ai::reliability::AppFailureRecord> {
+        let document = crate::notes::search_model::load_note_search_document(
+            row.id,
+            &crate::notes::notes_brain_days_dir(),
+        )?;
+        let stable_id = row.stable_id();
         let target = crate::ai::TabAiTargetContext {
             source: "NotesBrowse".to_string(),
-            kind: "note".to_string(),
-            semantic_id: crate::protocol::generate_semantic_id_named("note", &note_id),
-            label: title.clone(),
+            kind: row.kind.as_str().to_string(),
+            semantic_id: crate::protocol::generate_semantic_id_named(
+                row.kind.as_str(),
+                &stable_id,
+            ),
+            label: document.title.clone(),
             metadata: Some(serde_json::json!({
-                "noteId": note_id,
-                "title": title,
-                "content": note.content,
-                "preview": Self::notes_browse_preview(&note.content),
-                "isPinned": note.is_pinned,
-                "createdAt": note.created_at.to_rfc3339(),
-                "updatedAt": note.updated_at.to_rfc3339(),
+                "documentId": stable_id,
+                "documentKind": row.kind.as_str(),
+                "title": document.title,
+                "content": document.content,
+                "preview": Self::notes_browse_preview(&document.content),
+                "isPinned": document.pinned,
+                "updatedAt": document.updated_at.to_rfc3339(),
             })),
         };
         let label = crate::ai::format_explicit_target_chip_label(&target);
-        crate::ai::message_parts::AiContextPart::FocusedTarget { target, label }
+        Ok(crate::ai::message_parts::AiContextPart::FocusedTarget { target, label })
+    }
+
+    fn activate_notes_browse_row(
+        &mut self,
+        row: &crate::notes::search_model::NoteSearchRow,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let destination = match &self.current_view {
+            AppView::NotesBrowseView { search } => search.destination,
+            _ => return false,
+        };
+        match destination {
+            crate::notes::search_model::NoteSearchDestination::AttachNote => {
+                match self.build_notes_browse_portal_part(row) {
+                    Ok(part) => {
+                        self.close_attachment_portal_with_part(part, cx);
+                        true
+                    }
+                    Err(failure) => {
+                        self.show_error_toast(failure.primary_message().to_string(), cx);
+                        false
+                    }
+                }
+            }
+            crate::notes::search_model::NoteSearchDestination::OpenInNotesWindow => {
+                let result = match row.id {
+                    crate::notes::search_model::NoteSearchDocumentId::Note(note_id) => {
+                        crate::notes::open_note_in_notes_window(cx, note_id)
+                    }
+                    crate::notes::search_model::NoteSearchDocumentId::Day(date) => {
+                        crate::notes::open_day_note_in_notes_window(cx, date)
+                    }
+                };
+                match result {
+                    Ok(()) => {
+                        self.close_and_reset_window(cx);
+                        true
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "script_kit::notes",
+                            error = %error,
+                            destination = destination.as_str(),
+                            "notes_browse_open_in_notes_window_failed"
+                        );
+                        self.show_error_toast("The selected note couldn’t be opened.".to_string(), cx);
+                        false
+                    }
+                }
+            }
+            crate::notes::search_model::NoteSearchDestination::OpenInNotes
+            | crate::notes::search_model::NoteSearchDestination::OpenHere => false,
+        }
     }
 
     fn render_notes_browse_portal(
         &mut self,
-        filter: String,
-        selected_index: usize,
+        search: crate::notes::search_model::NoteSearchHostState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let filter = search.query.clone();
+        let selected_index = search.selected_index();
         use gpui_component::scroll::ScrollableElement as _;
 
         crate::components::emit_prompt_chrome_audit(
@@ -110,11 +172,11 @@ impl ScriptListApp {
 
         let chrome = theme::AppChromeColors::from_theme(&self.theme);
 
-        let filtered_notes = Self::notes_browse_filtered_notes(&filter);
+        let filtered_notes = search.state.rows().to_vec();
         let filtered_len = filtered_notes.len();
         let row_keys: Vec<String> = filtered_notes
             .iter()
-            .map(|note| note.id.to_string())
+            .map(crate::notes::search_model::NoteSearchRow::semantic_id)
             .collect();
         let selected_index = crate::reconcile_dynamic_tracked_list_on_render(
             self.tracked_builtin_list_states
@@ -125,16 +187,18 @@ impl ScriptListApp {
             selected_index,
             &self.notes_browse_scroll_handle,
         );
-        if let AppView::NotesBrowseView {
-            selected_index: current_selected,
-            ..
-        } = &mut self.current_view
-        {
-            *current_selected = selected_index;
+        if let AppView::NotesBrowseView { search } = &mut self.current_view {
+            search.select_index(selected_index);
         }
-        let total_notes = filtered_len;
+        let total_notes = search
+            .state
+            .snapshot()
+            .map(|snapshot| snapshot.total_count)
+            .unwrap_or(filtered_len);
         let preview_note = filtered_notes.get(selected_index).cloned();
-        let in_portal = self.is_in_attachment_portal();
+        let destination = search.destination;
+        let in_portal = destination
+            == crate::notes::search_model::NoteSearchDestination::AttachNote;
 
         let handle_key = cx.listener(
             move |this: &mut Self,
@@ -169,26 +233,21 @@ impl ScriptListApp {
                     return;
                 }
 
-                let Some((current_filter, current_selected)) = (match &this.current_view {
-                    AppView::NotesBrowseView {
-                        filter,
-                        selected_index,
-                    } => Some((filter.clone(), *selected_index)),
+                let Some((current_selected, notes)) = (match &this.current_view {
+                    AppView::NotesBrowseView { search } => {
+                        Some((search.selected_index(), search.state.rows().to_vec()))
+                    }
                     _ => None,
                 }) else {
                     return;
                 };
-
-                let notes = Self::notes_browse_filtered_notes(&current_filter);
                 let note_count = notes.len();
 
                 if crate::ui_foundation::is_key_up(key) {
                     if note_count > 0 {
                         let next = current_selected.saturating_sub(1);
-                        if let AppView::NotesBrowseView { selected_index, .. } =
-                            &mut this.current_view
-                        {
-                            *selected_index = next;
+                        if let AppView::NotesBrowseView { search } = &mut this.current_view {
+                            search.select_index(next);
                         }
                         this.notes_browse_scroll_handle.scroll_to_item(next);
                         cx.notify();
@@ -199,10 +258,8 @@ impl ScriptListApp {
                         let next = current_selected
                             .saturating_add(1)
                             .min(note_count.saturating_sub(1));
-                        if let AppView::NotesBrowseView { selected_index, .. } =
-                            &mut this.current_view
-                        {
-                            *selected_index = next;
+                        if let AppView::NotesBrowseView { search } = &mut this.current_view {
+                            search.select_index(next);
                         }
                         this.notes_browse_scroll_handle.scroll_to_item(next);
                         cx.notify();
@@ -210,10 +267,7 @@ impl ScriptListApp {
                     cx.stop_propagation();
                 } else if crate::ui_foundation::is_key_enter(key) {
                     if let Some(note) = notes.get(current_selected) {
-                        if this.is_in_attachment_portal() {
-                            let part = this.build_notes_browse_portal_part(note);
-                            this.close_attachment_portal_with_part(part, cx);
-                        }
+                        this.activate_notes_browse_row(note, cx);
                     }
                     cx.stop_propagation();
                 } else {
@@ -224,17 +278,34 @@ impl ScriptListApp {
 
         let list_colors = ListItemColors::from_theme(&self.theme);
         let list_element: AnyElement = if filtered_notes.is_empty() {
+            let state = match &search.state {
+                crate::notes::search_model::NoteSearchState::Loading { .. } => {
+                    crate::components::InfoStateSpec::new("notes-browse-loading")
+                        .layout(crate::components::InfoStateLayout::InlineRow)
+                        .density(crate::components::InfoStateDensity::Compact)
+                        .tone(crate::components::InfoStateTone::Help)
+                        .body("Loading notes…")
+                }
+                crate::notes::search_model::NoteSearchState::Failed { .. } => {
+                    crate::components::InfoStateSpec::new("notes-browse-failed")
+                        .layout(crate::components::InfoStateLayout::InlineRow)
+                        .density(crate::components::InfoStateDensity::Compact)
+                        .tone(crate::components::InfoStateTone::Recovery)
+                        .title("Notes couldn’t be loaded")
+                        .body("Notes search is unavailable. Try again.")
+                        .footer_note("This is an error, not an empty result.")
+                }
+                _ => crate::components::shared_empty_state_spec(
+                    crate::components::InfoEmptySurface::NotesBrowse,
+                    &filter,
+                ),
+            };
             div()
                 .w_full()
                 .py(px(design_spacing.padding_xl))
                 .px(px(design_spacing.padding_md))
                 .font_family(design_typography.font_family)
-                .child(crate::components::render_shared_empty_state(
-                    crate::components::InfoEmptySurface::NotesBrowse,
-                    &filter,
-                    &self.theme,
-                    cx,
-                ))
+                .child(crate::components::render_info_state(state, &self.theme, cx))
                 .into_any_element()
         } else {
             let notes_for_closure = filtered_notes.clone();
@@ -250,24 +321,21 @@ impl ScriptListApp {
                     .enumerate()
                     .map(move |(display_ix, note)| {
                         let is_selected = display_ix == selected;
-                        let note_id = note.id.clone();
-                        let title = Self::notes_browse_display_title(&note);
-                        let description = format!(
-                            "{} · {} chars{}",
-                            crate::formatting::format_absolute_datetime(note.updated_at),
-                            note.content.chars().count(),
-                            if note.is_pinned { " · pinned" } else { "" }
-                        );
+                        let note_id = note.stable_id();
+                        let title = note.title.clone();
+                        let description = note.search_description();
+                        let semantic_id = note.semantic_id();
 
                         let item = ListItem::new(title, list_colors)
                             .description_opt(Some(description))
                             .selected(is_selected)
                             .hovered(hovered == Some(display_ix))
-                            .semantic_id(format!("notes-browse:{note_id}"));
+                            .semantic_id(semantic_id);
 
                         let click_entity = entity.clone();
                         let move_entity = entity.clone();
                         let hover_entity = entity.clone();
+                        let activation_row = note.clone();
                         div()
                             .id(format!("notes-browse-row:{note_id}"))
                             .cursor_pointer()
@@ -275,12 +343,11 @@ impl ScriptListApp {
                                 if let Some(app) = click_entity.upgrade() {
                                     app.update(cx, |this, cx| {
                                         let should_submit = if let AppView::NotesBrowseView {
-                                            selected_index,
-                                            ..
+                                            search,
                                         } = &mut this.current_view
                                         {
-                                            let was_selected = *selected_index == display_ix;
-                                            *selected_index = display_ix;
+                                            let was_selected = search.selected_id == Some(activation_row.id);
+                                            search.select_index(display_ix);
                                             crate::ui_foundation::should_submit_selected_row_click(
                                                 was_selected,
                                                 event.click_count(),
@@ -292,15 +359,8 @@ impl ScriptListApp {
                                         this.notes_browse_scroll_handle.scroll_to_item(display_ix);
                                         this.note_list_pointer_click(display_ix, cx);
 
-                                        if should_submit && this.is_in_attachment_portal() {
-                                            let notes = Self::notes_browse_filtered_notes(
-                                                this.filter_text(),
-                                            );
-                                            if let Some(note) = notes.get(display_ix) {
-                                                let part =
-                                                    this.build_notes_browse_portal_part(note);
-                                                this.close_attachment_portal_with_part(part, cx);
-                                            }
+                                        if should_submit {
+                                            this.activate_notes_browse_row(&activation_row, cx);
                                         }
                                     });
                                 }
@@ -329,7 +389,7 @@ impl ScriptListApp {
 
         let preview_panel: AnyElement = match preview_note {
             Some(note) => {
-                let title = Self::notes_browse_display_title(&note);
+                let title = note.title.clone();
 
                 div()
                     .w_full()
@@ -372,10 +432,10 @@ impl ScriptListApp {
                             .min_w_0()
                             .text_sm()
                             .text_color(rgba(chrome.text_muted_rgba))
-                            .child(if note.content.trim().is_empty() {
+                            .child(if note.preview.trim().is_empty() {
                                 "Empty note".to_string()
                             } else {
-                                note.content
+                                note.preview
                             }),
                     )
                     .into_any_element()
@@ -393,6 +453,20 @@ impl ScriptListApp {
                 .into_any_element(),
         };
 
+        let failure_notice = search.state.failure().filter(|_| !filtered_notes.is_empty()).map(
+            |_failure| {
+                crate::components::render_info_state(
+                    crate::components::InfoStateSpec::new("notes-browse-stale-results")
+                        .layout(crate::components::InfoStateLayout::InlineRow)
+                        .density(crate::components::InfoStateDensity::Compact)
+                        .tone(crate::components::InfoStateTone::Recovery)
+                        .body("Notes couldn’t be refreshed. Showing previous results."),
+                    &self.theme,
+                    cx,
+                )
+            },
+        );
+
         let list_pane = div()
             .relative()
             .w_full()
@@ -406,6 +480,7 @@ impl ScriptListApp {
             ))
             .flex()
             .flex_col()
+            .when_some(failure_notice, |pane, notice| pane.child(notice))
             .child(
                 // Every list leads with a persistent section separator
                 // (POLISH.md layout-stability bar; same rule as the main
@@ -425,22 +500,29 @@ impl ScriptListApp {
             )
             .child(div().relative().flex_1().min_h(px(0.)).child(list_element));
 
-        let hints: Vec<SharedString> = if in_portal {
-            vec!["↵ Attach Note".into(), "Esc Cancel".into()]
-        } else {
-            vec!["Esc Back".into()]
-        };
+        let hints: Vec<SharedString> = vec![
+            format!("↵ {}", destination.primary_verb()).into(),
+            if in_portal {
+                "Esc Cancel".into()
+            } else {
+                "Esc Back".into()
+            },
+        ];
         crate::components::emit_prompt_hint_audit("notes_browse", &hints);
 
         let gpui_footer = crate::components::render_simple_hint_strip(hints, None);
         let footer = self.main_window_footer_slot(gpui_footer);
         let menu_def = self.current_main_menu_theme.def();
         let shell = menu_def.shell;
-        let count_label = format!(
-            "{} note{}",
-            total_notes,
-            if total_notes == 1 { "" } else { "s" }
-        );
+        let count_label = if filtered_len == total_notes {
+            format!(
+                "{} note{}",
+                total_notes,
+                if total_notes == 1 { "" } else { "s" }
+            )
+        } else {
+            format!("{} of {} notes", filtered_len, total_notes)
+        };
         let main =
             self.render_builtin_split_main_content(list_pane.into_any_element(), preview_panel);
 

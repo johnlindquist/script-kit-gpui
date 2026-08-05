@@ -392,32 +392,23 @@ impl NotesApp {
     /// Open the browse panel (note switcher) with current notes
     /// Uses CommandBar for consistent theming with the Cmd+K actions dialog
     pub(super) fn open_browse_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Update note switcher actions based on current notes
-        let mut rows = self
-            .notes
-            .iter()
-            .map(|n| NoteSwitcherNoteInfo {
-                id: n.id.as_str().to_string(),
-                title: if n.title.is_empty() {
-                    "Untitled Note".to_string()
-                } else {
-                    n.title.clone()
-                },
-                char_count: n.char_count(),
-                is_current: Some(n.id) == self.selected_note_id,
-                is_pinned: n.is_pinned,
-                preview: Self::note_switcher_preview(n),
-                relative_time: Self::format_relative_time(n.updated_at),
-            })
-            .collect::<Vec<_>>();
-        let day_entries = crate::notes::day_switcher::load_day_note_switcher_entries(
+        let destination = crate::notes::search_model::NoteSearchDestination::OpenInNotes;
+        let search_state = crate::notes::search_model::load_note_search_state(
+            "",
             &crate::notes::notes_brain_days_dir(),
+            1,
+            None,
         );
-        rows.extend(crate::notes::day_switcher::day_note_switcher_infos(
-            &day_entries,
-            self.active_day_binding.as_ref().map(|binding| binding.date),
-        ));
-        let note_switcher_actions = get_note_switcher_actions(&rows);
+        let current_id = self
+            .active_day_binding
+            .as_ref()
+            .map(|binding| crate::notes::search_model::NoteSearchDocumentId::Day(binding.date))
+            .or_else(|| {
+                self.selected_note_id
+                    .map(crate::notes::search_model::NoteSearchDocumentId::Note)
+            });
+        let note_switcher_actions =
+            crate::actions::get_canonical_note_search_actions(&search_state, current_id);
 
         // Log what actions we're setting
         info!(
@@ -431,13 +422,11 @@ impl NotesApp {
         self.note_switcher.open_centered(window, cx);
         self.wire_command_bar_activation(NotesCommandBarRole::NoteSwitcher, window, cx);
 
-        // The recent-notes switcher should not show a context-title / count
-        // chip. Clear any stale title so reopens after a config change render
-        // a clean header. The search placeholder is owned by
-        // CommandBarConfig::notes_recent_style ("Search Notes").
+        // Name what activating a result does; the search rows themselves stay
+        // identical across Notes, Today, standalone Browse, and the portal.
         if let Some(dialog) = self.note_switcher.dialog() {
             dialog.update(cx, |d, cx| {
-                d.set_context_title(None);
+                d.set_context_title(Some(destination.primary_verb().to_string()));
                 cx.notify();
             });
         }

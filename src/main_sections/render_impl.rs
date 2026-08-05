@@ -730,11 +730,8 @@ impl Render for ScriptListApp {
             } => self
                 .render_dictation_history(filter, selected_index, cx)
                 .into_any_element(),
-            AppView::NotesBrowseView {
-                filter,
-                selected_index,
-            } => self
-                .render_notes_browse_portal(filter, selected_index, cx)
+            AppView::NotesBrowseView { search } => self
+                .render_notes_browse_portal(search, cx)
                 .into_any_element(),
             AppView::AgentChatView { entity } => entity.into_any_element(),
             AppView::DayPage { entity } => entity.into_any_element(),

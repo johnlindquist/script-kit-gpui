@@ -44,6 +44,7 @@ pub(crate) mod markdown_highlighting;
 pub(crate) mod menu_syntax_capture;
 pub(crate) mod metadata;
 mod model;
+pub(crate) mod search_model;
 mod storage;
 pub(crate) mod window;
 

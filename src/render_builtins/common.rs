@@ -853,8 +853,8 @@ impl ScriptListApp {
         focused_semantic_id: &'static str,
     ) -> serde_json::Value {
         let item_count = semantic_ids.len();
-        let selected_index =
-            (!semantic_ids.is_empty()).then_some(selected_index.min(item_count - 1));
+        let selected_index = (!semantic_ids.is_empty())
+            .then_some(selected_index.min(item_count.saturating_sub(1)));
         let hovered_index = self.hovered_index.filter(|index| *index < item_count);
         let state = handle.0.borrow();
         let (scroll_top_item, offset_in_item) = state.base_handle.logical_scroll_top();
@@ -935,8 +935,8 @@ impl ScriptListApp {
         focused_semantic_id: &'static str,
     ) -> serde_json::Value {
         let item_count = semantic_ids.len();
-        let selected_index =
-            (!semantic_ids.is_empty()).then_some(selected_index.min(item_count - 1));
+        let selected_index = (!semantic_ids.is_empty())
+            .then_some(selected_index.min(item_count.saturating_sub(1)));
         let hovered_index = self.hovered_index.filter(|index| *index < item_count);
         let (scroll_top_item, offset_in_item) = handle.logical_scroll_top();
         let scroll_top_item = scroll_top_item.min(item_count.saturating_sub(1));
@@ -987,7 +987,8 @@ impl ScriptListApp {
             "lastVisibleSemanticId": last_visible_index_exclusive
                 .and_then(|exclusive| exclusive.checked_sub(1))
                 .and_then(|index| semantic_ids.get(index).cloned()),
-            "bottomItem": (!semantic_ids.is_empty()).then_some(handle.bottom_item().min(item_count - 1)),
+            "bottomItem": (!semantic_ids.is_empty())
+                .then_some(handle.bottom_item().min(item_count.saturating_sub(1))),
             "itemCount": item_count,
             "contentHeight": viewport_height + max_scroll_top,
             "viewportHeight": viewport_height,
@@ -1193,19 +1194,16 @@ impl ScriptListApp {
                     "input:browser-history-filter",
                 ))
             }
-            AppView::NotesBrowseView {
-                filter,
-                selected_index,
-            } => {
-                let ids = Self::notes_browse_visible_rows(filter)
+            AppView::NotesBrowseView { search } => {
+                let ids = Self::notes_browse_visible_rows(search)
                     .into_iter()
-                    .map(|note| format!("notes-browse:{}", note.id))
+                    .map(|row| row.semantic_id())
                     .collect();
                 Some(self.active_tracked_list_scroll_receipt(
                     "notes_browse",
                     &self.notes_browse_scroll_handle,
                     ids,
-                    *selected_index,
+                    search.selected_index(),
                     "input:notes-browse-filter",
                 ))
             }

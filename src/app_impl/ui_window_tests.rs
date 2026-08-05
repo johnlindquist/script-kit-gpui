@@ -236,22 +236,40 @@ fn main_window_footer_contract_legacy_view_buttons_match_real_keyboard_actions()
         ]
     );
     assert_eq!(
-        grammar(&notes_browse_footer_buttons(true, true, true)),
+        grammar(&notes_browse_footer_buttons(
+            true,
+            crate::notes::search_model::NoteSearchDestination::AttachNote,
+            true,
+        )),
         vec![
             (FooterAction::Run, "↵", "Attach Note"),
             (FooterAction::Close, "Esc", "Cancel"),
         ]
     );
     assert_eq!(
-        grammar(&notes_browse_footer_buttons(true, false, true)),
-        vec![(FooterAction::Close, "Esc", "Back")],
-        "standalone Notes Browse has no Enter behavior, so its footer must not advertise one"
+        grammar(&notes_browse_footer_buttons(
+            true,
+            crate::notes::search_model::NoteSearchDestination::OpenInNotesWindow,
+            true,
+        )),
+        vec![
+            (FooterAction::Run, "↵", "Open in Notes Window"),
+            (FooterAction::Close, "Esc", "Back"),
+        ],
+        "standalone Notes Browse must name its real Enter destination"
     );
 
     assert!(!sdk_reference_footer_buttons(true, false)[0].enabled);
     assert!(!script_template_catalog_footer_buttons(true, false)[0].enabled);
     assert!(!create_ai_preset_footer_buttons(true, false)[0].enabled);
-    assert!(!notes_browse_footer_buttons(true, true, false)[0].enabled);
+    assert!(
+        !notes_browse_footer_buttons(
+            true,
+            crate::notes::search_model::NoteSearchDestination::AttachNote,
+            false,
+        )[0]
+        .enabled
+    );
 }
 
 #[test]

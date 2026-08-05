@@ -3232,30 +3232,19 @@ impl ScriptListApp {
                             selected_value,
                         )
                     }
-                    AppView::NotesBrowseView {
-                        filter,
-                        selected_index,
-                    } => {
+                    AppView::NotesBrowseView { search } => {
                         let (dataset_count, visible_count) =
-                            Self::notes_browse_dataset_and_visible_counts(filter);
+                            Self::notes_browse_dataset_and_visible_counts(search);
                         let selected_value =
-                            Self::notes_browse_selected_visible_row(filter, *selected_index).map(
-                                |entry| {
-                                    if entry.title.trim().is_empty() {
-                                        "Untitled Note".to_string()
-                                    } else {
-                                        entry.title
-                                    }
-                                },
-                            );
+                            Self::notes_browse_selected_visible_row(search).map(|entry| entry.title);
                         (
                             "notesBrowse".to_string(),
                             None,
                             None,
-                            filter.clone(),
+                            search.query.clone(),
                             dataset_count,
                             visible_count,
-                            *selected_index as i32,
+                            search.selected_index() as i32,
                             selected_value,
                         )
                     }

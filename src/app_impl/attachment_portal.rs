@@ -541,8 +541,11 @@ impl ScriptListApp {
             ContextPortalKind::NotesBrowse => {
                 self.open_builtin_filterable_view_with_filter(
                     AppView::NotesBrowseView {
-                        filter: portal_query.clone(),
-                        selected_index: 0,
+                        search: crate::notes::search_model::NoteSearchHostState::load(
+                            portal_query.clone(),
+                            crate::notes::search_model::NoteSearchDestination::AttachNote,
+                            &crate::notes::notes_brain_days_dir(),
+                        ),
                     },
                     &portal_query,
                     "Search notes...",

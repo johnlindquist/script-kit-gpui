@@ -744,6 +744,111 @@ mod tests {
         let actions = get_note_switcher_actions(&notes);
         assert!(actions.is_empty());
     }
+
+    #[test]
+    fn canonical_note_search_actions_preserve_row_identity_order_and_metadata() {
+        use crate::notes::search_model::{
+            NoteSearchDocumentId, NoteSearchDocumentKind, NoteSearchRow, NoteSearchSnapshot,
+            NoteSearchState,
+        };
+        let note_id =
+            crate::notes::NoteId::parse("00000000-0000-0000-0000-000000000001").expect("note id");
+        let rows = vec![
+            NoteSearchRow {
+                id: NoteSearchDocumentId::Note(note_id),
+                title: "Alpha note".to_string(),
+                preview: "shared preview".to_string(),
+                updated_at: "2026-07-02T09:00:00Z".parse().expect("timestamp"),
+                char_count: 14,
+                pinned: true,
+                kind: NoteSearchDocumentKind::Note,
+            },
+            NoteSearchRow {
+                id: NoteSearchDocumentId::Day(
+                    chrono::NaiveDate::from_ymd_opt(2026, 7, 1).expect("date"),
+                ),
+                title: "2026-07-01 · Wednesday".to_string(),
+                preview: "shared preview".to_string(),
+                updated_at: "2026-07-01T09:00:00Z".parse().expect("timestamp"),
+                char_count: 14,
+                pinned: false,
+                kind: NoteSearchDocumentKind::Day,
+            },
+        ];
+        let state = NoteSearchState::Ready {
+            generation: 1,
+            snapshot: NoteSearchSnapshot {
+                rows: rows.clone(),
+                total_count: rows.len(),
+            },
+        };
+
+        let actions = get_canonical_note_search_actions(&state, Some(rows[0].id));
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| action.id.as_str())
+                .collect::<Vec<_>>(),
+            rows.iter()
+                .map(NoteSearchRow::action_id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .map(|action| action.title.as_str())
+                .collect::<Vec<_>>(),
+            rows.iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(actions
+            .iter()
+            .all(|action| action.section.as_deref() == Some("Notes")));
+        assert_eq!(actions[0].description, Some(rows[0].search_description()));
+        assert_eq!(actions[0].value, Some(rows[0].automation_metadata()));
+    }
+
+    #[test]
+    fn canonical_note_search_failure_keeps_prior_rows_before_status() {
+        use crate::notes::search_model::{
+            NoteSearchDocumentId, NoteSearchDocumentKind, NoteSearchRow, NoteSearchSnapshot,
+            NoteSearchState,
+        };
+        let row = NoteSearchRow {
+            id: NoteSearchDocumentId::Note(
+                crate::notes::NoteId::parse("00000000-0000-0000-0000-000000000001")
+                    .expect("note id"),
+            ),
+            title: "Previous result".to_string(),
+            preview: "preserved after refresh failure".to_string(),
+            updated_at: "2026-07-02T09:00:00Z".parse().expect("timestamp"),
+            char_count: 31,
+            pinned: false,
+            kind: NoteSearchDocumentKind::Note,
+        };
+        let state = NoteSearchState::Failed {
+            generation: 2,
+            failure: crate::ai::reliability::context_unavailable_failure(
+                "synthetic Notes search failure",
+            ),
+            prior_snapshot: Some(NoteSearchSnapshot {
+                rows: vec![row.clone()],
+                total_count: 1,
+            }),
+        };
+
+        let actions = get_canonical_note_search_actions(&state, Some(row.id));
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].id, row.action_id());
+        assert_eq!(actions[0].title, row.title);
+        assert_eq!(actions[1].id, "notes_search_failed");
+        assert!(!actions[1].is_enabled());
+        assert_eq!(
+            actions[1].description.as_deref(),
+            Some("Showing previous results. Try again.")
+        );
+    }
 }
 
 /// Build actions for the AI new chat dropdown.
@@ -944,6 +1049,85 @@ fn truncated_preview(preview: &str) -> String {
     } else {
         truncated
     }
+}
+
+/// Project canonical Notes search state into one ActionsDialog row language.
+///
+/// All rows intentionally share one section and preserve canonical input order.
+/// ActionsDialog's stable score ties therefore agree with the canonical Notes
+/// ranker instead of regrouping pinned/day rows into a host-local order.
+pub(crate) fn get_canonical_note_search_actions(
+    state: &crate::notes::search_model::NoteSearchState,
+    current_id: Option<crate::notes::search_model::NoteSearchDocumentId>,
+) -> Vec<Action> {
+    let mut actions = state
+        .rows()
+        .iter()
+        .map(|row| {
+            let icon = if row.pinned {
+                IconName::StarFilled
+            } else if Some(row.id) == current_id {
+                IconName::Check
+            } else {
+                IconName::File
+            };
+            let mut action = Action::new(
+                row.action_id(),
+                &row.title,
+                Some(row.search_description()),
+                ActionCategory::ScriptContext,
+            )
+            .with_icon(icon)
+            .with_section("Notes");
+            action.value = Some(row.automation_metadata());
+            action
+        })
+        .collect::<Vec<_>>();
+
+    if state.failure().is_some() {
+        let description = if actions.is_empty() {
+            "Notes search is unavailable. Try again."
+        } else {
+            "Showing previous results. Try again."
+        };
+        actions.push(
+            Action::new(
+                "notes_search_failed",
+                "Notes couldn’t be refreshed",
+                Some(description.to_string()),
+                ActionCategory::ScriptContext,
+            )
+            .with_icon(IconName::Warning)
+            .with_section("Notes")
+            .disabled(description),
+        );
+        return actions;
+    }
+
+    if actions.is_empty() {
+        let (title, description) = match state {
+            crate::notes::search_model::NoteSearchState::ReadyEmpty {
+                corpus_empty: false,
+                ..
+            } => ("No matching notes", "Try a different search"),
+            crate::notes::search_model::NoteSearchState::Loading { .. } => {
+                ("Loading notes…", "Your previous results remain available")
+            }
+            _ => ("No notes yet", "Create a note with ⌘N"),
+        };
+        actions.push(
+            Action::new(
+                "no_notes",
+                title,
+                Some(description.to_string()),
+                ActionCategory::ScriptContext,
+            )
+            .with_icon(IconName::Plus)
+            .with_section("Notes")
+            .disabled(description),
+        );
+    }
+    actions
 }
 
 /// Get actions for the note switcher dialog (Cmd+P in Notes window).

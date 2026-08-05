@@ -577,20 +577,8 @@ impl ScriptListApp {
                 .into()
             }
 
-            AppView::NotesBrowseView {
-                filter,
-                selected_index,
-            } => {
-                let rows = Self::notes_browse_visible_row_labels(filter);
-                self.collect_named_rows(
-                    "notes-browse-filter",
-                    filter.clone(),
-                    "notes",
-                    &rows,
-                    *selected_index,
-                    limit,
-                )
-                .into()
+            AppView::NotesBrowseView { search } => {
+                self.collect_notes_browse_elements(search, limit).into()
             }
 
             AppView::FileSearchView {
@@ -2245,6 +2233,128 @@ impl ScriptListApp {
                 choice,
                 display_index == selected_index,
             ));
+        }
+
+        (elements, total_count)
+    }
+
+    fn collect_notes_browse_elements(
+        &self,
+        search: &crate::notes::search_model::NoteSearchHostState,
+        limit: usize,
+    ) -> (Vec<protocol::ElementInfo>, usize) {
+        let rows = search.state.rows();
+        let total_count = rows.len().saturating_mul(2) + 4;
+        let mut elements = Vec::with_capacity(limit.min(total_count));
+
+        Self::push_limited_element(
+            &mut elements,
+            limit,
+            protocol::ElementInfo::input(
+                "notes-browse-filter",
+                Some(search.query.as_str()),
+                self.focused_input != FocusedInput::None,
+            ),
+        );
+        Self::push_limited_element(
+            &mut elements,
+            limit,
+            protocol::ElementInfo::list("notes", rows.len()),
+        );
+        Self::push_limited_element(
+            &mut elements,
+            limit,
+            protocol::ElementInfo {
+                semantic_id: "notes-search-state".to_string(),
+                element_type: protocol::ElementType::Panel,
+                text: Some(match search.state.kind() {
+                    "failed" => "Notes couldn’t be loaded".to_string(),
+                    "loading" => "Loading notes".to_string(),
+                    "readyEmpty" => "No notes yet".to_string(),
+                    "noMatch" => "No matching notes".to_string(),
+                    _ => "Notes ready".to_string(),
+                }),
+                value: Some(search.state.generation().to_string()),
+                selected: None,
+                focused: None,
+                index: None,
+                role: Some("status".to_string()),
+                kind: Some("noteSearchState".to_string()),
+                source: Some("notes".to_string()),
+                source_name: None,
+                selectable: Some(false),
+                status_kind: Some(search.state.kind().to_string()),
+                action_disabled: None,
+                style: None,
+            },
+        );
+        Self::push_limited_element(
+            &mut elements,
+            limit,
+            protocol::ElementInfo {
+                semantic_id: search.destination.semantic_action().to_string(),
+                element_type: protocol::ElementType::Button,
+                text: Some(search.destination.primary_verb().to_string()),
+                value: search.selected_id.map(|id| id.stable_id()),
+                selected: None,
+                focused: None,
+                index: None,
+                role: Some("action".to_string()),
+                kind: Some(search.destination.as_str().to_string()),
+                source: Some("notes".to_string()),
+                source_name: Some("Notes search".to_string()),
+                selectable: Some(search.selected_row().is_some()),
+                status_kind: None,
+                action_disabled: search
+                    .selected_row()
+                    .is_none()
+                    .then(|| "Select a note first.".to_string()),
+                style: None,
+            },
+        );
+
+        for (index, row) in rows.iter().enumerate() {
+            if elements.len() >= limit {
+                break;
+            }
+            elements.push(protocol::ElementInfo {
+                semantic_id: row.semantic_id(),
+                element_type: protocol::ElementType::Choice,
+                text: Some(row.title.clone()),
+                value: Some(row.stable_id()),
+                selected: Some(search.selected_id == Some(row.id)),
+                focused: None,
+                index: Some(index),
+                role: Some("result".to_string()),
+                kind: Some(row.kind.as_str().to_string()),
+                source: Some("notes".to_string()),
+                source_name: Some(search.destination.primary_verb().to_string()),
+                selectable: Some(true),
+                status_kind: None,
+                action_disabled: None,
+                style: None,
+            });
+            Self::push_limited_element(
+                &mut elements,
+                limit,
+                protocol::ElementInfo {
+                    semantic_id: format!("{}:metadata", row.semantic_id()),
+                    element_type: protocol::ElementType::Panel,
+                    text: Some(row.preview.clone()),
+                    value: Some(row.automation_metadata()),
+                    selected: None,
+                    focused: None,
+                    index: Some(index),
+                    role: Some("resultMetadata".to_string()),
+                    kind: Some(row.kind.as_str().to_string()),
+                    source: Some("notes".to_string()),
+                    source_name: Some(row.title.clone()),
+                    selectable: Some(false),
+                    status_kind: None,
+                    action_disabled: None,
+                    style: None,
+                },
+            );
         }
 
         (elements, total_count)

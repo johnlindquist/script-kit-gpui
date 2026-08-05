@@ -5646,11 +5646,12 @@ impl ScriptListApp {
             | AppView::AgentChatHistoryView { filter, .. }
             | AppView::BrowserHistoryView { filter, .. }
             | AppView::DictationHistoryView { filter, .. }
-            | AppView::NotesBrowseView { filter, .. }
             | AppView::SdkReferenceView { filter, .. }
             | AppView::TipsView { filter, .. }
             | AppView::ScriptTemplateCatalogView { filter, .. }
             | AppView::MigrateV1View { filter, .. } => non_empty(filter.clone()),
+
+            AppView::NotesBrowseView { search } => non_empty(search.query.clone()),
 
             AppView::FileSearchView { query, .. } => non_empty(query.clone()),
 

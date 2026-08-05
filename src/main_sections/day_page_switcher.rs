@@ -41,47 +41,30 @@ impl DayPageView {
                 "day_page_note_switcher_notes_init_failed"
             );
         }
-        let notes = crate::notes::get_all_notes().unwrap_or_else(|error| {
-            tracing::warn!(
-                target: "script_kit::day_page",
-                error = %error,
-                "day_page_note_switcher_notes_load_failed"
-            );
-            Vec::new()
-        });
-        let mut rows = notes
-            .iter()
-            .map(|note| crate::actions::NoteSwitcherNoteInfo {
-                id: note.id.as_str().to_string(),
-                title: if note.title.trim().is_empty() {
-                    "Untitled Note".to_string()
-                } else {
-                    note.title.clone()
-                },
-                char_count: note.char_count(),
-                is_current: self
-                    .session
-                    .viewing_note_id()
-                    .is_some_and(|id| id == note.id.as_str()),
-                is_pinned: note.is_pinned,
-                preview: note.preview(),
-                relative_time: crate::formatting::format_relative_time_short_dt(note.updated_at),
-            })
-            .collect::<Vec<_>>();
-        let day_entries = crate::notes::day_switcher::load_day_note_switcher_entries(
-            &self.session.substrate().paths().days_dir(),
+        let destination = crate::notes::search_model::NoteSearchDestination::OpenHere;
+        let search_state = crate::notes::search_model::load_note_search_state(
+            "",
+            &crate::notes::notes_brain_days_dir(),
+            1,
+            None,
         );
-        rows.extend(crate::notes::day_switcher::day_note_switcher_infos(
-            &day_entries,
-            self.session.bound_date(),
-        ));
-        let actions = crate::actions::get_note_switcher_actions(&rows);
+        let current_id = self
+            .session
+            .viewing_note_id()
+            .and_then(crate::notes::NoteId::parse)
+            .map(crate::notes::search_model::NoteSearchDocumentId::Note)
+            .or_else(|| {
+                self.session
+                    .bound_date()
+                    .map(crate::notes::search_model::NoteSearchDocumentId::Day)
+            });
+        let actions = crate::actions::get_canonical_note_search_actions(&search_state, current_id);
         self.note_switcher.set_actions(actions, cx);
         self.note_switcher.open_centered(window, cx);
         self.wire_note_switcher_activation(window, cx);
         if let Some(dialog) = self.note_switcher.dialog() {
             dialog.update(cx, |dialog, cx| {
-                dialog.set_context_title(None);
+                dialog.set_context_title(Some(destination.primary_verb().to_string()));
                 cx.notify();
             });
         }

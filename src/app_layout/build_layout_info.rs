@@ -1747,9 +1747,9 @@ impl ScriptListApp {
                     "dictationHistory",
                     Self::dictation_history_visible_row_labels(filter).len(),
                 ),
-                AppView::NotesBrowseView { filter, .. } => (
+                AppView::NotesBrowseView { search } => (
                     "notesBrowse",
-                    Self::notes_browse_visible_row_labels(filter).len(),
+                    Self::notes_browse_visible_row_labels(search).len(),
                 ),
                 _ => unreachable!("attachment portal branch is guarded by current_view match"),
             };

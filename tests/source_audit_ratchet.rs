@@ -71,10 +71,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "violation detector over remaining legacy tokens; count>0 reports diagnostics",
     ),
     (
-        "tests/notes_browse_text_state_contract.rs",
-        "singleton on stable single-line token",
-    ),
-    (
         "tests/smoke_main_menu.rs",
         "counts separators in a runtime-built frecency key string, not source text",
     ),
