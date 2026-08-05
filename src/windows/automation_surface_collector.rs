@@ -642,38 +642,55 @@ fn collect_notes_snapshot(
         text_size_source: Some("theme.mono_font_size".to_string()),
     });
 
-    // The one-shot titlebar Ask AI command (replaces the removed Notes/Agent
-    // mode switcher). The element id mirrors the renderer's GPUI id; its
-    // role/kind advertise that activation hands off to the MAIN window's
-    // Agent Chat rather than changing any Notes-local mode.
-    let mut ask_ai = element(
-        "button:notes-ask-ai",
-        ElementType::Button,
-        Some("Ask AI".to_string()),
-        None,
-        None,
-        None,
-        Some(0),
-    );
-    ask_ai.role = Some("handoff".to_string());
-    ask_ai.kind = Some("MainAgentChat".to_string());
-    ask_ai.selectable = Some(true);
+    // Titlebar commands are projected from the same mode-sensitive
+    // NotesAction descriptors as the renderer, Actions, and keyboard router.
+    let titlebar_actions = crate::notes::get_notes_titlebar_action_descriptors(cx)?;
+    let titlebar_elements = titlebar_actions
+        .into_iter()
+        .enumerate()
+        .map(|(index, descriptor)| {
+            let mut action = element(
+                &descriptor.semantic_action_id,
+                ElementType::Button,
+                Some(descriptor.label.to_string()),
+                descriptor.shortcut.map(str::to_string),
+                None,
+                None,
+                Some(index),
+            );
+            action.role = Some(
+                if descriptor.action == crate::notes::NotesAction::SendToAi {
+                    "handoff"
+                } else {
+                    "action"
+                }
+                .to_string(),
+            );
+            action.kind = Some(
+                if descriptor.action == crate::notes::NotesAction::SendToAi {
+                    "MainAgentChat".to_string()
+                } else {
+                    format!("{:?}", descriptor.action)
+                },
+            );
+            action.selectable = Some(descriptor.availability.is_enabled());
+            action.action_disabled = descriptor.disabled_reason().map(str::to_string);
+            action
+        });
 
     let identity = crate::notes::get_notes_document_identity_spec(cx)
         .map(|spec| collect_semantic_chip_element(&spec));
-    let mut elements = vec![
-        element(
-            "panel:notes-window",
-            ElementType::Panel,
-            resolved.title.clone(),
-            None,
-            None,
-            None,
-            None,
-        ),
-        ask_ai,
-        editor,
-    ];
+    let mut elements = vec![element(
+        "panel:notes-window",
+        ElementType::Panel,
+        resolved.title.clone(),
+        None,
+        None,
+        None,
+        None,
+    )];
+    elements.extend(titlebar_elements);
+    elements.push(editor);
     elements.extend(identity);
     let total_count = elements.len();
 

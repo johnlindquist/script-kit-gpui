@@ -10,13 +10,28 @@ enum NotesCommandBarRole {
 }
 
 impl NotesApp {
-    pub(crate) fn open_actions_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Update command bar actions based on current state (dynamic - depends on selection, etc.)
-        let actions = get_notes_command_bar_actions(&NotesInfo {
-            has_selection: self.selected_note_id.is_some(),
-            is_trash_view: self.view_mode == NotesViewMode::Trash,
+    pub(super) fn notes_action_context(&self) -> crate::notes::NotesActionContext {
+        let surface = if self.kit_resource_preview.is_some() {
+            crate::notes::NotesActionSurface::ReadOnly
+        } else if self.view_mode == NotesViewMode::Trash {
+            crate::notes::NotesActionSurface::Trash
+        } else if self.preview_enabled {
+            crate::notes::NotesActionSurface::Preview
+        } else {
+            crate::notes::NotesActionSurface::Editor
+        };
+        crate::notes::NotesActionContext {
+            surface,
+            has_current_note: self.selected_note_id.is_some(),
             auto_sizing_enabled: self.auto_sizing_enabled,
-        });
+        }
+    }
+
+    pub(crate) fn open_actions_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Actions, keyboard, titlebar controls, and automation all project the
+        // same mode-sensitive NotesAction descriptors.
+        let actions =
+            crate::actions::get_notes_command_bar_actions_for_context(self.notes_action_context());
 
         // Log what actions we're setting
         info!(
@@ -136,7 +151,7 @@ impl NotesApp {
         self.command_bar.close(cx);
 
         // Route through NotesFocusSurface for structured logging and consistent focus management.
-        self.request_focus_surface(focus::NotesFocusSurface::Editor, window, cx);
+        self.request_focus_surface(self.primary_focus_surface(), window, cx);
     }
 
     /// Restore host state and focus after a detached popup closed itself
@@ -174,6 +189,16 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.notes_action_execution_generation =
+            self.notes_action_execution_generation.wrapping_add(1);
+        self.last_notes_action_id = Some(action.id());
+        tracing::info!(
+            event = "notes_action_executed",
+            action_id = action.id(),
+            semantic_action_id = %action.semantic_action_id(),
+            generation = self.notes_action_execution_generation,
+            "notes_action_executed"
+        );
         debug!(?action, "Handling notes action");
         match action {
             NotesAction::NewNote => self.create_note(window, cx),
@@ -190,7 +215,11 @@ impl NotesApp {
             NotesAction::TogglePreview => self.toggle_preview(window, cx),
             NotesAction::CycleSortMode => self.cycle_sort_mode(cx),
             NotesAction::OpenTrash => self.set_view_mode(NotesViewMode::Trash, window, cx),
-            NotesAction::EmptyTrash => self.empty_trash(cx),
+            NotesAction::EmptyTrash => {
+                self.close_actions_panel(window, cx);
+                self.request_empty_trash(window, cx);
+                return;
+            }
             NotesAction::BackToNotes => self.set_view_mode(NotesViewMode::AllNotes, window, cx),
             NotesAction::HistoryBack => self.navigate_back(window, cx),
             NotesAction::HistoryForward => self.navigate_forward(window, cx),
@@ -218,7 +247,11 @@ impl NotesApp {
                 return;
             }
             NotesAction::RestoreNote => self.restore_note(window, cx),
-            NotesAction::PermanentlyDeleteNote => self.permanently_delete_note(window, cx),
+            NotesAction::PermanentlyDeleteNote => {
+                self.close_actions_panel(window, cx);
+                self.request_delete_selected_note(window, cx);
+                return;
+            }
             NotesAction::MoveListItemUp => {
                 self.close_actions_panel(window, cx);
                 self.move_line_up(window, cx);
@@ -264,41 +297,31 @@ impl NotesApp {
     ) {
         info!(action_id, "Executing notes action from CommandBar");
 
-        // Map action ID strings to NotesAction enum
-        let action = match action_id {
-            "new_note" => Some(NotesAction::NewNote),
-            "duplicate_note" => Some(NotesAction::DuplicateNote),
-            "browse_notes" => Some(NotesAction::BrowseNotes),
-            "toggle_preview" => Some(NotesAction::TogglePreview),
-            "cycle_sort_mode" => Some(NotesAction::CycleSortMode),
-            "open_trash" => Some(NotesAction::OpenTrash),
-            "empty_trash" => Some(NotesAction::EmptyTrash),
-            "back_to_notes" => Some(NotesAction::BackToNotes),
-            "history_back" => Some(NotesAction::HistoryBack),
-            "history_forward" => Some(NotesAction::HistoryForward),
-            "find_in_note" => Some(NotesAction::FindInNote),
-            "format" => Some(NotesAction::Format),
-            "copy_note_as" => Some(NotesAction::CopyNoteAs),
-            "copy_deeplink" => Some(NotesAction::CopyDeeplink),
-            "create_quicklink" => Some(NotesAction::CreateQuicklink),
-            "copy_backlinks" => Some(NotesAction::CopyBacklinks),
-            "export" => Some(NotesAction::Export),
-            "delete_note" => Some(NotesAction::DeleteNote),
-            "restore_note" => Some(NotesAction::RestoreNote),
-            "permanently_delete_note" => Some(NotesAction::PermanentlyDeleteNote),
-            "toggle_auto_sizing" | "enable_auto_sizing" => Some(NotesAction::EnableAutoSizing),
-            "reset_window_position" => Some(NotesAction::ResetWindowPosition),
-            "move_list_item_up" => Some(NotesAction::MoveListItemUp),
-            "move_list_item_down" => Some(NotesAction::MoveListItemDown),
-            "send_to_ai" => Some(NotesAction::SendToAi),
-            _ => {
-                tracing::warn!(action_id, "Unknown action ID from CommandBar");
-                None
-            }
-        };
+        let descriptor = crate::notes::notes_action_for_id(self.notes_action_context(), action_id)
+            .or_else(|| {
+                // Preserve the historical auto-sizing alias for callers that
+                // persisted the old action ID; it resolves to the current
+                // descriptor before execution rather than bypassing policy.
+                (action_id == "enable_auto_sizing").then(|| {
+                    crate::notes::notes_action_for_id(
+                        self.notes_action_context(),
+                        NotesAction::EnableAutoSizing.id(),
+                    )
+                })?
+            });
 
-        if let Some(action) = action {
-            self.handle_action(action, window, cx);
+        if let Some(descriptor) = descriptor {
+            if !descriptor.availability.is_enabled() {
+                self.show_action_feedback(
+                    descriptor
+                        .disabled_reason()
+                        .unwrap_or("This Notes action is unavailable."),
+                    true,
+                );
+                self.close_actions_panel(window, cx);
+                return;
+            }
+            self.handle_action(descriptor.action, window, cx);
         } else {
             // Unknown action - just close the command bar
             self.close_actions_panel(window, cx);
@@ -432,7 +455,7 @@ impl NotesApp {
         self.mention_portal_edit = None;
 
         // Route through NotesFocusSurface for structured logging and consistent focus management.
-        self.request_focus_surface(focus::NotesFocusSurface::Editor, window, cx);
+        self.request_focus_surface(self.primary_focus_surface(), window, cx);
     }
 
     /// Toggle the search bar visibility

@@ -16,16 +16,6 @@ fn is_plain_platform_cmd_w(event: &KeyDownEvent) -> bool {
 }
 
 #[inline]
-fn is_key_left_bracket(key: &str) -> bool {
-    key == "[" || key.eq_ignore_ascii_case("bracketleft")
-}
-
-#[inline]
-fn is_key_right_bracket(key: &str) -> bool {
-    key == "]" || key.eq_ignore_ascii_case("bracketright")
-}
-
-#[inline]
 fn is_key_backtick(key: &str) -> bool {
     key == "`" || key.eq_ignore_ascii_case("backtick")
 }
@@ -215,48 +205,6 @@ impl NotesApp {
         cx.stop_propagation();
     }
 
-    /// Handle Cmd+Shift+Backspace / Cmd+Shift+Delete shortcut to delete the selected note.
-    ///
-    /// Returns `true` if the shortcut was handled (caller should stop propagation).
-    pub(super) fn handle_platform_delete_shortcut(
-        &mut self,
-        key: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if !is_key_backspace(key) && !is_key_delete(key) {
-            return false;
-        }
-
-        tracing::info!(
-            event = "notes_delete_shortcut_received",
-            key = %key,
-            has_selection = self.selected_note_id.is_some(),
-            is_trash_view = (self.view_mode == NotesViewMode::Trash),
-            "notes_delete_shortcut_received"
-        );
-
-        let Some(note_id) = self.selected_note_id else {
-            tracing::debug!(
-                event = "notes_delete_shortcut_ignored",
-                key = %key,
-                reason = "no_selected_note",
-                "notes_delete_shortcut_ignored"
-            );
-            return false;
-        };
-
-        tracing::info!(
-            event = "notes_delete_shortcut_requesting_confirmation",
-            key = %key,
-            note_id = %note_id.as_str(),
-            "notes_delete_shortcut_requesting_confirmation"
-        );
-
-        self.request_delete_selected_note(window, cx);
-        true
-    }
-
     pub(super) fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -426,7 +374,7 @@ impl NotesApp {
                         cx.stop_propagation();
                         return;
                     }
-                    // Row shortcuts (⌘D Duplicate, ⌘⌫ Delete Note, …) must
+                    // Row shortcuts (⌘D Duplicate, ⇧⌘⌫ Delete Note, …) must
                     // work whichever window AppKit made key: the detached
                     // popup matches these in ActionsWindow::on_key_down, and
                     // this branch mirrors it for when the Notes window keeps
@@ -592,6 +540,14 @@ impl NotesApp {
             return;
         }
 
+        if let Some(descriptor) =
+            crate::notes::notes_action_for_keystroke(self.notes_action_context(), key, modifiers)
+        {
+            self.handle_action(descriptor.action, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
         if is_key_backtick(key) && !modifiers.platform && !modifiers.control && !modifiers.alt {
             if self.try_accept_notes_ghost(NotesGhostAcceptMode::Full, window, cx) {
                 cx.stop_propagation();
@@ -666,21 +622,6 @@ impl NotesApp {
             return;
         }
 
-        // Ctrl+Cmd+Up/Down: move list item (line) — advertised by the
-        // "Move List Item Up/Down" actions in the command bar.
-        if modifiers.control && modifiers.platform {
-            if is_key_up(key) {
-                self.move_line_up(window, cx);
-                cx.stop_propagation();
-                return;
-            }
-            if is_key_down(key) {
-                self.move_line_down(window, cx);
-                cx.stop_propagation();
-                return;
-            }
-        }
-
         if modifiers.platform {
             match key {
                 // Cmd+Shift+Enter: follow the [[wiki link]] under the cursor.
@@ -692,21 +633,6 @@ impl NotesApp {
                     if self.follow_wiki_link_at_cursor(window, cx) {
                         cx.stop_propagation();
                     }
-                }
-                // Cmd+Enter: hand the selected note (plus staged cart) off to
-                // the MAIN window's Agent Chat as an explicit @note reference.
-                // Must precede plain Enter and other platform shortcuts. Stop
-                // propagation whether the handoff staged or presented
-                // reason-specific feedback — never fall through to insert a
-                // newline after a blocked handoff.
-                key if is_key_enter(key)
-                    && !modifiers.shift
-                    && !modifiers.control
-                    && !modifiers.alt =>
-                {
-                    let _ =
-                        self.handoff_selected_note_to_main_agent_chat("NotesWindowCmdEnter", cx);
-                    cx.stop_propagation();
                 }
                 key if key.eq_ignore_ascii_case("k") => {
                     if self.command_bar.is_open() {
@@ -721,59 +647,13 @@ impl NotesApp {
                         cx.stop_propagation();
                     }
                 }
-                key if key.eq_ignore_ascii_case("p") => {
-                    if modifiers.shift {
-                        self.toggle_preview(window, cx);
-                        cx.stop_propagation();
-                    } else {
-                        self.close_actions_panel(window, cx);
-                        if self.note_switcher.is_open() {
-                            self.close_browse_panel(window, cx);
-                        } else {
-                            self.open_browse_panel(window, cx);
-                        }
-                        cx.stop_propagation();
-                    }
-                }
-                key if key.eq_ignore_ascii_case("f") => {
-                    if modifiers.shift {
-                        self.toggle_search(window, cx);
-                        cx.stop_propagation();
-                    } else {
-                        self.editor_state.update(cx, |state, cx| {
-                            state.focus(window, cx);
-                        });
-                        // Route Search directly through this window so Notes find works
-                        // even when other app windows are open.
-                        window.dispatch_action(Box::new(Search), cx);
-                        cx.stop_propagation();
-                    }
-                }
-                key if key.eq_ignore_ascii_case("a") => {
-                    if modifiers.shift {
-                        // Compatibility alias for the same one-shot handoff.
-                        let _ = self
-                            .handoff_selected_note_to_main_agent_chat("NotesWindowCmdShiftA", cx);
-                        cx.stop_propagation();
-                    }
-                }
-                key if key.eq_ignore_ascii_case("n") => {
-                    if modifiers.shift {
-                        self.create_note_from_clipboard(window, cx);
-                    } else {
-                        self.create_note(window, cx);
-                    }
+                key if key.eq_ignore_ascii_case("f") && modifiers.shift => {
+                    self.toggle_search(window, cx);
                     cx.stop_propagation();
                 }
-                key if key.eq_ignore_ascii_case("t") => {
-                    if modifiers.shift {
-                        if self.view_mode == NotesViewMode::Trash {
-                            self.set_view_mode(NotesViewMode::AllNotes, window, cx);
-                        } else {
-                            self.set_view_mode(NotesViewMode::Trash, window, cx);
-                        }
-                        cx.stop_propagation();
-                    }
+                key if key.eq_ignore_ascii_case("n") && modifiers.shift => {
+                    self.create_note_from_clipboard(window, cx);
+                    cx.stop_propagation();
                 }
                 key if key.eq_ignore_ascii_case("w") && !modifiers.shift => {
                     tracing::info!(
@@ -804,40 +684,15 @@ impl NotesApp {
                     }
                     cx.stop_propagation();
                 }
-                key if key.eq_ignore_ascii_case("s") => {
-                    if modifiers.shift {
-                        self.cycle_sort_mode(cx);
-                        cx.stop_propagation();
-                    }
-                }
-                key if key.eq_ignore_ascii_case("z") => {
-                    if self.view_mode == NotesViewMode::Trash && self.selected_note_id.is_some() {
-                        self.restore_note(window, cx);
-                        cx.stop_propagation();
-                    }
-                }
-                key if key.eq_ignore_ascii_case("d") => {
-                    if modifiers.shift {
-                        self.insert_date_time(window, cx);
-                        cx.stop_propagation();
-                    } else {
-                        self.duplicate_selected_note(window, cx);
-                    }
-                }
                 key if key.eq_ignore_ascii_case("x") => {
                     if modifiers.shift {
                         self.insert_formatting("~~", "~~", window, cx);
                         cx.stop_propagation();
                     }
                 }
-                key if key.eq_ignore_ascii_case("l") => {
-                    if modifiers.shift {
-                        self.toggle_checklist(window, cx);
-                        cx.stop_propagation();
-                    } else {
-                        self.select_current_line(window, cx);
-                        cx.stop_propagation();
-                    }
+                key if key.eq_ignore_ascii_case("l") && !modifiers.shift => {
+                    self.select_current_line(window, cx);
+                    cx.stop_propagation();
                 }
                 "-" => {
                     if modifiers.shift {
@@ -856,13 +711,7 @@ impl NotesApp {
                         cx.stop_propagation();
                     }
                 }
-                key if key.eq_ignore_ascii_case("c") => {
-                    if modifiers.shift {
-                        self.copy_as_markdown(cx);
-                        cx.stop_propagation();
-                    }
-                }
-                key if key.eq_ignore_ascii_case("e") => {
+                key if key.eq_ignore_ascii_case("e") && !modifiers.shift => {
                     self.insert_formatting("`", "`", window, cx);
                     cx.stop_propagation();
                 }
@@ -916,21 +765,6 @@ impl NotesApp {
                         cx.stop_propagation();
                     }
                 }
-                key if is_key_left_bracket(key) => {
-                    self.navigate_back(window, cx);
-                    cx.stop_propagation();
-                }
-                key if is_key_right_bracket(key) => {
-                    self.navigate_forward(window, cx);
-                    cx.stop_propagation();
-                }
-                key if (is_key_backspace(key) || is_key_delete(key)) && modifiers.shift => {
-                    if self.handle_platform_delete_shortcut(key, window, cx) {
-                        cx.stop_propagation();
-                    } else {
-                        cx.propagate();
-                    }
-                }
                 "7" if modifiers.shift => {
                     self.toggle_numbered_list(window, cx);
                     cx.stop_propagation();
@@ -959,74 +793,6 @@ mod dialog_modal_guard_tests {
 
     fn normalize_ws(source: &str) -> String {
         source.split_whitespace().collect::<Vec<_>>().join(" ")
-    }
-
-    /// Verify the Cmd+Shift+Backspace match arm calls `cx.stop_propagation()`
-    /// only when `handle_platform_delete_shortcut` returns true.  When the old
-    /// trash-view guard made it return false, the match arm completed without
-    /// calling either `stop_propagation` or `propagate` — silently swallowing
-    /// the key event (no dialog, no propagation signal to GPUI).
-    #[test]
-    fn delete_shortcut_caller_stop_propagation_is_conditional_on_handler_return() {
-        let source = std::fs::read_to_string("src/notes/window/keyboard.rs")
-            .expect("Failed to read keyboard.rs");
-        let normalized = normalize_ws(&source);
-
-        // The match arm: when handler returns false, no stop_propagation is called.
-        // This proves the old trash-view `return false` silently swallowed events.
-        assert!(
-            normalized.contains(
-                "if self.handle_platform_delete_shortcut(key, window, cx) { cx.stop_propagation(); } else { cx.propagate(); }"
-            ),
-            "Delete shortcut match arm must conditionally stop propagation based on handler return"
-        );
-    }
-
-    /// Verify the delete shortcut always calls `request_delete_selected_note`
-    /// regardless of view mode — the old trash-view guard silently swallowed
-    /// the key event (no dialog, no `stop_propagation`, no `propagate`).
-    #[test]
-    fn delete_shortcut_propagates_when_handler_declines_key() {
-        let source = fs::read_to_string("src/notes/window/keyboard.rs")
-            .expect("Failed to read src/notes/window/keyboard.rs");
-        let normalized = normalize_ws(&source);
-
-        assert!(
-            normalized.contains(
-                "if self.handle_platform_delete_shortcut(key, window, cx) { cx.stop_propagation(); } else { cx.propagate(); }"
-            ),
-            "Delete shortcut match arm should propagate when the handler declines the key"
-        );
-    }
-
-    #[test]
-    fn handle_platform_delete_shortcut_does_not_early_return_for_trash_view() {
-        let source = std::fs::read_to_string("src/notes/window/keyboard.rs")
-            .expect("Failed to read keyboard.rs");
-
-        let fn_start = source
-            .find("pub(super) fn handle_platform_delete_shortcut")
-            .expect("handle_platform_delete_shortcut should exist");
-        // Extract just the function body (up to the next pub(super) fn)
-        let fn_body = &source[fn_start..];
-        let fn_end = fn_body[1..]
-            .find("\n    pub(super) fn ")
-            .map(|i| i + 1)
-            .unwrap_or(fn_body.len());
-        let fn_body = &fn_body[..fn_end];
-
-        // The trash-view guard that silently swallowed the key is gone
-        assert!(
-            !fn_body.contains("is_trash_view {"),
-            "handle_platform_delete_shortcut must not early-return for trash view — \
-             request_delete_selected_note already handles both view modes"
-        );
-
-        // The function must always route to the confirmation helper
-        assert!(
-            fn_body.contains("self.request_delete_selected_note(window, cx);"),
-            "handle_platform_delete_shortcut must route through request_delete_selected_note"
-        );
     }
 
     #[test]

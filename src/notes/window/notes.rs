@@ -542,7 +542,8 @@ impl NotesApp {
         tracing::info!(
             event = "notes_delete_confirmation_requested",
             note_id = %note_id.as_str(),
-            note_title = %note_title,
+            note_title_length = note_title.chars().count(),
+            note_title_fingerprint = %Self::devtools_text_fingerprint(&note_title),
             is_trash_view = (self.view_mode == NotesViewMode::Trash),
             viewport_width,
             bounds_width,
@@ -703,7 +704,7 @@ impl NotesApp {
             });
         }
 
-        self.request_focus_surface(NotesFocusSurface::Editor, window, cx);
+        self.request_focus_surface(self.primary_focus_surface(), window, cx);
         self.show_action_feedback("Deleted · ⌘⇧T trash", false);
         cx.notify();
     }
@@ -742,7 +743,7 @@ impl NotesApp {
             });
         }
 
-        self.request_focus_surface(NotesFocusSurface::Editor, window, cx);
+        self.request_focus_surface(self.primary_focus_surface(), window, cx);
         info!(note_id = %id, "Note permanently deleted");
         cx.notify();
     }

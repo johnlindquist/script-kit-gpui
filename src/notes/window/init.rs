@@ -202,6 +202,8 @@ impl NotesApp {
             sort_mode: NotesSortMode::default(),
             last_save_confirmed: None,
             action_feedback: None,
+            last_notes_action_id: None,
+            notes_action_execution_generation: 0,
             pending_focus_surface: None,
             focus_transition_generation: 0,
             focus_transition_log: Vec::new(),

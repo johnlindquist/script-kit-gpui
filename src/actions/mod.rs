@@ -26,6 +26,7 @@ mod window;
 // - ActionsDialog: the main dialog component
 // - Window functions for separate vibrancy window
 
+pub(crate) use builders::get_notes_command_bar_actions_for_context;
 #[allow(unused_imports)] // used by binary target via include!() in main.rs
 pub(crate) use builders::resolve_file_search_secondary_action_id;
 pub(crate) use builders::AgentChatActionsDialogHost;

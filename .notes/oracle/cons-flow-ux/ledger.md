@@ -6,8 +6,8 @@
 - consult count: 1 / 1
 - plan status: complete (`plan.md`, 28/28 task IDs covered)
 - protocol/profile: v2 / `profile-b`
-- execution status: C01–C05 complete (`SAFE-001`, `WF-001`, `WF-003`, `WF-002`, `WF-008`, `WF-004`, `WF-005`, `SAFE-003`, `WF-011`); next slice pending
-- audit verdict: C01–C05 local audits PASS; whole-premise audit pending
+- execution status: C01–C07 complete (`SAFE-001`, `WF-001`, `WF-003`, `WF-002`, `WF-008`, `WF-004`, `WF-005`, `SAFE-003`, `WF-011`, `WF-006`, `WF-007`, `WF-009`, `WF-010`, `SAFE-004`); next slice pending
+- audit verdict: C01–C07 local audits PASS; whole-premise audit pending
 
 ## Receipts
 
@@ -88,3 +88,18 @@
 - **Governance:** Source-audit inventory reports no new guarded reader sites relative to `d4287ef3a`; no executable lane-governance script exists, so focused reliability/source/privacy/hardcoded-visual/glass gates are authoritative. Protected owner diff is empty; Bun glass suite 40/40 and production calibration fixture 1/1 pass. No surface-local visual values were added.
 - **Forward progress index:** 18 = prior 10 +2 product/model complete +2 focused/current-byte proof +2 stable artifact/runtime +1 governance/privacy/glass +1 docs/audit/commit readiness.
 - **Lifecycle:** Local commit authorized; push, deploy, tag, release, publication, and `.hitl-align` access remain unauthorized and were not performed.
+
+### C07 — SAFE-004 Notes executable descriptors
+
+- **Status:** Complete; local adversarial audit PASS; ready for atomic commit `fix(notes): make action descriptors own shortcuts and execution [SAFE-004]`.
+- **Implementation:** Added closed Notes surface/context, availability, confirmation, and descriptor models. One mode-sensitive list now owns IDs, labels, shortcuts, semantic IDs, destructive policy, Actions rows, titlebar controls, live key lookup, target-scoped automation, and redacted runtime projection. One exhaustive `handle_action` owns effects. Shared key normalization recognizes GPUI bracket aliases. Format is Actions-only; Open Trash is Shift+Command+T; Delete is Shift+Command+Backspace only; Ask AI is Command+Enter; Shift+Command+A and Shift+Command+Delete are unowned.
+- **Focus correction:** Runtime proof found closing Actions while preview was rendered focused the hidden editor. Added `NotesFocusSurface::Preview` and a pure primary-focus decision so Actions/dialog/delete restoration targets the rendered editor or preview root. Model test PASS; repeated real preview shortcut activation PASS.
+- **Automation correction:** Runtime proof found target-scoped `simulateKey` hardcoded only a small Notes subset and bypassed descriptor execution. Expanded the existing agent-facing seam to attempt the current descriptor lookup for every Notes-targeted key after modal/host-chrome precedence. Command+P, Command+Enter, Restore, Find, and all other advertised chords now share `handle_action`; Command+K remains host chrome.
+- **Semantic correction:** The Notes collector statically advertised obsolete `button:notes-ask-ai`, even in modes where the renderer omitted it. `getElements` now consumes live titlebar descriptors and exposes the same semantic IDs, labels, shortcuts, and availability as rendering. Ask AI, Restore, and Delete Permanently are runtime-proven.
+- **Focused proof:** Shortcut normalization 5/5 PASS; Notes action model 11/11 PASS; Notes Actions builder 13/13 PASS; Notes window/focus 99/99 PASS; `check --lib`, `check --bin script-kit-gpui`, and stable build PASS. Stable artifact SHA-256 `e82c143095f3a102e1e62b0556b5c689f0b9a92caf62b3fbfcb078c61a0a0196`.
+- **Runtime:** `.test-output/cons-flow-c07/notes-actions-receipt.json` PASS. Six projections cover editor-selected, preview-selected, Trash-empty, read-only, editor-no-current, and Trash-selected. Every descriptor matches one Actions semantic row; all 18 unique advertised shortcuts execute; exact generation increments prove one semantic action per activation. Delete, permanent delete, and empty trash each confirm before mutation and cancel with counts unchanged.
+- **Cleanup/privacy:** Driver uses a sandbox Notes DB and exact NSPasteboard archive under `try/finally`. Final receipt: `processExited:true`, `streamsDrained:true`, `logWriterClosed:true`, `ownedProcessCount:0`, `forcedSignals:[]`, `clipboardRestored:true`, `databaseRemoved:true`. Receipt contains no note text, URI, temporary path, or artifact path. Structured action logs contain only action ID, semantic ID, and generation; delete-confirmation logs use title length/fingerprint rather than title text.
+- **Governance:** Source inventory remains 2,818 sites with no new guarded reader relative to C06. Python governance 34/34 PASS. Hardcoded visual inventory has no additions. Protected owner diff is empty; Bun glass contracts 40/40 PASS and production calibration fixture 1/1 PASS. `git diff --check` PASS.
+- **Source-audit pruning:** Removed brittle keyboard source-text assertions superseded by typed descriptor/normalization tests and the six-mode runtime matrix. No test was ignored, no threshold changed, and no formatted source audit was added.
+- **Adversarial audit:** PASS. Catalog coverage is nonzero in applicable modes; per-mode IDs/semantics/normalized shortcuts are unique; every enabled advertised shortcut resolves to exactly one descriptor; the exhaustive enum match supplies every handler; unsupported actions are absent; destructive flags imply confirmation; pointer/Actions/GPUI/automation converge on `handle_action`; titlebar semantics derive from current descriptors; negative aliases do nothing; read-only/no-current policies are explicit; runtime cleanup is exact; protected visual/motion owners are unchanged.
+- **Lifecycle:** Local commit authorized. No push, deploy, tag, release, publication, credential access, or `.hitl-align` inspection performed.

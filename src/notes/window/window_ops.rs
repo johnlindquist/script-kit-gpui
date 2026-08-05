@@ -2107,7 +2107,33 @@ pub fn get_notes_editor_text(cx: &gpui::App) -> Option<String> {
     Some(entity.read(cx).editor_state.read(cx).value().to_string())
 }
 
-/// Return shared Markdown editor runtime metadata for the live Notes window.
+/// Return the mode-sensitive titlebar commands projected by the live Notes window.
+///
+/// The renderer and `getElements` both consume the same `NotesActionDescriptor`
+/// facts so automation never advertises a titlebar action that the current mode
+/// does not render or execute.
+pub(crate) fn get_notes_titlebar_action_descriptors(
+    cx: &gpui::App,
+) -> Option<Vec<crate::notes::NotesActionDescriptor>> {
+    let entity = {
+        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
+        slot.lock().ok()?.clone()?
+    };
+    let app = entity.read(cx);
+    let context = app.notes_action_context();
+    Some(
+        [
+            crate::notes::NotesAction::SendToAi,
+            crate::notes::NotesAction::RestoreNote,
+            crate::notes::NotesAction::PermanentlyDeleteNote,
+        ]
+        .into_iter()
+        .filter_map(|action| action.descriptor(context))
+        .collect(),
+    )
+}
+
+/// Return the semantic document identity for the live Notes window.
 pub(crate) fn get_notes_document_identity_spec(
     cx: &gpui::App,
 ) -> Option<crate::components::main_view_chrome::SemanticChipSpec> {
@@ -2139,6 +2165,7 @@ pub(crate) fn get_notes_document_identity_spec(
     )
 }
 
+/// Return shared Markdown editor runtime metadata for the live Notes window.
 pub fn get_notes_editor_runtime_info(
     cx: &gpui::App,
 ) -> Option<crate::protocol::ElementEditorRuntimeInfo> {
@@ -2259,6 +2286,20 @@ pub fn handle_notes_editor_key_for_automation(
             {
                 action = "cancelNotesParentConfirm";
                 handled = crate::confirm::route_key_to_confirm_popup("escape", cx);
+            } else if let Some(descriptor) = crate::notes::notes_action_for_keystroke(
+                app.notes_action_context(),
+                &key,
+                &gpui::Modifiers {
+                    platform,
+                    shift,
+                    control,
+                    alt,
+                    ..Default::default()
+                },
+            ) {
+                action = "executeNotesActionDescriptor";
+                app.handle_action(descriptor.action, window, cx);
+                handled = true;
             } else if !platform && !control && !alt {
                 if crate::ui_foundation::is_key_up(&key) {
                     action = "moveNotesSpineSelectionUp";
@@ -2273,14 +2314,6 @@ pub fn handle_notes_editor_key_for_automation(
                     action = "acceptNotesSpineSelectionFromTab";
                     handled = app.accept_notes_spine_selection(window, cx);
                 }
-            } else if platform
-                && !shift
-                && !control
-                && !alt
-                && crate::ui_foundation::is_key_enter(&key)
-            {
-                action = "openMainAgentChatFromNotesCmdEnter";
-                handled = app.handoff_selected_note_to_main_agent_chat("NotesWindowCmdEnter", cx);
             } else if platform && !shift && !control && !alt && key == "." {
                 action = "activateNotesDeeplinkOrFocusMode";
                 if !app.activate_deeplink_under_cursor(window, cx) {

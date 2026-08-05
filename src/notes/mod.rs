@@ -49,7 +49,11 @@ pub(crate) mod window;
 
 // Re-export notes action catalog for CommandBar action builders
 #[allow(unused_imports)]
-pub use actions_panel::NotesAction;
+pub use actions_panel::{
+    notes_action_descriptors, notes_action_for_id, notes_action_for_keystroke, NotesAction,
+    NotesActionAvailability, NotesActionConfirmation, NotesActionContext, NotesActionDescriptor,
+    NotesActionSurface,
+};
 
 #[allow(unused_imports)]
 pub(crate) use model::{Note, NoteCartItem, NoteCartItemPayload, NoteId};
@@ -96,4 +100,7 @@ pub use window::{
     NotesApp, NotesRunCommandExecutor,
 };
 #[allow(unused_imports)]
-pub(crate) use window::{get_notes_document_identity_spec, update_notes_window_detached};
+pub(crate) use window::{
+    get_notes_document_identity_spec, get_notes_titlebar_action_descriptors,
+    update_notes_window_detached,
+};

@@ -531,7 +531,50 @@ impl NotesApp {
         cx.notify();
     }
 
-    /// Empty the entire trash — permanently deletes all trashed notes
+    pub(super) fn request_empty_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.deleted_notes.len();
+        if count == 0 {
+            self.show_action_feedback("Trash is already empty", false);
+            cx.notify();
+            return;
+        }
+
+        self.request_focus_surface(NotesFocusSurface::Dialog, window, cx);
+        let weak_notes = cx.entity().downgrade();
+        let weak_notes_for_cancel = weak_notes.clone();
+        crate::confirm::open_parent_confirm_dialog_for_automation_parent(
+            window,
+            cx,
+            "notes",
+            crate::confirm::ParentConfirmOptions {
+                title: "Empty Trash".into(),
+                body: format!(
+                    "Permanently delete {count} {}? This cannot be undone.",
+                    if count == 1 { "note" } else { "notes" }
+                )
+                .into(),
+                confirm_text: "Empty Trash".into(),
+                cancel_text: "Cancel".into(),
+                confirm_variant: gpui_component::button::ButtonVariant::Danger,
+                width: gpui::px(crate::confirm::PARENT_MODAL_WIDTH_PX),
+            },
+            move |_window, cx| {
+                if let Some(entity) = weak_notes.upgrade() {
+                    entity.update(cx, |this, cx| this.empty_trash(cx));
+                }
+            },
+            move |window, cx| {
+                if let Some(entity) = weak_notes_for_cancel.upgrade() {
+                    entity.update(cx, |this, cx| {
+                        this.restore_primary_focus_after_dialog(window, cx);
+                    });
+                }
+            },
+        );
+        cx.notify();
+    }
+
+    /// Empty the entire trash — permanently deletes all trashed notes after confirmation.
     pub(super) fn empty_trash(&mut self, cx: &mut Context<Self>) {
         let ids: Vec<NoteId> = self.deleted_notes.iter().map(|n| n.id).collect();
         for id in &ids {

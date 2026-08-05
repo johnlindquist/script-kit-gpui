@@ -22,6 +22,27 @@ impl NotesApp {
         format!("fnv1a64:{hash:016x}")
     }
 
+    fn automation_action_descriptors(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            crate::notes::notes_action_descriptors(self.notes_action_context())
+                .into_iter()
+                .map(|descriptor| {
+                    serde_json::json!({
+                        "id": descriptor.id,
+                        "label": descriptor.label,
+                        "shortcut": descriptor.shortcut,
+                        "canonicalShortcut": descriptor.shortcut.map(crate::components::hint_strip::canonical_shortcut_hint),
+                        "enabled": descriptor.availability.is_enabled(),
+                        "disabledReason": descriptor.disabled_reason(),
+                        "destructive": descriptor.destructive,
+                        "confirmationRequired": descriptor.confirmation == crate::notes::NotesActionConfirmation::Required,
+                        "semanticActionId": descriptor.semantic_action_id,
+                    })
+                })
+                .collect(),
+        )
+    }
+
     fn automation_shortcut_registry(&self) -> serde_json::Value {
         let active_scope = if self.command_bar.is_open() {
             "actionsPanel"
@@ -63,12 +84,12 @@ impl NotesApp {
                     "handles": [
                         "Escape", "Tab", "Shift+Tab", "Alt+Up", "Alt+Down", "Alt+Shift+Up", "Alt+Shift+Down",
                         "Ctrl+Shift+K", "Cmd+Enter", "Cmd+K", "Cmd+Shift+O", "Cmd+P", "Cmd+Shift+P",
-                        "Cmd+F", "Cmd+Shift+F", "Cmd+Shift+A", "Cmd+N", "Cmd+Shift+N", "Cmd+Shift+T",
+                        "Cmd+F", "Cmd+Shift+F", "Cmd+N", "Cmd+Shift+N", "Cmd+Shift+T",
                         "Cmd+W", "Cmd+.", "Cmd+Shift+.", "Cmd+Shift+S", "Cmd+Z", "Cmd+D", "Cmd+Shift+D",
                         "Cmd+Shift+X", "Cmd+L", "Cmd+Shift+L", "Cmd+Shift+-", "Cmd+Shift+H", "Cmd+V",
                         "Cmd+Shift+C", "Cmd+E", "Cmd+J", "Cmd+Shift+U", "Cmd+B", "Cmd+I", "Cmd+Shift+I",
                         "Cmd+Up", "Cmd+Down", "Cmd+Shift+Up", "Cmd+Shift+Down", "Cmd+[", "Cmd+]",
-                        "Cmd+Shift+Backspace", "Cmd+Shift+Delete", "Cmd+Shift+7", "Cmd+Shift+8", "Cmd+1..Cmd+9"
+                        "Cmd+Shift+Backspace", "Cmd+Shift+7", "Cmd+Shift+8", "Cmd+1..Cmd+9"
                     ],
                 },
             ],
@@ -629,6 +650,12 @@ impl NotesApp {
             "commandBars": {
                 "actions": self.command_bar.automation_state("notes.actions", cx),
                 "noteSwitcher": self.note_switcher.automation_state("notes.switcher", cx),
+            },
+            "actionDescriptors": self.automation_action_descriptors(),
+            "lastActionExecution": {
+                "actionId": self.last_notes_action_id,
+                "semanticActionId": self.last_notes_action_id.map(|id| format!("notes.action.{id}")),
+                "generation": self.notes_action_execution_generation,
             },
             "spine": self.automation_notes_spine_state(cx),
             "shortcutRegistry": self.automation_shortcut_registry(),

@@ -64,33 +64,75 @@ pub enum NotesAction {
     Cancel,
 }
 
-impl NotesAction {
-    /// Get all available actions (excluding Cancel)
-    pub fn all() -> &'static [NotesAction] {
-        &[
-            NotesAction::NewNote,
-            NotesAction::DuplicateNote,
-            NotesAction::BrowseNotes,
-            NotesAction::TogglePreview,
-            NotesAction::CycleSortMode,
-            NotesAction::OpenTrash,
-            NotesAction::EmptyTrash,
-            NotesAction::BackToNotes,
-            NotesAction::HistoryBack,
-            NotesAction::HistoryForward,
-            NotesAction::FindInNote,
-            NotesAction::CopyNoteAs,
-            NotesAction::CopyDeeplink,
-            NotesAction::CreateQuicklink,
-            NotesAction::CopyBacklinks,
-            NotesAction::Export,
-            NotesAction::MoveListItemUp,
-            NotesAction::MoveListItemDown,
-            NotesAction::Format,
-            NotesAction::DeleteNote,
-        ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotesActionSurface {
+    Editor,
+    Preview,
+    Trash,
+    ReadOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotesActionContext {
+    pub surface: NotesActionSurface,
+    pub has_current_note: bool,
+    pub auto_sizing_enabled: bool,
+}
+
+impl NotesActionContext {
+    pub const fn editor(has_current_note: bool, auto_sizing_enabled: bool) -> Self {
+        Self {
+            surface: NotesActionSurface::Editor,
+            has_current_note,
+            auto_sizing_enabled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotesActionAvailability {
+    Enabled,
+    Disabled { reason: &'static str },
+}
+
+impl NotesActionAvailability {
+    pub const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
     }
 
+    pub const fn disabled_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Enabled => None,
+            Self::Disabled { reason } => Some(reason),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotesActionConfirmation {
+    None,
+    Required,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotesActionDescriptor {
+    pub action: NotesAction,
+    pub id: &'static str,
+    pub label: &'static str,
+    pub shortcut: Option<&'static str>,
+    pub availability: NotesActionAvailability,
+    pub destructive: bool,
+    pub confirmation: NotesActionConfirmation,
+    pub semantic_action_id: String,
+}
+
+impl NotesActionDescriptor {
+    pub fn disabled_reason(&self) -> Option<&'static str> {
+        self.availability.disabled_reason()
+    }
+}
+
+impl NotesAction {
     /// Get the display label for this action
     pub fn label(&self) -> &'static str {
         match self {
@@ -105,11 +147,11 @@ impl NotesAction {
             NotesAction::HistoryBack => "History Back",
             NotesAction::HistoryForward => "History Forward",
             NotesAction::FindInNote => "Find in Note",
-            NotesAction::CopyNoteAs => "Copy Note As...",
+            NotesAction::CopyNoteAs => "Copy Note as Markdown",
             NotesAction::CopyDeeplink => "Copy Deeplink",
             NotesAction::CreateQuicklink => "Create Quicklink",
             NotesAction::CopyBacklinks => "Copy Backlinks",
-            NotesAction::Export => "Export...",
+            NotesAction::Export => "Copy as HTML",
             NotesAction::MoveListItemUp => "Move List Item Up",
             NotesAction::MoveListItemDown => "Move List Item Down",
             NotesAction::Format => "Format...",
@@ -147,13 +189,13 @@ impl NotesAction {
             NotesAction::Export => Some("shift+cmd+e"),
             NotesAction::MoveListItemUp => Some("ctrl+cmd+up"),
             NotesAction::MoveListItemDown => Some("ctrl+cmd+down"),
-            NotesAction::Format => Some("shift+cmd+t"),
-            NotesAction::DeleteNote => Some("cmd+backspace"),
+            NotesAction::Format => None,
+            NotesAction::DeleteNote => Some("shift+cmd+backspace"),
             NotesAction::RestoreNote => Some("cmd+z"),
             NotesAction::PermanentlyDeleteNote => None,
             NotesAction::EnableAutoSizing => None,
             NotesAction::ResetWindowPosition => None,
-            NotesAction::SendToAi => Some("shift+cmd+a"),
+            NotesAction::SendToAi => Some("cmd+enter"),
             NotesAction::Cancel => Some("escape"),
         }
     }
@@ -195,7 +237,7 @@ impl NotesAction {
             NotesAction::DeleteNote => IconName::Trash,
             NotesAction::RestoreNote => IconName::Refresh,
             NotesAction::PermanentlyDeleteNote => IconName::Trash,
-            NotesAction::EnableAutoSizing => IconName::ArrowRight,
+            NotesAction::EnableAutoSizing => IconName::Settings,
             NotesAction::ResetWindowPosition => IconName::Refresh,
             NotesAction::SendToAi => IconName::BoltFilled,
             NotesAction::Cancel => IconName::Close,
@@ -233,6 +275,166 @@ impl NotesAction {
             NotesAction::Cancel => "cancel",
         }
     }
+
+    pub const fn catalog() -> &'static [NotesAction] {
+        &[
+            NotesAction::NewNote,
+            NotesAction::DuplicateNote,
+            NotesAction::BrowseNotes,
+            NotesAction::TogglePreview,
+            NotesAction::CycleSortMode,
+            NotesAction::OpenTrash,
+            NotesAction::EmptyTrash,
+            NotesAction::BackToNotes,
+            NotesAction::HistoryBack,
+            NotesAction::HistoryForward,
+            NotesAction::FindInNote,
+            NotesAction::CopyNoteAs,
+            NotesAction::CopyDeeplink,
+            NotesAction::CreateQuicklink,
+            NotesAction::CopyBacklinks,
+            NotesAction::Export,
+            NotesAction::MoveListItemUp,
+            NotesAction::MoveListItemDown,
+            NotesAction::Format,
+            NotesAction::DeleteNote,
+            NotesAction::RestoreNote,
+            NotesAction::PermanentlyDeleteNote,
+            NotesAction::EnableAutoSizing,
+            NotesAction::ResetWindowPosition,
+            NotesAction::SendToAi,
+        ]
+    }
+
+    pub fn semantic_action_id(self) -> String {
+        format!("notes.action.{}", self.id())
+    }
+
+    pub fn descriptor(self, context: NotesActionContext) -> Option<NotesActionDescriptor> {
+        if !notes_action_is_visible(self, context) {
+            return None;
+        }
+        let destructive = matches!(
+            self,
+            NotesAction::DeleteNote | NotesAction::EmptyTrash | NotesAction::PermanentlyDeleteNote
+        );
+        Some(NotesActionDescriptor {
+            action: self,
+            id: self.id(),
+            label: match self {
+                NotesAction::EnableAutoSizing if context.auto_sizing_enabled => {
+                    "Disable Auto-Sizing"
+                }
+                NotesAction::EnableAutoSizing => "Enable Auto-Sizing",
+                _ => self.label(),
+            },
+            shortcut: self.shortcut_hint(),
+            availability: NotesActionAvailability::Enabled,
+            destructive,
+            confirmation: if destructive {
+                NotesActionConfirmation::Required
+            } else {
+                NotesActionConfirmation::None
+            },
+            semantic_action_id: self.semantic_action_id(),
+        })
+    }
+}
+
+fn notes_action_is_visible(action: NotesAction, context: NotesActionContext) -> bool {
+    use NotesAction::*;
+    use NotesActionSurface::*;
+
+    match context.surface {
+        ReadOnly => matches!(action, BrowseNotes | ResetWindowPosition),
+        Trash => match action {
+            NewNote | BrowseNotes | TogglePreview | HistoryBack | HistoryForward | BackToNotes
+            | EmptyTrash | EnableAutoSizing | ResetWindowPosition => true,
+            RestoreNote | PermanentlyDeleteNote => context.has_current_note,
+            _ => false,
+        },
+        Editor | Preview => match action {
+            NewNote | BrowseNotes | TogglePreview | HistoryBack | HistoryForward
+            | CycleSortMode | OpenTrash | EnableAutoSizing | ResetWindowPosition => true,
+            DuplicateNote | DeleteNote | CopyNoteAs | CopyDeeplink | CreateQuicklink
+            | CopyBacklinks | Export | SendToAi => context.has_current_note,
+            FindInNote | MoveListItemUp | MoveListItemDown | Format => {
+                context.has_current_note && context.surface == Editor
+            }
+            _ => false,
+        },
+    }
+}
+
+pub fn notes_action_descriptors(context: NotesActionContext) -> Vec<NotesActionDescriptor> {
+    const DISPLAY_ORDER: &[NotesAction] = &[
+        NotesAction::NewNote,
+        NotesAction::RestoreNote,
+        NotesAction::PermanentlyDeleteNote,
+        NotesAction::DuplicateNote,
+        NotesAction::DeleteNote,
+        NotesAction::BrowseNotes,
+        NotesAction::TogglePreview,
+        NotesAction::HistoryBack,
+        NotesAction::HistoryForward,
+        NotesAction::BackToNotes,
+        NotesAction::EmptyTrash,
+        NotesAction::CycleSortMode,
+        NotesAction::OpenTrash,
+        NotesAction::FindInNote,
+        NotesAction::Format,
+        NotesAction::MoveListItemUp,
+        NotesAction::MoveListItemDown,
+        NotesAction::CopyNoteAs,
+        NotesAction::CopyDeeplink,
+        NotesAction::CreateQuicklink,
+        NotesAction::CopyBacklinks,
+        NotesAction::Export,
+        NotesAction::SendToAi,
+        NotesAction::EnableAutoSizing,
+        NotesAction::ResetWindowPosition,
+    ];
+
+    DISPLAY_ORDER
+        .iter()
+        .copied()
+        .filter_map(|action| action.descriptor(context))
+        .collect()
+}
+
+pub fn notes_action_for_id(
+    context: NotesActionContext,
+    action_id: &str,
+) -> Option<NotesActionDescriptor> {
+    notes_action_descriptors(context)
+        .into_iter()
+        .find(|descriptor| descriptor.id == action_id)
+}
+
+fn notes_action_for_canonical_shortcut(
+    context: NotesActionContext,
+    canonical: &str,
+) -> Option<NotesActionDescriptor> {
+    let mut matches = notes_action_descriptors(context)
+        .into_iter()
+        .filter(|descriptor| {
+            descriptor.availability.is_enabled()
+                && descriptor
+                    .shortcut
+                    .map(crate::components::hint_strip::canonical_shortcut_hint)
+                    .is_some_and(|shortcut| shortcut == canonical)
+        });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+pub fn notes_action_for_keystroke(
+    context: NotesActionContext,
+    key: &str,
+    modifiers: &gpui::Modifiers,
+) -> Option<NotesActionDescriptor> {
+    let canonical = crate::shortcuts::keystroke_to_shortcut(key, modifiers);
+    notes_action_for_canonical_shortcut(context, &canonical)
 }
 
 // Panel sizing constants and `panel_height_for_rows` were removed: the
@@ -251,10 +453,10 @@ mod tests {
         assert_eq!(NotesAction::DuplicateNote.label(), "Duplicate Note");
         assert_eq!(NotesAction::BrowseNotes.label(), "Switch Note");
         assert_eq!(NotesAction::FindInNote.label(), "Find in Note");
-        assert_eq!(NotesAction::CopyNoteAs.label(), "Copy Note As...");
+        assert_eq!(NotesAction::CopyNoteAs.label(), "Copy Note as Markdown");
         assert_eq!(NotesAction::CopyDeeplink.label(), "Copy Deeplink");
         assert_eq!(NotesAction::CreateQuicklink.label(), "Create Quicklink");
-        assert_eq!(NotesAction::Export.label(), "Export...");
+        assert_eq!(NotesAction::Export.label(), "Copy as HTML");
         assert_eq!(NotesAction::MoveListItemUp.label(), "Move List Item Up");
         assert_eq!(NotesAction::MoveListItemDown.label(), "Move List Item Down");
         assert_eq!(NotesAction::Format.label(), "Format...");
@@ -272,7 +474,10 @@ mod tests {
         assert_eq!(NotesAction::Export.shortcut_display(), "⇧⌘E");
         assert_eq!(NotesAction::MoveListItemUp.shortcut_display(), "⌃⌘↑");
         assert_eq!(NotesAction::MoveListItemDown.shortcut_display(), "⌃⌘↓");
-        assert_eq!(NotesAction::Format.shortcut_display(), "⇧⌘T");
+        assert_eq!(NotesAction::OpenTrash.shortcut_display(), "⇧⌘T");
+        assert_eq!(NotesAction::Format.shortcut_display(), "");
+        assert_eq!(NotesAction::DeleteNote.shortcut_display(), "⇧⌘⌫");
+        assert_eq!(NotesAction::SendToAi.shortcut_display(), "⌘↵");
     }
 
     #[test]
@@ -292,7 +497,10 @@ mod tests {
         );
 
         // Delete normalizes backspace glyph
-        assert_eq!(NotesAction::DeleteNote.shortcut_tokens(), vec!["⌘", "⌫"]);
+        assert_eq!(
+            NotesAction::DeleteNote.shortcut_tokens(),
+            vec!["⇧", "⌘", "⌫"]
+        );
 
         // PermanentlyDeleteNote has no shortcut
         assert!(NotesAction::PermanentlyDeleteNote.shortcut_hint().is_none());
@@ -306,13 +514,16 @@ mod tests {
     fn test_shortcut_hint_covers_all_actions() {
         // Destructive/navigation toggles without a stable global chord remain
         // CommandBar-only; every other catalog action has a shortcut hint.
-        for action in NotesAction::all() {
+        for action in NotesAction::catalog() {
             if !matches!(
                 action,
-                NotesAction::OpenTrash
-                    | NotesAction::EmptyTrash
+                NotesAction::EmptyTrash
                     | NotesAction::BackToNotes
                     | NotesAction::CopyBacklinks
+                    | NotesAction::Format
+                    | NotesAction::PermanentlyDeleteNote
+                    | NotesAction::EnableAutoSizing
+                    | NotesAction::ResetWindowPosition
             ) {
                 assert!(
                     action.shortcut_hint().is_some(),
@@ -324,33 +535,41 @@ mod tests {
     }
 
     #[test]
-    fn test_notes_action_all() {
-        let all = NotesAction::all();
-        assert_eq!(
-            all,
-            &[
-                NotesAction::NewNote,
-                NotesAction::DuplicateNote,
-                NotesAction::BrowseNotes,
-                NotesAction::TogglePreview,
-                NotesAction::CycleSortMode,
-                NotesAction::OpenTrash,
-                NotesAction::EmptyTrash,
-                NotesAction::BackToNotes,
-                NotesAction::HistoryBack,
-                NotesAction::HistoryForward,
-                NotesAction::FindInNote,
-                NotesAction::CopyNoteAs,
-                NotesAction::CopyDeeplink,
-                NotesAction::CreateQuicklink,
-                NotesAction::CopyBacklinks,
-                NotesAction::Export,
-                NotesAction::MoveListItemUp,
-                NotesAction::MoveListItemDown,
-                NotesAction::Format,
-                NotesAction::DeleteNote,
-            ]
-        );
+    fn catalog_is_complete_and_unique() {
+        let expected = [
+            NotesAction::NewNote,
+            NotesAction::DuplicateNote,
+            NotesAction::BrowseNotes,
+            NotesAction::TogglePreview,
+            NotesAction::CycleSortMode,
+            NotesAction::OpenTrash,
+            NotesAction::EmptyTrash,
+            NotesAction::BackToNotes,
+            NotesAction::HistoryBack,
+            NotesAction::HistoryForward,
+            NotesAction::FindInNote,
+            NotesAction::CopyNoteAs,
+            NotesAction::CopyDeeplink,
+            NotesAction::CreateQuicklink,
+            NotesAction::CopyBacklinks,
+            NotesAction::Export,
+            NotesAction::MoveListItemUp,
+            NotesAction::MoveListItemDown,
+            NotesAction::Format,
+            NotesAction::DeleteNote,
+            NotesAction::RestoreNote,
+            NotesAction::PermanentlyDeleteNote,
+            NotesAction::EnableAutoSizing,
+            NotesAction::ResetWindowPosition,
+            NotesAction::SendToAi,
+        ];
+        assert_eq!(NotesAction::catalog(), expected);
+        for (index, action) in NotesAction::catalog().iter().enumerate() {
+            assert!(
+                !NotesAction::catalog()[index + 1..].contains(action),
+                "duplicate catalog action: {action:?}"
+            );
+        }
     }
 
     #[test]
@@ -366,5 +585,157 @@ mod tests {
         assert_eq!(NotesAction::MoveListItemUp.id(), "move_list_item_up");
         assert_eq!(NotesAction::MoveListItemDown.id(), "move_list_item_down");
         assert_eq!(NotesAction::Format.id(), "format");
+    }
+
+    fn contexts() -> [NotesActionContext; 6] {
+        [
+            NotesActionContext::editor(false, false),
+            NotesActionContext::editor(true, true),
+            NotesActionContext {
+                surface: NotesActionSurface::Preview,
+                has_current_note: true,
+                auto_sizing_enabled: true,
+            },
+            NotesActionContext {
+                surface: NotesActionSurface::Trash,
+                has_current_note: false,
+                auto_sizing_enabled: true,
+            },
+            NotesActionContext {
+                surface: NotesActionSurface::Trash,
+                has_current_note: true,
+                auto_sizing_enabled: true,
+            },
+            NotesActionContext {
+                surface: NotesActionSurface::ReadOnly,
+                has_current_note: true,
+                auto_sizing_enabled: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn every_catalog_action_has_one_descriptor_in_an_applicable_mode() {
+        for action in NotesAction::catalog() {
+            let count = contexts()
+                .into_iter()
+                .filter(|context| action.descriptor(*context).is_some())
+                .count();
+            assert!(count > 0, "{action:?} has no applicable descriptor");
+        }
+    }
+
+    #[test]
+    fn every_mode_has_unique_ids_semantics_and_normalized_shortcuts() {
+        for context in contexts() {
+            let descriptors = notes_action_descriptors(context);
+            let mut ids = std::collections::HashSet::new();
+            let mut semantics = std::collections::HashSet::new();
+            let mut shortcuts = std::collections::HashSet::new();
+            for descriptor in descriptors {
+                assert!(ids.insert(descriptor.id), "duplicate id in {context:?}");
+                assert!(
+                    semantics.insert(descriptor.semantic_action_id.clone()),
+                    "duplicate semantic id in {context:?}"
+                );
+                assert_eq!(
+                    descriptor.semantic_action_id,
+                    format!("notes.action.{}", descriptor.id)
+                );
+                if let Some(shortcut) = descriptor.shortcut {
+                    let canonical =
+                        crate::components::hint_strip::canonical_shortcut_hint(shortcut);
+                    assert!(
+                        shortcuts.insert(canonical.clone()),
+                        "duplicate {canonical} in {context:?}"
+                    );
+                }
+                assert_eq!(
+                    descriptor.availability.is_enabled(),
+                    descriptor.disabled_reason().is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_c07_shortcuts_resolve_to_one_current_action() {
+        let context = NotesActionContext::editor(true, true);
+        let mut command = gpui::Modifiers::default();
+        command.platform = true;
+        for (key, expected) in [
+            ("enter", NotesAction::SendToAi),
+            ("n", NotesAction::NewNote),
+            ("p", NotesAction::BrowseNotes),
+            ("f", NotesAction::FindInNote),
+            ("[", NotesAction::HistoryBack),
+            ("]", NotesAction::HistoryForward),
+            ("bracketleft", NotesAction::HistoryBack),
+            ("bracketright", NotesAction::HistoryForward),
+        ] {
+            assert_eq!(
+                notes_action_for_keystroke(context, key, &command)
+                    .map(|descriptor| descriptor.action),
+                Some(expected),
+                "wrong action for {key}"
+            );
+        }
+
+        let mut shift_command = command;
+        shift_command.shift = true;
+        assert_eq!(
+            notes_action_for_keystroke(context, "backspace", &shift_command)
+                .map(|descriptor| descriptor.action),
+            Some(NotesAction::DeleteNote)
+        );
+        assert_eq!(
+            notes_action_for_keystroke(context, "t", &shift_command)
+                .map(|descriptor| descriptor.action),
+            Some(NotesAction::OpenTrash)
+        );
+        assert_eq!(
+            notes_action_for_keystroke(context, "a", &shift_command),
+            None
+        );
+        assert_eq!(
+            notes_action_for_keystroke(context, "delete", &shift_command),
+            None
+        );
+        assert!(NotesAction::Format.shortcut_hint().is_none());
+    }
+
+    #[test]
+    fn every_enabled_advertised_shortcut_resolves_to_its_descriptor() {
+        for context in contexts() {
+            for descriptor in notes_action_descriptors(context) {
+                let Some(shortcut) = descriptor.shortcut else {
+                    continue;
+                };
+                if !descriptor.availability.is_enabled() {
+                    continue;
+                }
+                let canonical = crate::components::hint_strip::canonical_shortcut_hint(shortcut);
+                assert_eq!(
+                    notes_action_for_canonical_shortcut(context, &canonical)
+                        .map(|matched| matched.action),
+                    Some(descriptor.action),
+                    "advertised shortcut {canonical} did not resolve in {context:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_destructive_descriptor_requires_confirmation() {
+        for context in contexts() {
+            for descriptor in notes_action_descriptors(context) {
+                assert_eq!(
+                    descriptor.confirmation == NotesActionConfirmation::Required,
+                    descriptor.destructive,
+                    "confirmation drift for {:?}",
+                    descriptor.action
+                );
+            }
+        }
     }
 }

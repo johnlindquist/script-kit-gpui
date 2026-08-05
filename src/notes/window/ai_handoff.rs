@@ -306,9 +306,9 @@ impl NotesApp {
         })
     }
 
-    /// The ONE notes→AI command. Every affordance (Cmd+Enter, the actions
-    /// panel `send_to_ai`, Cmd+Shift+A, the titlebar Ask AI button, and the
-    /// automation key route) funnels here.
+    /// The ONE notes→AI command. Every affordance (Cmd+Enter, the Actions
+    /// descriptor, the titlebar Ask AI button, and the automation key route)
+    /// funnels here. Cmd+Shift+A is intentionally unowned.
     ///
     /// Never closes, hides, or orders out the Notes window.
     pub(crate) fn handoff_selected_note_to_main_agent_chat(

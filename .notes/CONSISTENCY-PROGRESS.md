@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 33 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 34 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -18,7 +18,7 @@
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
-| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C06 complete; WF-006, WF-007, WF-009, and WF-010 verified |
+| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C07 complete; SAFE-004 verified |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
 ## How to view the baseline proposal explorer
@@ -754,6 +754,26 @@
   5. Verify ordinary ChatPrompt never shows Background or New Conversation.
   6. Open a Flow conversation and verify its TranscriptOnly ChatPrompt renders the transcript but no duplicate local input, footer, Actions, or keyboard controls.
 - **Intentional differences preserved:** Setup, SDK, built-in AI, and Flow retain distinct owners and capabilities. The shared model standardizes truthful projection/execution, not provider transport or lifecycle ownership. No visual constants, glass values, geometry, or generated design tokens changed.
+
+### SAFE-004 — Make Notes action descriptors own shortcuts and execution
+
+- **Status:** Complete. Notes Actions, titlebar controls, keyboard routing, target-scoped automation, and DevTools semantics now consume one mode-sensitive `NotesActionDescriptor` projection and execute through one exhaustive `handle_action` owner.
+- **Commit boundary:** Workflow Safety C07 — `fix(notes): make action descriptors own shortcuts and execution [SAFE-004]`.
+- **Changed behavior:** Stable action IDs, labels, normalized shortcuts, availability, disabled reasons, destructive/confirmation policy, and semantic action IDs are descriptor-owned. Open Trash is Shift+Command+T; Format is Actions-only; Delete is Shift+Command+Backspace only; Ask AI About This Note is Command+Enter; Shift+Command+A and Shift+Command+Delete execute nothing. Editor, preview, Trash, read-only, selected, and no-current states expose only applicable commands. Pointer, Actions, live GPUI key, and target-scoped automation routes converge on the same handler. Closing Actions or a dialog now restores the rendered editor or preview focus surface rather than focusing a hidden editor.
+- **Exact owners:** `src/notes/actions_panel.rs::{NotesActionContext,NotesActionDescriptor,notes_action_descriptors,notes_action_for_id,notes_action_for_keystroke}`; `src/actions/builders/notes.rs`; `src/notes/window/{keyboard.rs,panels.rs,focus.rs,notes.rs,notes_actions.rs,render_editor_titlebar.rs,navigation.rs,window_ops.rs}`; `src/app_impl/simulate_key_dispatch.rs`; `src/windows/automation_surface_collector.rs`; and `src/shortcuts/hotkey_compat.rs`.
+- **Compatibility/migration:** Existing action IDs remain stable, including the historical `enable_auto_sizing` alias resolving through the current descriptor. GPUI `bracketleft`/`bracketright` names normalize in the shared shortcut owner. Platform Delete is intentionally not an alias because the displayed policy names Backspace only. The old Shift+Command+A compatibility branch is removed. Read-only Notes intentionally offers only Switch Note and Reset Window Position.
+- **Focused tests/build:** Shared shortcut normalization PASS (5/5); Notes descriptor/model PASS (11/11); Notes Actions builder PASS (13/13); Notes window/focus PASS (99/99); library and binary checks PASS; stable product build PASS. Final artifact SHA-256: `e82c143095f3a102e1e62b0556b5c689f0b9a92caf62b3fbfcb078c61a0a0196`.
+- **Runtime receipt:** `.test-output/cons-flow-c07/notes-actions-receipt.json` is PASS against that exact artifact. It compares every descriptor with every Actions row across six states: editor-selected (21), preview-selected (17), Trash-empty (9), read-only (2), editor-no-current (9), and Trash-selected (11). All 18 unique advertised shortcuts execute with exact one-generation semantic receipts; 18 activations cross real GPUI Notes dispatch and the three native-bound Command+Z/Command+F/Command+Enter cases also cross the deterministic target-scoped Notes descriptor seam.
+- **Negative controls:** Format has no shortcut but executes from Actions. Shift+Command+A and Shift+Command+Delete leave execution generation unchanged and open no confirmation. Delete, Delete Permanently, and Empty Trash each open confirmation before mutation; cancellation preserves exact active/deleted counts. Ask AI, Restore, and Delete Permanently titlebar controls expose descriptor semantic IDs through `getElements`. Structured action events contain only action/semantic IDs and generation; the delete-confirmation log records title length/fingerprint rather than note text.
+- **Cleanup/governance:** The Driver runs in a sandbox Notes database under `try/finally`, restores every NSPasteboard item/type exactly, removes its database, and reports `processExited:true`, `streamsDrained:true`, `logWriterClosed:true`, `ownedProcessCount:0`, and no forced signals. Source-audit governance reports 2,818 existing reader sites and no guarded additions relative to C06. Hardcoded-visual governance reports no additions. Protected glass owners are unchanged; glass contracts PASS (40/40) and the production calibration fixture PASS (1/1).
+- **User test/view:**
+  1. Open Notes with a current note and press Command+K. Verify **Open Trash** shows Shift+Command+T, **Delete Note** shows Shift+Command+Backspace, **Ask AI About This Note** shows Command+Enter, and **Format…** shows no shortcut.
+  2. Press Shift+Command+A and Shift+Command+Delete; verify neither changes the note, opens Agent Chat, nor opens a confirmation. Press Shift+Command+Backspace; verify **Move note to Trash** appears before any note count changes, then cancel and verify the note remains.
+  3. Use Command+Enter from Notes and verify the same Ask AI handoff runs as the titlebar button and Actions row. Use Command+F, Command+P, Command+[ / Command+], and the copy/move shortcuts; verify each produces one matching action.
+  4. Toggle Markdown preview, open and close Actions, then invoke another shortcut; verify focus remains in the visible preview rather than disappearing into the hidden editor. Repeat from a read-only `kit://scripts` preview.
+  5. Move a synthetic note to Trash. Verify Restore and Delete Permanently appear in Actions and the titlebar; Delete Permanently and Empty Trash both require confirmation, and cancel leaves Trash unchanged.
+  6. Run `SCRIPT_KIT_GPUI_BINARY="$PWD/target-agent/artifacts/cons-flow-c07/script-kit-gpui" bun scripts/agentic/cons-flow-ux/notes-actions-probe.ts`; expect `status:"PASS"`, six projection modes, `advertisedShortcutCount:18`, `activatedShortcutCount:18`, complete cleanup, and exact clipboard restoration.
+- **Intentional differences preserved:** Notes keeps host-local editor formatting shortcuts that are not visible `NotesAction` commands. Actions-only commands do not acquire fake chords. Read-only and no-current modes omit inapplicable actions instead of showing enabled fiction. Existing Notes layout, theme tokens, popup geometry, glass material, and locked motion timing are unchanged.
 
 ## Verification ledger
 

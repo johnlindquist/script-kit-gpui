@@ -174,11 +174,16 @@ pub fn keystroke_to_shortcut(key: &str, modifiers: &gpui::Modifiers) -> String {
     }
 
     let key_lower = key.to_lowercase();
+    let canonical_key = match key_lower.as_str() {
+        "bracketleft" => "[",
+        "bracketright" => "]",
+        _ => key_lower.as_str(),
+    };
     let mut result = parts.join("+");
     if !result.is_empty() {
         result.push('+');
     }
-    result.push_str(&key_lower);
+    result.push_str(canonical_key);
     result
 }
 
@@ -227,5 +232,15 @@ mod tests {
 
         let modifiers = gpui::Modifiers::default();
         assert_eq!(keystroke_to_shortcut("A", &modifiers), "a");
+    }
+
+    #[test]
+    fn keystroke_to_shortcut_normalizes_named_bracket_keys() {
+        let modifiers = gpui::Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        assert_eq!(keystroke_to_shortcut("bracketleft", &modifiers), "cmd+[");
+        assert_eq!(keystroke_to_shortcut("bracketright", &modifiers), "cmd+]");
     }
 }

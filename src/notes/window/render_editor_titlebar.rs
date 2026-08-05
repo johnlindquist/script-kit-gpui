@@ -6,12 +6,19 @@ impl NotesApp {
     /// not a mode — it never displays a toggled/selected state, and the Notes
     /// window stays open.
     pub(super) fn render_ask_ai_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        Button::new("notes-ask-ai")
+        let Some(descriptor) = crate::notes::notes_action_for_id(
+            self.notes_action_context(),
+            NotesAction::SendToAi.id(),
+        ) else {
+            return div().into_any_element();
+        };
+        let action = descriptor.action;
+        Button::new(descriptor.semantic_action_id)
             .ghost()
             .xsmall()
-            .label("Ask AI")
-            .on_click(cx.listener(|this, _, _window, cx| {
-                let _ = this.handoff_selected_note_to_main_agent_chat("NotesTitlebarAskAi", cx);
+            .label(descriptor.label)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.handle_action(action, window, cx);
             }))
             .into_any_element()
     }
@@ -22,6 +29,19 @@ impl NotesApp {
         is_trash: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let actions = (has_selection && is_trash)
+            .then(|| {
+                let context = self.notes_action_context();
+                Some((
+                    crate::notes::notes_action_for_id(context, NotesAction::RestoreNote.id())?,
+                    crate::notes::notes_action_for_id(
+                        context,
+                        NotesAction::PermanentlyDeleteNote.id(),
+                    )?,
+                ))
+            })
+            .flatten();
+
         div()
             .w(px(TITLEBAR_ICONS_W))
             .flex_shrink_0()
@@ -29,28 +49,34 @@ impl NotesApp {
             .items_center()
             .justify_end()
             .gap_1()
-            .when(has_selection && is_trash, |d| {
+            .when_some(actions, |d, (restore, permanently_delete)| {
+                let restore_action = restore.action;
+                let permanently_delete_action = permanently_delete.action;
+                let restore_shortcut = restore
+                    .shortcut
+                    .map(crate::components::hint_strip::compact_shortcut_display_string)
+                    .unwrap_or_default();
                 d.child(
                     div()
                         .flex()
                         .items_center()
                         .gap_1()
                         .child(
-                            Button::new("restore")
+                            Button::new(restore.semantic_action_id)
                                 .ghost()
                                 .xsmall()
-                                .label("Restore (⌘Z)")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.restore_note(window, cx);
+                                .label(format!("{} ({restore_shortcut})", restore.label))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.handle_action(restore_action, window, cx);
                                 })),
                         )
                         .child(
-                            Button::new("permanent-delete")
+                            Button::new(permanently_delete.semantic_action_id)
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::Delete)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.permanently_delete_note(window, cx);
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.handle_action(permanently_delete_action, window, cx);
                                 })),
                         ),
                 )

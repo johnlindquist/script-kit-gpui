@@ -83,19 +83,6 @@ fn test_resolve_selected_note_returns_note_when_selection_exists() {
 }
 
 #[test]
-fn test_cmd_f_dispatches_search_on_window_when_notes_shortcut_runs() {
-    const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");
-    assert!(
-        KEYBOARD_SOURCE.contains("window.dispatch_action(Box::new(Search), cx);"),
-        "Notes cmd+f shortcut should dispatch Search through the current window"
-    );
-    assert!(
-        !KEYBOARD_SOURCE.contains("cx.dispatch_action(&Search);"),
-        "Notes cmd+f shortcut should not dispatch Search through app context"
-    );
-}
-
-#[test]
 fn test_notes_keyboard_checks_ghost_acceptance_before_tab_indentation() {
     const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");
     let dialog_guard = KEYBOARD_SOURCE
@@ -355,35 +342,6 @@ fn test_notes_editor_disables_dynamic_code_editor_bottom_margin() {
 }
 
 #[test]
-fn test_notes_keyboard_handles_named_bracket_keys_when_platform_navigation_shortcuts_run() {
-    const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");
-    assert!(
-        KEYBOARD_SOURCE.contains("fn is_key_left_bracket(key: &str) -> bool"),
-        "Notes keyboard should define a left bracket key helper"
-    );
-    assert!(
-        KEYBOARD_SOURCE.contains("key == \"[\" || key.eq_ignore_ascii_case(\"bracketleft\")"),
-        "Left bracket helper should match '[' and 'bracketleft'"
-    );
-    assert!(
-        KEYBOARD_SOURCE.contains("fn is_key_right_bracket(key: &str) -> bool"),
-        "Notes keyboard should define a right bracket key helper"
-    );
-    assert!(
-        KEYBOARD_SOURCE.contains("key == \"]\" || key.eq_ignore_ascii_case(\"bracketright\")"),
-        "Right bracket helper should match ']' and 'bracketright'"
-    );
-    assert!(
-        KEYBOARD_SOURCE.contains("key if is_key_left_bracket(key) => {"),
-        "Notes keyboard should use left bracket helper for navigate_back"
-    );
-    assert!(
-        KEYBOARD_SOURCE.contains("key if is_key_right_bracket(key) => {"),
-        "Notes keyboard should use right bracket helper for navigate_forward"
-    );
-}
-
-#[test]
 fn test_notes_keyboard_stops_propagation_when_escape_closes_actions_panel() {
     const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");
     // Scope to the live handler: the escape_dismiss_ladder earlier in the file
@@ -434,52 +392,6 @@ fn test_notes_keyboard_stops_propagation_for_cmd_k_actions_toggle() {
     assert!(
         open_idx < stop_idx,
         "Cmd+K branch should stop propagation after toggling the actions panel"
-    );
-}
-
-#[test]
-fn test_notes_keyboard_stops_propagation_for_cmd_p_browse_toggle() {
-    const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");
-    let branch = "key if key.eq_ignore_ascii_case(\"p\") => {";
-    let branch_start = KEYBOARD_SOURCE
-        .find(branch)
-        .expect("Expected cmd+p branch in keyboard.rs");
-    let branch_slice =
-        &KEYBOARD_SOURCE[branch_start..(branch_start + 640).min(KEYBOARD_SOURCE.len())];
-
-    let open_idx = branch_slice
-        .find("self.open_browse_panel(window, cx);")
-        .expect("Expected open_browse_panel call in cmd+p branch");
-    let stop_idx = branch_slice
-        .rfind("cx.stop_propagation();")
-        .expect("Expected cx.stop_propagation call in cmd+p branch");
-
-    assert!(
-        open_idx < stop_idx,
-        "Cmd+P branch should stop propagation after toggling the browse panel"
-    );
-}
-
-#[test]
-fn test_notes_keyboard_stops_propagation_for_cmd_n_new_note() {
-    const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");
-    let branch = "key if key.eq_ignore_ascii_case(\"n\") => {";
-    let branch_start = KEYBOARD_SOURCE
-        .find(branch)
-        .expect("Expected cmd+n branch in keyboard.rs");
-    let branch_slice =
-        &KEYBOARD_SOURCE[branch_start..(branch_start + 384).min(KEYBOARD_SOURCE.len())];
-
-    let create_idx = branch_slice
-        .find("self.create_note(window, cx);")
-        .expect("Expected create_note call in cmd+n branch");
-    let stop_idx = branch_slice
-        .find("cx.stop_propagation();")
-        .expect("Expected cx.stop_propagation call in cmd+n branch");
-
-    assert!(
-        create_idx < stop_idx,
-        "Cmd+N branch should stop propagation after creating a note"
     );
 }
 
@@ -701,20 +613,6 @@ fn test_notes_keyboard_stops_propagation_at_start_of_global_escape_chain() {
 }
 
 #[test]
-fn test_notes_keyboard_delete_shortcut_routes_through_confirmation_helper() {
-    const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");
-    assert!(
-        KEYBOARD_SOURCE.contains("pub(super) fn handle_platform_delete_shortcut")
-            && KEYBOARD_SOURCE.contains("self.request_delete_selected_note(window, cx);"),
-        "Notes keyboard delete shortcut should route through the confirmation helper"
-    );
-    assert!(
-        KEYBOARD_SOURCE.contains("notes_delete_shortcut_requesting_confirmation"),
-        "Delete shortcut helper should emit a structured confirmation-request log"
-    );
-}
-
-#[test]
 fn test_notes_keyboard_delete_shortcut_works_in_trash_view() {
     const KEYBOARD_SOURCE: &str = include_str!("keyboard.rs");
     // The trash-view guard was removed so the delete shortcut routes through
@@ -731,15 +629,6 @@ fn test_delete_dialog_cancel_restores_primary_focus_after_dialog() {
     assert!(
         NOTES_SOURCE.contains("this.restore_primary_focus_after_dialog(window, cx);"),
         "Cancel should restore focus after the dialog lifecycle completes"
-    );
-}
-
-#[test]
-fn test_delete_note_by_id_restores_editor_focus_via_focus_surface() {
-    const NOTES_SOURCE: &str = include_str!("notes.rs");
-    assert!(
-        NOTES_SOURCE.contains("self.request_focus_surface(NotesFocusSurface::Editor, window, cx);"),
-        "Confirmed delete should restore editor focus via the immediate focus-surface pattern"
     );
 }
 
@@ -868,22 +757,6 @@ fn test_delete_dialog_width_prefers_viewport_but_falls_back_when_zero() {
 }
 
 #[test]
-fn test_permanent_delete_accepts_window_and_restores_selection_or_focus() {
-    const NOTES_SOURCE: &str = include_str!("notes.rs");
-    assert!(
-        NOTES_SOURCE.contains("fn permanently_delete_note(")
-            && NOTES_SOURCE.contains("window: &mut Window,"),
-        "Permanent delete should accept window so it can restore editor state"
-    );
-    assert!(
-        NOTES_SOURCE.contains("self.select_note_without_focus(next_note.id, window, cx);")
-            && NOTES_SOURCE
-                .contains("self.request_focus_surface(NotesFocusSurface::Editor, window, cx);"),
-        "Permanent delete should update selection without early focus and restore via focus surface"
-    );
-}
-
-#[test]
 fn test_notes_render_does_not_apply_pending_focus_surface_in_render() {
     const RENDER_SOURCE: &str = include_str!("render.rs");
     assert!(
@@ -901,16 +774,6 @@ fn test_delete_dialog_requests_dialog_focus_surface_before_opening() {
     );
 }
 
-#[test]
-fn test_confirmed_delete_updates_selection_without_early_editor_refocus() {
-    const NOTES_SOURCE: &str = include_str!("notes.rs");
-    assert!(
-        NOTES_SOURCE.contains("self.select_note_without_focus(next_note.id, window, cx);")
-            && NOTES_SOURCE
-                .contains("self.request_focus_surface(NotesFocusSurface::Editor, window, cx);"),
-        "Confirmed delete should update selection first and restore editor focus after dialog dismissal"
-    );
-}
 #[test]
 fn notes_entry_reveal_rejects_stale_callbacks_after_cancel_and_restart() {
     let mut reveal = super::NotesEntryReveal::new(41);

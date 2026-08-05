@@ -136,330 +136,105 @@ fn has_invalid_note_switcher_note_info(note: &NoteSwitcherNoteInfo) -> bool {
 
 /// Get actions for the Notes window command bar (Cmd+K menu).
 pub fn get_notes_command_bar_actions(info: &NotesInfo) -> Vec<Action> {
-    let mut actions = Vec::new();
-    let action_plan = NotesCommandBarActionPlan::from_info(info);
+    let context = crate::notes::NotesActionContext {
+        surface: if info.is_trash_view {
+            crate::notes::NotesActionSurface::Trash
+        } else {
+            crate::notes::NotesActionSurface::Editor
+        },
+        has_current_note: info.has_selection,
+        auto_sizing_enabled: info.auto_sizing_enabled,
+    };
+    get_notes_command_bar_actions_for_context(context)
+}
 
-    actions.push(
-        Action::new(
-            "new_note",
-            "New Note",
-            Some("Creates a new note".to_string()),
-            ActionCategory::ScriptContext,
-        )
-        .with_shortcut("⌘N")
-        .with_icon(IconName::Plus)
-        .with_section("Notes"),
-    );
+pub(crate) fn get_notes_command_bar_actions_for_context(
+    context: crate::notes::NotesActionContext,
+) -> Vec<Action> {
+    crate::notes::notes_action_descriptors(context)
+        .into_iter()
+        .map(notes_command_bar_action_from_descriptor)
+        .collect()
+}
 
-    if action_plan.has_trash_note_actions() {
-        actions.push(
-            Action::new(
-                "restore_note",
-                "Restore Note",
-                Some("Restores the current note from Trash".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⌘Z")
-            .with_icon(IconName::Refresh)
-            .with_section("Trash"),
-        );
+fn notes_command_bar_action_from_descriptor(
+    descriptor: crate::notes::NotesActionDescriptor,
+) -> Action {
+    let mut action = Action::new(
+        descriptor.id,
+        descriptor.label,
+        Some(notes_action_description(descriptor.action).to_string()),
+        ActionCategory::ScriptContext,
+    )
+    .with_shortcut_opt(descriptor.shortcut.map(str::to_string))
+    .with_icon(descriptor.action.icon())
+    .with_section(notes_action_section(descriptor.action));
 
-        actions.push(
-            Action::new(
-                "permanently_delete_note",
-                "Delete Permanently",
-                Some("Permanently deletes the current note".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_icon(IconName::Trash)
-            .with_section("Trash"),
-        );
-    } else if action_plan.has_active_note_actions() {
-        actions.push(
-            Action::new(
-                "duplicate_note",
-                "Duplicate Note",
-                Some("Creates a copy of the current note".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⌘D")
-            .with_icon(IconName::Copy)
-            .with_section("Notes"),
-        );
-
-        actions.push(
-            Action::new(
-                "delete_note",
-                "Delete Note",
-                Some("Moves the current note to Trash".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut_opt(
-                crate::notes::NotesAction::DeleteNote
-                    .shortcut_hint()
-                    .map(String::from),
-            )
-            .with_icon(IconName::Trash)
-            .with_section("Notes"),
-        );
+    if let Some(reason) = descriptor.disabled_reason() {
+        action = action.disabled(reason);
     }
+    action
+}
 
-    actions.push(
-        Action::new(
-            "browse_notes",
-            "Switch Note",
-            Some("Opens the note switcher".to_string()),
-            ActionCategory::ScriptContext,
-        )
-        .with_shortcut("⌘P")
-        .with_icon(IconName::FolderOpen)
-        .with_section("Notes"),
-    );
-
-    actions.push(
-        Action::new(
-            "toggle_preview",
-            "Toggle Preview",
-            Some("Toggles Markdown preview mode".to_string()),
-            ActionCategory::ScriptContext,
-        )
-        .with_shortcut("⇧⌘P")
-        .with_icon(IconName::Code)
-        .with_section("Notes"),
-    );
-
-    actions.push(
-        Action::new(
-            "history_back",
-            "History Back",
-            Some("Returns to the previous note selection".to_string()),
-            ActionCategory::ScriptContext,
-        )
-        .with_shortcut("⌘[")
-        .with_icon(IconName::Refresh)
-        .with_section("Navigation"),
-    );
-
-    actions.push(
-        Action::new(
-            "history_forward",
-            "History Forward",
-            Some("Moves forward in note selection history".to_string()),
-            ActionCategory::ScriptContext,
-        )
-        .with_shortcut("⌘]")
-        .with_icon(IconName::ArrowRight)
-        .with_section("Navigation"),
-    );
-
-    if action_plan.is_trash_view() {
-        actions.push(
-            Action::new(
-                "back_to_notes",
-                "Back to Notes",
-                Some("Returns to active notes".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_icon(IconName::FolderOpen)
-            .with_section("Trash"),
-        );
-
-        actions.push(
-            Action::new(
-                "empty_trash",
-                "Empty Trash",
-                Some("Permanently deletes every note in Trash".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_icon(IconName::Trash)
-            .with_section("Trash"),
-        );
-    } else {
-        actions.push(
-            Action::new(
-                "cycle_sort_mode",
-                "Cycle Sort",
-                Some("Cycles Notes sorting by updated, created, or title".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⇧⌘S")
-            .with_icon(IconName::Refresh)
-            .with_section("Notes"),
-        );
-
-        actions.push(
-            Action::new(
-                "open_trash",
-                "Open Trash",
-                Some("Shows deleted notes".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_icon(IconName::Trash)
-            .with_section("Trash"),
-        );
+fn notes_action_description(action: crate::notes::NotesAction) -> &'static str {
+    use crate::notes::NotesAction;
+    match action {
+        NotesAction::NewNote => "Creates a new note",
+        NotesAction::DuplicateNote => "Creates a copy of the current note",
+        NotesAction::BrowseNotes => "Opens the note switcher",
+        NotesAction::TogglePreview => "Toggles Markdown preview mode",
+        NotesAction::CycleSortMode => "Cycles Notes sorting by updated, created, or title",
+        NotesAction::OpenTrash => "Shows deleted notes",
+        NotesAction::EmptyTrash => "Permanently deletes every note in Trash",
+        NotesAction::BackToNotes => "Returns to active notes",
+        NotesAction::HistoryBack => "Returns to the previous note selection",
+        NotesAction::HistoryForward => "Moves forward in note selection history",
+        NotesAction::FindInNote => "Searches within the current note",
+        NotesAction::CopyNoteAs => "Copies the note as Markdown",
+        NotesAction::CopyDeeplink => "Copies a deeplink to this note",
+        NotesAction::CreateQuicklink => "Copies a Markdown quicklink",
+        NotesAction::CopyBacklinks => "Copies notes that link here",
+        NotesAction::Export => "Copies the note as HTML",
+        NotesAction::MoveListItemUp => "Moves the current line up",
+        NotesAction::MoveListItemDown => "Moves the current line down",
+        NotesAction::Format => "Opens the formatting toolbar",
+        NotesAction::DeleteNote => "Moves the current note to Trash",
+        NotesAction::RestoreNote => "Restores the current note from Trash",
+        NotesAction::PermanentlyDeleteNote => "Permanently deletes the current note",
+        NotesAction::EnableAutoSizing => "Toggles whether the window resizes to match content",
+        NotesAction::ResetWindowPosition => {
+            "Moves the window to its default position on the active display"
+        }
+        NotesAction::SendToAi => {
+            "Open the main window's Agent Chat with this note staged as @note context"
+        }
+        NotesAction::Cancel => "Closes the action menu",
     }
+}
 
-    if action_plan.has_active_note_actions() {
-        actions.push(
-            Action::new(
-                "find_in_note",
-                "Find in Note",
-                Some("Searches within the current note".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⌘F")
-            .with_icon(IconName::MagnifyingGlass)
-            .with_section("Edit"),
-        );
-
-        actions.push(
-            Action::new(
-                "format",
-                "Format...",
-                Some("Opens the formatting toolbar".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⇧⌘T")
-            .with_icon(IconName::Code)
-            .with_section("Edit"),
-        );
-
-        actions.push(
-            Action::new(
-                "move_list_item_up",
-                "Move List Item Up",
-                Some("Moves the current line up".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⌃⌘↑")
-            .with_icon(IconName::ArrowUp)
-            .with_section("Edit"),
-        );
-
-        actions.push(
-            Action::new(
-                "move_list_item_down",
-                "Move List Item Down",
-                Some("Moves the current line down".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⌃⌘↓")
-            .with_icon(IconName::ArrowDown)
-            .with_section("Edit"),
-        );
+fn notes_action_section(action: crate::notes::NotesAction) -> &'static str {
+    use crate::notes::NotesAction;
+    match action {
+        NotesAction::RestoreNote
+        | NotesAction::PermanentlyDeleteNote
+        | NotesAction::BackToNotes
+        | NotesAction::EmptyTrash
+        | NotesAction::OpenTrash => "Trash",
+        NotesAction::HistoryBack | NotesAction::HistoryForward => "Navigation",
+        NotesAction::FindInNote
+        | NotesAction::Format
+        | NotesAction::MoveListItemUp
+        | NotesAction::MoveListItemDown => "Edit",
+        NotesAction::CopyNoteAs
+        | NotesAction::CopyDeeplink
+        | NotesAction::CreateQuicklink
+        | NotesAction::CopyBacklinks => "Copy",
+        NotesAction::Export => "Export",
+        NotesAction::SendToAi => "AI",
+        NotesAction::EnableAutoSizing => "Settings",
+        NotesAction::ResetWindowPosition => "Window",
+        _ => "Notes",
     }
-
-    if action_plan.has_active_note_actions() {
-        actions.push(
-            Action::new(
-                "copy_note_as",
-                "Copy Note as Markdown",
-                Some("Copies the note as Markdown".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⇧⌘C")
-            .with_icon(IconName::Copy)
-            .with_section("Copy"),
-        );
-
-        actions.push(
-            Action::new(
-                "copy_deeplink",
-                "Copy Deeplink",
-                Some("Copies a deeplink to this note".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut_opt(
-                crate::notes::NotesAction::CopyDeeplink
-                    .shortcut_hint()
-                    .map(String::from),
-            )
-            .with_icon(IconName::ArrowRight)
-            .with_section("Copy"),
-        );
-
-        actions.push(
-            Action::new(
-                "create_quicklink",
-                "Create Quicklink",
-                Some("Copies a Markdown quicklink".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⇧⌘L")
-            .with_icon(IconName::Star)
-            .with_section("Copy"),
-        );
-
-        actions.push(
-            Action::new(
-                "copy_backlinks",
-                "Copy Backlinks",
-                Some("Copies notes that link here".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_icon(IconName::FolderOpen)
-            .with_section("Copy"),
-        );
-
-        actions.push(
-            Action::new(
-                "export",
-                "Copy as HTML",
-                Some("Copies the note as HTML".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⇧⌘E")
-            .with_icon(IconName::ArrowRight)
-            .with_section("Export"),
-        );
-    }
-
-    if action_plan.has_active_note_actions() {
-        actions.push(
-            Action::new(
-                "send_to_ai",
-                "Ask AI About This Note",
-                Some(
-                    "Open the main window's Agent Chat with this note staged as @note context"
-                        .to_string(),
-                ),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⇧⌘A")
-            .with_icon(IconName::BoltFilled)
-            .with_section("AI"),
-        );
-    }
-
-    actions.push(
-        Action::new(
-            "toggle_auto_sizing",
-            if action_plan.needs_auto_sizing_action() {
-                "Enable Auto-Sizing"
-            } else {
-                "Disable Auto-Sizing"
-            },
-            Some("Toggles whether the window resizes to match content".to_string()),
-            ActionCategory::ScriptContext,
-        )
-        .with_icon(IconName::Settings)
-        .with_section("Settings"),
-    );
-
-    // Always available: this is the recovery path for a window dragged
-    // off-screen, so it must not depend on selection or view mode.
-    actions.push(
-        Action::new(
-            "reset_window_position",
-            "Reset Window Position",
-            Some("Moves the window to its default position on the active display".to_string()),
-            ActionCategory::ScriptContext,
-        )
-        .with_icon(IconName::Refresh)
-        .with_section("Window"),
-    );
-
-    actions
 }
 
 #[cfg(test)]
@@ -565,7 +340,7 @@ mod tests {
             .expect("missing permanently_delete_note action");
 
         assert_eq!(restore_note.title, "Restore Note");
-        assert_eq!(restore_note.shortcut.as_deref(), Some("⌘Z"));
+        assert_eq!(restore_note.shortcut.as_deref(), Some("cmd+z"));
         assert_eq!(
             restore_note.description.as_deref(),
             Some("Restores the current note from Trash")

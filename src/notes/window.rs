@@ -715,6 +715,9 @@ pub struct NotesApp {
     /// Brief action feedback message shown in footer (e.g. "Deleted", "Pinned", "Duplicated")
     /// Tuple of (message, accent_colored, timestamp). Clears after 2 seconds.
     action_feedback: Option<(String, bool, Instant)>,
+    /// Privacy-safe execution receipt shared by pointer, Actions, and shortcut routes.
+    last_notes_action_id: Option<&'static str>,
+    notes_action_execution_generation: u64,
 
     /// Pending focus surface request — applied in the next render frame.
     /// Used to defer focus changes until after dialog dismissal completes.
@@ -786,7 +789,10 @@ pub use window_ops::{
     open_notes_window_without_launcher_restore, quick_capture, save_note_with_content,
     save_note_with_content_and_source, toggle_notes_popup_for_automation,
 };
-pub(crate) use window_ops::{get_notes_document_identity_spec, update_notes_window_detached};
+pub(crate) use window_ops::{
+    get_notes_document_identity_spec, get_notes_titlebar_action_descriptors,
+    update_notes_window_detached,
+};
 
 #[cfg(test)]
 mod tests;

@@ -79,34 +79,17 @@ impl ScriptListApp {
             },
         );
 
-        if has_cmd && has_shift && key_lower == "p" && simulate_key_target_is_notes {
-            if let Some((notes_entity, notes_handle)) = notes::get_notes_app_entity_and_handle() {
-                let _ =
-                    notes::update_notes_window_detached(notes_handle, ctx, |notes_window, cx| {
-                        notes_entity.update(cx, |app, cx| {
-                            app.toggle_preview(notes_window, cx);
-                        });
-                    });
-                logging::log("STDIN", "SimulateKey: Cmd+Shift+P - toggle Notes preview");
-                return;
-            }
-        }
-        // Cmd+K / Cmd+P mirror the live Notes keyboard arms (actions command
-        // bar / note switcher) so target-scoped simulateKey can drive the same
-        // popups the user sees.
+        // Cmd+K is host chrome rather than a NotesAction descriptor, so its
+        // target-scoped automation arm remains explicit. Cmd+P and every other
+        // advertised Notes chord continue through the descriptor route below.
         if has_cmd
             && !has_shift
             && !_has_alt
             && !_has_ctrl
             && simulate_key_target_is_notes
-            && (key_lower == "k" || key_lower == "p")
+            && key_lower == "k"
         {
-            let popup = if key_lower == "k" {
-                "actions"
-            } else {
-                "noteSwitcher"
-            };
-            match notes::toggle_notes_popup_for_automation(ctx, popup) {
+            match notes::toggle_notes_popup_for_automation(ctx, "actions") {
                 Ok(result) => {
                     logging::log(
                         "STDIN",
@@ -183,25 +166,7 @@ impl ScriptListApp {
                 }
             }
         }
-        if simulate_key_target_is_notes
-            && ((has_cmd
-                && !has_shift
-                && !_has_alt
-                && !_has_ctrl
-                && (key_lower == "enter" || key_lower == "."))
-                || (!has_cmd
-                    && !_has_alt
-                    && !_has_ctrl
-                    && (key_lower == "enter"
-                        || key_lower == "return"
-                        || key_lower == "escape"
-                        || key_lower == "esc"
-                        || key_lower == "tab"
-                        || key_lower == "up"
-                        || key_lower == "arrowup"
-                        || key_lower == "down"
-                        || key_lower == "arrowdown")))
-        {
+        if simulate_key_target_is_notes {
             match notes::handle_notes_editor_key_for_automation(
                 ctx, key, has_cmd, has_shift, _has_ctrl, _has_alt,
             ) {
