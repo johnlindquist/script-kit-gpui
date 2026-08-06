@@ -2189,6 +2189,14 @@ pub fn delete_note_cart_items(note_id: NoteId, item_ids: &[String]) -> Result<us
     if item_ids.is_empty() {
         return Ok(0);
     }
+    if std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() == Some("1")
+        && std::env::var("SCRIPT_KIT_TEST_NOTES_CART_DELETE_FAIL")
+            .ok()
+            .as_deref()
+            == Some("1")
+    {
+        anyhow::bail!("test fixture refused note cart consumption");
+    }
 
     let db = get_db()?;
     let mut conn = db.lock().map_err(db_lock_err)?;

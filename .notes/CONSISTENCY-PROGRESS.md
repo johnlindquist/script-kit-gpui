@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 39 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 40 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -18,7 +18,7 @@
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
-| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C09 complete; WF-013, WF-014, and WF-015 verified |
+| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C10 complete; WF-016 verified |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
 ## How to view the baseline proposal explorer
@@ -865,6 +865,25 @@
   5. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c09/script-kit-gpui" bun scripts/agentic/cons-flow-ux/notes-agent-chat-return-probe.ts`; expect whole-note staging, exact Notes restore, redacted receipts, and complete cleanup to pass.
   6. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c09/script-kit-gpui" bun scripts/agentic/cons-flow-ux/notes-today-probe.ts`; expect all four scenarios to pass and `exactArtifactOwnedProcessCount:0`.
 - **Intentional differences preserved:** Notes restoration targets a separate native Notes window; Today restoration reuses an embedded main-window entity. Their generation tokens differ by host, but both reject stale callbacks and preserve live unsaved state without forcing persistence.
+
+### WF-016 — Consume Notes cart attachments transactionally after exact Agent Chat staging
+
+- **Status:** Complete. Notes now materializes one immutable primary item and one explicit attachment mapping per persisted cart row, and consumes each row only from its own typed Agent Chat staging outcome.
+- **Commit boundary:** Workflow Safety C10 — `fix(notes-agent-chat): consume cart items transactionally [WF-016]`.
+- **Changed behavior:** The entire live note, return snapshot, cart rows, context item IDs, and idempotency keys are captured before the main window changes. The primary note stages first. A primary refusal leaves Notes, Agent Chat, and every cart row unchanged. Accepted and canonical-duplicate attachments are consumed; failed attachments remain for retry. A cart-delete failure reports **Opened in Agent Chat; cart was not cleared** and retains the source row. A suitable live main-window Standard Agent Chat keeps its thread, draft, pending context, and messages. An unsuitable main host opens the proper embedded Standard chat; a detached chat is never reused or mutated. Main activation occurs only after primary staging, and every route remains composer-only.
+- **Exact owners:** `src/notes/window/ai_handoff.rs::{NotesAiHandoffPayload,NotesHandoffAttachment,NotesContextStageOutcome,NotesSupplementStageOutcome,NotesAiMainHandoffOutcome,consume_staged_cart_rows}`; `src/ai/agent_chat/ui/thread.rs::stage_prebuilt_context_item`; `src/ai/agent_chat/ui/view.rs::{stage_primary_context_item_from_host_preserving_composer,stage_supplemental_context_items_from_host}`; `src/app_impl/agent_handoff/agent_chat_entry.rs::{open_agent_chat_from_notes,open_tab_ai_agent_chat_for_notes_handoff,stage_notes_handoff_supplements}`; `src/main_entry/app_run_setup.rs`; `src/notes/storage.rs::delete_note_cart_items`; and `src/notes/window/navigation.rs`.
+- **Compatibility/migration:** Existing Notes action IDs and Command+Enter stay unchanged. The binary-registered cross-window hook now returns typed primary/per-item outcomes rather than `Result<bool, String>`. Existing generic Notes entry construction remains a compatibility adapter, while the Notes window uses the transactional payload directly. Context dedupe preserves the existing winning item ID, primary-over-supplemental priority, and provenance priority. Test-only refusal/delete fixtures require `SCRIPT_KIT_TEST_STATUS=1` and explicit named environment flags.
+- **Focused tests/build:** Notes handoff model PASS (10/10), including primary atomicity, accepted/duplicate/failed consumption, forged idempotency rejection, and redacted debug. Staged-context provenance/dedupe PASS (4/4). Library and binary compilation PASS; stable product build PASS. Artifact: `target-agent/artifacts/cons-flow-c10/script-kit-gpui`; SHA-256 `99243f05e6e3cb6b5bdca9d8e396095e6786006d95f0f2e396e177351230665c`.
+- **Runtime receipt:** `.test-output/cons-flow-c10/notes-handoff-receipt.json` → PASS. The first scenario stages one accepted and one refused attachment, consumes only the accepted row, then stages the same canonical attachment into the still-live main chat and receives `duplicate`, consumes that row, keeps the failure, preserves the exact draft/thread/context count, leaves message count zero, observes the bounded immutable re-entrant retry, and proves the detached fixture is byte-fingerprint unchanged. The primary-failure scenario consumes zero rows and preserves the source. The cart-delete-failure scenario stages the attachment, reports `stagedCartRetained`, consumes zero, and keeps the row.
+- **Negative controls:** A primary failure produces no supplemental outcomes and no consumption. An unknown or mismatched `(cart_item_id,idempotency_key)` cannot authorize deletion. Missing per-item outcomes count as partial failure rather than success. A request-ID mismatch fails closed. Refused supplemental rows stay persisted. Cart deletion cannot retroactively turn successful staging into failure or silently remove a row. Repeated canonical context does not add another chip. The runtime matrix requires zero auto-submitted messages, unchanged detached state, exact Driver finalization, database cleanup, and `exactArtifactOwnedProcessCount:0`.
+- **User test/view:**
+  1. Open a saved Note with two cart attachments, then press Command+Enter. Verify Agent Chat appears with the note and both eligible attachment chips already present before interaction, while no message sends.
+  2. Leave text in the main Agent Chat composer and repeat the Notes handoff. Verify the same main thread/draft remains and duplicate context appears only once.
+  3. Use a missing or refused attachment fixture. Verify the valid attachment leaves the Notes cart, the failed attachment remains, and feedback says some attachments remain.
+  4. Trigger a primary staging refusal (for example, an active blocking portal/save overlay). Verify Notes stays intact, Agent Chat is not replaced, and every cart row remains.
+  5. Trigger a cart-storage deletion failure after successful staging. Verify Agent Chat keeps the staged chip, Notes reports that the cart was not cleared, and the row remains available for retry.
+  6. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c10/script-kit-gpui" bun scripts/agentic/cons-flow-ux/notes-handoff-probe.ts`; expect all three scenarios to pass, privacy flags false, complete Driver cleanup, and `exactArtifactOwnedProcessCount:0`.
+- **Intentional differences preserved:** Notes owns persisted cart consumption and feedback; Agent Chat owns context admission, canonical dedupe, and thread state. A detached Agent Chat remains a separate host and is never selected as the destination for a Notes handoff.
 
 ## Verification ledger
 

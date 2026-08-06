@@ -18,6 +18,8 @@ pub(crate) enum NotesAiHandoffError {
     NoNoteOrDraft,
     /// The main window handle is not registered (even after one retry).
     MainWindowUnavailable,
+    /// Persisted cart attachments could not be materialized before dispatch.
+    CartLoadFailed,
     /// The main window refused or failed to stage the context.
     MainStagingFailed,
 }
@@ -27,23 +29,149 @@ impl NotesAiHandoffError {
         match self {
             Self::NoNoteOrDraft => "noNoteOrDraft",
             Self::MainWindowUnavailable => "mainWindowUnavailable",
+            Self::CartLoadFailed => "cartLoadFailed",
             Self::MainStagingFailed => "mainStagingFailed",
         }
     }
 }
 
+static NEXT_NOTES_HANDOFF_REQUEST_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+fn next_notes_handoff_request_id() -> String {
+    let generation =
+        NEXT_NOTES_HANDOFF_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("notes-handoff-{generation}")
+}
+
+/// One persisted Notes cart row mapped to one pre-materialized Agent Chat
+/// context item. The idempotency key remains stable across the bounded retry.
+#[derive(Clone)]
+pub(crate) struct NotesHandoffAttachment {
+    pub(crate) cart_item_id: String,
+    pub(crate) context_item: crate::ai::staged_context::StagedContextItem,
+    pub(crate) idempotency_key: String,
+}
+
+impl std::fmt::Debug for NotesHandoffAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NotesHandoffAttachment")
+            .field("cart_item_id_length", &self.cart_item_id.chars().count())
+            .field("context_item", &self.context_item)
+            .field(
+                "idempotency_key_fingerprint",
+                &fnv1a64_fingerprint(&self.idempotency_key),
+            )
+            .finish()
+    }
+}
+
+/// Per-item staging result returned synchronously by the main Agent Chat host.
+#[derive(Debug, Clone)]
+pub(crate) enum NotesContextStageOutcome {
+    Accepted {
+        context_item_id: crate::ai::staged_context::ContextItemId,
+    },
+    Duplicate {
+        winner_id: crate::ai::staged_context::ContextItemId,
+    },
+    Failed {
+        failure: crate::ai::reliability::AppFailureRecord,
+    },
+}
+
+impl NotesContextStageOutcome {
+    pub(crate) fn is_consumable(&self) -> bool {
+        matches!(self, Self::Accepted { .. } | Self::Duplicate { .. })
+    }
+
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Accepted { .. } => "accepted",
+            Self::Duplicate { .. } => "duplicate",
+            Self::Failed { .. } => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NotesSupplementStageOutcome {
+    pub(crate) cart_item_id: String,
+    pub(crate) idempotency_key: String,
+    pub(crate) outcome: NotesContextStageOutcome,
+}
+
+/// Typed main-host result. The Notes window consumes cart rows only from the
+/// per-item outcomes; a successful open alone is never sufficient evidence.
+#[derive(Debug, Clone)]
+pub(crate) struct NotesAiMainHandoffOutcome {
+    pub(crate) request_id: String,
+    pub(crate) primary: NotesContextStageOutcome,
+    pub(crate) supplements: Vec<NotesSupplementStageOutcome>,
+    pub(crate) destination_thread_id: Option<String>,
+    pub(crate) destination_generation: u64,
+    pub(crate) reused_existing_chat: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NotesAiMainHandoffFailure {
+    pub(crate) kind: NotesAiHandoffError,
+    pub(crate) failure: crate::ai::reliability::AppFailureRecord,
+}
+
+impl NotesAiMainHandoffFailure {
+    pub(crate) fn new(kind: NotesAiHandoffError, detail: &str) -> Self {
+        Self {
+            kind,
+            failure: crate::ai::reliability::context_unavailable_failure(detail),
+        }
+    }
+}
+
 /// Fully materialized handoff payload. Built BEFORE touching the main window
-/// so no later closure re-reads the Notes editor.
+/// so no later closure re-reads the Notes editor or cart.
 #[derive(Clone)]
 pub(crate) struct NotesAiHandoffPayload {
-    pub(crate) target: crate::ai::TabAiTargetContext,
+    pub(crate) request_id: String,
+    pub(crate) primary: crate::ai::staged_context::StagedContextItem,
     pub(crate) scope: crate::notes::ai_scope::NotesAiScope,
     pub(crate) return_snapshot: NotesHostReturnSnapshot,
-    pub(crate) supplemental_parts: Vec<crate::ai::message_parts::AiContextPart>,
+    pub(crate) supplements: Vec<NotesHandoffAttachment>,
     pub(crate) cart_note_id: Option<crate::notes::model::NoteId>,
-    pub(crate) cart_item_ids: Vec<String>,
     pub(crate) source: &'static str,
     pub(crate) is_draft: bool,
+}
+
+impl NotesAiHandoffPayload {
+    pub(crate) fn target(&self) -> &crate::ai::TabAiTargetContext {
+        match &self.primary.part {
+            crate::ai::message_parts::AiContextPart::FocusedTarget { target, .. } => target,
+            _ => unreachable!("Notes primary handoff item must be a FocusedTarget"),
+        }
+    }
+}
+
+fn consumable_cart_item_ids(
+    attachments: &[NotesHandoffAttachment],
+    outcome: &NotesAiMainHandoffOutcome,
+) -> Vec<String> {
+    if !outcome.primary.is_consumable() {
+        return Vec::new();
+    }
+    let mut seen = std::collections::HashSet::new();
+    outcome
+        .supplements
+        .iter()
+        .filter(|item| item.outcome.is_consumable())
+        .filter(|item| {
+            attachments.iter().any(|attachment| {
+                attachment.cart_item_id == item.cart_item_id
+                    && attachment.idempotency_key == item.idempotency_key
+            })
+        })
+        .filter(|item| seen.insert(item.cart_item_id.clone()))
+        .map(|item| item.cart_item_id.clone())
+        .collect()
 }
 
 /// Host-owned return token for Notes → main Agent Chat → Notes.
@@ -102,6 +230,9 @@ impl std::fmt::Debug for NotesHostReturnSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NotesAiHandoffStatus {
     Staged,
+    /// Primary staged and some cart rows remained because their individual
+    /// context items were refused.
+    StagedPartial,
     /// Context staged in main, but the persisted cart rows could not be
     /// deleted — the cart is retained for manual recovery.
     StagedCartRetained,
@@ -113,6 +244,7 @@ impl NotesAiHandoffStatus {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Staged => "staged",
+            Self::StagedPartial => "stagedPartial",
             Self::StagedCartRetained => "stagedCartRetained",
             Self::Blocked => "blocked",
             Self::Failed => "failed",
@@ -138,6 +270,10 @@ pub(crate) struct NotesAiHandoffReceipt {
     pub(crate) content_fingerprint: String,
     pub(crate) is_draft: bool,
     pub(crate) supplemental_part_count: usize,
+    pub(crate) supplemental_accepted_count: usize,
+    pub(crate) supplemental_duplicate_count: usize,
+    pub(crate) supplemental_failed_count: usize,
+    pub(crate) cart_consumed_count: usize,
     pub(crate) destination_window_id: &'static str,
     pub(crate) destination_surface: &'static str,
     pub(crate) staging_outcome: &'static str,
@@ -156,13 +292,11 @@ pub(crate) struct NotesAiHandoffReceipt {
 /// downcast the main window's root view itself; the binary registers the
 /// downcast-and-stage closure at app startup
 /// (`register_notes_ai_main_handoff_hook`).
-pub type NotesAiMainHandoffHook = fn(
-    crate::ai::TabAiTargetContext,
-    Vec<crate::ai::message_parts::AiContextPart>,
-    NotesHostReturnSnapshot,
-    &'static str,
-    &mut gpui::App,
-) -> Result<bool, String>;
+pub type NotesAiMainHandoffHook =
+    fn(
+        NotesAiHandoffPayload,
+        &mut gpui::App,
+    ) -> Result<NotesAiMainHandoffOutcome, NotesAiMainHandoffFailure>;
 
 static NOTES_AI_MAIN_HANDOFF_HOOK: std::sync::OnceLock<NotesAiMainHandoffHook> =
     std::sync::OnceLock::new();
@@ -374,60 +508,200 @@ impl NotesApp {
         }
     }
 
-    /// Materialize the complete immutable handoff payload: canonical target,
-    /// a generation-guarded Notes return token, deduplicated persisted cart
-    /// parts (the note body is NEVER duplicated as a supplemental part — the
-    /// target metadata already carries the live note and selection), and the
-    /// original cart row IDs for post-success consumption.
+    /// Materialize the complete immutable handoff payload: primary note item,
+    /// generation-guarded Notes return token, and one explicit mapping for
+    /// every persisted cart row. No main-window state is touched until this
+    /// succeeds, and no later closure re-reads the editor or cart.
     pub(crate) fn build_notes_ai_handoff_payload(
         &self,
         source: &'static str,
         cx: &Context<Self>,
     ) -> Result<NotesAiHandoffPayload, NotesAiHandoffError> {
         let (target, is_draft) = self.build_selected_note_ai_target(cx)?;
-
         let cart_note_id = self.selected_note_id;
-        let mut supplemental_parts: Vec<crate::ai::message_parts::AiContextPart> = Vec::new();
-        let mut cart_item_ids: Vec<String> = Vec::new();
+        let mut supplements = Vec::new();
 
         if let Some(note_id) = cart_note_id {
-            match crate::notes::storage::list_note_cart_items_deduped(note_id) {
-                Ok(items) => {
-                    for item in &items {
-                        let part = item.to_ai_context_part();
-                        if !supplemental_parts.iter().any(|existing| existing == &part) {
-                            supplemental_parts.push(part);
-                        }
+            let items = crate::notes::storage::list_note_cart_items(note_id).map_err(|error| {
+                tracing::warn!(
+                    target: "script_kit::tab_ai",
+                    event = "notes_ai_handoff_cart_load_failed",
+                    note_id = %note_id,
+                    error = %error,
+                );
+                NotesAiHandoffError::CartLoadFailed
+            })?;
+            supplements = items
+                .into_iter()
+                .map(|item| {
+                    let context_part = item.to_ai_context_part();
+                    let cart_item_id = item.id;
+                    let idempotency_key = format!("notes-cart:{}:{cart_item_id}", note_id.as_str());
+                    NotesHandoffAttachment {
+                        cart_item_id,
+                        context_item: crate::ai::staged_context::StagedContextItem::pending(
+                            context_part,
+                            crate::ai::staged_context::ContextProvenance::HostHandoff,
+                            crate::ai::staged_context::ContextRole::Supplemental,
+                        ),
+                        idempotency_key,
                     }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "script_kit::tab_ai",
-                        event = "notes_ai_handoff_cart_load_failed",
-                        note_id = %note_id,
-                        error = %error,
-                    );
-                }
-            }
-            if let Ok(items) = crate::notes::storage::list_note_cart_items(note_id) {
-                cart_item_ids = items.into_iter().map(|item| item.id).collect();
-            }
+                })
+                .collect();
         }
 
         let scope = crate::notes::ai_scope::NotesAiScope::WholeNote {
             document_id: target.semantic_id.clone(),
         };
         let return_snapshot = self.build_notes_host_return_snapshot(&target, cx);
+        let label = crate::ai::format_explicit_target_chip_label(&target);
+        let primary = crate::ai::staged_context::StagedContextItem::pending(
+            crate::ai::message_parts::AiContextPart::FocusedTarget { target, label },
+            crate::ai::staged_context::ContextProvenance::HostHandoff,
+            crate::ai::staged_context::ContextRole::Primary,
+        );
         Ok(NotesAiHandoffPayload {
-            target,
+            request_id: next_notes_handoff_request_id(),
+            primary,
             scope,
             return_snapshot,
-            supplemental_parts,
+            supplements,
             cart_note_id,
-            cart_item_ids,
             source,
             is_draft,
         })
+    }
+
+    fn consume_staged_cart_rows(
+        payload: &NotesAiHandoffPayload,
+        outcome: &NotesAiMainHandoffOutcome,
+    ) -> (NotesAiHandoffStatus, usize) {
+        if !outcome.primary.is_consumable() {
+            return (NotesAiHandoffStatus::Failed, 0);
+        }
+        let consumable_ids = consumable_cart_item_ids(&payload.supplements, outcome);
+        let explicit_failed_count = outcome
+            .supplements
+            .iter()
+            .filter(|item| !item.outcome.is_consumable())
+            .count();
+        let reported_ids = outcome
+            .supplements
+            .iter()
+            .filter(|item| {
+                payload.supplements.iter().any(|attachment| {
+                    attachment.cart_item_id == item.cart_item_id
+                        && attachment.idempotency_key == item.idempotency_key
+                })
+            })
+            .map(|item| item.cart_item_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let failed_count =
+            explicit_failed_count + payload.supplements.len().saturating_sub(reported_ids.len());
+        if consumable_ids.is_empty() {
+            return (
+                if failed_count == 0 {
+                    NotesAiHandoffStatus::Staged
+                } else {
+                    NotesAiHandoffStatus::StagedPartial
+                },
+                0,
+            );
+        }
+        let Some(note_id) = payload.cart_note_id else {
+            return (NotesAiHandoffStatus::StagedCartRetained, 0);
+        };
+        match crate::notes::storage::delete_note_cart_items(note_id, &consumable_ids) {
+            Ok(consumed) => (
+                if failed_count == 0 {
+                    NotesAiHandoffStatus::Staged
+                } else {
+                    NotesAiHandoffStatus::StagedPartial
+                },
+                consumed,
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    target: "script_kit::tab_ai",
+                    event = "notes_ai_handoff_cart_consume_failed",
+                    note_id = %note_id,
+                    attempted_count = consumable_ids.len(),
+                    error = %error,
+                );
+                (NotesAiHandoffStatus::StagedCartRetained, 0)
+            }
+        }
+    }
+
+    fn finish_successful_ai_handoff(
+        &mut self,
+        payload: &NotesAiHandoffPayload,
+        outcome: &NotesAiMainHandoffOutcome,
+    ) -> bool {
+        if outcome.request_id != payload.request_id {
+            self.record_ai_handoff_receipt(
+                Some(payload),
+                None,
+                0,
+                payload.source,
+                NotesAiHandoffStatus::Failed,
+                Some(NotesAiHandoffError::MainStagingFailed.code()),
+            );
+            self.show_action_feedback("Agent unavailable", true);
+            tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "notes_ai_handoff_outcome_request_mismatch",
+                expected_request_id = %payload.request_id,
+                received_request_id = %outcome.request_id,
+            );
+            return false;
+        }
+        if !outcome.primary.is_consumable() {
+            self.record_ai_handoff_receipt(
+                Some(payload),
+                Some(outcome),
+                0,
+                payload.source,
+                NotesAiHandoffStatus::Failed,
+                Some(NotesAiHandoffError::MainStagingFailed.code()),
+            );
+            self.show_action_feedback("Agent unavailable", true);
+            return false;
+        }
+        let (status, consumed_count) = Self::consume_staged_cart_rows(payload, outcome);
+        self.record_ai_handoff_receipt(
+            Some(payload),
+            Some(outcome),
+            consumed_count,
+            payload.source,
+            status,
+            None,
+        );
+        match status {
+            NotesAiHandoffStatus::Staged => {
+                self.show_action_feedback("Opened in main Agent Chat", false)
+            }
+            NotesAiHandoffStatus::StagedPartial => {
+                self.show_action_feedback("Opened in Agent Chat; some attachments remain", true)
+            }
+            NotesAiHandoffStatus::StagedCartRetained => {
+                self.show_action_feedback("Opened in Agent Chat; cart was not cleared", true)
+            }
+            NotesAiHandoffStatus::Blocked | NotesAiHandoffStatus::Failed => {
+                self.show_action_feedback("Agent unavailable", true)
+            }
+        }
+        tracing::info!(
+            target: "script_kit::tab_ai",
+            event = "notes_ai_handoff_main_staged",
+            source = payload.source,
+            request_id = %payload.request_id,
+            status = status.as_str(),
+            primary_outcome = outcome.primary.kind(),
+            supplemental_count = outcome.supplements.len(),
+            consumed_count,
+        );
+        true
     }
 
     /// The ONE notes→AI command. Every affordance (Cmd+Enter, the Actions
@@ -445,6 +719,8 @@ impl NotesApp {
             Err(error) => {
                 self.record_ai_handoff_receipt(
                     None,
+                    None,
+                    0,
                     source,
                     NotesAiHandoffStatus::Blocked,
                     Some(error.code()),
@@ -465,80 +741,23 @@ impl NotesApp {
             target: "script_kit::tab_ai",
             event = "notes_ai_handoff_requested",
             source,
-            target_semantic_id = %payload.target.semantic_id,
+            request_id = %payload.request_id,
+            target_semantic_id = %payload.target().semantic_id,
             is_draft = payload.is_draft,
-            supplemental_part_count = payload.supplemental_parts.len(),
+            supplemental_part_count = payload.supplements.len(),
         );
 
         match Self::dispatch_notes_ai_handoff_to_main(payload.clone(), cx) {
-            Ok(true) => {
-                let mut status = NotesAiHandoffStatus::Staged;
-                if let Some(note_id) = payload.cart_note_id {
-                    if !payload.cart_item_ids.is_empty() {
-                        match crate::notes::storage::delete_note_cart_items(
-                            note_id,
-                            &payload.cart_item_ids,
-                        ) {
-                            Ok(_) => {}
-                            Err(error) => {
-                                // A cart-delete failure never retroactively
-                                // fails the staging: report and retain.
-                                status = NotesAiHandoffStatus::StagedCartRetained;
-                                tracing::warn!(
-                                    target: "script_kit::tab_ai",
-                                    event = "notes_ai_handoff_cart_consume_failed",
-                                    note_id = %note_id,
-                                    error = %error,
-                                );
-                            }
-                        }
-                    }
-                }
-                self.record_ai_handoff_receipt(Some(&payload), source, status, None);
-                match status {
-                    NotesAiHandoffStatus::StagedCartRetained => self
-                        .show_action_feedback("Opened in Agent Chat; cart was not cleared", true),
-                    _ => self.show_action_feedback("Opened in main Agent Chat", false),
-                }
-                tracing::info!(
-                    target: "script_kit::tab_ai",
-                    event = "notes_ai_handoff_main_staged",
-                    source,
-                    status = status.as_str(),
-                    target_semantic_id = %payload.target.semantic_id,
-                );
+            Ok(outcome) => {
+                let finished = self.finish_successful_ai_handoff(&payload, &outcome);
                 cx.notify();
-                true
-            }
-            Ok(false) => {
-                self.record_ai_handoff_receipt(
-                    Some(&payload),
-                    source,
-                    NotesAiHandoffStatus::Failed,
-                    Some(NotesAiHandoffError::MainStagingFailed.code()),
-                );
-                self.show_action_feedback("Agent unavailable", true);
-                tracing::warn!(
-                    target: "script_kit::tab_ai",
-                    event = "notes_ai_handoff_main_stage_refused",
-                    source,
-                );
-                cx.notify();
-                false
+                finished
             }
             Err(error) => {
-                if error == "main_window_handle_missing"
-                    || error.starts_with("main_window_update_failed")
-                {
-                    // Recoverable: either no live main window yet, or the
-                    // dispatch arrived while the main window was already on
-                    // the GPUI update stack (automation simulateKey routes
-                    // through the main app), which reads as "window not
-                    // found" from a re-entrant update. Retry exactly once
-                    // outside the update stack. Only request a show when the
-                    // main window is genuinely not visible — showing the
-                    // launcher resets its view and would destroy a reusable
-                    // Agent Chat before the retry.
+                // A missing/re-entrant main handle is the sole retryable host
+                // boundary. The exact immutable payload (including request and
+                // context item IDs) is retried once; no editor/cart reread.
+                if error.kind == NotesAiHandoffError::MainWindowUnavailable {
                     if !crate::is_main_window_visible() {
                         crate::request_show_main_window();
                     }
@@ -547,6 +766,8 @@ impl NotesApp {
                 }
                 self.record_ai_handoff_receipt(
                     Some(&payload),
+                    None,
+                    0,
                     source,
                     NotesAiHandoffStatus::Failed,
                     Some(NotesAiHandoffError::MainStagingFailed.code()),
@@ -556,7 +777,8 @@ impl NotesApp {
                     target: "script_kit::tab_ai",
                     event = "notes_ai_handoff_dispatch_failed",
                     source,
-                    error = %error,
+                    failure_code = ?error.failure.failure.code,
+                    diagnostic_fingerprint = ?error.failure.failure.diagnostic.as_ref().map(|diagnostic| &diagnostic.fingerprint),
                 );
                 cx.notify();
                 false
@@ -583,32 +805,20 @@ impl NotesApp {
                 entity.update(cx, |app, cx| {
                     let source = payload.source;
                     match Self::dispatch_notes_ai_handoff_to_main(payload.clone(), cx) {
-                        Ok(true) => {
-                            let mut status = NotesAiHandoffStatus::Staged;
-                            if let Some(note_id) = payload.cart_note_id {
-                                if !payload.cart_item_ids.is_empty()
-                                    && crate::notes::storage::delete_note_cart_items(
-                                        note_id,
-                                        &payload.cart_item_ids,
-                                    )
-                                    .is_err()
-                                {
-                                    status = NotesAiHandoffStatus::StagedCartRetained;
-                                }
-                            }
-                            app.record_ai_handoff_receipt(Some(&payload), source, status, None);
-                            app.show_action_feedback("Opened in main Agent Chat", false);
+                        Ok(outcome) => {
+                            app.finish_successful_ai_handoff(&payload, &outcome);
                             tracing::info!(
                                 target: "script_kit::tab_ai",
-                                event = "notes_ai_handoff_main_staged",
+                                event = "notes_ai_handoff_retry_completed",
                                 source,
-                                status = status.as_str(),
-                                retried = true,
+                                request_id = %payload.request_id,
                             );
                         }
-                        Ok(false) | Err(_) => {
+                        Err(error) => {
                             app.record_ai_handoff_receipt(
                                 Some(&payload),
+                                None,
+                                0,
                                 source,
                                 NotesAiHandoffStatus::Failed,
                                 Some(NotesAiHandoffError::MainWindowUnavailable.code()),
@@ -618,6 +828,8 @@ impl NotesApp {
                                 target: "script_kit::tab_ai",
                                 event = "notes_ai_handoff_retry_failed",
                                 source,
+                                failure_code = ?error.failure.failure.code,
+                                diagnostic_fingerprint = ?error.failure.failure.diagnostic.as_ref().map(|diagnostic| &diagnostic.fingerprint),
                             );
                         }
                     }
@@ -637,26 +849,28 @@ impl NotesApp {
     fn dispatch_notes_ai_handoff_to_main(
         payload: NotesAiHandoffPayload,
         cx: &mut Context<Self>,
-    ) -> Result<bool, String> {
+    ) -> Result<NotesAiMainHandoffOutcome, NotesAiMainHandoffFailure> {
         if crate::get_main_window_handle().is_none() {
-            return Err("main_window_handle_missing".to_string());
+            return Err(NotesAiMainHandoffFailure::new(
+                NotesAiHandoffError::MainWindowUnavailable,
+                "notes_main_window_handle_missing",
+            ));
         }
         let Some(hook) = NOTES_AI_MAIN_HANDOFF_HOOK.get() else {
-            return Err("notes_ai_handoff_hook_unregistered".to_string());
+            return Err(NotesAiMainHandoffFailure::new(
+                NotesAiHandoffError::MainStagingFailed,
+                "notes_ai_handoff_hook_unregistered",
+            ));
         };
-        hook(
-            payload.target,
-            payload.supplemental_parts,
-            payload.return_snapshot,
-            payload.source,
-            cx,
-        )
+        hook(payload, cx)
     }
 
     /// Record the redacted receipt (also projected into devtools state).
     fn record_ai_handoff_receipt(
         &mut self,
         payload: Option<&NotesAiHandoffPayload>,
+        main_outcome: Option<&NotesAiMainHandoffOutcome>,
+        cart_consumed_count: usize,
         source: &'static str,
         status: NotesAiHandoffStatus,
         error_code: Option<&'static str>,
@@ -672,13 +886,13 @@ impl NotesApp {
             part_count,
         ) = match payload {
             Some(payload) => (
-                payload.target.semantic_id.clone(),
-                payload.target.label.clone(),
+                payload.target().semantic_id.clone(),
+                payload.target().label.clone(),
                 payload.scope.kind(),
                 payload.scope.document_semantic_id().to_string(),
                 payload.scope.range_length(),
                 payload.is_draft,
-                payload.supplemental_parts.len(),
+                payload.supplements.len(),
             ),
             None => (
                 String::new(),
@@ -691,6 +905,27 @@ impl NotesApp {
             ),
         };
         let return_snapshot = payload.map(|payload| &payload.return_snapshot);
+        let supplemental_accepted_count = main_outcome.map_or(0, |outcome| {
+            outcome
+                .supplements
+                .iter()
+                .filter(|item| matches!(item.outcome, NotesContextStageOutcome::Accepted { .. }))
+                .count()
+        });
+        let supplemental_duplicate_count = main_outcome.map_or(0, |outcome| {
+            outcome
+                .supplements
+                .iter()
+                .filter(|item| matches!(item.outcome, NotesContextStageOutcome::Duplicate { .. }))
+                .count()
+        });
+        let supplemental_failed_count = main_outcome.map_or(0, |outcome| {
+            outcome
+                .supplements
+                .iter()
+                .filter(|item| matches!(item.outcome, NotesContextStageOutcome::Failed { .. }))
+                .count()
+        });
         self.last_ai_handoff = Some(NotesAiHandoffReceipt {
             generation: self.ai_handoff_generation,
             source,
@@ -708,11 +943,17 @@ impl NotesApp {
                 .unwrap_or_default(),
             is_draft,
             supplemental_part_count: part_count,
+            supplemental_accepted_count,
+            supplemental_duplicate_count,
+            supplemental_failed_count,
+            cart_consumed_count,
             destination_window_id: "main",
             destination_surface: "agentChat",
             staging_outcome: if matches!(
                 status,
-                NotesAiHandoffStatus::Staged | NotesAiHandoffStatus::StagedCartRetained
+                NotesAiHandoffStatus::Staged
+                    | NotesAiHandoffStatus::StagedPartial
+                    | NotesAiHandoffStatus::StagedCartRetained
             ) {
                 "composerOnly"
             } else {
@@ -820,9 +1061,10 @@ pub(crate) fn restore_notes_host_return(
 #[cfg(test)]
 mod tests {
     use super::{
-        compose_note_ai_target, fnv1a64_fingerprint, notes_host_return_decision,
-        NotesAiHandoffError, NotesAiTargetSnapshot, NotesHostReturnDecision,
-        NotesHostReturnSnapshot,
+        compose_note_ai_target, consumable_cart_item_ids, fnv1a64_fingerprint,
+        notes_host_return_decision, NotesAiHandoffError, NotesAiMainHandoffOutcome,
+        NotesAiTargetSnapshot, NotesContextStageOutcome, NotesHandoffAttachment,
+        NotesHostReturnDecision, NotesHostReturnSnapshot, NotesSupplementStageOutcome,
     };
 
     fn snapshot(content: &str, selection: std::ops::Range<usize>) -> NotesAiTargetSnapshot {
@@ -970,5 +1212,136 @@ mod tests {
             !fp.contains("Test"),
             "fingerprint must not leak label content"
         );
+    }
+
+    fn context_id(value: &str) -> crate::ai::staged_context::ContextItemId {
+        crate::ai::staged_context::ContextItemId(value.to_string())
+    }
+
+    fn outcome(
+        primary: NotesContextStageOutcome,
+        supplements: Vec<NotesSupplementStageOutcome>,
+    ) -> NotesAiMainHandoffOutcome {
+        NotesAiMainHandoffOutcome {
+            request_id: "request-1".to_string(),
+            primary,
+            supplements,
+            destination_thread_id: Some("thread-1".to_string()),
+            destination_generation: 7,
+            reused_existing_chat: true,
+        }
+    }
+
+    fn attachment(cart_item_id: &str, idempotency_key: &str) -> NotesHandoffAttachment {
+        NotesHandoffAttachment {
+            cart_item_id: cart_item_id.to_string(),
+            context_item: crate::ai::staged_context::StagedContextItem::pending(
+                crate::ai::message_parts::AiContextPart::TextBlock {
+                    label: "Synthetic".to_string(),
+                    source: format!("test://{cart_item_id}"),
+                    text: "synthetic".to_string(),
+                    mime_type: Some("text/plain".to_string()),
+                },
+                crate::ai::staged_context::ContextProvenance::HostHandoff,
+                crate::ai::staged_context::ContextRole::Supplemental,
+            ),
+            idempotency_key: idempotency_key.to_string(),
+        }
+    }
+
+    #[test]
+    fn cart_consumption_requires_primary_and_uses_per_item_outcomes() {
+        let accepted = NotesSupplementStageOutcome {
+            cart_item_id: "accepted-row".to_string(),
+            idempotency_key: "key-accepted".to_string(),
+            outcome: NotesContextStageOutcome::Accepted {
+                context_item_id: context_id("context-a"),
+            },
+        };
+        let duplicate = NotesSupplementStageOutcome {
+            cart_item_id: "duplicate-row".to_string(),
+            idempotency_key: "key-duplicate".to_string(),
+            outcome: NotesContextStageOutcome::Duplicate {
+                winner_id: context_id("context-existing"),
+            },
+        };
+        let failed = NotesSupplementStageOutcome {
+            cart_item_id: "failed-row".to_string(),
+            idempotency_key: "key-failed".to_string(),
+            outcome: NotesContextStageOutcome::Failed {
+                failure: crate::ai::reliability::context_unavailable_failure(
+                    "synthetic_attachment_failure",
+                ),
+            },
+        };
+        let attachments = vec![
+            attachment("accepted-row", "key-accepted"),
+            attachment("duplicate-row", "key-duplicate"),
+            attachment("failed-row", "key-failed"),
+        ];
+        let staged = outcome(
+            NotesContextStageOutcome::Accepted {
+                context_item_id: context_id("primary"),
+            },
+            vec![accepted.clone(), duplicate.clone(), failed.clone()],
+        );
+        assert_eq!(
+            consumable_cart_item_ids(&attachments, &staged),
+            vec!["accepted-row".to_string(), "duplicate-row".to_string()],
+            "failed rows remain in the cart while accepted and canonical duplicates consume",
+        );
+        let forged = outcome(
+            NotesContextStageOutcome::Accepted {
+                context_item_id: context_id("primary"),
+            },
+            vec![NotesSupplementStageOutcome {
+                cart_item_id: "accepted-row".to_string(),
+                idempotency_key: "wrong-key".to_string(),
+                outcome: NotesContextStageOutcome::Accepted {
+                    context_item_id: context_id("forged"),
+                },
+            }],
+        );
+        assert!(
+            consumable_cart_item_ids(&attachments, &forged).is_empty(),
+            "a mismatched idempotency mapping must not consume a cart row",
+        );
+
+        let primary_failed = outcome(
+            NotesContextStageOutcome::Failed {
+                failure: crate::ai::reliability::context_unavailable_failure(
+                    "synthetic_primary_failure",
+                ),
+            },
+            vec![accepted, duplicate, failed],
+        );
+        assert!(
+            consumable_cart_item_ids(&attachments, &primary_failed).is_empty(),
+            "primary failure is atomic and consumes no cart row",
+        );
+    }
+
+    #[test]
+    fn attachment_debug_redacts_cart_and_idempotency_values() {
+        let attachment = NotesHandoffAttachment {
+            cart_item_id: "PRIVATE_CART_ROW".to_string(),
+            context_item: crate::ai::staged_context::StagedContextItem::pending(
+                crate::ai::message_parts::AiContextPart::TextBlock {
+                    label: "Synthetic".to_string(),
+                    source: "synthetic://attachment".to_string(),
+                    text: "private body".to_string(),
+                    mime_type: Some("text/plain".to_string()),
+                },
+                crate::ai::staged_context::ContextProvenance::HostHandoff,
+                crate::ai::staged_context::ContextRole::Supplemental,
+            ),
+            idempotency_key: "PRIVATE_IDEMPOTENCY_KEY".to_string(),
+        };
+        let debug = format!("{attachment:?}");
+        assert!(!debug.contains("PRIVATE_CART_ROW"));
+        assert!(!debug.contains("PRIVATE_IDEMPOTENCY_KEY"));
+        assert!(!debug.contains("private body"));
+        assert!(debug.contains("cart_item_id_length"));
+        assert!(debug.contains("idempotency_key_fingerprint"));
     }
 }

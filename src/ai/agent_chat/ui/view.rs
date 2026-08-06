@@ -8562,10 +8562,35 @@ impl AgentChatView {
         source: &'static str,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let item = crate::ai::staged_context::StagedContextItem::pending(
+            part,
+            crate::ai::staged_context::ContextProvenance::HostHandoff,
+            crate::ai::staged_context::ContextRole::Primary,
+        );
+        self.stage_primary_context_item_from_host_preserving_composer(item, source, cx)
+            .map(|_| ())
+    }
+
+    /// Transactional host ingress for a pre-materialized primary item. The
+    /// item is admitted before the composer changes; the returned ID names the
+    /// exact surviving chip when staging deduplicates or upgrades an item.
+    pub(crate) fn stage_primary_context_item_from_host_preserving_composer(
+        &mut self,
+        item: crate::ai::staged_context::StagedContextItem,
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Result<
+        (
+            crate::ai::staged_context::StageContextItemOutcome,
+            crate::ai::staged_context::ContextItemId,
+        ),
+        String,
+    > {
         if self.is_setup_mode() {
             return Err("Agent Chat is in setup mode".to_string());
         }
 
+        let part = item.part.clone();
         let inline_token =
             crate::ai::context_mentions::part_to_inline_token(&part).unwrap_or_else(|| {
                 crate::ai::context_mentions::format_typed_label_mention_token(
@@ -8574,16 +8599,9 @@ impl AgentChatView {
                 )
             });
         let token_already_owned = self.inline_owned_context_tokens.contains(&inline_token);
-
-        let staged_part = part.clone();
         let token_for_prefix = inline_token.clone();
-        self.live_thread().update(cx, move |thread, cx| {
-            thread.add_context_part_with_provenance(
-                staged_part,
-                crate::ai::staged_context::ContextProvenance::HostHandoff,
-                crate::ai::staged_context::ContextRole::Primary,
-                cx,
-            );
+        let staged = self.live_thread().update(cx, move |thread, cx| {
+            let staged = thread.stage_prebuilt_context_item(item, cx)?;
             if !token_already_owned {
                 let existing = thread.input.text().to_string();
                 let new_text = if existing.trim().is_empty() {
@@ -8596,7 +8614,8 @@ impl AgentChatView {
                 thread.input.set_cursor(cursor);
             }
             cx.notify();
-        });
+            Ok::<_, String>(staged)
+        })?;
 
         if !token_already_owned {
             self.register_inline_owned_context_part(inline_token.clone(), part);
@@ -8608,9 +8627,11 @@ impl AgentChatView {
             source,
             token = %inline_token,
             token_already_owned,
+            outcome = ?staged.0,
+            context_item_id = %staged.1.as_str(),
         );
         cx.notify();
-        Ok(())
+        Ok(staged)
     }
 
     /// Stage supplemental context parts from a host handoff as pending chips
@@ -8622,32 +8643,71 @@ impl AgentChatView {
         source: &'static str,
         cx: &mut Context<Self>,
     ) -> Result<usize, String> {
-        if self.is_setup_mode() {
-            return Err("Agent Chat is in setup mode".to_string());
-        }
-        if parts.is_empty() {
-            return Ok(0);
-        }
-        let count = parts.len();
-        self.live_thread().update(cx, move |thread, cx| {
-            for part in parts {
-                thread.add_context_part_with_provenance(
+        let items = parts
+            .into_iter()
+            .map(|part| {
+                crate::ai::staged_context::StagedContextItem::pending(
                     part,
                     crate::ai::staged_context::ContextProvenance::HostHandoff,
                     crate::ai::staged_context::ContextRole::Supplemental,
-                    cx,
-                );
-            }
+                )
+            })
+            .collect::<Vec<_>>();
+        let outcomes = self.stage_supplemental_context_items_from_host(items, source, cx)?;
+        Ok(outcomes.len())
+    }
+
+    /// Stage host-materialized supplemental items independently. Each result
+    /// names the surviving context item so callers can consume only accepted
+    /// or canonical-duplicate source rows and retain failures for retry.
+    pub(crate) fn stage_supplemental_context_items_from_host(
+        &mut self,
+        items: Vec<crate::ai::staged_context::StagedContextItem>,
+        source: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Result<
+        Vec<
+            Result<
+                (
+                    crate::ai::staged_context::StageContextItemOutcome,
+                    crate::ai::staged_context::ContextItemId,
+                ),
+                String,
+            >,
+        >,
+        String,
+    > {
+        if self.is_setup_mode() {
+            return Err("Agent Chat is in setup mode".to_string());
+        }
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let count = items.len();
+        let outcomes = self.live_thread().update(cx, move |thread, cx| {
+            let test_status = std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() == Some("1");
+            let outcomes = items
+                .into_iter()
+                .map(|item| {
+                    if test_status && item.part.source() == "test://notes-handoff-refuse" {
+                        Err("notes_handoff_fixture_refused".to_string())
+                    } else {
+                        thread.stage_prebuilt_context_item(item, cx)
+                    }
+                })
+                .collect::<Vec<_>>();
             cx.notify();
+            outcomes
         });
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_host_supplemental_context_staged",
             source,
             part_count = count,
+            accepted_count = outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
         );
         cx.notify();
-        Ok(count)
+        Ok(outcomes)
     }
 
     pub(crate) fn stage_focused_text_from_host(

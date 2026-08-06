@@ -5196,22 +5196,48 @@ impl AgentChatThread {
         role: ContextRole,
         cx: &mut Context<Self>,
     ) -> StageContextItemOutcome {
-        if let Err(error) = self.admit_context_part(&part) {
-            tracing::warn!(
-                target: "script_kit::quick_ai",
-                event = "agent_chat_context_part_denied_by_policy",
-                policy = ?self.session_policy,
-                context_class = ?classify_context_part(&part),
-                reason = error.as_str(),
-                source_kind = ?part.source_kind(),
-                provenance = provenance.as_str(),
-                role = role.as_str(),
-            );
-            return StageContextItemOutcome::Duplicate { index: usize::MAX };
+        let source_kind = part.source_kind();
+        let item = StagedContextItem::pending(part, provenance, role);
+        match self.stage_prebuilt_context_item(item, cx) {
+            Ok((outcome, _)) => outcome,
+            Err(reason) => {
+                tracing::warn!(
+                    target: "script_kit::quick_ai",
+                    event = "agent_chat_context_part_denied_by_policy",
+                    policy = ?self.session_policy,
+                    reason,
+                    source_kind = ?source_kind,
+                    provenance = provenance.as_str(),
+                    role = role.as_str(),
+                );
+                // Compatibility callers historically treated admission refusal
+                // as a non-mutating duplicate. Transactional host handoffs use
+                // `stage_prebuilt_context_item` directly and receive the error.
+                StageContextItemOutcome::Duplicate { index: usize::MAX }
+            }
+        }
+    }
+
+    /// Stage a host-materialized pending item while preserving its ID and
+    /// generation when it wins. The returned ID is always the surviving item,
+    /// including canonical duplicates and provenance/role upgrades.
+    pub(crate) fn stage_prebuilt_context_item(
+        &mut self,
+        item: StagedContextItem,
+        cx: &mut Context<Self>,
+    ) -> Result<
+        (
+            StageContextItemOutcome,
+            crate::ai::staged_context::ContextItemId,
+        ),
+        String,
+    > {
+        if let Err(error) = self.admit_context_part(&item.part) {
+            return Err(error.as_str().to_string());
         }
 
-        let is_ambient_bootstrap = part.is_ambient_bootstrap_resource();
-        let ambient_label = part.ambient_chip_label().map(str::to_string);
+        let is_ambient_bootstrap = item.part.is_ambient_bootstrap_resource();
+        let ambient_label = item.part.ambient_chip_label().map(str::to_string);
         if is_ambient_bootstrap {
             self.clear_pending_ambient_context("add_ambient_bootstrap_resource");
             self.pending_ambient_context_enabled = true;
@@ -5229,11 +5255,20 @@ impl AgentChatThread {
             self.context_bootstrap_note = None;
         }
 
-        let source_kind = part.source_kind();
-        let outcome = stage_context_item(
-            &mut self.pending_context_items,
-            StagedContextItem::pending(part, provenance, role),
-        );
+        let source_kind = item.part.source_kind();
+        let provenance = item.provenance;
+        let role = item.role;
+        let outcome = stage_context_item(&mut self.pending_context_items, item);
+        let index = match outcome {
+            StageContextItemOutcome::Added { index }
+            | StageContextItemOutcome::Upgraded { index }
+            | StageContextItemOutcome::Duplicate { index } => index,
+        };
+        let winner_id = self
+            .pending_context_items
+            .get(index)
+            .map(|item| item.id.clone())
+            .ok_or_else(|| "context_stage_winner_missing".to_string())?;
         self.arm_pending_context(if is_ambient_bootstrap {
             "add_ambient_bootstrap_part"
         } else {
@@ -5250,7 +5285,7 @@ impl AgentChatThread {
             pending_block_count = self.pending_context_blocks.len(),
         );
         cx.notify();
-        outcome
+        Ok((outcome, winner_id))
     }
 
     pub(crate) fn add_or_replace_skill_context(
