@@ -167,6 +167,9 @@ static DELIVERY_RECEIPT_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Monotonic generation for passive dictation runtime state exposed to DevTools.
 static DICTATION_STATE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// Monotonic generation incremented only by explicit destination selection.
+static DICTATION_TARGET_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 /// Last dictation delivery receipt. This stores only routing metadata, length,
 /// and a one-way fingerprint; it never stores transcript text.
 static LAST_DELIVERY_RECEIPT: Mutex<Option<serde_json::Value>> = Mutex::new(None);
@@ -474,6 +477,17 @@ pub fn delivery_receipt_generation() -> u64 {
     DELIVERY_RECEIPT_GENERATION.load(Ordering::Relaxed)
 }
 
+pub fn dictation_target_generation() -> u64 {
+    DICTATION_TARGET_GENERATION.load(Ordering::Relaxed)
+}
+
+pub(crate) fn record_fixture_dictation_target_selection() -> u64 {
+    debug_assert!(crate::dictation::dictation_overlay_fixture_mode());
+    let generation = DICTATION_TARGET_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    bump_dictation_state_generation();
+    generation
+}
+
 pub fn record_wrong_target_refusal(
     draft: DictationWrongTargetRefusalDraft,
     transcript_len: Option<usize>,
@@ -606,6 +620,7 @@ pub fn set_dictation_session_target(target: DictationTarget) -> Option<Dictation
         session.target_cycle.push(target);
     }
     session.target = target;
+    DICTATION_TARGET_GENERATION.fetch_add(1, Ordering::Relaxed);
     bump_dictation_state_generation();
 
     tracing::info!(
@@ -847,6 +862,22 @@ pub fn automation_state() -> serde_json::Value {
                     "stopReason": "capture stop in flight",
                 }),
             )
+        } else if crate::dictation::dictation_overlay_fixture_mode() {
+            let state = crate::dictation::last_dictation_overlay_state();
+            (
+                false,
+                state.phase.as_automation_str().to_string(),
+                Some(format!("{:?}", state.target)),
+                Some(state.target.overlay_label().to_string()),
+                Some(state.elapsed.as_millis() as u64),
+                serde_json::json!({
+                    "available": true,
+                    "bars": state.bars,
+                    "barCount": state.bars.len(),
+                    "source": "fixture.lastOverlayState",
+                    "stopReason": null,
+                }),
+            )
         } else {
             (
                 false,
@@ -891,6 +922,24 @@ pub fn automation_state() -> serde_json::Value {
     );
     let hotkey = config.get_dictation_hotkey();
     let generation = DICTATION_STATE_GENERATION.load(Ordering::Relaxed);
+    let target_actions = crate::dictation::DictationTarget::action_descriptors()
+        .map(|descriptor| {
+            serde_json::json!({
+                "stableId": descriptor.stable_id,
+                "selectorLabel": descriptor.selector_label,
+                "badgeLabel": descriptor.badge_label,
+                "icon": descriptor.icon,
+                "deliveryVerb": descriptor.delivery_verb,
+                "description": descriptor.description,
+                "requiresFrozenIdentity": descriptor.requires_frozen_identity,
+                "autoSubmitPermission": format!("{:?}", descriptor.auto_submit_permission),
+                "selectable": descriptor.selectable,
+            })
+        })
+        .collect::<Vec<_>>();
+    let quick_target_ids = crate::dictation::DictationTarget::quick_chip_descriptors()
+        .map(|descriptor| descriptor.stable_id)
+        .collect::<Vec<_>>();
 
     serde_json::json!({
         "schemaVersion": 1,
@@ -903,6 +952,9 @@ pub fn automation_state() -> serde_json::Value {
         "phase": phase,
         "target": target,
         "targetLabel": target_label,
+        "targetGeneration": dictation_target_generation(),
+        "targetActions": target_actions,
+        "quickTargetIds": quick_target_ids,
         "elapsedMs": elapsed_ms,
         "audioLevels": audio_levels,
         "setup": {

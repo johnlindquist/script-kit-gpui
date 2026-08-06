@@ -29,9 +29,9 @@ pub use catalog::{
     DictationEngineKind, DictationModelCatalogEntry, DictationModelId,
 };
 pub use delivery::{
-    parse_dictation_target_label, resolve_delivery_target_request,
-    DictationDeliveryTargetResolution, DictationDeliveryTargetSource, DictationWrongTargetReason,
-    DictationWrongTargetRefusalDraft,
+    parse_dictation_target_label, resolve_delivery_target_request, resolve_dictation_target_label,
+    DictationDeliveryTargetResolution, DictationDeliveryTargetSource,
+    DictationTargetLabelResolution, DictationWrongTargetReason, DictationWrongTargetRefusalDraft,
 };
 pub use device::{
     apply_device_selection, build_device_menu_items, default_input_device,
@@ -64,21 +64,21 @@ pub(crate) use microphone_popup_window::{
     DictationMicrophonePopupSelectionMode, DictationMicrophonePopupSnapshot,
     DictationPopupDismissOutcome, DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
 };
-pub(crate) use runtime::toggled_post_stop_restart;
 pub use runtime::{
     abort_dictation, automation_state, begin_stop_capture, can_cycle_dictation_target,
     current_dictation_phase, cycle_dictation_target, delivery_receipt_generation,
-    dictation_auto_stop_due, dictation_elapsed, dictation_stop_target, finalize_progress,
-    finish_stop_capture, get_active_dictation_device, get_dictation_target, is_dictation_busy,
-    is_dictation_recording, is_dictation_stopping, last_delivery_receipt, last_partial_transcript,
-    last_stop_receipt, last_wrong_target_refusal, maybe_unload_transcriber,
-    pending_dictation_device_label, record_delivery_receipt, record_wrong_target_refusal,
-    redacted_transcript_fingerprint, resolve_final_or_partial_transcript,
-    set_dictation_session_target, set_dictation_target_cycle, set_overlay_phase,
-    set_pending_dictation_device_label, snapshot_overlay_state, toggle_dictation,
-    transcribe_captured_audio, BeginStopCapture, DictationStopJob, DictationStopReason,
-    DictationTranscriptResolution,
+    dictation_auto_stop_due, dictation_elapsed, dictation_stop_target, dictation_target_generation,
+    finalize_progress, finish_stop_capture, get_active_dictation_device, get_dictation_target,
+    is_dictation_busy, is_dictation_recording, is_dictation_stopping, last_delivery_receipt,
+    last_partial_transcript, last_stop_receipt, last_wrong_target_refusal,
+    maybe_unload_transcriber, pending_dictation_device_label, record_delivery_receipt,
+    record_wrong_target_refusal, redacted_transcript_fingerprint,
+    resolve_final_or_partial_transcript, set_dictation_session_target, set_dictation_target_cycle,
+    set_overlay_phase, set_pending_dictation_device_label, snapshot_overlay_state,
+    toggle_dictation, transcribe_captured_audio, BeginStopCapture, DictationStopJob,
+    DictationStopReason, DictationTranscriptResolution,
 };
+pub(crate) use runtime::{record_fixture_dictation_target_selection, toggled_post_stop_restart};
 pub use setup::{
     build_dictation_setup_state, DictationHotkeyStatus, DictationMicrophonePermissionStatus,
     DictationMicrophoneStatus, DictationSetupState,
@@ -90,21 +90,24 @@ pub use transcription::{
     PARAKEET_MODEL_ARCHIVE_SIZE, PARAKEET_MODEL_URL, WHISPER_MODEL_SIZE, WHISPER_MODEL_URL,
 };
 pub use types::{
-    CapturedAudioChunk, CompletedDictationCapture, DictationCaptureConfig, DictationCaptureEvent,
-    DictationDestination, DictationDeviceId, DictationDeviceInfo, DictationDeviceTransport,
-    DictationModelStatus, DictationSessionPhase, DictationSessionResult, DictationTarget,
-    DictationToggleOutcome, RawAudioChunk,
+    CapturedAudioChunk, CompletedDictationCapture, DictationAutoSubmitPermission,
+    DictationCaptureConfig, DictationCaptureEvent, DictationDestination, DictationDeviceId,
+    DictationDeviceInfo, DictationDeviceTransport, DictationModelStatus,
+    DictationRecoveryCapabilities, DictationSessionPhase, DictationSessionResult, DictationTarget,
+    DictationTargetDescriptor, DictationTargetPersistenceClass, DictationToggleOutcome,
+    RawAudioChunk, ALL_DICTATION_TARGETS,
 };
 pub use visualizer::{animate_bars, silent_bars};
 pub use window::{
     automation_layout_info, begin_overlay_session, close_dictation_overlay,
     is_dictation_overlay_open, open_dictation_overlay, overlay_generation,
-    set_overlay_abort_callback, set_overlay_submit_callback, update_dictation_overlay,
-    DictationOverlay, DictationOverlayState,
+    reopen_last_dictation_overlay, set_overlay_abort_callback, set_overlay_submit_callback,
+    update_dictation_overlay, DictationOverlay, DictationOverlayState,
 };
 pub(crate) use window::{
     destination_selector_spec, dictation_overlay_fixture_mode, dictation_window_lifecycle_receipt,
-    open_dictation_microphone_popup_fixture, set_dictation_overlay_fixture_mode,
+    last_dictation_overlay_state, open_dictation_microphone_popup_fixture,
+    set_dictation_overlay_fixture_mode,
 };
 
 #[cfg(test)]

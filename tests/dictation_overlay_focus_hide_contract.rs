@@ -170,8 +170,9 @@ fn dictation_overlay_renders_visible_shortcut_rail() {
         "shared footer chrome tokens must pin native font, keycap, rail, and button chrome contracts"
     );
     assert!(
-        FOOTER_CHROME.contains("\"esc\" | \"escape\" => \"⎋\".to_string()")
-            && FOOTER_CHROME.contains("fn render_footer_labelcap(")
+        FOOTER_CHROME.contains(
+            "crate::components::hint_strip::shortcut_tokens_from_hint(shortcut)"
+        ) && FOOTER_CHROME.contains("fn render_footer_labelcap(")
             && !FOOTER_CHROME.contains("footer_labelcap_border_color(theme)")
             && !FOOTER_CHROME.contains("FOOTER_LABELCAP_BORDER_ALPHA")
             && !FOOTER_CHROME.contains(".bg(footer_keycap_bg_color(theme))")
@@ -219,7 +220,7 @@ fn dictation_overlay_renders_visible_shortcut_rail() {
     assert!(
         FOOTER_POPUP.contains("fn is_footer_left_pinned_button(")
             && FOOTER_POPUP.contains(
-                "button_cfg.key.as_ref() == crate::components::footer_chrome::FOOTER_MIC_ICON_TOKEN"
+                "matches!(button_cfg.placement, FooterPlacement::Leading)"
             )
             && !FOOTER_POPUP.contains("&& button_cfg.label.as_ref().is_empty()")
             && FOOTER_POPUP.contains("fn footer_hint_content_layout_for_button(")
@@ -236,10 +237,11 @@ fn dictation_overlay_renders_visible_shortcut_rail() {
         "native footer image glyphs must use the same recursive opacity/tint updates as text key glyphs"
     );
     assert!(
-        FOOTER_POPUP.contains("fn set_footer_button_border_alpha(")
-            && FOOTER_POPUP.contains("setBorderColor: cg_border")
-            && FOOTER_POPUP.contains("footer_keycap_border_hover_alpha(&theme)")
-            && FOOTER_POPUP.contains("themed_footer_button_border_alpha(&theme, true)"),
+        FOOTER_POPUP.contains("fn resolve_native_footer_visual_theme(")
+            && FOOTER_POPUP.contains("footer_keycap_border_alpha_for_state(theme, state)")
+            && FOOTER_POPUP.contains("visual_theme.border_alpha(state)")
+            && FOOTER_POPUP.contains("set_footer_button_border(")
+            && FOOTER_POPUP.contains("setBorderColor: cg_border"),
         "native footer chip borders must be visible at rest and strengthen on hover/selected states"
     );
     assert!(
@@ -257,7 +259,7 @@ fn dictation_overlay_renders_visible_shortcut_rail() {
             && DICTATION_WINDOW.contains("FooterButtonConfig::new(")
             && DICTATION_WINDOW.contains("FooterAction::Stop,")
             && DICTATION_WINDOW.contains("dictation_stop_keycap(),")
-            && DICTATION_WINDOW.contains("ACTION_STOP_LABEL,")
+            && DICTATION_WINDOW.contains("format!(\"Stop & {}\", target.descriptor().delivery_verb)")
             && !DICTATION_WINDOW.contains(
                 "FooterButtonConfig::new(FooterAction::Stop, \"click\", ACTION_STOP_LABEL)"
             )
@@ -283,7 +285,8 @@ fn dictation_overlay_renders_visible_shortcut_rail() {
         "runtime Delivering state must reserve the shared native footer Close + esc action"
     );
     assert!(
-        preview_render.contains("dictation_native_footer_config(&state.phase, armed)")
+        preview_render
+            .contains("dictation_native_footer_config(&state.phase, armed, state.target)")
             && preview_render.contains("render_static_action_rail(footer_config.buttons, None)"),
         "preview phases must derive their footer actions from the same shared config as runtime"
     );

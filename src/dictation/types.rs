@@ -120,9 +120,9 @@ pub enum DictationTarget {
     MainWindowPrompt,
     /// The notes window editor.
     NotesEditor,
-    /// The AI chat window composer.
+    /// Legacy AI composer target retained only for persisted-history/config migration.
     AiChatComposer,
-    /// The Tab AI harness terminal (`QuickTerminalView`).
+    /// The embedded Agent Chat composer.
     TabAiHarness,
     /// No internal Script Kit surface was active — deliver to the
     /// frontmost external app via simulated paste.
@@ -138,7 +138,228 @@ pub enum DictationTarget {
     QuickAiQuestion,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictationTargetPersistenceClass {
+    Contextual,
+    Sticky,
+    LegacyReadOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictationAutoSubmitPermission {
+    Never,
+    ExplicitSend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DictationRecoveryCapabilities {
+    pub retry: bool,
+    pub copy_transcript: bool,
+    pub retarget: bool,
+}
+
+impl DictationRecoveryCapabilities {
+    const STANDARD: Self = Self {
+        retry: true,
+        copy_transcript: true,
+        retarget: true,
+    };
+
+    const LEGACY: Self = Self {
+        retry: false,
+        copy_transcript: true,
+        retarget: false,
+    };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DictationTargetDescriptor {
+    pub target: DictationTarget,
+    pub stable_id: &'static str,
+    pub selector_label: &'static str,
+    pub badge_label: &'static str,
+    pub icon: &'static str,
+    pub delivery_verb: &'static str,
+    pub description: &'static str,
+    pub persistence_class: DictationTargetPersistenceClass,
+    pub requires_frozen_identity: bool,
+    pub auto_submit_permission: DictationAutoSubmitPermission,
+    pub recovery_capabilities: DictationRecoveryCapabilities,
+    pub quick_chip: bool,
+    pub quick_chip_label: Option<&'static str>,
+    pub quick_chip_order: Option<u8>,
+    pub selectable: bool,
+}
+
+pub const ALL_DICTATION_TARGETS: [DictationTargetDescriptor; 8] = [
+    DictationTargetDescriptor {
+        target: DictationTarget::MainWindowFilter,
+        stable_id: "filter",
+        selector_label: "Script Kit",
+        badge_label: "Script Kit",
+        icon: "search",
+        delivery_verb: "Insert",
+        description: "Insert the transcript into the Script Kit filter",
+        persistence_class: DictationTargetPersistenceClass::Contextual,
+        requires_frozen_identity: false,
+        auto_submit_permission: DictationAutoSubmitPermission::Never,
+        recovery_capabilities: DictationRecoveryCapabilities::STANDARD,
+        quick_chip: false,
+        quick_chip_label: None,
+        quick_chip_order: None,
+        selectable: true,
+    },
+    DictationTargetDescriptor {
+        target: DictationTarget::MainWindowPrompt,
+        stable_id: "prompt",
+        selector_label: "Prompt",
+        badge_label: "Prompt",
+        icon: "text-cursor-input",
+        delivery_verb: "Insert",
+        description: "Insert the transcript into the active prompt",
+        persistence_class: DictationTargetPersistenceClass::Contextual,
+        requires_frozen_identity: true,
+        auto_submit_permission: DictationAutoSubmitPermission::Never,
+        recovery_capabilities: DictationRecoveryCapabilities::STANDARD,
+        quick_chip: false,
+        quick_chip_label: None,
+        quick_chip_order: None,
+        selectable: true,
+    },
+    DictationTargetDescriptor {
+        target: DictationTarget::NotesEditor,
+        stable_id: "notes",
+        selector_label: "Notes",
+        badge_label: "Notes",
+        icon: "notebook-tabs",
+        delivery_verb: "Append",
+        description: "Append the transcript to the active note",
+        persistence_class: DictationTargetPersistenceClass::Sticky,
+        requires_frozen_identity: true,
+        auto_submit_permission: DictationAutoSubmitPermission::Never,
+        recovery_capabilities: DictationRecoveryCapabilities::STANDARD,
+        quick_chip: false,
+        quick_chip_label: None,
+        quick_chip_order: None,
+        selectable: true,
+    },
+    DictationTargetDescriptor {
+        target: DictationTarget::AiChatComposer,
+        stable_id: "aichat",
+        selector_label: "AI Chat (legacy)",
+        badge_label: "AI",
+        icon: "bot",
+        delivery_verb: "Stage",
+        description: "Legacy AI composer destination; migrated to Agent Chat",
+        persistence_class: DictationTargetPersistenceClass::LegacyReadOnly,
+        requires_frozen_identity: true,
+        auto_submit_permission: DictationAutoSubmitPermission::Never,
+        recovery_capabilities: DictationRecoveryCapabilities::LEGACY,
+        quick_chip: false,
+        quick_chip_label: None,
+        quick_chip_order: None,
+        selectable: false,
+    },
+    DictationTargetDescriptor {
+        target: DictationTarget::TabAiHarness,
+        stable_id: "agentchat",
+        selector_label: "Agent Chat",
+        badge_label: "Agent",
+        icon: "bot",
+        delivery_verb: "Send",
+        description: "Send the transcript to Agent Chat",
+        persistence_class: DictationTargetPersistenceClass::Sticky,
+        requires_frozen_identity: true,
+        auto_submit_permission: DictationAutoSubmitPermission::ExplicitSend,
+        recovery_capabilities: DictationRecoveryCapabilities::STANDARD,
+        quick_chip: true,
+        quick_chip_label: Some("Send"),
+        quick_chip_order: Some(3),
+        selectable: true,
+    },
+    DictationTargetDescriptor {
+        target: DictationTarget::ExternalApp,
+        stable_id: "frontmost",
+        selector_label: "Frontmost App",
+        badge_label: "App",
+        icon: "clipboard-paste",
+        delivery_verb: "Paste",
+        description: "Paste the transcript into the frontmost app",
+        persistence_class: DictationTargetPersistenceClass::Sticky,
+        requires_frozen_identity: true,
+        auto_submit_permission: DictationAutoSubmitPermission::Never,
+        recovery_capabilities: DictationRecoveryCapabilities::STANDARD,
+        quick_chip: true,
+        quick_chip_label: Some("Paste"),
+        quick_chip_order: Some(0),
+        selectable: true,
+    },
+    DictationTargetDescriptor {
+        target: DictationTarget::DayPageToday,
+        stable_id: "today",
+        selector_label: "Today",
+        badge_label: "Today",
+        icon: "calendar-days",
+        delivery_verb: "Append",
+        description: "Append the transcript to today's note",
+        persistence_class: DictationTargetPersistenceClass::Sticky,
+        requires_frozen_identity: false,
+        auto_submit_permission: DictationAutoSubmitPermission::Never,
+        recovery_capabilities: DictationRecoveryCapabilities::STANDARD,
+        quick_chip: true,
+        quick_chip_label: Some("Today"),
+        quick_chip_order: Some(1),
+        selectable: true,
+    },
+    DictationTargetDescriptor {
+        target: DictationTarget::QuickAiQuestion,
+        stable_id: "ask",
+        selector_label: "Ask AI",
+        badge_label: "Ask AI",
+        icon: "sparkles",
+        delivery_verb: "Ask",
+        description: "Ask Quick AI with the transcript",
+        persistence_class: DictationTargetPersistenceClass::Sticky,
+        requires_frozen_identity: false,
+        auto_submit_permission: DictationAutoSubmitPermission::ExplicitSend,
+        recovery_capabilities: DictationRecoveryCapabilities::STANDARD,
+        quick_chip: true,
+        quick_chip_label: Some("Ask"),
+        quick_chip_order: Some(2),
+        selectable: true,
+    },
+];
+
 impl DictationTarget {
+    pub fn descriptor(self) -> &'static DictationTargetDescriptor {
+        match self {
+            Self::MainWindowFilter => &ALL_DICTATION_TARGETS[0],
+            Self::MainWindowPrompt => &ALL_DICTATION_TARGETS[1],
+            Self::NotesEditor => &ALL_DICTATION_TARGETS[2],
+            Self::AiChatComposer => &ALL_DICTATION_TARGETS[3],
+            Self::TabAiHarness => &ALL_DICTATION_TARGETS[4],
+            Self::ExternalApp => &ALL_DICTATION_TARGETS[5],
+            Self::DayPageToday => &ALL_DICTATION_TARGETS[6],
+            Self::QuickAiQuestion => &ALL_DICTATION_TARGETS[7],
+        }
+    }
+
+    pub fn action_descriptors() -> impl Iterator<Item = &'static DictationTargetDescriptor> {
+        ALL_DICTATION_TARGETS
+            .iter()
+            .filter(|descriptor| descriptor.selectable)
+    }
+
+    pub fn quick_chip_descriptors() -> impl Iterator<Item = &'static DictationTargetDescriptor> {
+        (0_u8..4).filter_map(|order| {
+            ALL_DICTATION_TARGETS.iter().find(|descriptor| {
+                descriptor.quick_chip
+                    && descriptor.selectable
+                    && descriptor.quick_chip_order == Some(order)
+            })
+        })
+    }
+
     /// The delivery destination recorded in receipts for this target.
     ///
     /// Single source of truth for the `DictationTarget` →
@@ -161,30 +382,12 @@ impl DictationTarget {
     /// accepted back by `parse_dictation_target_label` — the two must stay
     /// round-trippable.
     pub fn sticky_label(self) -> &'static str {
-        match self {
-            Self::MainWindowFilter => "filter",
-            Self::MainWindowPrompt => "prompt",
-            Self::NotesEditor => "notes",
-            Self::AiChatComposer => "aichat",
-            Self::TabAiHarness => "agentchat",
-            Self::ExternalApp => "frontmost",
-            Self::DayPageToday => "today",
-            Self::QuickAiQuestion => "ask",
-        }
+        self.descriptor().stable_id
     }
 
     /// Short, stable label for the overlay destination badge.
     pub fn overlay_label(self) -> &'static str {
-        match self {
-            Self::MainWindowFilter => "Script Kit",
-            Self::MainWindowPrompt => "Prompt",
-            Self::NotesEditor => "Notes",
-            Self::AiChatComposer => "AI",
-            Self::TabAiHarness => "Agent",
-            Self::ExternalApp => "App",
-            Self::DayPageToday => "Today",
-            Self::QuickAiQuestion => "Ask AI",
-        }
+        self.descriptor().badge_label
     }
 }
 

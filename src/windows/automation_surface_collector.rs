@@ -540,7 +540,8 @@ pub fn collect_surface_snapshot(
 }
 
 fn collect_dictation_snapshot(resolved: &AutomationWindowInfo) -> SurfaceElementSnapshot {
-    let state = crate::dictation::snapshot_overlay_state().unwrap_or_default();
+    let state = crate::dictation::snapshot_overlay_state()
+        .unwrap_or_else(crate::dictation::last_dictation_overlay_state);
     let phase = format!("{:?}", state.phase);
     let destination = crate::dictation::destination_selector_spec(state.target);
 
@@ -571,11 +572,37 @@ fn collect_dictation_snapshot(resolved: &AutomationWindowInfo) -> SurfaceElement
     signal.kind = Some("signal".to_string());
 
     let mut target_badge = collect_semantic_chip_element(&destination);
-    target_badge.selectable = Some(crate::dictation::can_cycle_dictation_target());
+    target_badge.selectable = Some(false);
+    target_badge.selected = Some(true);
+    target_badge.kind = Some("destination-indicator".to_string());
+
+    let interactive = matches!(
+        state.phase,
+        crate::dictation::DictationSessionPhase::Recording
+            | crate::dictation::DictationSessionPhase::Confirming
+    );
+    let mut elements = vec![panel, signal, target_badge];
+    for descriptor in crate::dictation::DictationTarget::quick_chip_descriptors() {
+        let mut spec = crate::components::main_view_chrome::SemanticChipSpec::destination_selector(
+            format!("dictation-destination:{}", descriptor.stable_id),
+            descriptor
+                .quick_chip_label
+                .expect("quick chip descriptor must provide a label"),
+        );
+        if !interactive {
+            spec.enabled = false;
+            spec.disabled_reason = Some("Destination is locked while Dictation processes".into());
+        }
+        let mut chip = collect_semantic_chip_element(&spec);
+        chip.selected = Some(descriptor.target == state.target);
+        chip.source = Some("DictationTargetDescriptor".to_string());
+        elements.push(chip);
+    }
+    let total_count = elements.len();
 
     SurfaceElementSnapshot {
-        elements: vec![panel, signal, target_badge],
-        total_count: 3,
+        elements,
+        total_count,
         focused_semantic_id: Some("panel:dictation-overlay".to_string()),
         selected_semantic_id: None,
         warnings: Vec::new(),

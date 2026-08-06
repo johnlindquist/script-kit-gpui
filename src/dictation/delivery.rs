@@ -42,7 +42,13 @@ pub struct DictationWrongTargetRefusalDraft {
     pub delivery_generation_before: u64,
 }
 
-pub fn parse_dictation_target_label(label: &str) -> Option<DictationTarget> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DictationTargetLabelResolution {
+    pub target: DictationTarget,
+    pub migrated_legacy_ai_chat: bool,
+}
+
+pub fn resolve_dictation_target_label(label: &str) -> Option<DictationTargetLabelResolution> {
     let normalized = label
         .trim()
         .chars()
@@ -50,21 +56,33 @@ pub fn parse_dictation_target_label(label: &str) -> Option<DictationTarget> {
         .flat_map(|ch| ch.to_lowercase())
         .collect::<String>();
 
-    match normalized.as_str() {
+    let target = match normalized.as_str() {
         "mainwindowfilter" | "scriptkit" | "launcher" | "filter" => {
-            Some(DictationTarget::MainWindowFilter)
+            DictationTarget::MainWindowFilter
         }
-        "mainwindowprompt" | "prompt" => Some(DictationTarget::MainWindowPrompt),
-        "noteseditor" | "notes" => Some(DictationTarget::NotesEditor),
-        "aichatcomposer" | "aichat" | "legacyai" => Some(DictationTarget::AiChatComposer),
-        "tabaiharness" | "agentchat" | "agentchatchat" | "ai" => {
-            Some(DictationTarget::TabAiHarness)
+        "mainwindowprompt" | "prompt" => DictationTarget::MainWindowPrompt,
+        "noteseditor" | "notes" => DictationTarget::NotesEditor,
+        "aichatcomposer" | "aichat" | "legacyai" => {
+            return Some(DictationTargetLabelResolution {
+                target: DictationTarget::TabAiHarness,
+                migrated_legacy_ai_chat: true,
+            });
         }
-        "externalapp" | "frontmostapp" | "frontmost" | "app" => Some(DictationTarget::ExternalApp),
-        "daypagetoday" | "daypage" | "today" | "todaynote" => Some(DictationTarget::DayPageToday),
-        "quickaiquestion" | "quickai" | "ask" | "askai" => Some(DictationTarget::QuickAiQuestion),
-        _ => None,
-    }
+        "tabaiharness" | "agentchat" | "agentchatchat" | "ai" => DictationTarget::TabAiHarness,
+        "externalapp" | "frontmostapp" | "frontmost" | "app" => DictationTarget::ExternalApp,
+        "daypagetoday" | "daypage" | "today" | "todaynote" => DictationTarget::DayPageToday,
+        "quickaiquestion" | "quickai" | "ask" | "askai" => DictationTarget::QuickAiQuestion,
+        _ => return None,
+    };
+
+    Some(DictationTargetLabelResolution {
+        target,
+        migrated_legacy_ai_chat: false,
+    })
+}
+
+pub fn parse_dictation_target_label(label: &str) -> Option<DictationTarget> {
+    resolve_dictation_target_label(label).map(|resolution| resolution.target)
 }
 
 pub fn resolve_delivery_target_request(

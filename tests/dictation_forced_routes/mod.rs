@@ -76,7 +76,7 @@ fn overlay_target_badge_preserves_full_label_for_accessibility() {
 }
 
 #[test]
-fn hidden_dictation_to_app_route_uses_agent_chat_quick_submit() {
+fn hidden_dictation_to_app_route_uses_frontmost_app_target() {
     let hidden_start = BUILTINS_SOURCE
         .find(r#""builtin/dictation-to-app""#)
         .expect("hidden dictation-to-app route must exist");
@@ -86,8 +86,8 @@ fn hidden_dictation_to_app_route_uses_agent_chat_quick_submit() {
         .unwrap_or(hidden_body.len() - 1);
     let hidden_body = &hidden_body[..next_entry + 1];
 
-    assert!(hidden_body.contains("Start Dictation to Agent Chat"));
-    assert!(hidden_body.contains("BuiltInFeature::DictationToAiHarness"));
+    assert!(hidden_body.contains("Start Dictation to App"));
+    assert!(hidden_body.contains("BuiltInFeature::DictationToFrontmostApp"));
 }
 
 #[test]

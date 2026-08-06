@@ -112,19 +112,14 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 }
 
 fn target_label(target: DictationTarget) -> String {
-    match target {
-        DictationTarget::MainWindowFilter => "Main Filter".to_string(),
-        DictationTarget::MainWindowPrompt => "Prompt".to_string(),
-        DictationTarget::NotesEditor => "Notes".to_string(),
-        DictationTarget::AiChatComposer => "AI Chat".to_string(),
-        DictationTarget::TabAiHarness => "Agent Chat".to_string(),
-        DictationTarget::ExternalApp => crate::frontmost_app_tracker::get_last_real_app()
+    if target == DictationTarget::ExternalApp {
+        return crate::frontmost_app_tracker::get_last_real_app()
             .map(|app| app.name.trim().to_string())
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "Frontmost App".to_string()),
-        DictationTarget::DayPageToday => "Today".to_string(),
-        DictationTarget::QuickAiQuestion => "Ask AI".to_string(),
+            .unwrap_or_else(|| target.descriptor().selector_label.to_string());
     }
+
+    target.descriptor().selector_label.to_string()
 }
 
 pub fn format_history_timestamp(timestamp: &str) -> String {

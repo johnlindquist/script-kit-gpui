@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 40 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 43 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -18,7 +18,7 @@
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
-| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C10 complete; WF-016 verified |
+| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C11 complete; SAFE-002, WF-018, and WF-019 verified |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
 ## How to view the baseline proposal explorer
@@ -884,6 +884,59 @@
   5. Trigger a cart-storage deletion failure after successful staging. Verify Agent Chat keeps the staged chip, Notes reports that the cart was not cleared, and the row remains available for retry.
   6. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c10/script-kit-gpui" bun scripts/agentic/cons-flow-ux/notes-handoff-probe.ts`; expect all three scenarios to pass, privacy flags false, complete Driver cleanup, and `exactArtifactOwnedProcessCount:0`.
 - **Intentional differences preserved:** Notes owns persisted cart consumption and feedback; Agent Chat owns context admission, canonical dedupe, and thread state. A detached Agent Chat remains a separate host and is never selected as the destination for a Notes handoff.
+
+### SAFE-002 — Make every Dictation dismissal non-destructive unless the user explicitly discards
+
+- **Status:** Complete. Recording, confirmation, processing, terminal, and idle phases now have one exhaustive dismissal ladder shared by local Escape, global Escape, Command+W, and native footer Close.
+- **Commit boundary:** Workflow Safety C11 — `fix(dictation): unify targets chips and safe dismissal [SAFE-002 WF-018 WF-019]`.
+- **Changed behavior:** Escape during Recording always opens the discard confirmation, even immediately after Dictation starts. Escape from that confirmation resumes recording. Backspace/Delete or the explicit **Discard** footer action is the only abort path. During Transcribing or Delivering, Escape/Command+W hides the overlay without cancelling work; invoking Dictation again reopens the current processing overlay instead of starting or stopping another session. Finished/Failed closes, while Idle propagates. Microphone and destination popups unwind before the session ladder.
+- **Exact owners:** `src/dictation/window.rs::{OverlayEscapeAction,overlay_escape_action,DictationOverlay::apply_dismiss_action,process_global_keys_if_requested,handle_key_down,handle_native_footer_action,dematerialize_then_remove_overlay,reopen_last_dictation_overlay}`; `src/app_execute/builtin_execution.rs::execute_dictation_builtin_action`; and the persistent last-overlay snapshot in `src/dictation/window.rs`.
+- **Focused tests/build:** Final serial Dictation model suite PASS (236/236). Focused integration contracts PASS: forced routes 8/8, lifecycle 7/7, overlay focus/hide 2/2, and Agent Chat route 14/14. Library and binary checks PASS; stable product build PASS. Artifact: `target-agent/artifacts/cons-flow-c11/script-kit-gpui`; SHA-256 `acbc504c1a46a2612d766456b85d070df7c366c479a716d24fbddd288d3fe857`.
+- **Runtime receipt:** `.test-output/cons-flow-c11/dictation-dismiss-targets-receipt.json` → PASS. Immediate Escape reaches Confirming; a second Escape resumes; Command+W reaches the same confirmation without closing; explicit Backspace discard closes. A Transcribing fixture hides while phase and delivery generation remain unchanged, then the Dictation hotkey reopens it. Both Driver rows report `processExited:true`, `streamsDrained:true`, and `logWriterClosed:true`; exact artifact inventory reports `exactArtifactOwnedProcessCount:0`.
+- **Negative controls:** The elapsed-time abort threshold and Escape-owned abort result are absent. Early Escape cannot call the transcript handler or abort callback. Processing hide cannot advance stop/delivery generations. The shared-route model test scopes local, global, and native Close to the same resolver/effect owner. Fixture-only phase restoration requires `SCRIPT_KIT_TEST_STATUS=1`; production processing remains owned by the live session.
+- **User test/view:**
+  1. Start Dictation and press Escape immediately. Verify a **Discard dictation?** confirmation appears rather than the recording disappearing.
+  2. Press Escape again. Verify recording resumes with the same destination and captured state.
+  3. Press Command+W while recording. Verify it opens the same confirmation instead of closing or discarding.
+  4. Let Dictation reach Transcribing, then press Escape. Verify the overlay hides while transcription continues.
+  5. Invoke the Dictation hotkey while processing is hidden. Verify the same Transcribing/Delivering overlay reappears; no second capture begins.
+  6. Enter confirmation and choose **Discard** (or Backspace/Delete). Verify this explicit action closes and abandons the capture.
+- **Intentional differences preserved:** Idle Dictation does not swallow Escape. Finished/Failed may close immediately because no live capture remains. No glass, material, geometry, or motion calibration value changed.
+
+### WF-018 — Use one exhaustive Dictation target descriptor in Actions, badges, history, and automation
+
+- **Status:** Complete. All eight serialized `DictationTarget` variants resolve through one exhaustive descriptor table; the seven current targets appear in a real searchable Dictation Actions menu, while legacy `AiChatComposer` remains readable but non-selectable and migrates to Agent Chat with a typed receipt.
+- **Commit boundary:** Same Workflow Safety C11 commit as SAFE-002.
+- **Changed behavior:** Each target now has one stable ID, selector label, badge label, Lucide token, delivery verb, description, persistence class, frozen-identity requirement, auto-submit permission, recovery capabilities, quick-chip membership, and selectable flag. History labels, overlay badge/chips, footer copy, automation state/elements, and the Command+K **Destinations** Actions menu consume this descriptor instead of local label/verb tables. The menu exposes Script Kit, Prompt, Notes, Agent Chat, Frontmost App, Today, and Ask AI; no new selection can produce legacy AI Chat.
+- **Exact owners:** `src/dictation/types.rs::{DictationTargetDescriptor,DictationTargetPersistenceClass,DictationAutoSubmitPermission,DictationRecoveryCapabilities,ALL_DICTATION_TARGETS,DictationTarget::descriptor,action_descriptors,quick_chip_descriptors}`; `src/dictation/delivery.rs::{DictationTargetLabelResolution,resolve_dictation_target_label}`; `src/dictation/history.rs::target_label`; `src/dictation/window.rs::{dictation_target_actions,dictation_target_from_action_id,open_destination_actions,render_target_badge_slot,dictation_native_footer_config}`; `src/dictation/runtime.rs::dictation_automation_state`; and `src/windows/automation_surface_collector.rs::dictation_elements`.
+- **Compatibility/migration:** Stable labels and aliases continue to parse. `aichat`, `AiChatComposer`, and `legacy-ai` migrate to `TabAiHarness` and set `migrated_legacy_ai_chat:true`. The enum remains deserializable and exhaustively matched; only new selection surfaces omit the legacy row. Existing quick target IDs and delivery destinations remain compatible.
+- **Runtime/visual receipt:** The C11 receipt opens the real Actions popup with Command+K, enumerates exactly `filter`, `prompt`, `notes`, `agentchat`, `frontmost`, `today`, and `ask`, rejects `aichat`, and activates the selected `filter` row through real GPUI key dispatch. Target generation advances exactly once while stop/delivery generations remain unchanged. Screenshots: `.test-output/cons-flow-c11/dictation-destinations-actions.png` (targeted popup chrome; Tahoe target capture blacks the Metal row plane) and `.test-output/cons-flow-c11/dictation-destinations-screen.png` (live overlay, four quick chips, and Destinations footer action). Semantic rows and activation are the authoritative popup-content proof.
+- **Negative controls:** Descriptor tests require eight unique IDs and seven selectable nonlegacy rows. A forged `dictation_target:aichat` action ID resolves to no target. Every Actions row round-trips to its descriptor target. Source-audit inventory shrank to 2,814 sites and passes `--check --base main` with no guarded additions. Stale Agent Chat source audits were repaired to current typed owners; product behavior was not reverted to satisfy old strings.
+- **User test/view:**
+  1. Start Dictation and press Command+K, or click **Destinations** in the native footer.
+  2. Verify the searchable Actions menu lists Script Kit, Prompt, Notes, Agent Chat, Frontmost App, Today, and Ask AI with target descriptions; legacy **AI Chat** is absent.
+  3. Choose Script Kit. Verify the target badge changes to Script Kit, the recording continues, and no transcript is delivered.
+  4. Reopen Destinations and choose Notes, Today, Ask AI, or Agent Chat. Verify the badge and footer verb agree with the selected row.
+  5. Close/reopen Script Kit with a previously persisted legacy AI Chat target. Verify Dictation resolves it to Agent Chat rather than presenting a legacy selectable row.
+  6. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c11/script-kit-gpui" bun scripts/agentic/cons-flow-ux/dictation-dismiss-targets-probe.ts`; expect seven visible Action IDs, `actionsSelectionTarget:"MainWindowFilter"`, complete cleanup, and `exactArtifactOwnedProcessCount:0`.
+- **Intentional differences preserved:** The overlay uses Lucide tokens directly, while the shared Actions renderer adapts those descriptor tokens to its smaller repository icon enum. Frontmost App may still show the tracked app display identity through its existing badge exception; frozen delivery identity belongs to C12 and is not claimed here.
+
+### WF-019 — Keep Dictation quick chips selection-only in every modifier and phase
+
+- **Status:** Complete. Paste, Today, Ask, and Send are a stable quick subset; clicks select a destination only while Recording or Confirming and are truthfully disabled during processing.
+- **Commit boundary:** Same Workflow Safety C11 commit as SAFE-002.
+- **Changed behavior:** The four chip rows now come from `quick_chip_descriptors()` in both runtime and preview. A click advances only target generation. It never stops capture, starts transcription, delivers text, or changes role when armed or when Option is held. Modifier tracking was removed from the overlay and global monitor. During Transcribing/Delivering the same four chips remain visible but inert with semantic disabled reasons. The native footer primary derives from the selected descriptor: `Stop & Paste/Append/Ask/Send` while Recording and the direct `Paste/Append/Ask/Send` verb while Confirming.
+- **Exact owners:** `src/dictation/window.rs::{ChipClickBehavior,chip_click_behavior,render_destination_chip_row,select_destination,dictation_native_footer_config}`; `src/dictation/runtime.rs::{DICTATION_TARGET_GENERATION,dictation_target_generation,set_dictation_session_target}`; `src/windows/automation_surface_collector.rs::dictation_elements`; and descriptor quick-chip fields in `src/dictation/types.rs`.
+- **Focused/runtime proof:** The phase × armed × Option model matrix passes for Recording, Confirming, Idle, Transcribing, Delivering, Finished, and Failed. The exact-artifact runtime selects all four chips by real GPUI pointer dispatch and one full Actions target by real keyboard dispatch. Five selections advance only target generation; stop generation, delivery generation, and the before/after config fingerprint remain unchanged. Processing exposes four disabled chips with performable copy instead of executable selection.
+- **Negative controls:** No `SendTo` chip result, send/aim mode, Option role branch, Enter glyph, direct submit, transcript handler, or delivery actor remains in chip execution. Fixture selection deliberately bypasses preference persistence and the probe compares the real config fingerprint before/after. Processing chips require `selectable:false` plus a non-empty `actionDisabled` reason.
+- **User test/view:**
+  1. Start Dictation and click **Paste**, **Today**, **Ask**, and **Send** one at a time. Verify each click changes only the target badge; recording continues and no delivery occurs.
+  2. Hold Option and repeat every click. Verify behavior and labels are identical; no chip changes into a send/aim control.
+  3. Press Escape to enter confirmation and click each chip again. Verify confirmation remains open and only the destination changes.
+  4. Inspect the primary footer after each selection. Verify Recording says `Stop & <verb>` and Confirming says the direct verb.
+  5. Submit once and watch Transcribing/Delivering. Verify all four chips keep their positions but appear disabled and cannot retarget.
+  6. Run the C11 probe above; expect `targetSelections:5`, `deliveryGenerationUnchanged:true`, `stopGenerationUnchanged:true`, and `configFingerprintUnchanged:true`.
+- **Intentional differences preserved:** Quick chips intentionally omit Script Kit, Prompt, and Notes to keep the compact four-target row; all seven current targets remain available through Destinations Actions. Persisting a real production selection remains target-owner behavior, while the deterministic fixture never mutates user configuration.
 
 ## Verification ledger
 

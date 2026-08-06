@@ -2564,7 +2564,7 @@ fn dictation_start_preflights_delivery_target_before_toggle() {
         .find("fn execute_dictation_builtin_action(")
         .expect("execute_dictation_builtin_action must exist");
     let dictation_src =
-        &src[dictation_start..dictation_start + 4000.min(src.len() - dictation_start)];
+        &src[dictation_start..dictation_start + 7000.min(src.len() - dictation_start)];
 
     let preflight_pos = dictation_src
         .find("let preflight = self.prepare_dictation_builtin_start(action, None, cx);")
@@ -2830,24 +2830,16 @@ fn builtin_dictation_overlay_transitions_are_ordered_correctly() {
     let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
 
-    let branch_start = src
-        .find("builtins::BuiltInFeature::Dictation =>")
-        .expect("dictation builtin branch must exist");
-    let branch_src = &src[branch_start..];
-
-    // On Started: overlay is set to Recording.
-    let recording_pos = branch_src
-        .find("DictationSessionPhase::Recording")
-        .expect("Started arm must set overlay to Recording");
-
-    // On Stopped(Some): overlay transitions to Transcribing.
-    let transcribing_pos = branch_src
-        .find("DictationSessionPhase::Transcribing")
-        .expect("Stopped(Some) arm must set overlay to Transcribing");
+    let recording_owner = src
+        .find("fn start_dictation_overlay_session")
+        .expect("recording overlay owner must exist");
+    let transcribing_owner = src
+        .find("fn request_active_dictation_stop")
+        .expect("transcribing overlay owner must exist");
 
     assert!(
-        recording_pos < transcribing_pos,
-        "Recording (byte {recording_pos}) must appear before Transcribing (byte {transcribing_pos}) in the dictation branch"
+        recording_owner < transcribing_owner,
+        "recording setup must remain upstream of the stop/transcribing owner"
     );
 
     let handler_src = dictation_handler_source(&src);
@@ -2880,7 +2872,7 @@ fn dictation_start_preflight_runs_before_toggle() {
         .find("fn execute_dictation_builtin_action(")
         .expect("execute_dictation_builtin_action must exist");
     let dictation_src =
-        &src[dictation_start..dictation_start + 4000.min(src.len() - dictation_start)];
+        &src[dictation_start..dictation_start + 7000.min(src.len() - dictation_start)];
 
     let recording_guard_pos = dictation_src
         .find("let is_start_edge = !crate::dictation::is_dictation_busy();")
@@ -3265,29 +3257,54 @@ fn set_overlay_phase_is_exported() {
 fn overlay_key_handler_writes_through_to_runtime_phase() {
     let window_src = std::fs::read_to_string("src/dictation/window.rs").expect("read window.rs");
 
-    // The overlay key handler must use overlay_escape_action to decide behavior.
+    // Every non-destructive dismissal route delegates to the phase-only ladder.
     assert!(
-        window_src.contains("overlay_escape_action(&self.state.phase, elapsed)"),
-        "overlay key handler must delegate to overlay_escape_action with elapsed"
+        window_src.contains("overlay_escape_action(&self.state.phase)"),
+        "overlay routes must delegate to the phase-only dismissal ladder"
     );
 
-    // AbortSession must invoke the stored abort callback (via helper).
+    // Explicit Discard still owns the stored abort callback.
     assert!(
         window_src.contains("OVERLAY_ABORT_CALLBACK"),
-        "overlay must invoke the stored abort callback on AbortSession"
+        "explicit Discard must retain the stored abort callback"
     );
 
-    // CloseOverlay must call close_dictation_overlay.
-    let handler_start = window_src
+    // Local Escape/Command+W, the global Escape monitor, and native footer
+    // Close must resolve the same phase action and apply the same effect owner.
+    let local_start = window_src
         .find("fn handle_key_down")
         .expect("overlay must have a key-down handler");
-    let handler_end = handler_start + 3000.min(window_src.len() - handler_start);
-    let handler_src = &window_src[handler_start..handler_end];
-    assert!(
-        handler_src.contains("close_dictation_overlay")
-            || handler_src.contains("abort_overlay_session"),
-        "overlay key handler must call close_dictation_overlay or abort_overlay_session on CloseOverlay"
-    );
+    let local_end = window_src[local_start..]
+        .find("impl crate::actions::prelude::CommandBarHost")
+        .map(|offset| local_start + offset)
+        .expect("key handler must end before the command-bar host");
+    let local = &window_src[local_start..local_end];
+
+    let global_start = window_src
+        .find("fn process_global_keys_if_requested")
+        .expect("overlay must process global Escape");
+    let global_end = window_src[global_start..]
+        .find("pub fn set_state")
+        .map(|offset| global_start + offset)
+        .expect("global key handler must end before set_state");
+    let global = &window_src[global_start..global_end];
+
+    let footer_start = window_src
+        .find("fn handle_native_footer_action")
+        .expect("overlay must route native footer actions");
+    let footer_end = window_src[footer_start..]
+        .find("fn enter_confirming")
+        .map(|offset| footer_start + offset)
+        .expect("footer handler must end before confirming transition");
+    let footer = &window_src[footer_start..footer_end];
+
+    for (route, body) in [("local", local), ("global", global), ("native", footer)] {
+        assert!(
+            body.contains("overlay_escape_action(&self.state.phase)")
+                && body.contains("self.apply_dismiss_action(action, window, cx)"),
+            "{route} dismissal must resolve and apply the shared ladder"
+        );
+    }
 }
 
 #[test]
@@ -3624,13 +3641,10 @@ fn abort_dictation_clears_session_state() {
     );
 }
 
-/// The overlay Escape key handler must write `Confirming` through to the
-/// runtime (via `set_overlay_phase`) so the pump reads the authoritative
-/// phase. Escape in Confirming must resume recording, while Enter remains the
-/// deliberate abort action that invokes `abort_dictation` + close, NOT
-/// `handle_dictation_transcript`.
+/// Non-destructive dismissal must confirm or hide; only the explicit Discard
+/// branch may invoke the abort callback, and no key route delivers directly.
 #[test]
-fn escape_abort_never_reaches_transcript_handler() {
+fn dismissal_never_reaches_transcript_handler_or_elapsed_abort() {
     let window_src = std::fs::read_to_string("src/dictation/window.rs").expect("read window.rs");
 
     let handler_start = window_src
@@ -3639,23 +3653,22 @@ fn escape_abort_never_reaches_transcript_handler() {
     let handler_end = handler_start + 3000.min(window_src.len() - handler_start);
     let handler_src = &window_src[handler_start..handler_end];
 
-    // AbortSession arm invokes the stored abort callback (via helper).
+    // The explicit Backspace/Delete Discard branch still owns abort.
     assert!(
-        handler_src.contains("abort_overlay_session"),
-        "Escape abort must invoke abort_overlay_session (which uses the stored abort callback)"
+        window_src.contains("Backspace pressed during confirmation, discarding dictation session")
+            && window_src.contains("self.abort_overlay_session(window, cx)"),
+        "explicit Discard must invoke the stored abort callback"
     );
 
-    // overlay_escape_action routes Recording (≥ threshold) to TransitionToConfirming
-    // and Recording (< threshold) to AbortSession.
     assert!(
         window_src.contains(
             "DictationSessionPhase::Recording => OverlayEscapeAction::TransitionToConfirming"
         ),
-        "overlay_escape_action must map Recording (>= threshold) to TransitionToConfirming"
+        "recording dismissal must always map to confirmation"
     );
     assert!(
-        window_src.contains("ESCAPE_CONFIRM_THRESHOLD"),
-        "overlay_escape_action must use the named threshold constant"
+        !window_src.contains("ESCAPE_CONFIRM_THRESHOLD"),
+        "dismissal safety must not depend on elapsed recording time"
     );
     assert!(
         window_src
@@ -4314,16 +4327,15 @@ fn dictation_overlay_claims_full_popup_bounds_contract() {
         "dictation pill must fill the bounded content stage and preserve the non-glass full-window fallback"
     );
 
-    // Root overlay node must own focus, keyboard/modifier routing, and the
-    // full edge-to-edge clipped popup bounds. Mouse routing may sit between
-    // those independent contracts without invalidating them.
+    // Root overlay node must own focus, keyboard routing, and the full
+    // edge-to-edge clipped popup bounds. Option/modifier tracking is
+    // deliberately absent because destination chips are selection-only.
     let root_start = body
         .find("div().track_focus(&self.focus_handle)")
         .expect("root overlay must own the focus handle");
     let root = &body[root_start..];
     for required in [
         ".on_key_down(cx.listener(Self::handle_key_down))",
-        ".on_modifiers_changed(",
         ".w_full().h_full().overflow_hidden().child(composition)",
     ] {
         assert!(
@@ -4357,76 +4369,63 @@ fn dictation_overlay_generation_guards_pump_and_delayed_close_contract() {
 }
 
 // ---------------------------------------------------------------------------
-// Overlay escape action mapping
+// Overlay safe dismissal ladder
 // ---------------------------------------------------------------------------
 
 #[test]
-fn overlay_escape_action_aborts_before_threshold() {
+fn overlay_dismissal_always_confirms_recording_without_elapsed_time() {
     use super::types::DictationSessionPhase;
     use super::window::{overlay_escape_action, OverlayEscapeAction};
 
-    // Escape during Recording below 5 seconds → immediate abort.
     assert_eq!(
-        overlay_escape_action(&DictationSessionPhase::Recording, Duration::from_secs(4)),
-        OverlayEscapeAction::AbortSession
-    );
-}
-
-#[test]
-fn overlay_escape_action_confirms_at_threshold() {
-    use super::types::DictationSessionPhase;
-    use super::window::{overlay_escape_action, OverlayEscapeAction};
-
-    // Escape during Recording at exactly 5 seconds → transition to Confirming.
-    assert_eq!(
-        overlay_escape_action(&DictationSessionPhase::Recording, Duration::from_secs(5)),
+        overlay_escape_action(&DictationSessionPhase::Recording),
         OverlayEscapeAction::TransitionToConfirming
     );
 }
 
 #[test]
-fn overlay_escape_action_resumes_from_confirming() {
+fn overlay_dismissal_resumes_from_confirming() {
     use super::types::DictationSessionPhase;
     use super::window::{overlay_escape_action, OverlayEscapeAction};
 
-    // Escape during Confirming resumes recording (elapsed is irrelevant).
     assert_eq!(
-        overlay_escape_action(&DictationSessionPhase::Confirming, Duration::from_secs(9)),
+        overlay_escape_action(&DictationSessionPhase::Confirming),
         OverlayEscapeAction::ResumeRecording
     );
 }
 
 #[test]
-fn overlay_escape_closes_non_recording_phases() {
+fn overlay_dismissal_hides_processing_and_closes_terminal_phases() {
     use super::types::DictationSessionPhase;
     use super::window::{overlay_escape_action, OverlayEscapeAction};
 
-    let elapsed = Duration::from_secs(0);
-    assert_eq!(
-        overlay_escape_action(&DictationSessionPhase::Transcribing, elapsed),
-        OverlayEscapeAction::CloseOverlay
-    );
-    assert_eq!(
-        overlay_escape_action(&DictationSessionPhase::Delivering, elapsed),
-        OverlayEscapeAction::CloseOverlay
-    );
-    assert_eq!(
-        overlay_escape_action(&DictationSessionPhase::Finished, elapsed),
-        OverlayEscapeAction::CloseOverlay
-    );
-    assert_eq!(
-        overlay_escape_action(&DictationSessionPhase::Failed("boom".to_string()), elapsed),
-        OverlayEscapeAction::CloseOverlay
-    );
+    for phase in [
+        DictationSessionPhase::Transcribing,
+        DictationSessionPhase::Delivering,
+    ] {
+        assert_eq!(
+            overlay_escape_action(&phase),
+            OverlayEscapeAction::HideOverlay
+        );
+    }
+    for phase in [
+        DictationSessionPhase::Finished,
+        DictationSessionPhase::Failed("boom".to_string()),
+    ] {
+        assert_eq!(
+            overlay_escape_action(&phase),
+            OverlayEscapeAction::CloseOverlay
+        );
+    }
 }
 
 #[test]
-fn overlay_escape_propagates_only_when_idle() {
+fn overlay_dismissal_propagates_only_when_idle() {
     use super::types::DictationSessionPhase;
     use super::window::{overlay_escape_action, OverlayEscapeAction};
 
     assert_eq!(
-        overlay_escape_action(&DictationSessionPhase::Idle, Duration::from_secs(0)),
+        overlay_escape_action(&DictationSessionPhase::Idle),
         OverlayEscapeAction::Propagate
     );
 }
@@ -4475,33 +4474,6 @@ fn overlay_phase_copy_confirming_uses_stop_continue() {
     let (headline, action_label) = overlay_phase_copy(&DictationSessionPhase::Confirming);
     assert_eq!(headline, "Stop dictation?");
     assert_eq!(action_label, "Continue");
-}
-
-#[test]
-fn overlay_escape_action_boundary_just_below_threshold() {
-    use super::types::DictationSessionPhase;
-    use super::window::{overlay_escape_action, OverlayEscapeAction};
-
-    // 4999ms is below the 5-second threshold → immediate abort.
-    assert_eq!(
-        overlay_escape_action(
-            &DictationSessionPhase::Recording,
-            Duration::from_millis(4999),
-        ),
-        OverlayEscapeAction::AbortSession
-    );
-}
-
-#[test]
-fn overlay_escape_action_confirms_well_above_threshold() {
-    use super::types::DictationSessionPhase;
-    use super::window::{overlay_escape_action, OverlayEscapeAction};
-
-    // 30 seconds is well above the threshold → still transition to confirming.
-    assert_eq!(
-        overlay_escape_action(&DictationSessionPhase::Recording, Duration::from_secs(30),),
-        OverlayEscapeAction::TransitionToConfirming
-    );
 }
 
 #[test]
@@ -4962,6 +4934,101 @@ fn dictation_runtime_exposes_target_cycle_helpers() {
 }
 
 #[test]
+fn dictation_target_descriptors_are_exhaustive_unique_and_action_safe() {
+    use super::types::{DictationTarget, ALL_DICTATION_TARGETS};
+    use std::collections::HashSet;
+
+    assert_eq!(ALL_DICTATION_TARGETS.len(), 8);
+    let mut ids = HashSet::new();
+    for descriptor in ALL_DICTATION_TARGETS {
+        assert_eq!(descriptor.target.descriptor(), &descriptor);
+        assert!(
+            ids.insert(descriptor.stable_id),
+            "duplicate target stable id"
+        );
+        assert!(!descriptor.selector_label.is_empty());
+        assert!(!descriptor.badge_label.is_empty());
+        assert!(!descriptor.icon.is_empty());
+        assert!(!descriptor.delivery_verb.is_empty());
+        assert!(!descriptor.description.is_empty());
+    }
+
+    let actions = DictationTarget::action_descriptors().collect::<Vec<_>>();
+    assert_eq!(actions.len(), 7);
+    assert!(actions.iter().all(|descriptor| descriptor.selectable));
+    assert!(actions
+        .iter()
+        .all(|descriptor| descriptor.target != DictationTarget::AiChatComposer));
+
+    let quick = DictationTarget::quick_chip_descriptors()
+        .map(|descriptor| descriptor.target)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        quick,
+        vec![
+            DictationTarget::ExternalApp,
+            DictationTarget::DayPageToday,
+            DictationTarget::QuickAiQuestion,
+            DictationTarget::TabAiHarness,
+        ]
+    );
+}
+
+#[test]
+fn dictation_actions_project_every_selectable_descriptor() {
+    let descriptors = crate::dictation::DictationTarget::action_descriptors().collect::<Vec<_>>();
+    let actions = super::window::dictation_target_actions();
+
+    assert_eq!(actions.len(), descriptors.len());
+    for (action, descriptor) in actions.iter().zip(descriptors) {
+        assert_eq!(
+            action.id,
+            format!("dictation_target:{}", descriptor.stable_id)
+        );
+        assert_eq!(action.title, descriptor.selector_label);
+        assert_eq!(
+            action.description.as_deref(),
+            Some(format!("{} — {}", descriptor.delivery_verb, descriptor.description).as_str())
+        );
+        assert!(action.icon.is_some(), "Actions target must keep an icon");
+        assert_eq!(action.section.as_deref(), Some("Destination"));
+        assert_eq!(
+            super::window::dictation_target_from_action_id(&action.id),
+            Some(descriptor.target),
+            "Actions activation must route back to its descriptor target"
+        );
+    }
+    assert!(actions
+        .iter()
+        .all(|action| action.id != "dictation_target:aichat"));
+    assert_eq!(
+        super::window::dictation_target_from_action_id("dictation_target:aichat"),
+        None,
+        "legacy AI target must not reactivate through a forged action id"
+    );
+}
+
+#[test]
+fn legacy_ai_chat_labels_migrate_to_agent_chat_with_receipt() {
+    for label in ["aichat", "AiChatComposer", "legacy-ai"] {
+        let resolution = crate::dictation::resolve_dictation_target_label(label)
+            .expect("legacy label must remain readable");
+        assert_eq!(
+            resolution.target,
+            crate::dictation::DictationTarget::TabAiHarness
+        );
+        assert!(resolution.migrated_legacy_ai_chat);
+    }
+    let current = crate::dictation::resolve_dictation_target_label("agentchat")
+        .expect("current label must resolve");
+    assert_eq!(
+        current.target,
+        crate::dictation::DictationTarget::TabAiHarness
+    );
+    assert!(!current.migrated_legacy_ai_chat);
+}
+
+#[test]
 fn overlay_destination_chip_click_behavior_matches_armed_option_matrix() {
     use super::types::DictationSessionPhase;
     use super::window::{chip_click_behavior, ChipClickBehavior};
@@ -5008,16 +5075,81 @@ fn dictation_footer_stop_button_tracks_armed_state() {
     use crate::footer_popup::FooterAction;
 
     let has_stop = |phase, armed| {
-        super::window::dictation_native_footer_config(&phase, armed)
-            .buttons
-            .iter()
-            .any(|button| button.action == FooterAction::Stop)
+        super::window::dictation_native_footer_config(
+            &phase,
+            armed,
+            crate::dictation::DictationTarget::ExternalApp,
+        )
+        .buttons
+        .iter()
+        .any(|button| button.action == FooterAction::Stop)
     };
 
     assert!(!has_stop(DictationSessionPhase::Recording, false));
     assert!(has_stop(DictationSessionPhase::Recording, true));
     assert!(!has_stop(DictationSessionPhase::Confirming, false));
     assert!(has_stop(DictationSessionPhase::Confirming, true));
+
+    let recording_footer = super::window::dictation_native_footer_config(
+        &DictationSessionPhase::Recording,
+        true,
+        crate::dictation::DictationTarget::ExternalApp,
+    );
+    let destination_action = recording_footer
+        .buttons
+        .iter()
+        .find(|button| button.action == FooterAction::Actions)
+        .expect("recording footer must expose all destinations");
+    assert_eq!(destination_action.key.as_ref(), "⌘K");
+    assert_eq!(destination_action.label.as_ref(), "Destinations");
+
+    let confirming_footer = super::window::dictation_native_footer_config(
+        &DictationSessionPhase::Confirming,
+        true,
+        crate::dictation::DictationTarget::ExternalApp,
+    );
+    let discard_action = confirming_footer
+        .buttons
+        .iter()
+        .find(|button| button.action == FooterAction::Actions)
+        .expect("confirming footer must expose explicit Discard");
+    assert_eq!(discard_action.label.as_ref(), "Discard");
+
+    for target in [
+        crate::dictation::DictationTarget::ExternalApp,
+        crate::dictation::DictationTarget::DayPageToday,
+        crate::dictation::DictationTarget::QuickAiQuestion,
+        crate::dictation::DictationTarget::TabAiHarness,
+    ] {
+        let recording = super::window::dictation_native_footer_config(
+            &DictationSessionPhase::Recording,
+            true,
+            target,
+        );
+        let confirming = super::window::dictation_native_footer_config(
+            &DictationSessionPhase::Confirming,
+            true,
+            target,
+        );
+        let recording_primary = recording
+            .buttons
+            .iter()
+            .find(|button| button.action == FooterAction::Stop)
+            .expect("recording primary");
+        let confirming_primary = confirming
+            .buttons
+            .iter()
+            .find(|button| button.action == FooterAction::Stop)
+            .expect("confirming primary");
+        assert_eq!(
+            recording_primary.label.as_ref(),
+            format!("Stop & {}", target.descriptor().delivery_verb)
+        );
+        assert_eq!(
+            confirming_primary.label.as_ref(),
+            target.descriptor().delivery_verb
+        );
+    }
 }
 
 #[test]
@@ -5027,21 +5159,20 @@ fn dictation_chip_tooltips_describe_selection_without_delivery() {
 
     let external = chip_tooltip_label(DictationTarget::ExternalApp);
     assert!(
-        external.as_ref().starts_with("Dictate into "),
+        external.as_ref().contains("frontmost app")
+            || external.as_ref().starts_with("Dictate into "),
         "external app tooltip should name the selection target"
     );
-    assert_eq!(
-        chip_tooltip_label(DictationTarget::DayPageToday).as_ref(),
-        "Dictate to today's note"
-    );
-    assert_eq!(
-        chip_tooltip_label(DictationTarget::QuickAiQuestion).as_ref(),
-        "Dictate to AI"
-    );
-    assert_eq!(
-        chip_tooltip_label(DictationTarget::TabAiHarness).as_ref(),
-        "Dictate to Agent Chat"
-    );
+    for target in [
+        DictationTarget::DayPageToday,
+        DictationTarget::QuickAiQuestion,
+        DictationTarget::TabAiHarness,
+    ] {
+        assert_eq!(
+            chip_tooltip_label(target).as_ref(),
+            target.descriptor().description
+        );
+    }
 }
 
 #[test]
@@ -5050,10 +5181,13 @@ fn overlay_destination_chip_icons_resolve_to_lucide_assets() {
     // in the app (paste/clipboard, day/calendar, ask/sparkles, Agent
     // Chat/bot). Resolution must succeed so the chips never render blank
     // icon slots.
-    for (target, verb, icon) in super::window::DICTATION_CHIP_TARGETS {
+    for descriptor in crate::dictation::DictationTarget::quick_chip_descriptors() {
         assert!(
-            super::window::chip_icon_path(icon).is_some(),
-            "chip {verb} ({target:?}) icon {icon:?} must resolve to a Lucide asset path"
+            super::window::chip_icon_path(descriptor.icon).is_some(),
+            "chip {} ({:?}) icon {:?} must resolve to a Lucide asset path",
+            descriptor.delivery_verb,
+            descriptor.target,
+            descriptor.icon,
         );
     }
 }
@@ -5567,10 +5701,15 @@ fn dictation_sticky_labels_round_trip_through_parser() {
         DictationTarget::DayPageToday,
         DictationTarget::QuickAiQuestion,
     ] {
+        let expected = if target == DictationTarget::AiChatComposer {
+            DictationTarget::TabAiHarness
+        } else {
+            target
+        };
         assert_eq!(
             parse_dictation_target_label(target.sticky_label()),
-            Some(target),
-            "sticky label for {target:?} must parse back to the same target"
+            Some(expected),
+            "sticky label for {target:?} must parse to its current target"
         );
     }
 }

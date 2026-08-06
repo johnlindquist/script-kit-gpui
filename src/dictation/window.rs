@@ -111,38 +111,6 @@ pub(crate) fn has_sound(bars: &[f32; WAVEFORM_BAR_COUNT]) -> bool {
     bars.iter().any(|&bar| bar > SOUND_THRESHOLD)
 }
 
-/// Destination verb chips shown in the header row: explicit one-click
-/// targets replacing the removed click-to-cycle badge. Order matches the
-/// delivery verbs: Paste (frontmost app), Today (day page capture), Ask
-/// (quick AI), Send (Agent Chat).
-///
-/// The third field is the Lucide icon name, chosen to match how each concept
-/// is drawn elsewhere in the app: `clipboard-paste` (paste builtins),
-/// `calendar-days` (day/today), `sparkles` (ask-AI builtins), and `bot`
-/// (the Agent Chat builtin and footer agent chip).
-pub(crate) const DICTATION_CHIP_TARGETS: [(crate::dictation::DictationTarget, &str, &str); 4] = [
-    (
-        crate::dictation::DictationTarget::ExternalApp,
-        "Paste",
-        "clipboard-paste",
-    ),
-    (
-        crate::dictation::DictationTarget::DayPageToday,
-        "Today",
-        "calendar-days",
-    ),
-    (
-        crate::dictation::DictationTarget::QuickAiQuestion,
-        "Ask",
-        "sparkles",
-    ),
-    (
-        crate::dictation::DictationTarget::TabAiHarness,
-        "Send",
-        "bot",
-    ),
-];
-
 /// Resolve a chip's Lucide icon name to an embedded asset path.
 pub(crate) fn chip_icon_path(lucide_name: &str) -> Option<gpui::SharedString> {
     use gpui_component::IconNamed;
@@ -234,16 +202,14 @@ pub(crate) fn chip_tooltip_label(target: crate::dictation::DictationTarget) -> S
             .filter(|name| !name.is_empty())
     };
 
-    match target {
-        crate::dictation::DictationTarget::ExternalApp => match frontmost_app_name() {
+    if target == crate::dictation::DictationTarget::ExternalApp {
+        return match frontmost_app_name() {
             Some(name) => format!("Dictate into {name}").into(),
-            None => "Dictate into the frontmost app".into(),
-        },
-        crate::dictation::DictationTarget::DayPageToday => "Dictate to today's note".into(),
-        crate::dictation::DictationTarget::QuickAiQuestion => "Dictate to AI".into(),
-        crate::dictation::DictationTarget::TabAiHarness => "Dictate to Agent Chat".into(),
-        other => other.overlay_label().into(),
+            None => target.descriptor().description.into(),
+        };
     }
+
+    target.descriptor().description.into()
 }
 
 /// Build the overlay badge label for the current delivery target.
@@ -402,7 +368,7 @@ use crate::ui_foundation::HexColorExt;
 
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 /// Monotonic generation counter for overlay sessions.
@@ -416,6 +382,7 @@ static OVERLAY_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Global handle so we can reach the overlay from any callsite.
 static DICTATION_OVERLAY_WINDOW: OnceLock<Mutex<Option<gpui::WindowHandle<DictationOverlay>>>> =
     OnceLock::new();
+static LAST_DICTATION_OVERLAY_STATE: OnceLock<Mutex<DictationOverlayState>> = OnceLock::new();
 static DICTATION_OVERLAY_EXIT_TICKET: Mutex<Option<crate::platform::GlassExitTicket>> =
     Mutex::new(None);
 static DICTATION_OVERLAY_EXIT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -427,6 +394,19 @@ pub(crate) fn set_dictation_overlay_fixture_mode(active: bool) {
 
 pub(crate) fn dictation_overlay_fixture_mode() -> bool {
     DICTATION_OVERLAY_FIXTURE_MODE.load(Ordering::SeqCst)
+}
+
+fn remember_dictation_overlay_state(state: &DictationOverlayState) {
+    *LAST_DICTATION_OVERLAY_STATE
+        .get_or_init(|| Mutex::new(DictationOverlayState::default()))
+        .lock() = state.clone();
+}
+
+pub(crate) fn last_dictation_overlay_state() -> DictationOverlayState {
+    LAST_DICTATION_OVERLAY_STATE
+        .get_or_init(|| Mutex::new(DictationOverlayState::default()))
+        .lock()
+        .clone()
 }
 
 /// Callback type for overlay escape actions (abort dictation).
@@ -486,8 +466,6 @@ fn install_global_escape_monitor() {
     use cocoa::base::{id, nil};
     use objc::{class, msg_send, sel, sel_impl};
 
-    OPTION_HELD.store(false, Ordering::SeqCst);
-
     if crate::platform::require_main_thread("install_global_escape_monitor") {
         return;
     }
@@ -497,39 +475,30 @@ fn install_global_escape_monitor() {
         return;
     }
 
-    // NSEventMaskKeyDown = 1 << 10, NSEventMaskFlagsChanged = 1 << 12
-    let mask: u64 = (1 << 10) | (1 << 12);
+    // NSEventMaskKeyDown = 1 << 10. Modifier changes are deliberately not
+    // monitored: Option never changes Dictation destination-chip behavior.
+    let mask: u64 = 1 << 10;
 
     let block = block::ConcreteBlock::new(move |event: id| {
-        // SAFETY: `event` is a valid NSEvent passed by AppKit.
-        let event_type: u64 = unsafe { msg_send![event, type] };
-        if event_type == 12 {
-            // NSEventModifierFlagOption = 1 << 19
-            let flags: u64 = unsafe { msg_send![event, modifierFlags] };
-            OPTION_HELD.store((flags & (1 << 19)) != 0, Ordering::SeqCst);
-            return;
-        }
-
-        if event_type == 10 {
-            // keyCode 53 = Escape, keyCode 36 = Return/Enter.
-            let key_code: u16 = unsafe { msg_send![event, keyCode] };
-            match key_code {
-                53 => {
-                    tracing::info!(
-                        category = "DICTATION",
-                        "Global key monitor: Escape pressed in external app"
-                    );
-                    ESCAPE_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                36 => {
-                    tracing::info!(
-                        category = "DICTATION",
-                        "Global key monitor: Enter pressed in external app"
-                    );
-                    ENTER_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                _ => {}
+        // SAFETY: `event` is a valid key-down NSEvent passed by AppKit.
+        // keyCode 53 = Escape, keyCode 36 = Return/Enter.
+        let key_code: u16 = unsafe { msg_send![event, keyCode] };
+        match key_code {
+            53 => {
+                tracing::info!(
+                    category = "DICTATION",
+                    "Global key monitor: Escape pressed in external app"
+                );
+                ESCAPE_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
             }
+            36 => {
+                tracing::info!(
+                    category = "DICTATION",
+                    "Global key monitor: Enter pressed in external app"
+                );
+                ENTER_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            _ => {}
         }
     });
     let block = block.copy();
@@ -559,16 +528,12 @@ fn install_global_escape_monitor() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install_global_escape_monitor() {
-    OPTION_HELD.store(false, Ordering::SeqCst);
-}
+fn install_global_escape_monitor() {}
 
 /// Remove the global key-down monitor.
 #[cfg(target_os = "macos")]
 fn remove_global_escape_monitor() {
     use objc::{class, msg_send, sel, sel_impl};
-
-    OPTION_HELD.store(false, Ordering::SeqCst);
 
     if crate::platform::require_main_thread("remove_global_escape_monitor") {
         return;
@@ -587,9 +552,7 @@ fn remove_global_escape_monitor() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn remove_global_escape_monitor() {
-    OPTION_HELD.store(false, Ordering::SeqCst);
-}
+fn remove_global_escape_monitor() {}
 
 /// Flag: the global key monitor detected an Escape press that the overlay
 /// needs to process. Checked by `process_global_keys_if_requested` inside
@@ -600,13 +563,6 @@ static ESCAPE_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 /// phase. Enter in Confirming = stop and transcribe the session.
 static ENTER_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Flag: the Option (⌥) key is currently held. Fed by the global
-/// FlagsChanged monitor (other app focused) and the overlay's own
-/// `on_modifiers_changed` listener (overlay focused); read at render time to
-/// flip the destination chips between send and aim affordances. Reset on
-/// monitor install/remove so state never leaks across sessions.
-static OPTION_HELD: AtomicBool = AtomicBool::new(false);
-
 // ---------------------------------------------------------------------------
 // Confirming-phase copy constants (single source of truth)
 // ---------------------------------------------------------------------------
@@ -615,6 +571,8 @@ static OPTION_HELD: AtomicBool = AtomicBool::new(false);
 const ACTION_STOP_LABEL: &str = "Stop";
 /// Opens the microphone picker; the live session keeps its opened mic.
 const ACTION_MIC_LABEL: &str = "Select Mic";
+/// Opens the complete descriptor-backed destination Actions menu.
+const ACTION_DESTINATIONS_LABEL: &str = "Destinations";
 /// Single-word action label for discarding the current recording.
 const ACTION_CANCEL_LABEL: &str = "Cancel";
 /// Single-word action label for discarding from the confirmation state.
@@ -629,22 +587,23 @@ const ESC_KEYCAP: &str = "esc";
 const ENTER_KEYCAP: &str = "\u{21b5}";
 /// Keycap shown for Backspace (discard from confirmation).
 const BACKSPACE_KEYCAP: &str = "\u{232b}";
+/// Keycap shown for the complete destination menu.
+const DESTINATIONS_KEYCAP: &str = "⌘K";
 /// Keycap token rendered as a Lucide microphone glyph by footer chrome.
 const MIC_KEYCAP: &str = crate::components::footer_chrome::FOOTER_MIC_ICON_TOKEN;
 
 /// Interval between animation ticks for the transcribing dot pulse (ms).
 const TRANSCRIBING_TICK_MS: u64 = 50;
 
-/// What the overlay should do when Escape is pressed in a given phase.
+/// What every non-destructive overlay dismissal route does in a given phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OverlayEscapeAction {
-    /// First Escape during recording — show confirmation UI, don't abort yet.
+    /// Recording dismissal always asks before any audio can be discarded.
     TransitionToConfirming,
-    /// Escape during Confirming — dismiss confirmation and resume recording.
+    /// Dismissing the confirmation resumes the still-live recording.
     ResumeRecording,
-    /// Escape during a short recording (or Backspace during Confirming) —
-    /// abort the session and discard the audio.
-    AbortSession,
+    /// Processing continues after the overlay is hidden.
+    HideOverlay,
     CloseOverlay,
     Propagate,
 }
@@ -672,31 +631,18 @@ pub(crate) fn overlay_phase_copy(phase: &DictationSessionPhase) -> (&'static str
     }
 }
 
-/// Recordings shorter than this abort immediately on Escape; longer ones
-/// enter a confirmation state where Escape means "continue" and Enter means
-/// "stop."  Mirrors the vercel-voice 5-second threshold.
-const ESCAPE_CONFIRM_THRESHOLD: Duration = Duration::from_secs(5);
-
-/// Map a dictation session phase + elapsed time to the appropriate Escape behavior.
-///
-/// Follows the vercel-voice confirm-first pattern:
-/// - Recording (< 5 s) → immediate abort
-/// - Recording (≥ 5 s) → show confirmation (first Escape)
-/// - Confirming → dismiss confirmation and resume recording
-pub(crate) fn overlay_escape_action(
-    phase: &DictationSessionPhase,
-    elapsed: Duration,
-) -> OverlayEscapeAction {
+/// Map the current phase to the one safe dismissal ladder shared by Escape,
+/// Command+W, the global monitor, and native footer Close.
+pub(crate) fn overlay_escape_action(phase: &DictationSessionPhase) -> OverlayEscapeAction {
     match phase {
-        DictationSessionPhase::Recording if elapsed < ESCAPE_CONFIRM_THRESHOLD => {
-            OverlayEscapeAction::AbortSession
-        }
         DictationSessionPhase::Recording => OverlayEscapeAction::TransitionToConfirming,
         DictationSessionPhase::Confirming => OverlayEscapeAction::ResumeRecording,
-        DictationSessionPhase::Transcribing
-        | DictationSessionPhase::Delivering
-        | DictationSessionPhase::Finished
-        | DictationSessionPhase::Failed(_) => OverlayEscapeAction::CloseOverlay,
+        DictationSessionPhase::Transcribing | DictationSessionPhase::Delivering => {
+            OverlayEscapeAction::HideOverlay
+        }
+        DictationSessionPhase::Finished | DictationSessionPhase::Failed(_) => {
+            OverlayEscapeAction::CloseOverlay
+        }
         DictationSessionPhase::Idle => OverlayEscapeAction::Propagate,
     }
 }
@@ -802,11 +748,61 @@ impl DictationMicrophonePopupLifetime {
     }
 }
 
+const DICTATION_TARGET_ACTION_PREFIX: &str = "dictation_target:";
+
+fn dictation_target_action_icon(
+    descriptor: &crate::dictation::DictationTargetDescriptor,
+) -> crate::designs::icon_variations::IconName {
+    use crate::designs::icon_variations::IconName;
+
+    // ActionsDialog uses the repository's compact icon enum while the overlay
+    // renders Lucide names. Keep this adapter driven by the descriptor's icon
+    // token so the two hosts cannot choose target icons independently.
+    match descriptor.icon {
+        "search" => IconName::MagnifyingGlass,
+        "text-cursor-input" => IconName::Pencil,
+        "notebook-tabs" => IconName::File,
+        "bot" => IconName::MessageCircle,
+        "clipboard-paste" => IconName::Copy,
+        "calendar-days" => IconName::File,
+        "sparkles" => IconName::BoltFilled,
+        _ => IconName::MessageCircle,
+    }
+}
+
+pub(crate) fn dictation_target_actions() -> Vec<crate::actions::Action> {
+    crate::dictation::DictationTarget::action_descriptors()
+        .map(|descriptor| {
+            crate::actions::Action::new(
+                format!("{DICTATION_TARGET_ACTION_PREFIX}{}", descriptor.stable_id),
+                descriptor.selector_label,
+                Some(format!(
+                    "{} — {}",
+                    descriptor.delivery_verb, descriptor.description
+                )),
+                crate::actions::ActionCategory::ScriptContext,
+            )
+            .with_icon(dictation_target_action_icon(descriptor))
+            .with_section("Destination")
+        })
+        .collect()
+}
+
+pub(crate) fn dictation_target_from_action_id(
+    action_id: &str,
+) -> Option<crate::dictation::DictationTarget> {
+    let stable_id = action_id.strip_prefix(DICTATION_TARGET_ACTION_PREFIX)?;
+    crate::dictation::DictationTarget::action_descriptors()
+        .find(|descriptor| descriptor.stable_id == stable_id)
+        .map(|descriptor| descriptor.target)
+}
+
 /// The GPUI entity that renders the compact dictation pill.
 pub struct DictationOverlay {
     state: DictationOverlayState,
     display_bars: [f32; WAVEFORM_BAR_COUNT],
     focus_handle: FocusHandle,
+    destination_command_bar: crate::actions::CommandBar,
     microphone_popup_lifetime: Option<DictationMicrophonePopupLifetime>,
     last_render_logged_phase: Option<DictationSessionPhase>,
     /// When the processing (transcribing/delivering) animation started, for
@@ -846,6 +842,11 @@ impl DictationOverlay {
             state: DictationOverlayState::default(),
             display_bars: silent_bars(),
             focus_handle: cx.focus_handle(),
+            destination_command_bar: crate::actions::CommandBar::new(
+                dictation_target_actions(),
+                crate::actions::CommandBarConfig::notes_style(),
+                Arc::new(get_cached_theme()),
+            ),
             microphone_popup_lifetime: None,
             last_render_logged_phase: None,
             processing_started_at: None,
@@ -955,22 +956,21 @@ impl DictationOverlay {
                     self.open_microphone_picker(window, cx);
                 }
             }
-            // Discard slot: only shown in Confirming; discards the recording.
-            FooterAction::Actions => {
-                if self.state.phase == DictationSessionPhase::Confirming {
-                    self.abort_overlay_session(window, cx);
-                } else {
-                    self.close_overlay_from_within(window, cx);
-                }
-            }
+            // Recording: open the full descriptor-backed destination menu.
+            // Confirming: the same footer action occupies the explicit Discard
+            // slot and remains the only destructive dismissal path.
+            FooterAction::Actions => match self.state.phase {
+                DictationSessionPhase::Recording => self.open_destination_actions(window, cx),
+                DictationSessionPhase::Confirming => self.abort_overlay_session(window, cx),
+                DictationSessionPhase::Idle
+                | DictationSessionPhase::Transcribing
+                | DictationSessionPhase::Delivering
+                | DictationSessionPhase::Finished
+                | DictationSessionPhase::Failed(_) => {}
+            },
             FooterAction::Close => {
-                if self.state.phase == DictationSessionPhase::Confirming {
-                    self.resume_recording(window, cx);
-                } else if self.state.phase == DictationSessionPhase::Recording {
-                    self.abort_overlay_session(window, cx);
-                } else {
-                    self.close_overlay_from_within(window, cx);
-                }
+                let action = overlay_escape_action(&self.state.phase);
+                let _ = self.apply_dismiss_action(action, window, cx);
             }
             FooterAction::Replace
             | FooterAction::Append
@@ -988,6 +988,7 @@ impl DictationOverlay {
     /// No resize needed — confirming swaps content inline at the same pill height.
     fn enter_confirming(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.state.phase = DictationSessionPhase::Confirming;
+        remember_dictation_overlay_state(&self.state);
         crate::dictation::set_overlay_phase(DictationSessionPhase::Confirming);
         cx.notify();
     }
@@ -995,8 +996,72 @@ impl DictationOverlay {
     /// Dismiss the confirmation state and resume recording.
     fn resume_recording(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.state.phase = DictationSessionPhase::Recording;
+        remember_dictation_overlay_state(&self.state);
         crate::dictation::set_overlay_phase(DictationSessionPhase::Recording);
         cx.notify();
+    }
+
+    fn open_destination_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(
+            self.state.phase,
+            DictationSessionPhase::Recording | DictationSessionPhase::Confirming
+        ) {
+            return;
+        }
+
+        let _ = self.dismiss_microphone_popup_top_layer("open_destination_actions", cx);
+        self.destination_command_bar
+            .set_actions(dictation_target_actions(), cx);
+        self.destination_command_bar.open_centered(window, cx);
+        self.wire_destination_actions_activation(window, cx);
+    }
+
+    fn wire_destination_actions_activation(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.destination_command_bar.dialog().cloned() else {
+            return;
+        };
+        let overlay = cx.entity().downgrade();
+        let activation_window = window.window_handle();
+        let close_window = activation_window;
+        let close_overlay = overlay.clone();
+        dialog.update(cx, |dialog, _cx| {
+            dialog.set_on_close(Arc::new(move |cx| {
+                let overlay = close_overlay.clone();
+                cx.defer(move |cx| {
+                    let _ = close_window.update(cx, |_root, window, cx| {
+                        let Some(overlay) = overlay.upgrade() else {
+                            return;
+                        };
+                        overlay.update(cx, |overlay, cx| {
+                            overlay.destination_command_bar.mark_closed_externally();
+                            overlay.focus_handle.focus(window, cx);
+                        });
+                    });
+                });
+            }));
+            dialog.set_on_activation(Arc::new(move |activation, _popup_window, cx| {
+                let crate::actions::ActionsDialogActivation::Executed { action_id, .. } =
+                    activation
+                else {
+                    return;
+                };
+                let overlay = overlay.clone();
+                cx.defer(move |cx| {
+                    let _ = activation_window.update(cx, |_root, window, cx| {
+                        let Some(overlay) = overlay.upgrade() else {
+                            return;
+                        };
+                        overlay.update(cx, |overlay, cx| {
+                            overlay.destination_command_bar.mark_closed_externally();
+                            if let Some(target) = dictation_target_from_action_id(&action_id) {
+                                overlay.select_destination(target, cx);
+                            }
+                            overlay.focus_handle.focus(window, cx);
+                        });
+                    });
+                });
+            }));
+        });
     }
 
     /// Open the attached microphone picker.
@@ -1217,6 +1282,7 @@ impl DictationOverlay {
     /// then run the native close prep and remove the overlay window. Falls
     /// back to instant close when glass/morph is unavailable.
     fn dematerialize_then_remove_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.destination_command_bar.close(cx);
         set_dictation_overlay_fixture_mode(false);
         if let Some(ticket) = crate::platform::begin_gpui_window_exit_with_ticket(
             window,
@@ -1300,6 +1366,43 @@ impl DictationOverlay {
         tracing::info!(category = "DICTATION", "Overlay closed from within entity");
     }
 
+    fn apply_dismiss_action(
+        &mut self,
+        action: OverlayEscapeAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> GlobalKeyProcessResult {
+        match action {
+            OverlayEscapeAction::TransitionToConfirming => {
+                self.enter_confirming(window, cx);
+                GlobalKeyProcessResult::StateChanged
+            }
+            OverlayEscapeAction::ResumeRecording => {
+                self.resume_recording(window, cx);
+                GlobalKeyProcessResult::StateChanged
+            }
+            OverlayEscapeAction::HideOverlay => {
+                tracing::info!(
+                    category = "DICTATION",
+                    phase = ?self.state.phase,
+                    event = "dictation_processing_overlay_hidden",
+                    "Hiding Dictation overlay while processing continues"
+                );
+                let preserve_fixture = dictation_overlay_fixture_mode();
+                self.close_overlay_from_within(window, cx);
+                if preserve_fixture {
+                    set_dictation_overlay_fixture_mode(true);
+                }
+                GlobalKeyProcessResult::Closed
+            }
+            OverlayEscapeAction::CloseOverlay => {
+                self.close_overlay_from_within(window, cx);
+                GlobalKeyProcessResult::Closed
+            }
+            OverlayEscapeAction::Propagate => GlobalKeyProcessResult::None,
+        }
+    }
+
     /// Check whether the global key monitor flagged an Escape or Enter press
     /// and process it.  Called from the overlay pump tick (every 16ms) so the
     /// action runs inside GPUI context with full `&mut self` access.
@@ -1340,36 +1443,16 @@ impl DictationOverlay {
             | crate::dictation::DictationPopupDismissOutcome::NotPresent => {}
         }
 
-        let elapsed = crate::dictation::dictation_elapsed().unwrap_or(self.state.elapsed);
-        let action = overlay_escape_action(&self.state.phase, elapsed);
+        let action = overlay_escape_action(&self.state.phase);
 
         tracing::info!(
             category = "DICTATION",
             ?action,
             phase = ?self.state.phase,
-            elapsed_ms = elapsed.as_millis() as u64,
             "Processing global escape request"
         );
 
-        match action {
-            OverlayEscapeAction::TransitionToConfirming => {
-                self.enter_confirming(window, cx);
-                GlobalKeyProcessResult::StateChanged
-            }
-            OverlayEscapeAction::ResumeRecording => {
-                self.resume_recording(window, cx);
-                GlobalKeyProcessResult::StateChanged
-            }
-            OverlayEscapeAction::AbortSession => {
-                self.abort_overlay_session(window, cx);
-                GlobalKeyProcessResult::Closed
-            }
-            OverlayEscapeAction::CloseOverlay => {
-                self.close_overlay_from_within(window, cx);
-                GlobalKeyProcessResult::Closed
-            }
-            OverlayEscapeAction::Propagate => GlobalKeyProcessResult::None,
-        }
+        self.apply_dismiss_action(action, window, cx)
     }
 
     /// Replace the visual state snapshot (called from the dictation runtime).
@@ -1555,10 +1638,18 @@ impl DictationOverlay {
 
         let theme = get_cached_theme();
         let hover_bg = theme.colors.background.main.with_opacity(OPACITY_SELECTED);
-        for (target, verb, icon) in DICTATION_CHIP_TARGETS {
+        for descriptor in crate::dictation::DictationTarget::quick_chip_descriptors() {
+            let target = descriptor.target;
             let is_active = self.state.target == target;
             let tooltip_label = chip_tooltip_label(target);
-            let mut chip = destination_chip_base(verb, icon, is_active, !interactive);
+            let mut chip = destination_chip_base(
+                descriptor
+                    .quick_chip_label
+                    .expect("quick chip descriptor must provide a label"),
+                descriptor.icon,
+                is_active,
+                !interactive,
+            );
             if interactive {
                 if !is_active {
                     chip = chip.hover(move |style| style.bg(hover_bg));
@@ -1575,7 +1666,7 @@ impl DictationOverlay {
                             match chip_click_behavior(
                                 &this.state.phase,
                                 this.transcript_armed(),
-                                OPTION_HELD.load(Ordering::SeqCst),
+                                false,
                             ) {
                                 ChipClickBehavior::Ignore => {}
                                 ChipClickBehavior::Retarget => {
@@ -1622,18 +1713,26 @@ impl DictationOverlay {
             return;
         }
 
-        let Some(applied) = crate::dictation::set_dictation_session_target(target) else {
-            return;
+        let applied = match crate::dictation::set_dictation_session_target(target) {
+            Some(applied) => applied,
+            None if dictation_overlay_fixture_mode() => {
+                crate::dictation::record_fixture_dictation_target_selection();
+                target
+            }
+            None => return,
         };
         self.state.target = applied;
+        remember_dictation_overlay_state(&self.state);
 
-        if let Err(error) = crate::dictation::save_dictation_last_target(applied) {
-            tracing::warn!(
-                category = "DICTATION",
-                error = %error,
-                target_label = applied.overlay_label(),
-                "Failed to persist sticky dictation destination"
-            );
+        if !dictation_overlay_fixture_mode() {
+            if let Err(error) = crate::dictation::save_dictation_last_target(applied) {
+                tracing::warn!(
+                    category = "DICTATION",
+                    error = %error,
+                    target_label = applied.overlay_label(),
+                    "Failed to persist sticky dictation destination"
+                );
+            }
         }
 
         cx.notify();
@@ -1848,6 +1947,12 @@ impl DictationOverlay {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.key.as_str();
+        let escape_requested = crate::ui_foundation::is_key_escape(key);
+        let command_w_requested =
+            event.keystroke.modifiers.platform && key.eq_ignore_ascii_case("w");
+        let command_k_requested =
+            event.keystroke.modifiers.platform && key.eq_ignore_ascii_case("k");
+        let dismiss_requested = escape_requested || command_w_requested;
 
         tracing::debug!(
             category = "DICTATION",
@@ -1856,8 +1961,42 @@ impl DictationOverlay {
             "Overlay received key_down"
         );
 
-        if crate::ui_foundation::is_key_escape(key) {
-            match self.dismiss_microphone_popup_top_layer("parent_escape", cx) {
+        if self.destination_command_bar.is_open() {
+            if command_k_requested {
+                self.destination_command_bar.close(cx);
+                cx.stop_propagation();
+                return;
+            }
+            if crate::actions::prelude::CommandBarHost::handle_command_bar_key(
+                self,
+                key,
+                &event.keystroke.modifiers,
+                window,
+                cx,
+            ) {
+                cx.stop_propagation();
+                return;
+            }
+        }
+
+        if command_k_requested
+            && matches!(
+                self.state.phase,
+                DictationSessionPhase::Recording | DictationSessionPhase::Confirming
+            )
+        {
+            self.open_destination_actions(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        if dismiss_requested {
+            let dismiss_reason = if command_w_requested {
+                "parent_command_w"
+            } else {
+                "parent_escape"
+            };
+            match self.dismiss_microphone_popup_top_layer(dismiss_reason, cx) {
                 crate::dictation::DictationPopupDismissOutcome::ClosedCurrentTopLayer => {
                     cx.stop_propagation();
                     return;
@@ -1918,62 +2057,51 @@ impl DictationOverlay {
                 cx.stop_propagation();
                 return;
             }
-            if !crate::ui_foundation::is_key_escape(key) {
+            if !dismiss_requested {
                 // Swallow unrelated keys — no resume, no propagation.
                 cx.stop_propagation();
                 return;
             }
         }
 
-        if !crate::ui_foundation::is_key_escape(key) {
+        if !dismiss_requested {
             cx.propagate();
             return;
         }
 
-        // Use the authoritative runtime elapsed time for threshold decisions,
-        // falling back to the pump-snapshot elapsed when no session is active.
-        let elapsed = crate::dictation::dictation_elapsed().unwrap_or(self.state.elapsed);
+        let action = overlay_escape_action(&self.state.phase);
+        tracing::info!(
+            category = "DICTATION",
+            ?action,
+            phase = ?self.state.phase,
+            command_w_requested,
+            "Processing local Dictation dismissal"
+        );
+        match self.apply_dismiss_action(action, window, cx) {
+            GlobalKeyProcessResult::None => cx.propagate(),
+            GlobalKeyProcessResult::StateChanged | GlobalKeyProcessResult::Closed => {
+                cx.stop_propagation();
+            }
+        }
+    }
+}
 
-        match overlay_escape_action(&self.state.phase, elapsed) {
-            OverlayEscapeAction::TransitionToConfirming => {
-                tracing::info!(
-                    category = "DICTATION",
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "Escape pressed after threshold, showing confirmation"
-                );
-                self.enter_confirming(window, cx);
-                cx.stop_propagation();
-            }
-            OverlayEscapeAction::ResumeRecording => {
-                tracing::info!(
-                    category = "DICTATION",
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "Escape pressed in confirmation, resuming recording"
-                );
-                self.resume_recording(window, cx);
-                cx.stop_propagation();
-            }
-            OverlayEscapeAction::AbortSession => {
-                tracing::info!(
-                    category = "DICTATION",
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "Escape pressed before threshold, aborting dictation session"
-                );
-                self.abort_overlay_session(window, cx);
-                cx.stop_propagation();
-            }
-            OverlayEscapeAction::CloseOverlay => {
-                tracing::info!(
-                    category = "DICTATION",
-                    phase = ?self.state.phase,
-                    "Escape pressed, dismissing dictation overlay"
-                );
-                self.close_overlay_from_within(window, cx);
-                cx.stop_propagation();
-            }
-            OverlayEscapeAction::Propagate => {
-                cx.propagate();
-            }
+impl crate::actions::prelude::CommandBarHost for DictationOverlay {
+    fn command_bar(&self) -> &crate::actions::CommandBar {
+        &self.destination_command_bar
+    }
+
+    fn command_bar_mut(&mut self) -> &mut crate::actions::CommandBar {
+        &mut self.destination_command_bar
+    }
+
+    fn get_context_actions(&self) -> Vec<crate::actions::Action> {
+        dictation_target_actions()
+    }
+
+    fn execute_action(&mut self, action_id: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(target) = dictation_target_from_action_id(action_id) {
+            self.select_destination(target, cx);
         }
     }
 }
@@ -1989,7 +2117,8 @@ impl Render for DictationOverlay {
         self.sync_caption_follow();
         self.ensure_native_footer_action_listener(window, cx);
         let armed = self.transcript_armed();
-        let footer_config = dictation_native_footer_config(&self.state.phase, armed);
+        let footer_config =
+            dictation_native_footer_config(&self.state.phase, armed, self.state.target);
         let glass_in_window_footer = crate::platform::tahoe_liquid_glass_available()
             && crate::theme::get_cached_theme().is_vibrancy_enabled();
         let glass_buttons_enabled = crate::components::footer_chrome::glass_capsules_enabled();
@@ -2242,12 +2371,6 @@ impl Render for DictationOverlay {
                 cx.listener(Self::handle_parent_mouse_down),
             )
             .on_key_down(cx.listener(Self::handle_key_down))
-            .on_modifiers_changed(cx.listener(
-                |_, event: &gpui::ModifiersChangedEvent, _window, cx| {
-                    OPTION_HELD.store(event.modifiers.alt, Ordering::SeqCst);
-                    cx.notify();
-                },
-            ))
             .w_full()
             .h_full()
             .overflow_hidden()
@@ -2465,21 +2588,29 @@ fn active_microphone_footer_label() -> SharedString {
 pub(crate) fn dictation_native_footer_config(
     phase: &DictationSessionPhase,
     armed: bool,
+    target: crate::dictation::DictationTarget,
 ) -> crate::footer_popup::MainWindowFooterConfig {
     use crate::footer_popup::{FooterAction, FooterButtonConfig, MainWindowFooterConfig};
 
     let buttons = match phase {
         DictationSessionPhase::Recording => {
-            let mut buttons = vec![FooterButtonConfig::new(
-                FooterAction::Ai,
-                MIC_KEYCAP,
-                active_microphone_footer_label(),
-            )];
+            let mut buttons = vec![
+                FooterButtonConfig::new(
+                    FooterAction::Ai,
+                    MIC_KEYCAP,
+                    active_microphone_footer_label(),
+                ),
+                FooterButtonConfig::new(
+                    FooterAction::Actions,
+                    DESTINATIONS_KEYCAP,
+                    ACTION_DESTINATIONS_LABEL,
+                ),
+            ];
             if armed {
                 buttons.push(FooterButtonConfig::new(
                     FooterAction::Stop,
                     dictation_stop_keycap(),
-                    ACTION_STOP_LABEL,
+                    format!("Stop & {}", target.descriptor().delivery_verb),
                 ));
             }
             buttons.push(FooterButtonConfig::new(
@@ -2495,7 +2626,7 @@ pub(crate) fn dictation_native_footer_config(
                 buttons.push(FooterButtonConfig::new(
                     FooterAction::Stop,
                     ENTER_KEYCAP,
-                    ACTION_STOP_LABEL,
+                    target.descriptor().delivery_verb,
                 ));
             }
             buttons.push(FooterButtonConfig::new(
@@ -2744,7 +2875,7 @@ pub(crate) fn render_dictation_overlay_state_preview(
     };
 
     let armed = !state.transcript.trim().is_empty();
-    let footer_config = dictation_native_footer_config(&state.phase, armed);
+    let footer_config = dictation_native_footer_config(&state.phase, armed, state.target);
     let action_rail = render_static_action_rail(footer_config.buttons, None);
 
     let inner = div()
@@ -2810,11 +2941,11 @@ fn render_static_header_row(state: &DictationOverlayState) -> impl IntoElement {
         .items_center()
         .justify_center()
         .gap(px(6.));
-    for (target, verb, icon) in DICTATION_CHIP_TARGETS {
+    for descriptor in crate::dictation::DictationTarget::quick_chip_descriptors() {
         chip_row = chip_row.child(destination_chip_base(
-            verb,
-            icon,
-            state.target == target,
+            descriptor.delivery_verb,
+            descriptor.icon,
+            state.target == descriptor.target,
             !live,
         ));
     }
@@ -3401,8 +3532,45 @@ pub(crate) fn open_dictation_microphone_popup_fixture(cx: &mut App) -> anyhow::R
         .map_err(|error| anyhow::anyhow!("Failed to open Dictation microphone fixture: {error}"))
 }
 
+fn apply_test_dictation_overlay_override(
+    mut state: DictationOverlayState,
+) -> DictationOverlayState {
+    if !dictation_overlay_fixture_mode()
+        || std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() != Some("1")
+    {
+        return state;
+    }
+
+    if let Ok(phase) = std::env::var("SCRIPT_KIT_TEST_DICTATION_FIXTURE_PHASE") {
+        state.phase = match phase.as_str() {
+            "recording" => DictationSessionPhase::Recording,
+            "confirming" => DictationSessionPhase::Confirming,
+            "transcribing" => DictationSessionPhase::Transcribing,
+            "delivering" => DictationSessionPhase::Delivering,
+            "finished" => DictationSessionPhase::Finished,
+            "failed" => DictationSessionPhase::Failed("Synthetic fixture failure".to_string()),
+            _ => state.phase,
+        };
+    }
+    if let Ok(target) = std::env::var("SCRIPT_KIT_TEST_DICTATION_FIXTURE_TARGET") {
+        if let Some(target) = crate::dictation::parse_dictation_target_label(&target) {
+            state.target = target;
+        }
+    }
+    if std::env::var("SCRIPT_KIT_TEST_DICTATION_FIXTURE_ARMED")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        state.transcript = "Synthetic armed fixture".into();
+    }
+    state
+}
+
 /// Push a new state snapshot into the overlay (no-op if overlay is not open).
 pub fn update_dictation_overlay(state: DictationOverlayState, cx: &mut App) -> anyhow::Result<()> {
+    let state = apply_test_dictation_overlay_override(state);
+    remember_dictation_overlay_state(&state);
     let slot = DICTATION_OVERLAY_WINDOW.get_or_init(|| Mutex::new(None));
     let handle = {
         let guard = slot.lock();
@@ -3426,6 +3594,27 @@ pub fn update_dictation_overlay(state: DictationOverlayState, cx: &mut App) -> a
         }
     });
 
+    Ok(())
+}
+
+pub fn reopen_last_dictation_overlay(cx: &mut App) -> anyhow::Result<()> {
+    let state = LAST_DICTATION_OVERLAY_STATE
+        .get_or_init(|| Mutex::new(DictationOverlayState::default()))
+        .lock()
+        .clone();
+    if !matches!(
+        state.phase,
+        DictationSessionPhase::Transcribing | DictationSessionPhase::Delivering
+    ) {
+        anyhow::bail!("no hidden processing Dictation overlay is available");
+    }
+    open_dictation_overlay(cx)?;
+    update_dictation_overlay(state, cx)?;
+    tracing::info!(
+        category = "DICTATION",
+        event = "dictation_processing_overlay_reopened",
+        "Reopened hidden Dictation processing overlay"
+    );
     Ok(())
 }
 

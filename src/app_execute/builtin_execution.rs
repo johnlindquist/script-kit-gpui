@@ -5887,20 +5887,37 @@ impl ScriptListApp {
             "{}", action.opening_message()
         );
 
+        if crate::dictation::dictation_overlay_fixture_mode()
+            && !crate::dictation::is_dictation_overlay_open()
+            && matches!(
+                crate::dictation::last_dictation_overlay_state().phase,
+                crate::dictation::DictationSessionPhase::Transcribing
+                    | crate::dictation::DictationSessionPhase::Delivering
+            )
+        {
+            let _ = crate::dictation::reopen_last_dictation_overlay(cx);
+            return Self::builtin_success(dctx, action.success_detail());
+        }
+
         if crate::dictation::is_dictation_stopping() {
-            let target = crate::dictation::dictation_stop_target()
-                .unwrap_or_else(|| action.stop_fallback_target());
-            let restart_queued = toggle_pending_dictation_restart(PendingDictationRestart {
-                action,
-                target,
-            });
+            let overlay_was_open = crate::dictation::is_dictation_overlay_open();
+            if !overlay_was_open {
+                if let Err(error) = crate::dictation::reopen_last_dictation_overlay(cx) {
+                    tracing::warn!(
+                        category = "DICTATION",
+                        action = ?action,
+                        %error,
+                        trace_id = %dctx.trace_id,
+                        "Could not reopen hidden Dictation processing overlay"
+                    );
+                }
+            }
             tracing::info!(
                 category = "DICTATION",
                 action = ?action,
-                ?target,
-                restart_queued,
+                overlay_was_open,
                 trace_id = %dctx.trace_id,
-                "Applied rapid dictation toggle to pending post-stop state"
+                "Dictation hotkey kept the in-flight processing session and revealed it when hidden"
             );
             return Self::builtin_success(dctx, action.success_detail());
         }
