@@ -296,6 +296,30 @@ impl AgentChatEntryRequest {
         })
     }
 
+    pub(crate) fn dictation_send(
+        text: String,
+        target: AgentChatThreadTarget,
+        ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+    ) -> Result<Self, &'static str> {
+        let intent = AgentChatEntryIntent::send(text)?;
+        let context_policy = if ui_variant
+            == crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi
+        {
+            AgentChatContextPolicy::NoContext
+        } else {
+            AgentChatContextPolicy::SuppressFocused
+        };
+        Ok(Self {
+            request_id: next_agent_chat_entry_request_id(),
+            origin: AgentChatEntryOrigin::Dictation,
+            target,
+            intent,
+            ui_variant,
+            context_policy,
+            return_origin: None,
+        })
+    }
+
     pub(crate) fn explicit_send(
         origin: AgentChatEntryOrigin,
         text: String,
@@ -1172,9 +1196,9 @@ mod quick_question_contract {
     // Deliberately no `use super::*`: the parent glob-imports gpui, whose
     // `test` macro would shadow the builtin `#[test]` attribute.
     use super::{
-        AgentChatContextPolicy, AgentChatEntryIntent, AgentChatEntryOutcome, AgentChatEntryRequest,
-        AgentChatEntryVerb, AgentChatOpenDisposition, AgentChatReturnRouteKind,
-        AgentChatSubmissionOutcome,
+        AgentChatContextPolicy, AgentChatEntryIntent, AgentChatEntryOrigin, AgentChatEntryOutcome,
+        AgentChatEntryRequest, AgentChatEntryVerb, AgentChatOpenDisposition,
+        AgentChatReturnRouteKind, AgentChatSubmissionOutcome, AgentChatThreadTarget,
     };
 
     /// Double-tap of the main hotkey means "fastest path to a clean chat for
@@ -1391,5 +1415,39 @@ mod quick_question_contract {
             AgentChatContextPolicy::NoContext,
             "Quick AI must suppress every context source",
         );
+    }
+
+    #[test]
+    fn dictation_send_freezes_existing_or_fresh_thread_policy() {
+        for (target, expected) in [
+            (
+                AgentChatThreadTarget::CurrentHostEmbedded,
+                AgentChatThreadTarget::CurrentHostEmbedded,
+            ),
+            (
+                AgentChatThreadTarget::FreshEmbedded,
+                AgentChatThreadTarget::FreshEmbedded,
+            ),
+        ] {
+            let request = AgentChatEntryRequest::dictation_send(
+                "dictated text".to_string(),
+                target,
+                crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+            )
+            .expect("non-empty dictated text");
+            assert_eq!(request.origin, AgentChatEntryOrigin::Dictation);
+            assert_eq!(request.target, expected);
+            assert_eq!(request.context_policy, AgentChatContextPolicy::SuppressFocused);
+            assert!(request.intent.requests_submission());
+        }
+
+        let quick = AgentChatEntryRequest::dictation_send(
+            "quick dictated text".to_string(),
+            AgentChatThreadTarget::FreshEmbedded,
+            crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi,
+        )
+        .expect("non-empty Quick AI dictated text");
+        assert_eq!(quick.context_policy, AgentChatContextPolicy::NoContext);
+        assert!(quick.intent.requests_submission());
     }
 }

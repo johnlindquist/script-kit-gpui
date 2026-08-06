@@ -196,17 +196,11 @@ pub(crate) fn chip_click_behavior(
 /// Tooltip copy for a destination selector. Selecting a destination never
 /// stops or delivers the current dictation session.
 pub(crate) fn chip_tooltip_label(target: crate::dictation::DictationTarget) -> SharedString {
-    let frontmost_app_name = || {
-        crate::frontmost_app_tracker::get_last_real_app()
-            .map(|app| app.name.trim().to_string())
-            .filter(|name| !name.is_empty())
-    };
-
     if target == crate::dictation::DictationTarget::ExternalApp {
-        return match frontmost_app_name() {
-            Some(name) => format!("Dictate into {name}").into(),
-            None => target.descriptor().description.into(),
-        };
+        return crate::dictation::get_dictation_target_selection()
+            .filter(|selection| selection.is_compatible_with(target))
+            .map(|selection| format!("Dictate into {}", selection.display_label).into())
+            .unwrap_or_else(|| target.descriptor().description.into());
     }
 
     target.descriptor().description.into()
@@ -218,15 +212,11 @@ pub(crate) fn chip_tooltip_label(target: crate::dictation::DictationTarget) -> S
 /// clipboard flow's "Paste to <app>" hint while keeping internal targets
 /// explicit.
 pub(crate) fn target_badge_label(target: crate::dictation::DictationTarget) -> SharedString {
-    if matches!(target, crate::dictation::DictationTarget::ExternalApp) {
-        if let Some(name) = crate::frontmost_app_tracker::get_last_real_app()
-            .map(|app| app.name.trim().to_string())
-            .filter(|name| !name.is_empty())
-        {
-            return name.into();
-        }
+    if let Some(selection) = crate::dictation::get_dictation_target_selection()
+        .filter(|selection| selection.is_compatible_with(target))
+    {
+        return selection.display_label.into();
     }
-
     target.overlay_label().into()
 }
 
@@ -243,7 +233,13 @@ pub(crate) fn destination_selector_spec(
 
 /// Resolve the tracked frontmost app's pre-decoded icon from the app launcher cache.
 pub(crate) fn target_badge_frontmost_app_icon() -> Option<crate::app_launcher::DecodedIcon> {
-    let bundle_id = crate::frontmost_app_tracker::get_last_real_app()?.bundle_id;
+    let selection = crate::dictation::get_dictation_target_selection()?;
+    let crate::dictation::FrozenDictationDestination::ExternalApp { icon_identity, .. } =
+        selection.destination
+    else {
+        return None;
+    };
+    let bundle_id = icon_identity?;
     let bundle_id = bundle_id.trim();
     if bundle_id.is_empty() {
         return None;
@@ -413,11 +409,21 @@ pub(crate) fn last_dictation_overlay_state() -> DictationOverlayState {
 type OverlayAbortCallback = Box<dyn Fn(&mut App) + Send + Sync + 'static>;
 /// Callback type for overlay submit actions (stop and transcribe dictation).
 type OverlaySubmitCallback = Box<dyn Fn(&mut App) + Send + Sync + 'static>;
+type OverlayRetargetCallback = Box<
+    dyn Fn(
+            crate::dictation::DictationTarget,
+            &mut App,
+        ) -> Result<crate::dictation::DictationTargetSelection, String>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Global abort callback set by the dictation runtime.
 static OVERLAY_ABORT_CALLBACK: Mutex<Option<OverlayAbortCallback>> = Mutex::new(None);
 /// Global submit callback set by the dictation runtime.
 static OVERLAY_SUBMIT_CALLBACK: Mutex<Option<OverlaySubmitCallback>> = Mutex::new(None);
+static OVERLAY_RETARGET_CALLBACK: Mutex<Option<OverlayRetargetCallback>> = Mutex::new(None);
 
 /// Register a callback to be invoked when the user confirms stop via
 /// Enter or the Stop button in the overlay.
@@ -429,6 +435,18 @@ pub fn set_overlay_abort_callback(callback: impl Fn(&mut App) + Send + Sync + 's
 /// recording overlay.
 pub fn set_overlay_submit_callback(callback: impl Fn(&mut App) + Send + Sync + 'static) {
     *OVERLAY_SUBMIT_CALLBACK.lock() = Some(Box::new(callback));
+}
+
+pub fn set_overlay_retarget_callback(
+    callback: impl Fn(
+            crate::dictation::DictationTarget,
+            &mut App,
+        ) -> Result<crate::dictation::DictationTargetSelection, String>
+        + Send
+        + Sync
+        + 'static,
+) {
+    *OVERLAY_RETARGET_CALLBACK.lock() = Some(Box::new(callback));
 }
 
 // ---------------------------------------------------------------------------
@@ -1361,6 +1379,7 @@ impl DictationOverlay {
         crate::dictation::close_dictation_microphone_popup_window_for_owner_loss(cx);
         *OVERLAY_ABORT_CALLBACK.lock() = None;
         *OVERLAY_SUBMIT_CALLBACK.lock() = None;
+        *OVERLAY_RETARGET_CALLBACK.lock() = None;
         remove_global_escape_monitor();
         self.dematerialize_then_remove_overlay(window, cx);
         tracing::info!(category = "DICTATION", "Overlay closed from within entity");
@@ -1713,13 +1732,36 @@ impl DictationOverlay {
             return;
         }
 
-        let applied = match crate::dictation::set_dictation_session_target(target) {
-            Some(applied) => applied,
-            None if dictation_overlay_fixture_mode() => {
-                crate::dictation::record_fixture_dictation_target_selection();
-                target
+        let applied = if dictation_overlay_fixture_mode() {
+            crate::dictation::record_fixture_dictation_target_selection();
+            target
+        } else {
+            let selection = {
+                let callback = OVERLAY_RETARGET_CALLBACK.lock();
+                let Some(callback) = callback.as_ref() else {
+                    tracing::error!(
+                        category = "DICTATION",
+                        "Dictation retarget callback is unavailable"
+                    );
+                    return;
+                };
+                match callback(target, cx) {
+                    Ok(selection) => selection,
+                    Err(error) => {
+                        tracing::warn!(
+                            category = "DICTATION",
+                            ?target,
+                            error = %error,
+                            "Dictation destination selection refused"
+                        );
+                        return;
+                    }
+                }
+            };
+            match crate::dictation::set_dictation_session_selection(selection) {
+                Some(selection) => selection.target,
+                None => return,
             }
-            None => return,
         };
         self.state.target = applied;
         remember_dictation_overlay_state(&self.state);

@@ -9,6 +9,9 @@ mod agent_chat_setup;
 mod focused_text_entry;
 mod source_classification;
 mod types;
+pub(crate) use agent_chat_entry::{
+    AgentChatEntryDispatch, AgentChatEntryOutcome, AgentChatSubmissionOutcome,
+};
 use agent_chat_context_staging::materialize_selection_context_parts;
 use source_classification::{
     app_view_to_prompt_type_str, build_tab_ai_apply_back_hint, detect_tab_ai_source_type,
@@ -776,6 +779,47 @@ impl ScriptListApp {
             Err(reason_code) => tracing::warn!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_ask_refused",
+                reason_code,
+            ),
+        }
+    }
+
+    pub(crate) fn dispatch_dictation_to_frozen_agent_chat(
+        &mut self,
+        text: String,
+        fresh: bool,
+        ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+        cx: &mut Context<Self>,
+    ) -> Result<agent_chat_entry::AgentChatEntryDispatch, &'static str> {
+        let target = if fresh {
+            agent_chat_entry::AgentChatThreadTarget::FreshEmbedded
+        } else {
+            agent_chat_entry::AgentChatThreadTarget::CurrentHostEmbedded
+        };
+        let request = agent_chat_entry::AgentChatEntryRequest::dictation_send(
+            text,
+            target,
+            ui_variant,
+        )?;
+        Ok(self.open_agent_chat_from_entry_request(request, cx))
+    }
+
+    pub(crate) fn send_dictation_to_frozen_agent_chat(
+        &mut self,
+        text: String,
+        fresh: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match self.dispatch_dictation_to_frozen_agent_chat(
+            text,
+            fresh,
+            crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+            cx,
+        ) {
+            Ok(dispatch) => self.observe_agent_chat_entry_dispatch(dispatch, cx),
+            Err(reason_code) => tracing::warn!(
+                target: "script_kit::tab_ai",
+                event = "agent_chat_frozen_dictation_send_refused",
                 reason_code,
             ),
         }

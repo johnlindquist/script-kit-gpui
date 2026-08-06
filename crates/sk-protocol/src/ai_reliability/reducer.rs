@@ -259,7 +259,9 @@ pub fn recovery_plan_for(
                     RecoveryRole::Secondary,
                 ),
             ],
-            InputFailure::ContextUnavailable => {
+            InputFailure::ContextUnavailable
+            | InputFailure::DestinationUnavailable
+            | InputFailure::DestinationStale => {
                 vec![manual_retry_option(failure, retry, RecoveryRole::Primary)]
             }
         },
@@ -644,6 +646,8 @@ fn backoff_class(failure: &AiFailure) -> BackoffClass {
         | AiFailureCode::MessageTooLarge
         | AiFailureCode::ContextLimitExceeded
         | AiFailureCode::ContextUnavailable
+        | AiFailureCode::DestinationUnavailable
+        | AiFailureCode::DestinationStale
         | AiFailureCode::Unknown => BackoffClass::Immediate,
     }
 }

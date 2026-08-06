@@ -112,6 +112,10 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 }
 
 fn target_label(target: DictationTarget) -> String {
+    let target = match target {
+        DictationTarget::AiChatComposer => DictationTarget::TabAiHarness,
+        target => target,
+    };
     if target == DictationTarget::ExternalApp {
         return crate::frontmost_app_tracker::get_last_real_app()
             .map(|app| app.name.trim().to_string())
@@ -695,7 +699,7 @@ mod tests {
             DictationTarget::AiChatComposer,
         );
         assert_eq!(entry.preview, "hello from dictation");
-        assert_eq!(entry.target, "AI Chat");
+        assert_eq!(entry.target, "Agent Chat");
         assert_eq!(entry.audio_duration_ms, 2_000);
     }
 
@@ -741,7 +745,7 @@ mod tests {
             DictationTarget::NotesEditor,
         );
 
-        let ai_hits = search_history("oauth ai", 10);
+        let ai_hits = search_history("oauth agent", 10);
         assert_eq!(ai_hits.len(), 1);
         assert_eq!(
             ai_hits[0].matched_field,
@@ -752,9 +756,9 @@ mod tests {
         assert_eq!(notes_hits.len(), 1);
         assert_eq!(notes_hits[0].entry.target, "Notes");
 
-        let duration_hits = search_history("ai 2 sec", 10);
+        let duration_hits = search_history("agent 2 sec", 10);
         assert_eq!(duration_hits.len(), 1);
-        assert_eq!(duration_hits[0].entry.target, "AI Chat");
+        assert_eq!(duration_hits[0].entry.target, "Agent Chat");
     }
 
     /// Screenshot regression (2026-07-11): sentence queries must not match

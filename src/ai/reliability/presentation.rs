@@ -491,6 +491,14 @@ fn failure_copy(failure: &AiFailure) -> FailureCopy {
                 title: "Context could not be prepared",
                 body: "Retry or remove the unavailable context before sending.",
             },
+            InputFailure::DestinationUnavailable => FailureCopy {
+                title: "Destination unavailable",
+                body: "Your work is saved. Choose an available destination to continue.",
+            },
+            InputFailure::DestinationStale => FailureCopy {
+                title: "Destination changed",
+                body: "Your work is saved. Choose the destination again to continue.",
+            },
         },
         AiFailureKind::Unknown => FailureCopy {
             title: "AI request did not finish",

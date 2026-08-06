@@ -320,6 +320,8 @@ pub enum AiFailureCode {
     MessageTooLarge,
     ContextLimitExceeded,
     ContextUnavailable,
+    DestinationUnavailable,
+    DestinationStale,
     Unknown,
 }
 
@@ -381,6 +383,8 @@ impl AiFailureCode {
                 InputFailure::MessageTooLarge => Self::MessageTooLarge,
                 InputFailure::ContextLimitExceeded => Self::ContextLimitExceeded,
                 InputFailure::ContextUnavailable => Self::ContextUnavailable,
+                InputFailure::DestinationUnavailable => Self::DestinationUnavailable,
+                InputFailure::DestinationStale => Self::DestinationStale,
             },
             AiFailureKind::Unknown => Self::Unknown,
         }
@@ -543,6 +547,8 @@ pub enum InputFailure {
     MessageTooLarge,
     ContextLimitExceeded,
     ContextUnavailable,
+    DestinationUnavailable,
+    DestinationStale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

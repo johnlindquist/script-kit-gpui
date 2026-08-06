@@ -1089,33 +1089,19 @@ fn delivery_checks_prompt_input_before_paste() {
     );
 }
 
-/// Prove that when `try_set_prompt_input` returns true, the destination is
-/// `ActivePrompt` and no paste fallback occurs.
+/// Prompt delivery validates and mutates only its frozen prompt; the canonical
+/// target mapping supplies the receipt destination without a fallback branch.
 #[test]
-fn delivery_active_prompt_sets_correct_destination() {
+fn delivery_active_prompt_uses_frozen_target_mapping() {
     let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
+    let handler_src = dictation_handler_source(&src);
 
-    // The delivery block must assign ActivePrompt when try_set_prompt_input succeeds.
     assert!(
-        src.contains("DictationDestination::ActivePrompt"),
-        "delivery must use DictationDestination::ActivePrompt when prompt accepts input"
-    );
-
-    // Verify ActivePrompt is set in the if-true branch (before paste_text).
-    let handler_start = src
-        .find("fn handle_dictation_transcript")
-        .expect("handler must exist");
-    let handler_src = &src[handler_start..];
-    let active_prompt_pos = handler_src
-        .find("DictationDestination::ActivePrompt")
-        .expect("ActivePrompt must be in handler");
-    let paste_pos = handler_src
-        .find("paste_text")
-        .expect("paste_text must be in handler");
-    assert!(
-        active_prompt_pos < paste_pos,
-        "ActivePrompt destination must be assigned BEFORE the paste fallback branch"
+        handler_src.contains("DictationTarget::MainWindowPrompt")
+            && handler_src.contains("current.destination != request.selection.destination")
+            && src.contains("let destination = target.destination();"),
+        "prompt delivery must validate its frozen identity and use the exhaustive target mapping"
     );
 }
 
@@ -1562,7 +1548,8 @@ fn frontmost_app_delivery_closes_overlay_before_paste() {
     let handler_src = &src[handler_start..];
 
     assert!(
-        handler_src.contains("DictationSessionPhase::Finished"),
+        src.contains("fn complete_internal_dictation_delivery")
+            && src.contains("DictationSessionPhase::Finished"),
         "internal dictation delivery must show the Finished confirmation pill"
     );
 
@@ -1583,15 +1570,12 @@ fn frontmost_app_delivery_closes_overlay_before_paste() {
 // Ordering regressions: frontmost-app delivery sequence
 // ---------------------------------------------------------------------------
 
-/// Extract the frontmost-app else branch from handle_dictation_transcript.
+/// Extract the frozen external-app actor from handle_dictation_transcript.
 fn frontmost_dictation_delivery_branch(handler_src: &str) -> &str {
-    let internal_if = handler_src
-        .find("if delivered_internally")
-        .expect("handler must branch on internal delivery");
-    let else_offset = handler_src[internal_if..]
-        .find("} else {")
-        .expect("handler must have a frontmost-app else branch");
-    &handler_src[internal_if + else_offset..]
+    let actor = handler_src
+        .find("validate_frozen_external_destination")
+        .expect("handler must validate the frozen external destination");
+    &handler_src[actor..]
 }
 
 #[test]
@@ -2017,14 +2001,14 @@ fn dictation_yield_focus_helper_source(src: &str) -> &str {
     &tail[..end]
 }
 
-/// Extract the frontmost-app else branch from `handle_dictation_transcript`.
+/// Extract the frozen external-app delivery actor from `handle_dictation_transcript`.
 /// Uses `Ok(None)` as the end boundary.
 fn dictation_frontmost_paste_source(src: &str) -> &str {
     let handler_src = dictation_handler_source(src);
-    let else_pos = handler_src
-        .find("} else {")
-        .expect("handle_dictation_transcript must have a frontmost-app else branch");
-    let tail = &handler_src[else_pos..];
+    let actor_pos = handler_src
+        .find("validate_frozen_external_destination")
+        .expect("handler must validate its frozen external destination");
+    let tail = &handler_src[actor_pos..];
     let end = tail
         .find("Ok(None)")
         .expect("frontmost-app else branch must end before the Ok(None) arm");
@@ -2148,16 +2132,16 @@ fn delivery_frontmost_app_checks_tracked_target_before_paste() {
     let frontmost_src = dictation_frontmost_paste_source(&src);
 
     let target_pos = frontmost_src
-        .find("ensure_dictation_frontmost_target_available")
-        .expect("frontmost-app branch must verify tracked target before paste");
+        .find("validate_frozen_external_destination")
+        .expect("frontmost-app branch must validate its exact frozen target before paste");
     let paste_pos = frontmost_src
         .find("paste_text")
         .expect("frontmost-app branch must call paste_text");
 
     assert!(
         target_pos < paste_pos,
-        "ensure_dictation_frontmost_target_available (byte {target_pos}) must appear before \
-         paste_text (byte {paste_pos}) in the frontmost-app branch"
+        "frozen external validation (byte {target_pos}) must appear before paste_text \
+         (byte {paste_pos}) in the external-app actor"
     );
 }
 
@@ -2169,13 +2153,13 @@ fn delivery_frontmost_app_surfaces_missing_tracked_target() {
     let handler_src = dictation_handler_source(&src);
 
     assert!(
-        handler_src
-            .contains("no previously tracked frontmost app is available for dictation paste"),
-        "frontmost-app path must surface a missing tracked-target error"
+        handler_src.contains("validate_frozen_external_destination")
+            && handler_src.contains("destination_failure(true, &error)"),
+        "frontmost-app path must classify missing or stale frozen targets before mutation"
     );
     assert!(
-        handler_src.contains("Failed to resolve frontmost-app dictation target"),
-        "frontmost-app path must log tracked-target resolution failures"
+        handler_src.contains("Frozen external Dictation destination refused delivery"),
+        "frontmost-app path must log a typed redacted refusal"
     );
     assert!(
         handler_src.contains("show_error_toast"),
@@ -2570,7 +2554,7 @@ fn dictation_start_preflights_delivery_target_before_toggle() {
         .find("let preflight = self.prepare_dictation_builtin_start(action, None, cx);")
         .expect("dictation start must prepare preflight");
     let toggle_pos = dictation_src
-        .find("crate::dictation::toggle_dictation(dictation_target)")
+        .find("crate::dictation::toggle_dictation(canonical_target)")
         .expect("dictation builtin must call toggle_dictation");
     assert!(
         preflight_pos < toggle_pos,
@@ -2844,12 +2828,12 @@ fn builtin_dictation_overlay_transitions_are_ordered_correctly() {
 
     let handler_src = dictation_handler_source(&src);
     assert!(
-        handler_src.contains("DictationSessionPhase::Finished"),
-        "handler must render a brief Finished confirmation before the overlay closes"
+        src.contains("fn complete_internal_dictation_delivery")
+            && src.contains("DictationSessionPhase::Finished"),
+        "the delivery completion owner must render a brief Finished confirmation before the overlay closes"
     );
     assert!(
-        handler_src
-            .contains("schedule_dictation_overlay_close(cx, Self::DICTATION_FINISHED_LINGER)"),
+        src.contains("schedule_dictation_overlay_close(cx, Self::DICTATION_FINISHED_LINGER)"),
         "handler must schedule the overlay close after the Finished linger"
     );
 
@@ -2881,7 +2865,7 @@ fn dictation_start_preflight_runs_before_toggle() {
         .find("let preflight = self.prepare_dictation_builtin_start(action, None, cx);")
         .expect("dictation start path must prepare preflight");
     let toggle_pos = dictation_src
-        .find("crate::dictation::toggle_dictation(dictation_target)")
+        .find("crate::dictation::toggle_dictation(canonical_target)")
         .expect("dictation start path must toggle dictation");
 
     assert!(
@@ -3497,11 +3481,11 @@ fn agent_chat_dictation_delivery_suppresses_focused_launcher_context() {
     let tab_ai_arm_start = handler_src
         .find("DictationTarget::TabAiHarness =>")
         .expect("handler must route TabAiHarness dictation");
-    let tab_ai_arm = &handler_src[tab_ai_arm_start..tab_ai_arm_start + 900];
+    let tab_ai_arm = &handler_src[tab_ai_arm_start..];
 
     assert!(
-        tab_ai_arm.contains("send_dictation_to_agent_chat(transcript.clone(), cx)"),
-        "Agent Chat dictation should use the explicit Send verb without inheriting the selected ScriptList item as context"
+        tab_ai_arm.contains("dispatch_dictation_to_frozen_agent_chat"),
+        "Agent Chat dictation must use frozen thread policy and suppress focused launcher context"
     );
 }
 
@@ -4817,14 +4801,11 @@ fn delivery_routes_notes_transcript_via_inject_text() {
     let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
 
-    let handler_start = src
-        .find("fn handle_dictation_transcript")
-        .expect("handler must exist");
-    let handler_src = &src[handler_start..handler_start + 3000.min(src.len() - handler_start)];
+    let handler_src = dictation_handler_source(&src);
 
     assert!(
-        handler_src.contains("notes::inject_text_into_notes"),
-        "handler must deliver to notes via inject_text_into_notes"
+        handler_src.contains("notes::inject_text_into_frozen_notes"),
+        "handler must deliver to the validated Notes instance, document, generation, and anchor"
     );
     assert!(
         handler_src.contains("DictationTarget::NotesEditor"),
@@ -4837,14 +4818,11 @@ fn delivery_routes_ai_chat_transcript_to_agent_chat_composer() {
     let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
 
-    let handler_start = src
-        .find("fn handle_dictation_transcript")
-        .expect("handler must exist");
-    let handler_src = &src[handler_start..handler_start + 8000.min(src.len() - handler_start)];
+    let handler_src = dictation_handler_source(&src);
 
     assert!(
-        handler_src.contains("open_agent_chat_with_composer_seed"),
-        "handler must deliver to Agent Chat via the composer-seed entry"
+        handler_src.contains("dispatch_dictation_to_frozen_agent_chat"),
+        "handler must deliver to the exact frozen Agent Chat policy and observe acceptance"
     );
     assert!(
         handler_src.contains("DictationTarget::AiChatComposer"),
@@ -4853,21 +4831,19 @@ fn delivery_routes_ai_chat_transcript_to_agent_chat_composer() {
 }
 
 #[test]
-fn internal_delivery_failure_falls_back_to_frontmost_app() {
+fn internal_delivery_failure_refuses_without_frontmost_fallback() {
     let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
+    let handler_src = dictation_handler_source(&src);
 
-    let handler_start = src
-        .find("fn handle_dictation_transcript")
-        .expect("handler must exist");
-    let handler_src = &src[handler_start..handler_start + 8000.min(src.len() - handler_start)];
-
-    // Notes delivery must have fallback logging on failure. (The Agent Chat
-    // composer route delivers through the entry-request orchestrator, which
-    // stages the seed itself and has no synchronous failure branch.)
     assert!(
-        handler_src.contains("Notes delivery failed, falling back"),
-        "notes delivery must log fallback on failure"
+        handler_src.contains("Frozen Dictation destination refused delivery")
+            && handler_src.contains("transcript saved in History"),
+        "an unavailable frozen internal destination must preserve the transcript and refuse"
+    );
+    assert!(
+        !handler_src.contains("falling back to frontmost app"),
+        "an internal delivery failure must never redirect to a different app"
     );
 }
 
@@ -5213,17 +5189,23 @@ fn overlay_timer_and_target_badge_use_readable_primary_text() {
 }
 
 #[test]
-fn external_app_badge_names_the_tracked_frontmost_app() {
+fn external_app_badge_uses_the_frozen_selection_not_live_focus() {
     let window_src = std::fs::read_to_string("src/dictation/window.rs").expect("read window.rs");
+    let label_start = window_src
+        .find("pub(crate) fn target_badge_label(")
+        .expect("badge label helper");
+    let icon_start = window_src
+        .find("pub(crate) fn target_badge_frontmost_app_icon(")
+        .expect("badge icon helper");
+    let badge_helpers = &window_src[label_start..icon_start + 900];
 
     assert!(
-        window_src.contains("pub(crate) fn target_badge_label(")
-            && window_src.contains("pub(crate) fn target_badge_frontmost_app_icon(")
-            && window_src.contains("crate::app_launcher::cached_app_icon_for_bundle")
-            && window_src.contains("crate::frontmost_app_tracker::get_last_real_app()")
-            && window_src.contains("target.overlay_label().into()")
-            && window_src.contains("icons::render_image"),
-        "external-app badge should prefer the indexed frontmost app icon and fall back to the tracked app name or static target label"
+        badge_helpers.contains("get_dictation_target_selection()")
+            && badge_helpers.contains("selection.display_label")
+            && badge_helpers.contains("icon_identity")
+            && badge_helpers.contains("crate::app_launcher::cached_app_icon_for_bundle")
+            && !badge_helpers.contains("get_last_real_app()"),
+        "external-app badge label and icon must project the frozen selection rather than current focus"
     );
 }
 
@@ -5245,7 +5227,7 @@ fn builtin_dictation_configures_target_cycle_and_agent_chat_alternate() {
 }
 
 #[test]
-fn main_window_filter_delivery_can_reset_to_script_list_and_reveal_main() {
+fn main_window_filter_delivery_validates_frozen_input_and_reveals_main() {
     let builtin_src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
     let handler_start = builtin_src
@@ -5254,12 +5236,14 @@ fn main_window_filter_delivery_can_reset_to_script_list_and_reveal_main() {
     let handler_src = &builtin_src[handler_start..];
 
     assert!(
-        handler_src.contains("self.reset_to_script_list(cx);"),
-        "main-window dictation delivery must be able to reset to ScriptList before applying the filter"
+        handler_src.contains("current.destination != request.selection.destination")
+            && handler_src.contains("The Script Kit filter changed while Dictation was active"),
+        "main-window dictation must refuse when its frozen input identity changes"
     );
     assert!(
-        handler_src.contains("script_kit_gpui::set_main_window_visible(true);")
-            && handler_src.contains("show_main_window_without_activation"),
+        builtin_src.contains("fn complete_internal_dictation_delivery")
+            && builtin_src.contains("script_kit_gpui::set_main_window_visible(true);")
+            && builtin_src.contains("show_main_window_without_activation"),
         "main-window dictation delivery must reveal the main window when retargeted from a hidden session"
     );
 }
@@ -5792,4 +5776,78 @@ fn dictation_target_destination_mapping_is_exhaustive_and_stable() {
     for (target, destination) in cases {
         assert_eq!(target.destination(), destination);
     }
+}
+
+#[test]
+fn immutable_dictation_transcript_exposes_identity_not_text_in_debug() {
+    let transcript = crate::dictation::ImmutableDictationTranscript::new(
+        "transcript-7",
+        "PRIVATE DICTATION CONTENT".to_string(),
+    );
+    assert_eq!(transcript.id(), "transcript-7");
+    assert_eq!(transcript.text(), "PRIVATE DICTATION CONTENT");
+    assert_eq!(transcript.len(), 25);
+    let debug = format!("{transcript:?}");
+    assert!(!debug.contains("PRIVATE DICTATION CONTENT"));
+    assert!(debug.contains("text_len"));
+    assert!(debug.contains("fingerprint"));
+}
+
+#[test]
+fn frozen_destination_fingerprint_changes_with_each_identity_generation() {
+    use crate::dictation::FrozenDictationDestination;
+    let first = FrozenDictationDestination::MainWindowPrompt {
+        prompt_id: "prompt-a".to_string(),
+        prompt_generation: 3,
+        input_generation: 5,
+    };
+    let replaced = FrozenDictationDestination::MainWindowPrompt {
+        prompt_id: "prompt-a".to_string(),
+        prompt_generation: 4,
+        input_generation: 5,
+    };
+    let edited = FrozenDictationDestination::MainWindowPrompt {
+        prompt_id: "prompt-a".to_string(),
+        prompt_generation: 3,
+        input_generation: 6,
+    };
+    assert_ne!(
+        first.identity_fingerprint(),
+        replaced.identity_fingerprint()
+    );
+    assert_ne!(first.identity_fingerprint(), edited.identity_fingerprint());
+    assert_eq!(first.kind(), "mainWindowPrompt");
+}
+
+#[test]
+fn delivery_ids_are_claimed_before_mutation_at_most_once() {
+    let delivery_id = crate::dictation::next_dictation_delivery_id();
+    assert!(!crate::dictation::dictation_delivery_was_claimed(
+        delivery_id
+    ));
+    assert!(crate::dictation::claim_dictation_delivery(delivery_id));
+    assert!(crate::dictation::dictation_delivery_was_claimed(
+        delivery_id
+    ));
+    assert!(!crate::dictation::claim_dictation_delivery(delivery_id));
+}
+
+#[test]
+fn legacy_ai_target_is_compatible_only_with_canonical_agent_chat() {
+    use crate::dictation::{
+        DictationTarget, DictationTargetSelection, FrozenAgentChatPolicy,
+        FrozenDictationDestination,
+    };
+    let selection = DictationTargetSelection {
+        target: DictationTarget::TabAiHarness,
+        destination: FrozenDictationDestination::AgentChat {
+            policy: FrozenAgentChatPolicy::FreshStandard { host_generation: 9 },
+        },
+        display_label: "Agent Chat".to_string(),
+        icon_identity: Some("bot".to_string()),
+        selection_generation: 11,
+    };
+    assert!(selection.is_compatible_with(DictationTarget::AiChatComposer));
+    assert!(selection.is_compatible_with(DictationTarget::TabAiHarness));
+    assert!(!selection.is_compatible_with(DictationTarget::QuickAiQuestion));
 }

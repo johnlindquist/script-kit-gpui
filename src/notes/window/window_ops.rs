@@ -1654,6 +1654,76 @@ pub fn save_note_with_content_and_source(
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotesDictationDestinationSnapshot {
+    pub notes_instance_id: u64,
+    pub document_id: String,
+    pub editor_generation: String,
+    pub insertion_anchor: std::ops::Range<usize>,
+}
+
+fn notes_dictation_snapshot(app: &NotesApp, cx: &App) -> NotesDictationDestinationSnapshot {
+    let editor = app.editor_state.read(cx);
+    let content = editor.value().to_string();
+    let document_id = if let Some(note_id) = app.selected_note_id {
+        format!("note:{}", note_id.as_str())
+    } else if let Some(day) = app.active_day_binding.as_ref() {
+        format!("day:{}", day.date)
+    } else {
+        format!("draft:{}", app.instance_id)
+    };
+    NotesDictationDestinationSnapshot {
+        notes_instance_id: app.instance_id,
+        document_id,
+        editor_generation: super::ai_handoff::fnv1a64_fingerprint(&content),
+        insertion_anchor: editor.selection(),
+    }
+}
+
+pub fn capture_notes_dictation_destination(
+    cx: &mut App,
+) -> Result<NotesDictationDestinationSnapshot, String> {
+    let notes_app = {
+        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
+        slot.lock().ok().and_then(|guard| guard.clone())
+    }
+    .ok_or_else(|| "Notes window is not open".to_string())?;
+    Ok(notes_app.read_with(cx, notes_dictation_snapshot))
+}
+
+pub fn inject_text_into_frozen_notes(
+    cx: &mut App,
+    expected: &NotesDictationDestinationSnapshot,
+    text: &str,
+) -> Result<serde_json::Value, String> {
+    let handle = {
+        let slot = NOTES_WINDOW.get_or_init(|| std::sync::Mutex::new(None));
+        slot.lock().ok().and_then(|guard| *guard)
+    };
+    let notes_app = {
+        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
+        slot.lock().ok().and_then(|guard| guard.clone())
+    };
+    let (Some(handle), Some(notes_app)) = (handle, notes_app) else {
+        return Err("Notes destination is unavailable".to_string());
+    };
+    let current = notes_app.read_with(cx, notes_dictation_snapshot);
+    if &current != expected {
+        return Err("Notes destination changed while Dictation was active".to_string());
+    }
+    update_notes_window_detached(handle, cx, |window, cx| {
+        notes_app.update(cx, |app, cx| {
+            app.inject_dictation_text_at_frozen_anchor(
+                text,
+                expected.insertion_anchor.clone(),
+                window,
+                cx,
+            )
+        })
+    })
+    .map_err(|error| format!("Failed to update frozen Notes destination: {error}"))?
+}
+
 /// Inject dictated text into the notes editor at the current cursor position.
 ///
 /// If the notes window is open, inserts the text at the cursor. Otherwise

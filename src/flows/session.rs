@@ -330,6 +330,10 @@ impl PersistedAiFailure {
             AiFailureCode::ContextUnavailable => {
                 AiFailureKind::Input(InputFailure::ContextUnavailable)
             }
+            AiFailureCode::DestinationUnavailable => {
+                AiFailureKind::Input(InputFailure::DestinationUnavailable)
+            }
+            AiFailureCode::DestinationStale => AiFailureKind::Input(InputFailure::DestinationStale),
             AiFailureCode::Unknown => AiFailureKind::Unknown,
         };
         AiFailure::new(kind, RetrySafety::SameSelectionReadOnly)

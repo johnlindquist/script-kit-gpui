@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use sk_protocol::ai_reliability::RetrySafety;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DictationDeviceId(pub String);
 
@@ -138,6 +140,241 @@ pub enum DictationTarget {
     QuickAiQuestion,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrozenAgentChatPolicy {
+    ExistingThread { thread_id: String, generation: u64 },
+    FreshStandard { host_generation: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrozenDictationDestination {
+    MainWindowFilter {
+        window_generation: u64,
+        input_generation: u64,
+    },
+    MainWindowPrompt {
+        prompt_id: String,
+        prompt_generation: u64,
+        input_generation: u64,
+    },
+    NotesEditor {
+        notes_instance_id: u64,
+        document_id: String,
+        editor_generation: String,
+        insertion_anchor: std::ops::Range<usize>,
+    },
+    AgentChat {
+        policy: FrozenAgentChatPolicy,
+    },
+    ExternalApp {
+        pid: i32,
+        bundle_fingerprint: String,
+        window_identity_fingerprint: String,
+        display_label: String,
+        icon_identity: Option<String>,
+    },
+    DayPage {
+        date: chrono::NaiveDate,
+        substrate_fingerprint: String,
+        entity_generation: u64,
+    },
+    QuickAi {
+        request_generation: u64,
+    },
+}
+
+impl FrozenDictationDestination {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::MainWindowFilter { .. } => "mainWindowFilter",
+            Self::MainWindowPrompt { .. } => "mainWindowPrompt",
+            Self::NotesEditor { .. } => "notesEditor",
+            Self::AgentChat { .. } => "agentChat",
+            Self::ExternalApp { .. } => "externalApp",
+            Self::DayPage { .. } => "dayPage",
+            Self::QuickAi { .. } => "quickAi",
+        }
+    }
+
+    pub fn external_window_id(&self) -> Option<u32> {
+        let Self::ExternalApp {
+            window_identity_fingerprint,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        window_identity_fingerprint
+            .strip_prefix("cgwindow:")?
+            .split(':')
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    pub fn identity_fingerprint(&self) -> String {
+        let identity = match self {
+            Self::MainWindowFilter {
+                window_generation,
+                input_generation,
+            } => format!("filter:{window_generation}:{input_generation}"),
+            Self::MainWindowPrompt {
+                prompt_id,
+                prompt_generation,
+                input_generation,
+            } => format!("prompt:{prompt_id}:{prompt_generation}:{input_generation}"),
+            Self::NotesEditor {
+                notes_instance_id,
+                document_id,
+                editor_generation,
+                insertion_anchor,
+            } => format!(
+                "notes:{notes_instance_id}:{document_id}:{editor_generation}:{}:{}",
+                insertion_anchor.start, insertion_anchor.end
+            ),
+            Self::AgentChat { policy } => match policy {
+                FrozenAgentChatPolicy::ExistingThread {
+                    thread_id,
+                    generation,
+                } => format!("agent-chat:existing:{thread_id}:{generation}"),
+                FrozenAgentChatPolicy::FreshStandard { host_generation } => {
+                    format!("agent-chat:fresh:{host_generation}")
+                }
+            },
+            Self::ExternalApp {
+                pid,
+                bundle_fingerprint,
+                window_identity_fingerprint,
+                ..
+            } => format!("external:{pid}:{bundle_fingerprint}:{window_identity_fingerprint}"),
+            Self::DayPage {
+                date,
+                substrate_fingerprint,
+                entity_generation,
+            } => format!("day:{date}:{substrate_fingerprint}:{entity_generation}"),
+            Self::QuickAi { request_generation } => format!("quick-ai:{request_generation}"),
+        };
+        crate::dictation::redacted_transcript_fingerprint(&identity)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictationTargetSelection {
+    pub target: DictationTarget,
+    pub destination: FrozenDictationDestination,
+    pub display_label: String,
+    pub icon_identity: Option<String>,
+    pub selection_generation: u64,
+}
+
+impl DictationTargetSelection {
+    pub fn is_compatible_with(&self, target: DictationTarget) -> bool {
+        let canonical = match target {
+            DictationTarget::AiChatComposer => DictationTarget::TabAiHarness,
+            target => target,
+        };
+        let selected = match self.target {
+            DictationTarget::AiChatComposer => DictationTarget::TabAiHarness,
+            target => target,
+        };
+        canonical == selected
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ImmutableDictationTranscript {
+    id: String,
+    text: String,
+    fingerprint: String,
+}
+
+impl std::fmt::Debug for ImmutableDictationTranscript {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImmutableDictationTranscript")
+            .field("id", &self.id)
+            .field("text_len", &self.text.len())
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
+}
+
+impl ImmutableDictationTranscript {
+    pub fn new(id: impl Into<String>, text: String) -> Self {
+        let fingerprint = crate::dictation::redacted_transcript_fingerprint(&text);
+        Self {
+            id: id.into(),
+            text,
+            fingerprint,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictationDeliveryRequest {
+    pub delivery_id: u64,
+    pub session_generation: u64,
+    pub selection: DictationTargetSelection,
+    pub transcript: ImmutableDictationTranscript,
+    pub history_entry_id: String,
+    pub attempt: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictationDeliveryFailureReason {
+    DestinationUnavailable,
+    DestinationStale,
+    MutationFailed,
+    MutationOutcomeUnknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictationMutationReceipt {
+    pub delivery_id: u64,
+    pub destination_kind: &'static str,
+    pub identity_fingerprint: String,
+    pub insertion_start: Option<usize>,
+    pub insertion_end: Option<usize>,
+    pub inserted_length: usize,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DictationDeliveryOutcome {
+    Delivered {
+        destination: FrozenDictationDestination,
+        mutation_receipt: DictationMutationReceipt,
+    },
+    Refused {
+        failure: crate::ai::reliability::AppFailureRecord,
+        reason: DictationDeliveryFailureReason,
+    },
+    Failed {
+        failure: crate::ai::reliability::AppFailureRecord,
+        reason: DictationDeliveryFailureReason,
+        retry_safety: RetrySafety,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DictationTargetPersistenceClass {
     Contextual,
@@ -201,7 +438,7 @@ pub const ALL_DICTATION_TARGETS: [DictationTargetDescriptor; 8] = [
         delivery_verb: "Insert",
         description: "Insert the transcript into the Script Kit filter",
         persistence_class: DictationTargetPersistenceClass::Contextual,
-        requires_frozen_identity: false,
+        requires_frozen_identity: true,
         auto_submit_permission: DictationAutoSubmitPermission::Never,
         recovery_capabilities: DictationRecoveryCapabilities::STANDARD,
         quick_chip: false,
@@ -303,7 +540,7 @@ pub const ALL_DICTATION_TARGETS: [DictationTargetDescriptor; 8] = [
         delivery_verb: "Append",
         description: "Append the transcript to today's note",
         persistence_class: DictationTargetPersistenceClass::Sticky,
-        requires_frozen_identity: false,
+        requires_frozen_identity: true,
         auto_submit_permission: DictationAutoSubmitPermission::Never,
         recovery_capabilities: DictationRecoveryCapabilities::STANDARD,
         quick_chip: true,
@@ -320,7 +557,7 @@ pub const ALL_DICTATION_TARGETS: [DictationTargetDescriptor; 8] = [
         delivery_verb: "Ask",
         description: "Ask Quick AI with the transcript",
         persistence_class: DictationTargetPersistenceClass::Sticky,
-        requires_frozen_identity: false,
+        requires_frozen_identity: true,
         auto_submit_permission: DictationAutoSubmitPermission::ExplicitSend,
         recovery_capabilities: DictationRecoveryCapabilities::STANDARD,
         quick_chip: true,

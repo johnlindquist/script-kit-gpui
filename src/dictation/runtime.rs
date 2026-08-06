@@ -34,10 +34,12 @@ struct DictationSession {
     /// and the overlay key handler (on Escape transitions).  The pump reads this
     /// on every tick so the overlay never drifts from shared state.
     overlay_phase: DictationSessionPhase,
-    /// The Script Kit surface that was active when dictation started.
-    /// Captured at start time so the delivery path knows where to route
-    /// the transcript even if the UI changes while the user is speaking.
+    /// Target class selected for the session. Preferences persist only this
+    /// class; the concrete destination identity is recaptured per session.
     target: DictationTarget,
+    /// Exact destination identity frozen before the overlay can conceal or
+    /// redirect focus. Retargeting replaces this atomically with the target.
+    selection: Option<crate::dictation::DictationTargetSelection>,
     /// Ordered list of destinations the overlay badge cycles through.
     target_cycle: Vec<DictationTarget>,
     /// Microphone resolved when capture started. Changing preferences while
@@ -59,6 +61,8 @@ struct DictationSession {
 ///
 /// `None` means idle (no recording in progress).
 static SESSION: Mutex<Option<DictationSession>> = Mutex::new(None);
+static LAST_FROZEN_SELECTION: Mutex<Option<crate::dictation::DictationTargetSelection>> =
+    Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DictationStopReason {
@@ -77,6 +81,7 @@ struct StopState {
     request_id: u64,
     reason: DictationStopReason,
     target: DictationTarget,
+    selection: Option<crate::dictation::DictationTargetSelection>,
     requested_at: Instant,
 }
 
@@ -84,6 +89,8 @@ pub enum BeginStopCapture {
     Started {
         request_id: u64,
         target: DictationTarget,
+        selection: Option<crate::dictation::DictationTargetSelection>,
+        session_generation: u64,
         job: Box<DictationStopJob>,
     },
     AlreadyStopping {
@@ -163,6 +170,26 @@ fn set_finalize_progress(fraction: Option<f32>) {
 
 /// Monotonic counter for redacted delivery receipts exposed through automation.
 static DELIVERY_RECEIPT_GENERATION: AtomicU64 = AtomicU64::new(0);
+static DELIVERY_ID_GENERATION: AtomicU64 = AtomicU64::new(0);
+static CLAIMED_DELIVERY_IDS: std::sync::LazyLock<Mutex<std::collections::HashSet<u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+pub fn next_dictation_delivery_id() -> u64 {
+    DELIVERY_ID_GENERATION.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// Atomically claim a delivery before validation or mutation.
+///
+/// A delivery id gets one coordinator pass. Keeping failed and uncertain ids
+/// claimed is intentional: retrying the same request could duplicate a mutation
+/// whose result was not observable.
+pub fn claim_dictation_delivery(delivery_id: u64) -> bool {
+    CLAIMED_DELIVERY_IDS.lock().insert(delivery_id)
+}
+
+pub fn dictation_delivery_was_claimed(delivery_id: u64) -> bool {
+    CLAIMED_DELIVERY_IDS.lock().contains(&delivery_id)
+}
 
 /// Monotonic generation for passive dictation runtime state exposed to DevTools.
 static DICTATION_STATE_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -295,12 +322,18 @@ pub fn begin_stop_capture(reason: DictationStopReason) -> Result<BeginStopCaptur
 
     let request_id = STOP_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let target = session.target;
-    let target_label = target.overlay_label();
+    let selection = session.selection.clone();
+    let session_generation = session.session_generation;
+    let target_label = selection
+        .as_ref()
+        .map(|selection| selection.display_label.as_str())
+        .unwrap_or_else(|| target.overlay_label());
     let requested_at = Instant::now();
     *STOP_IN_FLIGHT.lock() = Some(StopState {
         request_id,
         reason,
         target,
+        selection: selection.clone(),
         requested_at,
     });
     *LAST_STOP_RECEIPT.lock() = Some(serde_json::json!({
@@ -331,6 +364,8 @@ pub fn begin_stop_capture(reason: DictationStopReason) -> Result<BeginStopCaptur
     Ok(BeginStopCapture::Started {
         request_id,
         target,
+        selection,
+        session_generation,
         job: Box::new(DictationStopJob { session }),
     })
 }
@@ -413,6 +448,43 @@ pub fn get_dictation_target() -> Option<DictationTarget> {
     SESSION.lock().as_ref().map(|s| s.target)
 }
 
+pub fn get_dictation_target_selection() -> Option<crate::dictation::DictationTargetSelection> {
+    SESSION
+        .lock()
+        .as_ref()
+        .and_then(|session| session.selection.clone())
+        .or_else(|| {
+            STOP_IN_FLIGHT
+                .lock()
+                .as_ref()
+                .and_then(|state| state.selection.clone())
+        })
+        .or_else(|| LAST_FROZEN_SELECTION.lock().clone())
+}
+
+pub(crate) fn retain_frozen_selection_for_delivery(
+    selection: crate::dictation::DictationTargetSelection,
+) {
+    *LAST_FROZEN_SELECTION.lock() = Some(selection);
+    bump_dictation_state_generation();
+}
+
+pub fn set_dictation_session_selection(
+    selection: crate::dictation::DictationTargetSelection,
+) -> Option<crate::dictation::DictationTargetSelection> {
+    let mut guard = SESSION.lock();
+    let session = guard.as_mut()?;
+    if !session.target_cycle.contains(&selection.target) {
+        session.target_cycle.push(selection.target);
+    }
+    session.target = selection.target;
+    session.selection = Some(selection.clone());
+    *LAST_FROZEN_SELECTION.lock() = Some(selection.clone());
+    DICTATION_TARGET_GENERATION.fetch_add(1, Ordering::Relaxed);
+    bump_dictation_state_generation();
+    Some(selection)
+}
+
 /// Return the microphone that the active capture session opened with.
 pub fn get_active_dictation_device() -> Option<DictationDeviceInfo> {
     SESSION
@@ -442,6 +514,9 @@ pub fn pending_dictation_device_label() -> Option<String> {
 /// Agent-facing DevTools use this to prove target routing and delivery
 /// generation without reading transcript contents from logs or UI text.
 pub fn record_delivery_receipt(
+    delivery_id: u64,
+    session_generation: u64,
+    selection: &crate::dictation::DictationTargetSelection,
     transcript: &str,
     audio_duration: std::time::Duration,
     target: DictationTarget,
@@ -453,8 +528,15 @@ pub fn record_delivery_receipt(
     let generation = DELIVERY_RECEIPT_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let receipt = serde_json::json!({
         "generation": generation,
+        "deliveryId": delivery_id,
+        "sessionGeneration": session_generation,
+        "selectionGeneration": selection.selection_generation,
+        "frozenIdentityKind": selection.destination.kind(),
+        "frozenIdentityFingerprint": selection.destination.identity_fingerprint(),
+        "destinationAttemptCount": 1,
+        "mutationCount": 1,
         "target": format!("{:?}", target),
-        "targetLabel": target.overlay_label(),
+        "targetLabel": selection.display_label,
         "destination": format!("{:?}", destination),
         "deliveredInternally": delivered_internally,
         "historyEntryId": history_entry_id,
@@ -509,7 +591,6 @@ pub fn record_wrong_target_refusal(
         "requestedTarget": draft.requested_target.map(|target| format!("{:?}", target)),
         "requestedTargetLabelLen": requested_target_label_len,
         "requestedTargetLabelFingerprint": requested_target_label_fingerprint,
-        "fallbackTarget": draft.fallback_target.map(|target| format!("{:?}", target)),
         "deliveryGenerationBefore": draft.delivery_generation_before,
         "deliveryGenerationAfter": delivery_generation_after,
         "noDeliveryAttempted": true,
@@ -620,6 +701,8 @@ pub fn set_dictation_session_target(target: DictationTarget) -> Option<Dictation
         session.target_cycle.push(target);
     }
     session.target = target;
+    session.selection = None;
+    *LAST_FROZEN_SELECTION.lock() = None;
     DICTATION_TARGET_GENERATION.fetch_add(1, Ordering::Relaxed);
     bump_dictation_state_generation();
 
@@ -650,6 +733,8 @@ pub fn cycle_dictation_target() -> Option<DictationTarget> {
     let next_ix = (current_ix + 1) % session.target_cycle.len();
     let next_target = session.target_cycle[next_ix];
     session.target = next_target;
+    session.selection = None;
+    *LAST_FROZEN_SELECTION.lock() = None;
     bump_dictation_state_generation();
 
     tracing::info!(
@@ -837,7 +922,13 @@ pub fn automation_state() -> serde_json::Value {
                 true,
                 session.overlay_phase.as_automation_str().to_string(),
                 Some(format!("{:?}", session.target)),
-                Some(session.target.overlay_label().to_string()),
+                Some(
+                    session
+                        .selection
+                        .as_ref()
+                        .map(|selection| selection.display_label.clone())
+                        .unwrap_or_else(|| session.target.overlay_label().to_string()),
+                ),
                 Some(session.started_at.elapsed().as_millis() as u64),
                 serde_json::json!({
                     "available": true,
@@ -852,7 +943,13 @@ pub fn automation_state() -> serde_json::Value {
                 false,
                 "stopping".to_string(),
                 Some(format!("{:?}", stop_state.target)),
-                Some(stop_state.target.overlay_label().to_string()),
+                Some(
+                    stop_state
+                        .selection
+                        .as_ref()
+                        .map(|selection| selection.display_label.clone())
+                        .unwrap_or_else(|| stop_state.target.overlay_label().to_string()),
+                ),
                 Some(stop_state.requested_at.elapsed().as_millis() as u64),
                 serde_json::json!({
                     "available": false,
@@ -940,6 +1037,18 @@ pub fn automation_state() -> serde_json::Value {
     let quick_target_ids = crate::dictation::DictationTarget::quick_chip_descriptors()
         .map(|descriptor| descriptor.stable_id)
         .collect::<Vec<_>>();
+    let frozen_selection = crate::dictation::get_dictation_target_selection().map(|selection| {
+        serde_json::json!({
+            "target": format!("{:?}", selection.target),
+            "kind": selection.destination.kind(),
+            "identityFingerprint": selection.destination.identity_fingerprint(),
+            "selectionGeneration": selection.selection_generation,
+            "displayLabel": selection.display_label,
+            "iconIdentityFingerprint": selection.icon_identity.as_deref().map(automation_fingerprint),
+            "source": "runtime.session.frozenSelection",
+            "redacted": true,
+        })
+    });
 
     serde_json::json!({
         "schemaVersion": 1,
@@ -953,6 +1062,7 @@ pub fn automation_state() -> serde_json::Value {
         "target": target,
         "targetLabel": target_label,
         "targetGeneration": dictation_target_generation(),
+        "frozenSelection": frozen_selection,
         "targetActions": target_actions,
         "quickTargetIds": quick_target_ids,
         "elapsedMs": elapsed_ms,
@@ -1352,6 +1462,7 @@ fn start_recording(target: DictationTarget) -> Result<()> {
         started_at: Instant::now(),
         overlay_phase: DictationSessionPhase::Recording,
         target,
+        selection: None,
         target_cycle: vec![target],
         active_device: active_device.clone(),
         session_generation,

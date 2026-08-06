@@ -38,7 +38,6 @@ fn explicit_valid_target_resolves_without_fallback() {
     let result = resolve_delivery_target_request(
         Some("mainWindowFilter"),
         Some(DictationTarget::NotesEditor),
-        DictationTarget::ExternalApp,
         7,
     );
 
@@ -56,7 +55,6 @@ fn explicit_invalid_target_refuses_instead_of_fallback() {
     let result = resolve_delivery_target_request(
         Some("__missing_target__"),
         Some(DictationTarget::NotesEditor),
-        DictationTarget::MainWindowFilter,
         7,
     );
 
@@ -67,13 +65,8 @@ fn explicit_invalid_target_refuses_instead_of_fallback() {
 }
 
 #[test]
-fn implicit_target_uses_active_session_before_ui_fallback() {
-    let result = resolve_delivery_target_request(
-        None,
-        Some(DictationTarget::AiChatComposer),
-        DictationTarget::MainWindowFilter,
-        7,
-    );
+fn implicit_target_uses_active_session() {
+    let result = resolve_delivery_target_request(None, Some(DictationTarget::AiChatComposer), 7);
 
     assert!(matches!(
         result,
@@ -85,14 +78,11 @@ fn implicit_target_uses_active_session_before_ui_fallback() {
 }
 
 #[test]
-fn implicit_target_uses_ui_fallback_when_no_active_session() {
-    let result = resolve_delivery_target_request(None, None, DictationTarget::MainWindowFilter, 7);
+fn implicit_target_refuses_when_no_active_session() {
+    let result = resolve_delivery_target_request(None, None, 7);
 
     assert!(matches!(
         result,
-        DictationDeliveryTargetResolution::Deliver {
-            target: DictationTarget::MainWindowFilter,
-            ..
-        }
+        DictationDeliveryTargetResolution::Refuse(_)
     ));
 }

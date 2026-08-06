@@ -179,65 +179,51 @@ fn dictation_transcript_delivery_routes_tab_ai_harness() {
         "handle_dictation_transcript must have a TabAiHarness arm"
     );
     assert!(
-        fn_body.contains("send_dictation_to_agent_chat(transcript.clone(), cx)"),
-        "TabAiHarness delivery must use explicit Send without inheriting launcher context"
+        fn_body.contains("dispatch_dictation_to_frozen_agent_chat"),
+        "TabAiHarness delivery must use the frozen thread policy and suppress launcher context"
     );
 }
 
 #[test]
-fn tab_ai_harness_delivery_seeds_script_list_return_origin_before_open() {
+fn tab_ai_harness_delivery_distinguishes_existing_and_fresh_policy() {
     let fn_body = function_body(BUILTIN_EXECUTION_SOURCE, "fn handle_dictation_transcript");
     let arm_start = fn_body
         .find("DictationTarget::TabAiHarness => {")
         .expect("handle_dictation_transcript must have a TabAiHarness arm");
     let arm = &fn_body[arm_start..];
     let arm_end = arm
-        .find("DictationTarget::ExternalApp")
-        .expect("TabAiHarness arm must be followed by ExternalApp arm");
+        .find("DictationTarget::DayPageToday")
+        .expect("TabAiHarness arm must be followed by Day Page");
     let arm = &arm[..arm_end];
-
-    let seed_idx = arm
-        .find("self.seed_agent_chat_dictation_return_origin(cx)")
-        .expect("TabAiHarness delivery must seed its close return origin");
-    let open_idx = arm
-        .find("self.send_dictation_to_agent_chat")
-        .expect("TabAiHarness delivery must open embedded Agent Chat");
-    let finish_idx = arm
-        .find("WindowEvent::FinishDictation")
-        .expect("TabAiHarness delivery must reveal/focus Agent Chat through the orchestrator");
 
     assert!(
-        seed_idx < open_idx && open_idx < finish_idx,
-        "TabAiHarness delivery must seed ScriptList/MainFilter return origin before opening Agent Chat, then finish dictation"
+        arm.contains("FrozenAgentChatPolicy::ExistingThread")
+            && arm.contains("dispatch_dictation_to_frozen_agent_chat")
+            && arm.contains("false")
+            && arm.contains("true"),
+        "existing-thread delivery must stay on that thread while fresh delivery creates a new embedded thread"
     );
 }
 
 #[test]
-fn tab_ai_harness_delivery_preserves_detached_agent_chat_before_embedded_open() {
+fn tab_ai_harness_delivery_preserves_detached_agent_chat() {
     let fn_body = function_body(BUILTIN_EXECUTION_SOURCE, "fn handle_dictation_transcript");
     let arm_start = fn_body
         .find("DictationTarget::TabAiHarness => {")
         .expect("handle_dictation_transcript must have a TabAiHarness arm");
     let arm = &fn_body[arm_start..];
     let arm_end = arm
-        .find("DictationTarget::ExternalApp")
-        .expect("TabAiHarness arm must be followed by ExternalApp arm");
+        .find("DictationTarget::DayPageToday")
+        .expect("TabAiHarness arm must be followed by Day Page");
     let arm = &arm[..arm_end];
-
-    let open_idx = arm
-        .find("self.send_dictation_to_agent_chat")
-        .expect("TabAiHarness delivery must open embedded Agent Chat");
-    let finish_idx = arm
-        .find("WindowEvent::FinishDictation")
-        .expect("TabAiHarness delivery must reveal/focus Agent Chat through the orchestrator");
 
     assert!(
         !arm.contains("close_chat_window") && !arm.contains("is_chat_window_open"),
         "Agent Chat dictation must preserve the independent detached workspace"
     );
     assert!(
-        open_idx < finish_idx,
-        "Agent Chat dictation must seed the embedded chat before revealing/focusing main"
+        arm.contains("dispatch_dictation_to_frozen_agent_chat"),
+        "Agent Chat dictation must route through the exact existing/fresh host policy"
     );
 }
 

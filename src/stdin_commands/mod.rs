@@ -734,14 +734,20 @@ pub enum ExternalCommand {
     /// target: Optional target label. Accepted values mirror `DictationTarget`:
     ///   "mainWindowFilter", "mainWindowPrompt", "notesEditor", "aiChatComposer",
     ///   "tabAiHarness", "externalApp", plus short aliases like "agent_chat". Unknown
-    ///   or absent values fall back to the active dictation target, then the
-    ///   current UI-derived target.
+    ///   targets refuse. An absent target uses only an active Dictation session;
+    ///   it never derives a fallback from the current UI.
     PushDictationResult {
         transcript: String,
         #[serde(default, rename = "partialTranscript")]
         partial_transcript: Option<String>,
         #[serde(default)]
         target: Option<String>,
+        /// Capture and retain the target identity without delivering.
+        #[serde(default, rename = "freezeOnly")]
+        freeze_only: bool,
+        /// Deliver through the previously retained frozen identity.
+        #[serde(default, rename = "useFrozenSelection")]
+        use_frozen_selection: bool,
         #[serde(default, rename = "requestId")]
         request_id: Option<ExternalCommandRequestId>,
     },
@@ -1605,6 +1611,8 @@ mod tests {
                 transcript: String::new(),
                 partial_transcript: None,
                 target: None,
+                freeze_only: false,
+                use_frozen_selection: false,
                 request_id: None,
             },
             ExternalCommand::OpenDictationOverlayFixture { request_id: None },

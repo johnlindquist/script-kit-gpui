@@ -106,6 +106,12 @@ pub fn primary_message_for_failure(failure: &AiFailure) -> &'static str {
         AiFailureCode::ContextUnavailable => {
             "This context could not be prepared. Retry or remove it before sending."
         }
+        AiFailureCode::DestinationUnavailable => {
+            "The selected destination is no longer available. Your work is saved."
+        }
+        AiFailureCode::DestinationStale => {
+            "The selected destination changed. Your work is saved; choose it again to continue."
+        }
         AiFailureCode::Unknown => {
             "The AI request did not finish. Your work is saved; try again or view details."
         }
@@ -378,6 +384,24 @@ pub fn classify_context_unavailable(
     )
 }
 
+pub fn classify_destination_failure(
+    context: &FailureContext,
+    stale: bool,
+    detail: &str,
+    diagnostics: &DiagnosticVault,
+) -> AppFailureRecord {
+    record(
+        context,
+        detail,
+        diagnostics,
+        AiFailureKind::Input(if stale {
+            InputFailure::DestinationStale
+        } else {
+            InputFailure::DestinationUnavailable
+        }),
+    )
+}
+
 /// Classify a runtime process that failed to spawn, keeping its cause (S11).
 ///
 /// [`classify_process_failure`] with [`ProcessFailureFacts::SpawnFailed`]
@@ -647,6 +671,14 @@ fn presentation(context: &FailureContext, failure: &AiFailure) -> FailurePresent
         AiFailureCode::ContextUnavailable => {
             ("ai.context_unavailable", "ai.context_unavailable.detail")
         }
+        AiFailureCode::DestinationUnavailable => (
+            "dictation.destination_unavailable",
+            "dictation.destination_unavailable.detail",
+        ),
+        AiFailureCode::DestinationStale => (
+            "dictation.destination_stale",
+            "dictation.destination_stale.detail",
+        ),
         AiFailureCode::ProfileUnavailable => {
             ("ai.profile_unavailable", "ai.profile_unavailable.detail")
         }

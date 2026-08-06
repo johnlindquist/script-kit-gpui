@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 43 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 45 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -18,7 +18,7 @@
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
-| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C11 complete; SAFE-002, WF-018, and WF-019 verified |
+| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C12 complete; WF-020 and WF-021 verified |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
 ## How to view the baseline proposal explorer
@@ -937,6 +937,40 @@
   5. Submit once and watch Transcribing/Delivering. Verify all four chips keep their positions but appear disabled and cannot retarget.
   6. Run the C11 probe above; expect `targetSelections:5`, `deliveryGenerationUnchanged:true`, `stopGenerationUnchanged:true`, and `configFingerprintUnchanged:true`.
 - **Intentional differences preserved:** Quick chips intentionally omit Script Kit, Prompt, and Notes to keep the compact four-target row; all seven current targets remain available through Destinations Actions. Persisting a real production selection remains target-owner behavior, while the deterministic fixture never mutates user configuration.
+
+### WF-020 — Freeze Dictation destination identity and refuse stale targets
+
+- **Status:** Complete. Every selectable Dictation target now captures a typed destination identity before recording and on every explicit retarget; delivery never re-resolves from the current UI.
+- **Commit boundary:** Workflow Safety C12 — `fix(dictation-delivery): freeze identity and deliver exactly once [WF-020 WF-021]`.
+- **Changed behavior:** Script Kit freezes Launcher window/input generations, Prompt instance/input generations, Notes instance/document/editor/anchor, existing-versus-fresh Agent Chat policy, exact external PID/bundle/window identity, captured Day Page date/substrate, or fresh zero-context Quick AI request identity. Badge copy and external icon come from that snapshot. A changed Launcher input, Prompt input, Notes editor, Agent Chat thread, external window, or substrate refuses with a typed stale-destination failure and never redirects to whichever surface is current.
+- **Exact owners:** `src/dictation/types.rs::{FrozenDictationDestination,FrozenAgentChatPolicy,DictationTargetSelection}`; `src/dictation/runtime.rs::{set_dictation_session_selection,get_dictation_target_selection,retain_frozen_selection_for_delivery}`; `src/dictation/delivery.rs::{capture_frozen_external_destination,validate_frozen_external_destination}`; `src/dictation/window.rs::set_overlay_retarget_callback`; `src/app_execute/builtin_execution.rs::capture_dictation_target_selection`; and frozen Notes/Day actors under `src/notes/window/**` and `src/brain/substrate/mod.rs`.
+- **Compatibility/migration:** Persisted preferences still store only the target class. Legacy `AiChatComposer` labels canonicalize to Agent Chat before identity capture and History now records the canonical **Agent Chat** label. New automation flags `freezeOnly` and `useFrozenSelection` expose the real two-phase coordinator for deterministic stale-target proof without starting a microphone.
+- **Focused proof:** Serial Dictation model suite PASS (283/283). Integration contracts PASS: forced routes 8/8, lifecycle 7/7, Agent Chat policy 14/14, synthetic delivery protocol 8/8. `sk-protocol` PASS 26/26. Prompt identity reads the real owning input/entity rather than `AppView::Debug`; captured-date rollover and exact-window selection/ambiguity tests pass.
+- **Runtime receipt:** `.test-output/cons-flow-c12/dictation-delivery-receipt.json` → PASS across 11 isolated Driver scenarios: Launcher, Prompt, Notes, captured Day Page, fresh Agent Chat, existing-thread Agent Chat, fresh Quick AI, unknown target, plus changed Launcher/Prompt/Notes stale refusals. Every stale row records zero destination attempts and no fallback. Every Driver reports `processExited:true`, `streamsDrained:true`, and `logWriterClosed:true`; exact artifact process inventory is zero.
+- **Negative controls:** No `UiFallback`, fallback target field, current-frontmost internal fallback, or reset-to-ScriptList-on-stale path remains. Ambiguous external windows fail closed. Raw transcript text is absent from immutable transcript `Debug`, delivery receipts, and automation state. External paste remains covered by exact-window model/integration contracts rather than mutating an uncontrolled user application during the automated runtime matrix.
+- **User test/view:**
+  1. Start Dictation with Script Kit selected, change the Launcher filter, then submit. Verify no text replaces the changed filter and History retains the transcript.
+  2. Open a prompt or Note, select it as the destination, edit its input/document, then submit. Verify delivery refuses instead of inserting into the changed surface.
+  3. Select Agent Chat while an existing thread is open, replace the thread, then submit. Verify the old frozen thread is not replaced and the new thread receives nothing.
+  4. Select Frontmost App, switch or close that exact external window, then submit. Verify Script Kit does not paste into the newly focused app.
+  5. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c12/script-kit-gpui" bun scripts/agentic/cons-flow-ux/dictation-delivery-probe.ts`; expect 11/11 scenarios, stale attempt counts of zero, and `exactArtifactOwnedProcessCount:0`.
+- **Intentional differences preserved:** External delivery stays a native paste actor while internal targets use owned editor APIs. Day Page appends to the captured date even after midnight. Agent Chat standard and Quick AI retain distinct UI variants and context policies.
+
+### WF-021 — Deliver one immutable Dictation transcript exactly once
+
+- **Status:** Complete. One History record is written before one validated destination attempt; one delivery ID is atomically claimed before validation or mutation and is never replayed after refusal or an unknown mutation result.
+- **Commit boundary:** Same Workflow Safety C12 commit as WF-020.
+- **Changed behavior:** The coordinator carries one redacted `ImmutableDictationTranscript`, session/selection generations, History ID, and delivery ID. Internal editor mutations, captured-day append, Agent Chat Send, Quick AI Ask, and external paste each have one actor and no second-destination branch. Agent Chat and Quick AI success is recorded only after their entry ticket reports the exact turn accepted; Quick AI is fresh and `NoContext`.
+- **Exact owners:** `src/dictation/types.rs::{ImmutableDictationTranscript,DictationDeliveryRequest,DictationDeliveryOutcome,DictationMutationReceipt}`; `src/dictation/runtime.rs::{next_dictation_delivery_id,claim_dictation_delivery,record_delivery_receipt}`; `src/app_execute/builtin_execution.rs::{handle_dictation_transcript,complete_internal_dictation_delivery}`; and `src/app_impl/agent_handoff::{agent_chat_entry.rs,mod.rs}`.
+- **Focused/runtime proof:** The atomic-claim model rejects a second claim. Runtime receipts require `destinationAttemptCount:1`, `mutationCount:1`, a frozen identity fingerprint, transcript length/fingerprint, and no raw transcript. Fresh and existing-thread Agent Chat plus fresh Quick AI all wait for accepted submission. External paste failures are `MutationOutcomeUnknown` with `RetrySafety::Never`.
+- **Build/governance:** Stable artifact `target-agent/artifacts/cons-flow-c12/script-kit-gpui`, SHA-256 `ad52a842b86b24c579a55fa24493f57f77ce11fb1aba6eecf3c2d45a338b7859`. Formatting and `git diff --check` PASS. Source-audit inventory is current at 2,814 reader sites; no new reader was added. Hardcoded-visual tests PASS 16/16. Protected glass contracts PASS 40/40 and calibration fixture PASS 1/1; no locked value changed.
+- **User test/view:**
+  1. Dictate once to Launcher, Prompt, and Notes. Verify each destination changes once and Dictation does not submit or execute the inserted text.
+  2. Dictate once to Today. Verify exactly one capture is appended to the date selected when Dictation began, including across local midnight.
+  3. Dictate to existing Agent Chat, then to a fresh Agent Chat. Verify one submitted turn appears in the intended thread each time with no focused-row chip.
+  4. Dictate to Ask AI. Verify one fresh Quick AI turn appears with zero context chips.
+  5. Inspect `.test-output/cons-flow-c12/dictation-delivery-receipt.json`; each successful row must report one attempt/one mutation, redaction, and complete cleanup.
+- **Intentional differences preserved:** Host-specific undo/focus mechanics remain owned by each editor/window. Unknown-after-paste cannot offer same-destination retry; C13 adds the user-facing recovery controls without weakening this C12 safety boundary.
 
 ## Verification ledger
 

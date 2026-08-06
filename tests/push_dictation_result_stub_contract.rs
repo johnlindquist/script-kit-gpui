@@ -28,7 +28,7 @@ fn push_arm<'a>(source: &'a str, name: &str) -> &'a str {
 fn push_dictation_result_variant_is_defined_with_expected_fields() {
     assert!(
         STDIN_COMMANDS.contains(
-            "PushDictationResult {\n        transcript: String,\n        #[serde(default, rename = \"partialTranscript\")]\n        partial_transcript: Option<String>,\n        #[serde(default)]\n        target: Option<String>,\n        #[serde(default, rename = \"requestId\")]\n        request_id: Option<ExternalCommandRequestId>,\n    },"
+            "PushDictationResult {\n        transcript: String,\n        #[serde(default, rename = \"partialTranscript\")]\n        partial_transcript: Option<String>,\n        #[serde(default)]\n        target: Option<String>,\n        /// Capture and retain the target identity without delivering.\n        #[serde(default, rename = \"freezeOnly\")]\n        freeze_only: bool,\n        /// Deliver through the previously retained frozen identity.\n        #[serde(default, rename = \"useFrozenSelection\")]\n        use_frozen_selection: bool,\n        #[serde(default, rename = \"requestId\")]\n        request_id: Option<ExternalCommandRequestId>,\n    },"
         ),
         "stdin protocol must keep loose String target shape and optional partialTranscript fallback without coupling serde to DictationTarget"
     );
@@ -73,14 +73,15 @@ fn push_dictation_result_routes_through_real_delivery_helper() {
 }
 
 #[test]
-fn delivery_helper_preserves_active_session_target_and_accepts_agent_chat_alias() {
+fn delivery_helper_preserves_active_session_target_without_ui_fallback() {
     assert!(
         BUILTIN_EXECUTION.contains("pub(crate) fn deliver_stdin_dictation_result(")
             && BUILTIN_EXECUTION.contains("resolve_delivery_target_request(")
             && BUILTIN_EXECUTION.contains("active_session_target")
-            && BUILTIN_EXECUTION.contains("ui_fallback_target")
+            && BUILTIN_EXECUTION.contains("capture_dictation_target_selection(target, cx)")
+            && !BUILTIN_EXECUTION.contains("ui_fallback_target")
             && BUILTIN_EXECUTION.contains("self.handle_dictation_transcript("),
-        "delivery helper must resolve target through explicit label, active session target, then UI-derived fallback before calling handle_dictation_transcript"
+        "delivery helper must use an explicit or active target, freeze its identity, and never derive a fallback from current UI state"
     );
     assert!(
         include_str!("../src/dictation/delivery.rs")
@@ -192,7 +193,7 @@ fn dictation_delivery_records_redacted_receipt_for_devtools() {
     assert!(
         BUILTIN_EXECUTION.contains("crate::dictation::record_delivery_receipt(")
             && BUILTIN_EXECUTION.contains("DictationDestination::FrontmostApp")
-            && BUILTIN_EXECUTION.contains("\"operation\": \"replaceInput\"")
+            && BUILTIN_EXECUTION.contains("\"operation\": \"replaceFrozenInput\"")
             && BUILTIN_EXECUTION.contains("\"unit\": \"utf8Bytes\""),
         "both internal and frontmost-app delivery paths must write the receipt at the delivery boundary"
     );

@@ -24,6 +24,18 @@ pub(crate) fn provider_failure(
     )
 }
 
+pub(crate) fn destination_failure(stale: bool, detail: &str) -> AppFailureRecord {
+    super::classify_destination_failure(
+        &FailureContext {
+            component: ProtocolComponent::Provider,
+            ..FailureContext::default()
+        },
+        stale,
+        detail,
+        runtime_vault(),
+    )
+}
+
 pub(crate) fn context_unavailable_failure(detail: &str) -> AppFailureRecord {
     super::classify_context_unavailable(
         &FailureContext {

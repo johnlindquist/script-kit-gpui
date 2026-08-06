@@ -43,6 +43,48 @@ impl NotesApp {
         insertion_range
     }
 
+    pub(crate) fn inject_dictation_text_at_frozen_anchor(
+        &mut self,
+        text: &str,
+        anchor: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        let insertion_range = self.editor_state.update(cx, |state, cx| {
+            let value = state.value().to_string();
+            if anchor.start > anchor.end
+                || anchor.end > value.len()
+                || !value.is_char_boundary(anchor.start)
+                || !value.is_char_boundary(anchor.end)
+            {
+                return Err("Frozen Notes insertion anchor is no longer valid".to_string());
+            }
+            let new_value = format!("{}{}{}", &value[..anchor.start], text, &value[anchor.end..]);
+            let new_cursor = anchor.start + text.len();
+            state.set_value_preserving_scroll(new_value, new_cursor, window, cx);
+            Ok(serde_json::json!({
+                "available": true,
+                "unit": "utf8Bytes",
+                "start": anchor.start,
+                "end": new_cursor,
+                "replacedStart": anchor.start,
+                "replacedEnd": anchor.end,
+                "insertedLength": text.len(),
+                "operation": if anchor.start == anchor.end { "insertAtFrozenCursor" } else { "replaceFrozenSelection" },
+                "source": "notes.inject_dictation_text_at_frozen_anchor",
+                "redacted": true,
+            }))
+        })?;
+        self.has_unsaved_changes = true;
+        tracing::info!(
+            category = "DICTATION",
+            text_len = text.len(),
+            "Dictated text injected at frozen Notes anchor"
+        );
+        cx.notify();
+        Ok(insertion_range)
+    }
+
     /// Insert current date/time at cursor position (Cmd+Shift+D)
     pub(super) fn insert_date_time(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let date_str = crate::formatting::format_absolute_datetime(chrono::Utc::now());

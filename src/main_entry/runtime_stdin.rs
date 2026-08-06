@@ -1305,6 +1305,8 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                 ref transcript,
                                 ref partial_transcript,
                                 ref target,
+                                freeze_only,
+                                use_frozen_selection,
                                 ref request_id,
                             } => {
                                 let rid = request_id.as_ref().map(|id| id.as_str());
@@ -1318,6 +1320,8 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                     transcript.clone(),
                                     partial_transcript.as_deref(),
                                     target.as_deref(),
+                                    freeze_only,
+                                    use_frozen_selection,
                                     ctx,
                                 ) {
                                     Ok(delivery_target) => {

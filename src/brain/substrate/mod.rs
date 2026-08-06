@@ -66,22 +66,34 @@ impl BrainSubstrate {
         self.tz
     }
 
-    /// Append a timestamped entry to today's day page. Append-only — earlier
-    /// content is never rewritten.
-    pub fn append_to_day(&self, now: DateTime<Utc>, entry: DayEntry) -> Result<()> {
-        let (date, timestamp) = day::local_day_and_time(now, self.tz);
+    pub fn capture_day_destination(&self, now: DateTime<Utc>) -> (chrono::NaiveDate, String) {
+        let (date, _) = day::local_day_and_time(now, self.tz);
+        let identity = format!("{}:{}", self.paths.base().display(), date);
+        (
+            date,
+            crate::dictation::redacted_transcript_fingerprint(&identity),
+        )
+    }
+
+    pub fn append_to_captured_day(
+        &self,
+        date: chrono::NaiveDate,
+        now: DateTime<Utc>,
+        entry: DayEntry,
+    ) -> Result<()> {
+        let (_, timestamp) = day::local_day_and_time(now, self.tz);
         let path = self.paths.day_page(date);
         let line = entry.format_line(&timestamp);
         io::atomic_append_line(&path, &line)?;
-        // Layering exception: the substrate is otherwise a pure file layer, but
-        // every append_to_day caller (clipboard sediment, `;todo`, agent day
-        // traces, dictation) is a capture that must be recallable at once.
-        // Indexing here — once — instead of at each call site keeps the diff
-        // small and derives the doc from the exact file just written, so it can
-        // never drift from the periodic sync. `index_capture_after_write` is a
-        // cfg(test) no-op so file-layer tests stay pure.
         crate::brain::indexer::index_capture_after_write(&path);
         Ok(())
+    }
+
+    /// Append a timestamped entry to today's day page. Append-only — earlier
+    /// content is never rewritten.
+    pub fn append_to_day(&self, now: DateTime<Utc>, entry: DayEntry) -> Result<()> {
+        let (date, _) = day::local_day_and_time(now, self.tz);
+        self.append_to_captured_day(date, now, entry)
     }
 
     /// Write a long capture as a fragment when it exceeds
@@ -393,6 +405,33 @@ mod tests {
         let contents = fs::read_to_string(local_path).expect("read local day");
         assert!(contents.contains("23:30 local day boundary"));
         assert!(!utc_path.exists(), "UTC day file must not be created");
+    }
+
+    #[test]
+    fn append_to_captured_day_does_not_follow_a_later_calendar_day() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let substrate =
+            BrainSubstrate::with_timezone(dir.path().join("brain"), chrono_tz::America::Denver);
+        let before_midnight = Utc.with_ymd_and_hms(2026, 6, 14, 5, 59, 0).unwrap();
+        let after_midnight = before_midnight + chrono::Duration::minutes(2);
+        let (captured_date, _) = substrate.capture_day_destination(before_midnight);
+
+        substrate
+            .append_to_captured_day(
+                captured_date,
+                after_midnight,
+                DayEntry::Capture {
+                    text: "frozen destination".to_string(),
+                },
+            )
+            .expect("append captured day");
+
+        let captured_path = substrate.paths().day_page(captured_date);
+        let later_date = captured_date.succ_opt().unwrap();
+        assert!(fs::read_to_string(captured_path)
+            .expect("captured day")
+            .contains("00:01 frozen destination"));
+        assert!(!substrate.paths().day_page(later_date).exists());
     }
 
     #[test]
