@@ -3777,6 +3777,10 @@ impl ScriptListApp {
     ) {
         match self.agent_chat_return_route.clone() {
             AgentChatReturnRoute::Direct => self.close_agent_chat_main_window_state_first(cx),
+            AgentChatReturnRoute::Notes(snapshot) => {
+                self.close_agent_chat_main_window_state_first(cx);
+                let _ = crate::notes::window::ai_handoff::restore_notes_host_return(snapshot, cx);
+            }
             AgentChatReturnRoute::Source(origin) => {
                 self.tab_ai_harness_return_view = Some(origin.view.clone());
                 self.tab_ai_harness_return_focus_target = Some(origin.focus_target);

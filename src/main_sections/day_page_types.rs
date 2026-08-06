@@ -109,6 +109,10 @@ pub(crate) struct DayPageClipboardShelfEntry {
 /// Host for today's day page inside the main launcher window.
 pub struct DayPageView {
     pub(crate) app: WeakEntity<ScriptListApp>,
+    /// Stable identity of this exact held Day Page entity for return routing.
+    pub(crate) instance_id: u64,
+    /// Monotonic host-return generation; delayed callbacks must match it.
+    pub(crate) host_return_generation: u64,
     pub(crate) session: DayPageDocumentSession,
     pub(crate) notes_editor: Entity<NotesEditor>,
     pub(crate) editor_state: Entity<InputState>,

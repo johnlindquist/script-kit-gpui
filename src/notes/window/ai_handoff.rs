@@ -37,11 +37,65 @@ impl NotesAiHandoffError {
 #[derive(Clone)]
 pub(crate) struct NotesAiHandoffPayload {
     pub(crate) target: crate::ai::TabAiTargetContext,
+    pub(crate) scope: crate::notes::ai_scope::NotesAiScope,
+    pub(crate) return_snapshot: NotesHostReturnSnapshot,
     pub(crate) supplemental_parts: Vec<crate::ai::message_parts::AiContextPart>,
     pub(crate) cart_note_id: Option<crate::notes::model::NoteId>,
     pub(crate) cart_item_ids: Vec<String>,
     pub(crate) source: &'static str,
     pub(crate) is_draft: bool,
+}
+
+/// Host-owned return token for Notes → main Agent Chat → Notes.
+///
+/// The token carries only redacted identity and UI anchors. The live Notes
+/// entity remains authoritative and is never reconstructed from this data.
+/// Its instance/window/focus generations make delayed return callbacks fail
+/// closed instead of focusing a newly opened Notes window or a newer panel.
+#[derive(Clone, PartialEq)]
+pub(crate) struct NotesHostReturnSnapshot {
+    pub(crate) notes_instance_id: u64,
+    pub(crate) window_generation: u64,
+    pub(crate) focus_generation: u64,
+    pub(crate) document_id: String,
+    pub(crate) document_generation: String,
+    pub(crate) content_length: usize,
+    pub(crate) content_fingerprint: String,
+    pub(crate) dirty: bool,
+    pub(crate) selection: std::ops::Range<usize>,
+    pub(crate) scroll_top: Option<f32>,
+    pub(crate) mode: String,
+    pub(crate) alias_id_fingerprints: Vec<String>,
+    pub(crate) search_query_fingerprint: String,
+    pub(crate) selected_result_id: Option<String>,
+    pub(crate) search_scroll_anchor: Option<String>,
+    pub(crate) focus_semantic_id: &'static str,
+}
+
+impl std::fmt::Debug for NotesHostReturnSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NotesHostReturnSnapshot")
+            .field("notes_instance_id", &self.notes_instance_id)
+            .field("window_generation", &self.window_generation)
+            .field("focus_generation", &self.focus_generation)
+            .field("document_id_length", &self.document_id.chars().count())
+            .field("document_generation", &self.document_generation)
+            .field("content_length", &self.content_length)
+            .field("content_fingerprint", &self.content_fingerprint)
+            .field("dirty", &self.dirty)
+            .field("selection_length", &self.selection.len())
+            .field("scroll_top", &self.scroll_top)
+            .field("mode", &self.mode)
+            .field("alias_count", &self.alias_id_fingerprints.len())
+            .field("search_query_fingerprint", &self.search_query_fingerprint)
+            .field("has_selected_result", &self.selected_result_id.is_some())
+            .field(
+                "has_search_scroll_anchor",
+                &self.search_scroll_anchor.is_some(),
+            )
+            .field("focus_semantic_id", &self.focus_semantic_id)
+            .finish()
+    }
 }
 
 /// Outcome states for the redacted receipt.
@@ -76,11 +130,22 @@ pub(crate) struct NotesAiHandoffReceipt {
     pub(crate) target_semantic_id: String,
     pub(crate) target_label_length: usize,
     pub(crate) target_label_fingerprint: String,
+    pub(crate) scope_kind: &'static str,
+    pub(crate) scope_document_id_length: usize,
+    pub(crate) scope_document_id_fingerprint: String,
+    pub(crate) scope_range_length: Option<usize>,
+    pub(crate) content_length: usize,
+    pub(crate) content_fingerprint: String,
     pub(crate) is_draft: bool,
     pub(crate) supplemental_part_count: usize,
     pub(crate) destination_window_id: &'static str,
     pub(crate) destination_surface: &'static str,
+    pub(crate) staging_outcome: &'static str,
+    pub(crate) return_route: &'static str,
     pub(crate) notes_instance_id: u64,
+    pub(crate) window_generation: u64,
+    pub(crate) focus_generation: u64,
+    pub(crate) alias_count: usize,
     pub(crate) error_code: Option<&'static str>,
     pub(crate) recorded_at: std::time::Instant,
 }
@@ -94,6 +159,7 @@ pub(crate) struct NotesAiHandoffReceipt {
 pub type NotesAiMainHandoffHook = fn(
     crate::ai::TabAiTargetContext,
     Vec<crate::ai::message_parts::AiContextPart>,
+    NotesHostReturnSnapshot,
     &'static str,
     &mut gpui::App,
 ) -> Result<bool, String>;
@@ -203,6 +269,7 @@ pub(crate) fn compose_note_ai_target(
             "title": title,
             "content": content,
             "contentSource": "liveEditorSnapshot",
+            "scope": "wholeNote",
             "hasUnsavedChanges": has_unsaved_changes,
             "selection": {
                 "start": selection.start,
@@ -256,11 +323,62 @@ impl NotesApp {
         })
     }
 
+    fn build_notes_host_return_snapshot(
+        &self,
+        target: &crate::ai::TabAiTargetContext,
+        cx: &Context<Self>,
+    ) -> NotesHostReturnSnapshot {
+        let editor = self.editor_state.read(cx);
+        let content = editor.value();
+        let selection = editor.selection();
+        let scroll = editor.automation_scroll_metrics();
+        let mut alias_id_fingerprints = self
+            .spine_runtime
+            .mention_aliases
+            .keys()
+            .map(|token| fnv1a64_fingerprint(token))
+            .collect::<Vec<_>>();
+        alias_id_fingerprints.sort();
+
+        let focus_semantic_id = match self.current_focus_surface() {
+            super::focus::NotesFocusSurface::Editor => "input:notes-editor",
+            super::focus::NotesFocusSurface::Preview => "notes-preview",
+            super::focus::NotesFocusSurface::ActionsPanel => "notes-actions",
+            super::focus::NotesFocusSurface::BrowsePanel => "notes-switcher",
+            super::focus::NotesFocusSurface::Dialog => "notes-dialog",
+        };
+        let content_fingerprint = fnv1a64_fingerprint(&content);
+
+        NotesHostReturnSnapshot {
+            notes_instance_id: self.instance_id,
+            window_generation: self.entry_reveal.generation,
+            focus_generation: self.focus_transition_generation,
+            document_id: target.semantic_id.clone(),
+            document_generation: content_fingerprint.clone(),
+            content_length: content.chars().count(),
+            content_fingerprint,
+            dirty: self.has_unsaved_changes,
+            selection,
+            scroll_top: scroll
+                .get("scrollTop")
+                .and_then(serde_json::Value::as_f64)
+                .map(|value| value as f32),
+            mode: format!("{:?}", self.view_mode),
+            alias_id_fingerprints,
+            search_query_fingerprint: fnv1a64_fingerprint(&self.search_query),
+            selected_result_id: self
+                .selected_note_id
+                .map(|id| format!("note:{}", id.as_str())),
+            search_scroll_anchor: None,
+            focus_semantic_id,
+        }
+    }
+
     /// Materialize the complete immutable handoff payload: canonical target,
-    /// deduplicated persisted cart parts (the note body is NEVER duplicated
-    /// as a supplemental part — the target metadata already carries the live
-    /// note and selection), and the original cart row IDs for post-success
-    /// consumption.
+    /// a generation-guarded Notes return token, deduplicated persisted cart
+    /// parts (the note body is NEVER duplicated as a supplemental part — the
+    /// target metadata already carries the live note and selection), and the
+    /// original cart row IDs for post-success consumption.
     pub(crate) fn build_notes_ai_handoff_payload(
         &self,
         source: &'static str,
@@ -296,8 +414,14 @@ impl NotesApp {
             }
         }
 
+        let scope = crate::notes::ai_scope::NotesAiScope::WholeNote {
+            document_id: target.semantic_id.clone(),
+        };
+        let return_snapshot = self.build_notes_host_return_snapshot(&target, cx);
         Ok(NotesAiHandoffPayload {
             target,
+            scope,
+            return_snapshot,
             supplemental_parts,
             cart_note_id,
             cart_item_ids,
@@ -523,6 +647,7 @@ impl NotesApp {
         hook(
             payload.target,
             payload.supplemental_parts,
+            payload.return_snapshot,
             payload.source,
             cx,
         )
@@ -537,15 +662,35 @@ impl NotesApp {
         error_code: Option<&'static str>,
     ) {
         self.ai_handoff_generation = self.ai_handoff_generation.wrapping_add(1);
-        let (semantic_id, label, is_draft, part_count) = match payload {
+        let (
+            semantic_id,
+            label,
+            scope_kind,
+            scope_document_id,
+            scope_range_length,
+            is_draft,
+            part_count,
+        ) = match payload {
             Some(payload) => (
                 payload.target.semantic_id.clone(),
                 payload.target.label.clone(),
+                payload.scope.kind(),
+                payload.scope.document_semantic_id().to_string(),
+                payload.scope.range_length(),
                 payload.is_draft,
                 payload.supplemental_parts.len(),
             ),
-            None => (String::new(), String::new(), false, 0),
+            None => (
+                String::new(),
+                String::new(),
+                "none",
+                String::new(),
+                None,
+                false,
+                0,
+            ),
         };
+        let return_snapshot = payload.map(|payload| &payload.return_snapshot);
         self.last_ai_handoff = Some(NotesAiHandoffReceipt {
             generation: self.ai_handoff_generation,
             source,
@@ -553,21 +698,131 @@ impl NotesApp {
             target_semantic_id: semantic_id,
             target_label_length: label.chars().count(),
             target_label_fingerprint: fnv1a64_fingerprint(&label),
+            scope_kind,
+            scope_document_id_length: scope_document_id.chars().count(),
+            scope_document_id_fingerprint: fnv1a64_fingerprint(&scope_document_id),
+            scope_range_length,
+            content_length: return_snapshot.map_or(0, |snapshot| snapshot.content_length),
+            content_fingerprint: return_snapshot
+                .map(|snapshot| snapshot.content_fingerprint.clone())
+                .unwrap_or_default(),
             is_draft,
             supplemental_part_count: part_count,
             destination_window_id: "main",
             destination_surface: "agentChat",
+            staging_outcome: if matches!(
+                status,
+                NotesAiHandoffStatus::Staged | NotesAiHandoffStatus::StagedCartRetained
+            ) {
+                "composerOnly"
+            } else {
+                "notStaged"
+            },
+            return_route: if payload.is_some() { "notes" } else { "none" },
             notes_instance_id: self.instance_id,
+            window_generation: return_snapshot.map_or(0, |snapshot| snapshot.window_generation),
+            focus_generation: return_snapshot.map_or(0, |snapshot| snapshot.focus_generation),
+            alias_count: return_snapshot.map_or(0, |snapshot| snapshot.alias_id_fingerprints.len()),
             error_code,
             recorded_at: std::time::Instant::now(),
         });
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotesHostReturnDecision {
+    Restore,
+    StaleInstance,
+    StaleWindow,
+    StaleFocus,
+}
+
+fn notes_host_return_decision(
+    snapshot: &NotesHostReturnSnapshot,
+    instance_id: u64,
+    window_generation: u64,
+    focus_generation: u64,
+) -> NotesHostReturnDecision {
+    if snapshot.notes_instance_id != instance_id {
+        NotesHostReturnDecision::StaleInstance
+    } else if snapshot.window_generation != window_generation {
+        NotesHostReturnDecision::StaleWindow
+    } else if snapshot.focus_generation != focus_generation {
+        NotesHostReturnDecision::StaleFocus
+    } else {
+        NotesHostReturnDecision::Restore
+    }
+}
+
+/// Restore the exact Notes window that originated a main Agent Chat handoff.
+/// A delayed callback never opens Notes and never targets a replacement
+/// instance: every generation must still match the host-owned snapshot.
+pub(crate) fn restore_notes_host_return(
+    snapshot: NotesHostReturnSnapshot,
+    cx: &mut gpui::App,
+) -> bool {
+    let Some((entity, handle)) = super::get_notes_app_entity_and_handle() else {
+        tracing::info!(
+            target: "script_kit::tab_ai",
+            event = "notes_ai_return_ignored",
+            reason = "notesWindowClosed",
+        );
+        return false;
+    };
+
+    super::update_notes_window_detached(handle, cx, |window, cx| {
+        entity.update(cx, |app, cx| {
+            let decision = notes_host_return_decision(
+                &snapshot,
+                app.instance_id,
+                app.entry_reveal.generation,
+                app.focus_transition_generation,
+            );
+            if decision != NotesHostReturnDecision::Restore {
+                tracing::info!(
+                    target: "script_kit::tab_ai",
+                    event = "notes_ai_return_ignored",
+                    reason = ?decision,
+                    snapshot_instance_id = snapshot.notes_instance_id,
+                    live_instance_id = app.instance_id,
+                );
+                return false;
+            }
+
+            let surface = match snapshot.focus_semantic_id {
+                "notes-preview" => super::focus::NotesFocusSurface::Preview,
+                "notes-actions" => super::focus::NotesFocusSurface::ActionsPanel,
+                "notes-switcher" => super::focus::NotesFocusSurface::BrowsePanel,
+                "notes-dialog" => super::focus::NotesFocusSurface::Dialog,
+                _ => super::focus::NotesFocusSurface::Editor,
+            };
+            window.activate_window();
+            app.request_focus_surface(surface, window, cx);
+            tracing::info!(
+                target: "script_kit::tab_ai",
+                event = "notes_ai_return_restored",
+                notes_instance_id = app.instance_id,
+                focus_semantic_id = snapshot.focus_semantic_id,
+            );
+            true
+        })
+    })
+    .unwrap_or_else(|error| {
+        tracing::warn!(
+            target: "script_kit::tab_ai",
+            event = "notes_ai_return_failed",
+            error = ?error,
+        );
+        false
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        compose_note_ai_target, fnv1a64_fingerprint, NotesAiHandoffError, NotesAiTargetSnapshot,
+        compose_note_ai_target, fnv1a64_fingerprint, notes_host_return_decision,
+        NotesAiHandoffError, NotesAiTargetSnapshot, NotesHostReturnDecision,
+        NotesHostReturnSnapshot,
     };
 
     fn snapshot(content: &str, selection: std::ops::Range<usize>) -> NotesAiTargetSnapshot {
@@ -648,6 +903,57 @@ mod tests {
         assert_eq!(metadata["selection"]["start"], 6);
         assert_eq!(metadata["selection"]["end"], 11);
         assert_eq!(metadata["selection"]["text"], "world");
+    }
+
+    fn return_snapshot() -> NotesHostReturnSnapshot {
+        NotesHostReturnSnapshot {
+            notes_instance_id: 7,
+            window_generation: 11,
+            focus_generation: 13,
+            document_id: "note:semantic".to_string(),
+            document_generation: "fnv1a64:document".to_string(),
+            content_length: 42,
+            content_fingerprint: "fnv1a64:content".to_string(),
+            dirty: true,
+            selection: 4..9,
+            scroll_top: Some(12.0),
+            mode: "AllNotes".to_string(),
+            alias_id_fingerprints: vec!["fnv1a64:alias".to_string()],
+            search_query_fingerprint: "fnv1a64:query".to_string(),
+            selected_result_id: Some("note:selected".to_string()),
+            search_scroll_anchor: None,
+            focus_semantic_id: "input:notes-editor",
+        }
+    }
+
+    #[test]
+    fn host_return_snapshot_rejects_every_stale_generation() {
+        let snapshot = return_snapshot();
+        assert_eq!(
+            notes_host_return_decision(&snapshot, 7, 11, 13),
+            NotesHostReturnDecision::Restore,
+        );
+        assert_eq!(
+            notes_host_return_decision(&snapshot, 8, 11, 13),
+            NotesHostReturnDecision::StaleInstance,
+        );
+        assert_eq!(
+            notes_host_return_decision(&snapshot, 7, 12, 13),
+            NotesHostReturnDecision::StaleWindow,
+        );
+        assert_eq!(
+            notes_host_return_decision(&snapshot, 7, 11, 14),
+            NotesHostReturnDecision::StaleFocus,
+        );
+    }
+
+    #[test]
+    fn host_return_snapshot_debug_is_redacted() {
+        let debug = format!("{:?}", return_snapshot());
+        assert!(!debug.contains("note:semantic"));
+        assert!(!debug.contains("note:selected"));
+        assert!(debug.contains("document_id_length"));
+        assert!(debug.contains("selection_length"));
     }
 
     #[test]

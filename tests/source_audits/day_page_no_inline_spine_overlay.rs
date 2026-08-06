@@ -118,7 +118,6 @@ fn day_page_cannot_delegate_to_main_list_spine_projection() {
 fn free_text_spine_projection_does_not_own_a_list() {
     let list = source("src/spine/list.rs");
     let input_projection = source("src/spine/input_projection.rs");
-    let notes_spine = source("src/components/notes_editor/spine.rs");
 
     assert!(
         list.contains("SpineSegmentKind::FreeText => Vec::new()"),
@@ -129,13 +128,6 @@ fn free_text_spine_projection_does_not_own_a_list() {
     assert!(
         owns_list.contains("SpineSegmentKind::FreeText") && owns_list.contains("return false"),
         "Shared Spine ownership must reject free-text projections explicitly"
-    );
-
-    let notes_owns_list = function_body(&notes_spine, "fn spine_projection_owns_editor_list(");
-    assert!(
-        notes_owns_list.contains("SpineSegmentKind::ContextMention")
-            && notes_owns_list.contains("return false"),
-        "Notes editor Spine keeps context mentions on the shared main-menu path"
     );
 }
 
@@ -257,12 +249,12 @@ fn day_page_footer_cannot_open_generic_agent_chat_popup() {
     let footer = function_body(&view, "pub(crate) fn day_page_footer_buttons(");
 
     assert!(
-        !footer.contains("FooterAction::Run") && footer.contains("FooterAction::Actions"),
-        "Day footer should expose Actions only; day pages autosave and should not show a Save button"
+        footer.contains("day_page_footer_buttons_for_preview"),
+        "the ordinary Day footer must delegate preview-specific buttons to the preview owner"
     );
     assert!(
         !footer.contains("FooterAction::Ai"),
-        "Day footer must not expose the generic Agent footer button; stale clicks opened the deleted inline assistant panel"
+        "the ordinary Day footer must not expose a generic empty-context Agent button"
     );
 
     let ui_window = source("src/app_impl/ui_window.rs");

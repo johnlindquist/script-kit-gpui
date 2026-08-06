@@ -2,50 +2,8 @@ fn markdown_reference_for_day_page_context_part(
     token: &str,
     part: Option<&crate::ai::message_parts::AiContextPart>,
 ) -> Option<String> {
-    let part = part.cloned().or_else(|| {
-        crate::ai::context_contract::ContextAttachmentKind::from_mention_line(token)
-            .map(|kind| kind.part())
-    })?;
-    let (label, href) = match part {
-        crate::ai::message_parts::AiContextPart::FilePath { path, label }
-        | crate::ai::message_parts::AiContextPart::SkillFile { path, label, .. } => {
-            (label, file_href_for_day_page_markdown(&path))
-        }
-        crate::ai::message_parts::AiContextPart::ResourceUri { uri, label } => (label, uri),
-        crate::ai::message_parts::AiContextPart::TextBlock { label, source, .. } => {
-            if !source.contains(':') || source.contains(char::is_whitespace) {
-                return None;
-            }
-            (label, source)
-        }
-        crate::ai::message_parts::AiContextPart::FocusedTarget { target, label } => {
-            if let Some(path) = target
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("path"))
-                .and_then(|value| value.as_str())
-            {
-                (label, file_href_for_day_page_markdown(path))
-            } else {
-                (
-                    label,
-                    format!("kit://focused-target/{}", target.semantic_id),
-                )
-            }
-        }
-        crate::ai::message_parts::AiContextPart::AmbientContext { label } => (
-            label.clone(),
-            format!(
-                "kit://context?label={}",
-                encode_day_page_markdown_url_component(&label)
-            ),
-        ),
-    };
-    let label = label.trim().replace('[', "\\[").replace(']', "\\]");
-    if label.is_empty() || href.trim().is_empty() {
-        return None;
-    }
-    Some(format!("[{label}]({})", href.replace(')', "%29")))
+    crate::components::notes_editor::spine::context_reference_for_part(token, part)
+        .map(|(reference, _)| reference)
 }
 
 fn day_page_context_parts_from_markdown_links(
@@ -225,33 +183,6 @@ fn single_deleted_char_byte_range(previous: &str, next: &str) -> Option<(usize, 
     }
     let deleted = previous[prefix..].chars().next()?;
     Some((prefix, prefix + deleted.len_utf8()))
-}
-
-fn file_href_for_day_page_markdown(path: &str) -> String {
-    format!("file://{}", encode_day_page_markdown_url_path(path))
-}
-
-fn encode_day_page_markdown_url_path(path: &str) -> String {
-    path.chars()
-        .map(|ch| match ch {
-            ' ' => "%20".to_string(),
-            ')' => "%29".to_string(),
-            '(' => "%28".to_string(),
-            '%' => "%25".to_string(),
-            _ => ch.to_string(),
-        })
-        .collect()
-}
-
-fn encode_day_page_markdown_url_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| match ch {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => ch.to_string(),
-            ' ' => "%20".to_string(),
-            _ => format!("%{:02X}", ch as u32),
-        })
-        .collect()
 }
 
 fn decode_day_page_markdown_url_component(value: &str) -> String {

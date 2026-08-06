@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 36 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 39 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -18,7 +18,7 @@
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
-| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C08 complete; WF-012 and WF-017 verified |
+| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C09 complete; WF-013, WF-014, and WF-015 verified |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
 ## How to view the baseline proposal explorer
@@ -808,6 +808,63 @@
   4. Open Agent Chat’s Notes portal. Verify the footer says **Enter Attach Note**. Attach once with Enter and once with a second click; each attempt adds exactly one selected note attachment and returns to the composer.
   5. Reopen the portal after entering draft text and positioning the cursor. Change the query/selection, then press Escape; verify the original draft, cursor, context, selection evidence, and composer focus return.
 - **Intentional differences preserved:** Destination verbs differ because host effects differ. Portal Escape means **Cancel** and restores the parent snapshot; standalone Escape means **Back**. The shared search/result model does not collapse Notes Window, Day Page, standalone Browse, and Agent Chat into one renderer.
+
+### WF-013 — Share Notes/Today `@` grammar while preserving host navigation
+
+- **Status:** Complete. Notes now opens a local context picker for `@`; Today retains its main-menu round trip. Both consume the same Spine row identities, insertion references, alias registry, and atomic-delete behavior.
+- **Commit boundary:** Workflow Safety C09 — `fix(notes-today): align mentions ai scope and host restoration [WF-013 WF-014 WF-015]`.
+- **Changed behavior:** Notes admits context-mention segments into its local Spine overlay, including visible loading/status rows when a subsearch has no selectable results. The shared built-in row inserts `[What I’m Looking At](kit://context?profile=minimal)` in both hosts. Editing or deleting inside that registered reference removes the complete alias atomically instead of leaving a broken Markdown URL. Today continues to leave the editor for the canonical main-menu context search and return to the held Day Page entity. Leading `-` remains ordinary Markdown bullet syntax and is never interpreted as a Flow trigger.
+- **Exact owners:** `src/components/notes_editor/spine.rs::{NotesEditorContextMentionBehavior,NotesEditorHostSpineContract,context_reference_for_part,mention_atomic_delete_fixup,SpineEditorRuntime::prune_mention_aliases_for_content}`; `src/notes/window/{render_editor_body.rs,init.rs,navigation.rs}`; `src/main_sections/{day_page_markdown_refs.rs,day_page_context_round_trip.rs}`; and `src/design_contract/mod.rs`.
+- **Compatibility/migration:** Existing inline `@file:`/`@project:` aliases retain strict token-boundary behavior. Complete registered Markdown-reference aliases now survive adjacent edits until an edit occurs inside their own range. Today’s main-menu portal, existing row IDs, and insertion tokens are unchanged; Notes adopts those owners rather than creating a second result vocabulary.
+- **Focused tests/build:** `components::notes_editor` PASS (42/42), including shared built-in insertion, loading visibility, adjacent-edit alias retention, and atomic deletion. The focused Day Page source-audit target PASS (9/9). `python3 -B tests/source_audit_inventory.py --base main` reports 2,814 reader sites and no new guarded reader. Stable product build PASS at `target-agent/artifacts/cons-flow-c09/script-kit-gpui`; SHA-256 `483dee3182df9ebbb8154bff062b55208547a6b74043fe4e5d7cf30fd3942dac`.
+- **Runtime receipt:** `.test-output/cons-flow-c09/notes-today-receipt.json` → PASS. The `notes-mention-parity` scenario exercises the real Notes editor, sees `spine:@:builtin:here`, inserts the exact shared reference, dispatches real target-scoped GPUI Backspace events, observes complete atomic removal, enters `@file:`, and keeps its visible loading state.
+- **Negative controls:** A partial Markdown URL after deletion fails the probe. Losing the alias after removing only adjacent whitespace fails model tests. A silent `@file:` state fails the runtime assertion. No source-audit reader was added to bless the refactor; the obsolete Notes-main-menu assertion was removed because typed model/runtime coverage now owns that decision.
+- **User test/view:**
+  1. Open Notes, type `@con`, and choose **What I’m Looking At**. Verify the editor inserts `[What I’m Looking At](kit://context?profile=minimal)`.
+  2. Place the caret inside that inserted reference and press Backspace. Verify the entire reference is removed rather than leaving a partial link.
+  3. Type `@fi`, choose File, and verify the local Notes picker remains visibly open while file results load. Press Escape to close it without leaving Notes.
+  4. Open Today and type the same `@` query. Verify Today uses the main launcher context search, returns to Today after selection, and inserts the same reference/token identity.
+  5. Type a line beginning with `-`; verify it remains a Markdown bullet and does not open or run a Flow.
+  6. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c09/script-kit-gpui" bun scripts/agentic/notes-spine-host-wiring-probe.ts`; expect `status:"pass"` and complete process/stream/log cleanup.
+- **Intentional differences preserved:** Notes owns a local picker because it is a separate Notes window; Today owns a main-menu round trip because it is embedded in the main window. Shared grammar and results do not force the two hosts into one navigation mechanism.
+
+### WF-014 — Make Notes/Today AI handoff scope exact and composer-only
+
+- **Status:** Complete. A closed scope model distinguishes whole note, selection, current line, resource, and attached note, and each user verb stages exactly that scope without silently submitting a turn.
+- **Commit boundary:** Same Workflow Safety C09 commit as WF-013.
+- **Changed behavior:** Notes Command+Enter stages the whole unsaved live editor snapshot as `WholeNote`. Today’s action is **Ask AI About Selection** when selection is non-empty and **Ask AI About Current Line** otherwise; range scopes exclude every byte outside the selected/current-line range. The explicit whole-Today action remains separate. Resource preview says **Add Resource to Agent Chat** and the Notes portal says **Attach Note**. All four paths open/focus the composer with zero automatically authored messages.
+- **Exact owners:** `src/notes/ai_scope.rs::{NotesAiScope,selected_or_current_line_scope}`; `src/notes/window/ai_handoff.rs::{NotesAiHandoffPayload,build_notes_ai_handoff,dispatch_notes_ai_handoff}`; `src/main_sections/day_page_actions.rs::{DayPageAgentHandoffMode,day_page_agent_handoff_packet}`; `src/main_sections/day_page_view.rs`; `src/app_impl/agent_handoff/agent_chat_entry.rs`; and `src/main_entry/app_run_setup.rs`.
+- **Compatibility/migration:** Existing Notes Command+Enter action identity remains stable. Existing Today explicit whole-page action remains available but is no longer conflated with the current-line/selection path. Receipts expose scope, semantic identity lengths/fingerprints, range/content length, destination, and staging outcome only; raw note/day/resource content and URIs are excluded.
+- **Focused tests/build:** `notes::ai_scope` PASS (2/2) with outside-range canaries; Notes AI-handoff tests PASS (8/8); Agent Chat entry tests PASS (10/10); Day Page binary tests PASS (20/20). TypeScript probe bundling and stable product build PASS.
+- **Runtime receipt:** `.test-output/cons-flow-c09/notes-today-receipt.json` → PASS. `notes-agent-chat-return` proves Notes whole-live-snapshot staging, zero messages, and `composerOnly`. `today-scope-matrix` crosses the real Agent Chat boundary for current-line chips, establishes a real one-character GPUI selection, receipts `rangeLength:1`, keeps the outside-range canary absent, and proves explicit whole-note mode separately.
+- **Negative controls:** Selection/current-line tests fail if an outside-range canary enters the payload or receipt. Open/Add/Attach paths fail if message count changes from zero. The current-line receipt requires `wholeDayIncluded:false`; the explicit whole-note receipt requires `wholeDayIncluded:true`. Raw synthetic content is absent from serialized handoff receipts.
+- **User test/view:**
+  1. Make an unsaved edit in Notes and press Command+Enter. Verify Agent Chat opens with a whole-note context chip, the composer remains editable, and no message sends automatically.
+  2. In Today, place the caret on a line with unrelated text above and below. Choose **Ask AI About Current Line** and verify the context chip names the current line rather than the whole day.
+  3. Select a short range in Today and repeat. Verify the action changes to **Ask AI About Selection** and only that range is staged.
+  4. Use the separate **Ask Agent Chat About Today** action and verify it explicitly names the whole page; it still does not auto-submit.
+  5. Open a `kit://` resource preview and choose **Add Resource to Agent Chat**; open the Notes portal and choose **Attach Note**. Verify both add context without sending.
+  6. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c09/script-kit-gpui" bun scripts/agentic/day-page-agent-chat-handoff-scope-probe.ts`; expect current-line, one-character selection, explicit whole-note, redaction, composer-only, and exact cleanup checks to pass.
+- **Intentional differences preserved:** Notes defaults to its whole document because **This Note** is the explicit action. Today defaults to the current line/selection because it is a journal page with a narrower conversational intent. Whole Today remains an explicit separate action; Add/Attach remain non-submitting verbs.
+
+### WF-015 — Restore the exact Notes/Today host state after portals and Agent Chat
+
+- **Status:** Complete. Notes and Today now carry host-owned generation-safe return snapshots so unsaved content, selection, scroll, mode, aliases, entity identity, and focus return to the exact originating host.
+- **Commit boundary:** Same Workflow Safety C09 commit as WF-013.
+- **Changed behavior:** Notes stays open while the main window presents Agent Chat. Closing Agent Chat restores the same Notes instance and editor/preview focus without recreating a window. Today’s held `Entity<DayPageView>` remains authoritative across the main-menu `@` round trip; return focuses the existing editor without moving its selection to the end or forcing a bottom scroll. Return callbacks validate instance/entity, window, and focus generations and fail closed when a replacement host exists.
+- **Exact owners:** `src/notes/window/ai_handoff.rs::{NotesHostReturnSnapshot,NotesHostReturnDecision,restore_notes_host_return}`; `src/main_sections/day_page_context_round_trip.rs::{DayPageHostReturnSnapshot,DayPageContextReturn,restore_day_page_view_after_round_trip}`; `src/main_sections/day_page_view.rs::{DayPageView::focus_editor_preserving_state,show_day_page_view_with_substrate}`; `src/main_sections/{day_page_types.rs,app_state.rs}`; `src/app_impl/agent_handoff/{agent_chat_entry.rs,mod.rs}`; `src/main_entry/app_run_setup.rs`; and `src/notes/window/navigation.rs`.
+- **Compatibility/migration:** Snapshots are transient host-return tokens, not a new global persistence store. Their custom debug/automation projections expose lengths, fingerprints, generations, counts, mode, and focus IDs without raw document IDs, note text, selected-result IDs, or aliases. Missing/replaced Notes windows are never reopened by stale callbacks. Today no longer forces a save before its round trip; the live entity remains the source of truth.
+- **Focused tests/build:** Notes host-return tests PASS (8/8), including exact restore and stale instance/window/focus refusals. Day Page host-return tests are included in the 20/20 binary matrix. Agent Chat entry tests PASS (10/10). Source inventory, hardcoded visual inventory (16/16), Bun glass contracts (40/40), production glass calibration fixture (1/1), and `git diff --check` PASS.
+- **Runtime receipt:** `.test-output/cons-flow-c09/notes-today-receipt.json` → PASS across four sequential scenarios. Notes return preserves body length/fingerprint, selection range, mode, instance ID, and editor focus and emits `event=notes_ai_return_restored` with no ignored-stale event. The provider-free Today return scenario preserves its held entity and host-return generation. Every child reports `processExited:true`, `streamsDrained:true`, and `logWriterClosed:true`; exact artifact inventory reports `exactArtifactOwnedProcessCount:0`.
+- **Negative controls:** Stale Notes instance, window generation, and focus generation each return `false`. A missing Notes host is not recreated. Today rejects an entity/generation mismatch. The Notes probe fails if the window closes during Agent Chat, if content fingerprint/selection/mode changes, if focus lands outside the editor, or if an ignored-stale log replaces the exact restore event.
+- **User test/view:**
+  1. In Notes, type unsaved text, create a selection, scroll away from the top, and choose Preview or Editor mode. Press Command+Enter to open Agent Chat.
+  2. Verify Notes remains open in its separate window. Press Escape in main Agent Chat and verify the same Notes window, content, selection, scroll position, mode, and focused surface return.
+  3. In Today, type unsaved text, create a selection, and scroll. Start an `@` context round trip, select a result, and verify Today returns without flashing a blank/new page or moving the cursor to the end.
+  4. Repeat while changing to a past day and back, and while opening/closing a resource preview. Verify the original live Today entity and editor state remain intact.
+  5. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c09/script-kit-gpui" bun scripts/agentic/cons-flow-ux/notes-agent-chat-return-probe.ts`; expect whole-note staging, exact Notes restore, redacted receipts, and complete cleanup to pass.
+  6. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c09/script-kit-gpui" bun scripts/agentic/cons-flow-ux/notes-today-probe.ts`; expect all four scenarios to pass and `exactArtifactOwnedProcessCount:0`.
+- **Intentional differences preserved:** Notes restoration targets a separate native Notes window; Today restoration reuses an embedded main-window entity. Their generation tokens differ by host, but both reject stale callbacks and preserve live unsaved state without forcing persistence.
 
 ## Verification ledger
 

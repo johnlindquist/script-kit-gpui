@@ -2979,8 +2979,8 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         crate::components::notes_editor::spine::NotesEditorContextMentionBehavior::MainMenuRoundTrip => {
             "mainMenuRoundTrip"
         }
-        crate::components::notes_editor::spine::NotesEditorContextMentionBehavior::Ignore => {
-            "ignore"
+        crate::components::notes_editor::spine::NotesEditorContextMentionBehavior::LocalPicker => {
+            "localPicker"
         }
     };
     for (id, value, path) in [

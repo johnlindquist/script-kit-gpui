@@ -131,10 +131,17 @@ pub(crate) struct AgentChatContextStageOutcome {
 pub(crate) enum AgentChatReturnRouteKind {
     Source,
     Main,
+    Notes,
     Direct,
 }
 
-fn agent_chat_return_route_kind(return_origin: Option<&AppView>) -> AgentChatReturnRouteKind {
+fn agent_chat_return_route_kind(
+    origin: &AgentChatEntryOrigin,
+    return_origin: Option<&AppView>,
+) -> AgentChatReturnRouteKind {
+    if matches!(origin, AgentChatEntryOrigin::Notes) {
+        return AgentChatReturnRouteKind::Notes;
+    }
     match return_origin {
         Some(AppView::ScriptList) => AgentChatReturnRouteKind::Main,
         Some(_) => AgentChatReturnRouteKind::Source,
@@ -609,13 +616,24 @@ impl ScriptListApp {
         &mut self,
         target: crate::ai::TabAiTargetContext,
         supplemental_parts: Vec<crate::ai::message_parts::AiContextPart>,
+        return_snapshot: crate::notes::window::ai_handoff::NotesHostReturnSnapshot,
         source: &'static str,
         cx: &mut Context<Self>,
     ) -> bool {
-        match self.dispatch_agent_chat_entry_request(
+        let dispatch = self.dispatch_agent_chat_entry_request(
             AgentChatEntryRequest::notes(target, supplemental_parts, source),
             cx,
-        ) {
+        );
+        let accepted = match &dispatch {
+            AgentChatEntryDispatch::Complete(outcome) => {
+                outcome.disposition != AgentChatOpenDisposition::Blocked
+            }
+            AgentChatEntryDispatch::Pending(_) => true,
+        };
+        if accepted && matches!(self.current_view, AppView::AgentChatView { .. }) {
+            self.agent_chat_return_route = AgentChatReturnRoute::Notes(return_snapshot);
+        }
+        match dispatch {
             AgentChatEntryDispatch::Complete(outcome) => outcome.source_consumed(),
             AgentChatEntryDispatch::Pending(ticket) => {
                 self.observe_agent_chat_entry_dispatch(AgentChatEntryDispatch::Pending(ticket), cx);
@@ -659,11 +677,11 @@ impl ScriptListApp {
                     AgentChatSubmissionOutcome::NotRequested
                 },
                 blocked_reason: Some("portal_active"),
-                return_route: agent_chat_return_route_kind(req.return_origin.as_ref()),
+                return_route: agent_chat_return_route_kind(&req.origin, req.return_origin.as_ref()),
             });
         }
 
-        let route_kind = agent_chat_return_route_kind(req.return_origin.as_ref());
+        let route_kind = agent_chat_return_route_kind(&req.origin, req.return_origin.as_ref());
         let source_view = req
             .return_origin
             .clone()
@@ -672,7 +690,7 @@ impl ScriptListApp {
         match route_kind {
             AgentChatReturnRouteKind::Main => self.opened_from_main_menu = true,
             AgentChatReturnRouteKind::Direct => self.opened_from_main_menu = false,
-            AgentChatReturnRouteKind::Source => {}
+            AgentChatReturnRouteKind::Source | AgentChatReturnRouteKind::Notes => {}
         }
         self.seed_agent_chat_return_origin_for_view(&source_view, cx);
         self.opened_from_main_menu = opened_from_main_menu;
@@ -687,7 +705,7 @@ impl ScriptListApp {
                 req.context_policy,
                 AgentChatContextPolicy::SuppressFocused | AgentChatContextPolicy::NoContext
             ),
-            return_route: agent_chat_return_route_kind(req.return_origin.as_ref()),
+            return_route: agent_chat_return_route_kind(&req.origin, req.return_origin.as_ref()),
             baseline: self.agent_chat_entry_baseline(cx),
         };
         tracing::info!(
@@ -1141,6 +1159,11 @@ mod quick_question_contract {
                 AgentChatContextPolicy::NotesHandoff { .. }
             ),
             "notes entry must carry the NotesHandoff context policy",
+        );
+        assert_eq!(
+            super::agent_chat_return_route_kind(&req.origin, req.return_origin.as_ref()),
+            AgentChatReturnRouteKind::Notes,
+            "Notes handoff must advertise the exact external Notes return route",
         );
     }
 

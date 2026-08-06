@@ -21,7 +21,7 @@ pub(crate) enum NotesEditorLocalSpineOverlay {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NotesEditorContextMentionBehavior {
-    Ignore,
+    LocalPicker,
     MainMenuRoundTrip,
 }
 
@@ -41,7 +41,7 @@ impl NotesEditorHostSpineContract {
                 element_id: "notes-spine-list",
                 render_path: "components.notes_editor.spine.render_spine_overlay",
             },
-            context_mentions: NotesEditorContextMentionBehavior::Ignore,
+            context_mentions: NotesEditorContextMentionBehavior::LocalPicker,
             project_cwd_local_list: false,
         }
     }
@@ -267,13 +267,7 @@ pub(crate) fn local_spine_input_for_contract(
         return None;
     }
     let ctx = notes_editor_line_context(content, selection)?;
-    if !spine_projection_owns_editor_list(&ctx.parse, &ctx.projection) {
-        return None;
-    }
-    if matches!(
-        ctx.projection.active_segment_kind,
-        crate::spine::SpineSegmentKind::ContextMention { .. }
-    ) {
+    if !spine_projection_owns_editor_list(contract, &ctx.parse, &ctx.projection) {
         return None;
     }
     if matches!(
@@ -333,6 +327,79 @@ pub(crate) fn context_round_trip_request_for_contract(
     })
 }
 
+pub(crate) fn context_reference_for_part(
+    token: &str,
+    part: Option<&AiContextPart>,
+) -> Option<(String, AiContextPart)> {
+    let part = part.cloned().or_else(|| {
+        crate::ai::context_contract::ContextAttachmentKind::from_mention_line(token)
+            .map(|kind| kind.part())
+    })?;
+    let (label, href) = match &part {
+        AiContextPart::FilePath { path, label } | AiContextPart::SkillFile { path, label, .. } => (
+            label.clone(),
+            format!("file://{}", encode_reference_path(path)),
+        ),
+        AiContextPart::ResourceUri { uri, label } => (label.clone(), uri.clone()),
+        AiContextPart::TextBlock { label, source, .. } => {
+            if !source.contains(':') || source.contains(char::is_whitespace) {
+                return None;
+            }
+            (label.clone(), source.clone())
+        }
+        AiContextPart::FocusedTarget { target, label } => {
+            if let Some(path) = target
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("path"))
+                .and_then(|value| value.as_str())
+            {
+                (
+                    label.clone(),
+                    format!("file://{}", encode_reference_path(path)),
+                )
+            } else {
+                (
+                    label.clone(),
+                    format!("kit://focused-target/{}", target.semantic_id),
+                )
+            }
+        }
+        AiContextPart::AmbientContext { label } => (
+            label.clone(),
+            format!("kit://context?label={}", encode_reference_component(label)),
+        ),
+    };
+    let label = label.trim().replace('[', "\\[").replace(']', "\\]");
+    if label.is_empty() || href.trim().is_empty() {
+        return None;
+    }
+    Some((format!("[{label}]({})", href.replace(')', "%29")), part))
+}
+
+fn encode_reference_path(path: &str) -> String {
+    path.chars()
+        .map(|ch| match ch {
+            ' ' => "%20".to_string(),
+            ')' => "%29".to_string(),
+            '(' => "%28".to_string(),
+            '%' => "%25".to_string(),
+            _ => ch.to_string(),
+        })
+        .collect()
+}
+
+fn encode_reference_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => ch.to_string(),
+            ' ' => "%20".to_string(),
+            _ => format!("%{:02X}", ch as u32),
+        })
+        .collect()
+}
+
 pub(crate) fn clamp_to_char_boundary(text: &str, mut pos: usize) -> usize {
     pos = pos.min(text.len());
     while pos > 0 && !text.is_char_boundary(pos) {
@@ -388,6 +455,7 @@ pub(crate) fn spine_prompt_plan_can_submit(
 }
 
 pub(crate) fn spine_projection_owns_editor_list(
+    contract: NotesEditorHostSpineContract,
     parse: &crate::spine::SpineParse,
     projection: &crate::spine::SpineCursorProjection,
 ) -> bool {
@@ -395,7 +463,7 @@ pub(crate) fn spine_projection_owns_editor_list(
         projection.active_segment_kind,
         crate::spine::SpineSegmentKind::ContextMention { .. }
     ) {
-        return false;
+        return contract.context_mentions == NotesEditorContextMentionBehavior::LocalPicker;
     }
 
     if matches!(
@@ -499,7 +567,7 @@ pub(crate) fn spine_model_for_runtime(
     }
 
     let rows = build_rows(&input.parse, &input.projection)?;
-    if rows.flat.is_empty() {
+    if rows.grouped.is_empty() {
         return None;
     }
     let grouped = rows.grouped;
@@ -661,25 +729,40 @@ pub(crate) fn mention_atomic_delete_fixup(
         return None;
     }
     let deleted_char_index = single_char_deletion_index(previous, next)?;
-    let deleted_registered_token = crate::ai::context_mentions::inline_token_spans(previous)
+    let deleted_inline_token = crate::ai::context_mentions::inline_token_spans(previous)
         .into_iter()
         .any(|span| {
             deleted_char_index >= span.range.start
                 && deleted_char_index < span.range.end
                 && mention_aliases.contains_key(&span.token)
         });
-    if !deleted_registered_token {
-        return None;
+    if deleted_inline_token {
+        let (fixed, cursor_char) =
+            crate::ai::context_mentions::remove_inline_mention_at_cursor_with_aliases(
+                previous,
+                deleted_char_index + 1,
+                false,
+                mention_aliases,
+            )?;
+        let cursor = byte_index_for_char_index(&fixed, cursor_char);
+        return Some((fixed, cursor));
     }
-    let (fixed, cursor_char) =
-        crate::ai::context_mentions::remove_inline_mention_at_cursor_with_aliases(
-            previous,
-            deleted_char_index + 1,
-            false,
-            mention_aliases,
-        )?;
-    let cursor = byte_index_for_char_index(&fixed, cursor_char);
-    Some((fixed, cursor))
+
+    let (token_start, token_end) = mention_aliases.keys().find_map(|token| {
+        previous.match_indices(token).find_map(|(start, _)| {
+            let start_char = previous[..start].chars().count();
+            let end = start + token.len();
+            let end_char = start_char + token.chars().count();
+            (deleted_char_index >= start_char && deleted_char_index < end_char)
+                .then_some((start, end))
+        })
+    })?;
+    let mut remove_end = token_end;
+    if previous[token_end..].starts_with(' ') {
+        remove_end += 1;
+    }
+    let fixed = format!("{}{}", &previous[..token_start], &previous[remove_end..]);
+    Some((fixed, token_start))
 }
 
 pub(crate) fn prune_mention_aliases(
@@ -693,7 +776,13 @@ pub(crate) fn prune_mention_aliases(
         .into_iter()
         .map(|span| span.token)
         .collect::<std::collections::HashSet<_>>();
-    mention_aliases.retain(|token, _| visible_tokens.contains(token));
+    mention_aliases.retain(|token, _| {
+        visible_tokens.contains(token)
+            || (token.starts_with('[')
+                && token.contains("](")
+                && token.ends_with(')')
+                && content.contains(token))
+    });
 }
 
 #[cfg(test)]
@@ -750,20 +839,93 @@ mod tests {
     }
 
     #[test]
-    fn notes_contract_does_not_open_local_overlay_for_context_mentions() {
-        let content = "ask @file:readme";
+    fn notes_contract_opens_local_picker_for_context_mentions() {
+        let content = "ask @fi";
         let selection = content.len()..content.len();
 
         let input = local_spine_input_for_contract(
             NotesEditorHostSpineContract::notes(),
             content,
             selection,
+        )
+        .expect("Notes context mentions must use the local picker");
+        let sections = crate::spine::list::build_spine_list_sections_full_with_resolved_tokens(
+            &input.parse,
+            &input.projection,
+            None,
+            &|_| false,
         );
+        let row_ids = sections
+            .iter()
+            .flat_map(|section| section.rows.iter())
+            .map(|row| row.id.as_ref())
+            .collect::<Vec<_>>();
 
-        assert!(
-            input.is_none(),
-            "Context mentions must not become a Notes local overlay"
+        assert!(row_ids.contains(&"spine:@:subsearch:file"));
+        assert_eq!(
+            NotesEditorHostSpineContract::notes().context_mentions,
+            NotesEditorContextMentionBehavior::LocalPicker
         );
+    }
+
+    #[test]
+    fn built_in_context_reference_uses_shared_today_token_and_atomic_alias() {
+        let (reference, part) =
+            context_reference_for_part("@here", None).expect("built-in context token resolves");
+        assert_eq!(
+            reference,
+            "[What I’m Looking At](kit://context?profile=minimal)"
+        );
+        let mut aliases = HashMap::from([(reference.clone(), part)]);
+        prune_mention_aliases(&mut aliases, &format!("ask {reference} now"));
+        assert!(
+            aliases.contains_key(&reference),
+            "shared Markdown-reference aliases survive ordinary adjacent edits",
+        );
+        let previous = reference.clone();
+        let next = reference
+            .strip_suffix(')')
+            .expect("reference ends with a closing parenthesis")
+            .to_string();
+        let (deleted, cursor) = mention_atomic_delete_fixup(&previous, &next, &aliases)
+            .expect("editing a shared reference deletes it atomically");
+        assert_eq!(deleted, "");
+        assert_eq!(cursor, 0);
+        prune_mention_aliases(&mut aliases, &deleted);
+        assert!(aliases.is_empty());
+    }
+
+    #[test]
+    fn notes_context_subsearch_keeps_loading_state_visible() {
+        let content = "ask @file:readme";
+        let selection = content.len()..content.len();
+        let input = local_spine_input_for_contract(
+            NotesEditorHostSpineContract::notes(),
+            content,
+            selection,
+        )
+        .expect("Notes context subsearch must stay in the local picker");
+        let mut runtime = NotesEditorSpineRuntime::default();
+        let model = spine_model_for_runtime(&mut runtime, input, |parse, projection| {
+            let sections = crate::spine::list::build_spine_list_sections_full_with_resolved_tokens(
+                parse,
+                projection,
+                None,
+                &|_| false,
+            );
+            Some(push_spine_sections_as_grouped(
+                sections,
+                notes_editor_supports_insert_resolve_action,
+            ))
+        })
+        .expect("non-selectable loading rows still render");
+
+        assert!(model.flat.is_empty());
+        assert!(model.grouped.iter().any(|row| matches!(
+            row,
+            crate::list_item::GroupedListItem::SectionHeader(label, _)
+                if label.contains("Loading") || label.contains("Searching files")
+        )));
     }
 
     #[test]

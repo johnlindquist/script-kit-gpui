@@ -53,7 +53,7 @@
     // downcast-and-stage closure here. Staging happens BEFORE ShowMain so the
     // first visible main-window frame already has the note chip and prefill.
     crate::notes::window::ai_handoff::register_notes_ai_main_handoff_hook(
-        |target, supplemental_parts, source, cx| {
+        |target, supplemental_parts, return_snapshot, source, cx| {
             let Some(handle) = crate::get_main_window_handle() else {
                 return Err("main_window_handle_missing".to_string());
             };
@@ -67,8 +67,13 @@
                         .downcast::<ScriptListApp>()
                         .map_err(|_| "main_window_app_downcast_failed".to_string())?;
                     Ok(app.update(cx, |app, cx| {
-                        let staged =
-                            app.open_agent_chat_from_notes(target, supplemental_parts, source, cx);
+                        let staged = app.open_agent_chat_from_notes(
+                            target,
+                            supplemental_parts,
+                            return_snapshot,
+                            source,
+                            cx,
+                        );
                         if staged {
                             app.dispatch_window_event(
                                 crate::window_orchestrator::WindowEvent::ShowMain {

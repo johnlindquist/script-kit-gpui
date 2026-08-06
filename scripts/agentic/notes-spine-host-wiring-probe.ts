@@ -105,34 +105,49 @@ async function proveReplacement(
   });
 }
 
-async function proveAtContextDoesNotOpenNotesLocalUi(driver: Driver) {
-  await setNotesText(driver, "@note");
-  await Bun.sleep(150);
-  const state = await notesState(driver);
-  check("at_context_no_notes_spine", (state.spine as Json | undefined)?.active !== true, {
-    spine: state.spine ?? null,
+async function proveContextReferenceParity(driver: Driver) {
+  await setNotesText(driver, "@con");
+  await waitForSpineRow(driver, "spine:@:builtin:here");
+  await driver.simulateKey("enter");
+  await Bun.sleep(100);
+  const expected = "[What I’m Looking At](kit://context?profile=minimal) ";
+  const inserted = await editorValue(driver);
+  check("context_reference_matches_today_token", inserted === expected, {
+    expected,
+    actual: inserted,
   });
-  check("at_context_no_note_switcher_auto_open", state.view?.showBrowsePanel !== true, {
-    showBrowsePanel: state.view?.showBrowsePanel ?? null,
+  await driver.simulateGpuiKeyDown("backspace", {
+    target,
+    timeoutMs: 5000,
+  });
+  await Bun.sleep(100);
+  await driver.simulateGpuiKeyDown("backspace", {
+    target,
+    timeoutMs: 5000,
+  });
+  await Bun.sleep(150);
+  const afterDelete = await editorValue(driver);
+  check("context_reference_deletes_atomically", afterDelete === "", {
+    actual: afterDelete,
   });
 }
 
-async function proveAgentChatStillOpens(driver: Driver) {
-  await setNotesText(driver, "Agent Chat handoff proof");
-  await driver.simulateKey("enter", ["cmd"]);
-  for (let i = 0; i < 50; i += 1) {
-    const state = await notesState(driver);
-    if (state.view?.surfaceMode === "AgentChat") {
-      check("cmd_enter_opens_notes_agent_chat", true, {
-        surfaceMode: state.view.surfaceMode,
-      });
-      return;
-    }
-    await Bun.sleep(100);
-  }
-  const state = await notesState(driver);
-  check("cmd_enter_opens_notes_agent_chat", false, {
-    surfaceMode: state.view?.surfaceMode ?? null,
+async function proveAtContextOpensNotesLocalUi(driver: Driver) {
+  await setNotesText(driver, "@fi");
+  const receipt = await waitForSpineRow(driver, "spine:@:subsearch:file");
+  check("at_context_uses_notes_local_picker", receipt.spine.active === true, {
+    spine: receipt.spine,
+  });
+  await driver.simulateKey("enter");
+  await Bun.sleep(100);
+  const value = await editorValue(driver);
+  check("at_context_inserts_shared_token", value === "@file:", {
+    expected: "@file:",
+    actual: value,
+  });
+  const loading = await notesState(driver);
+  check("at_context_subsearch_loading_visible", loading.spine?.active === true, {
+    spine: loading.spine ?? null,
   });
 }
 
@@ -142,6 +157,7 @@ const driver = await Driver.launch({
   sessionName: "notes-spine-host-wiring",
   env: { SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1" },
 });
+let finalReceipt: Json = {};
 
 try {
   await openNotes(driver);
@@ -171,8 +187,8 @@ try {
     expected: ":type:script ",
   });
 
-  await proveAtContextDoesNotOpenNotesLocalUi(driver);
-  await proveAgentChatStillOpens(driver);
+  await proveContextReferenceParity(driver);
+  await proveAtContextOpensNotesLocalUi(driver);
 
   const logText = await Bun.file(driver.logPath).text();
   check("no_runtime_panic", !/panicked at|thread 'main' panicked/i.test(logText), {
@@ -190,21 +206,29 @@ try {
   );
   check("state_receipts_instant", maxStateMs < 250, { maxStateMs });
 
-  console.log(
-    JSON.stringify(
-      {
-        status: failures.length === 0 ? "pass" : "fail",
-        scenario: "notes-spine-host-wiring",
-        failures,
-        checks,
-        sessionDir: driver.sessionDir,
-        logPath: driver.logPath,
-      },
-      null,
-      2,
-    ),
-  );
-  if (failures.length > 0) process.exit(1);
+  finalReceipt = {
+    status: failures.length === 0 ? "pass" : "fail",
+    scenario: "notes-spine-host-wiring",
+    failures,
+    checks,
+    sessionDir: driver.sessionDir,
+    logPath: driver.logPath,
+  };
 } finally {
   await driver.close();
+  finalReceipt.cleanup = driver.finalization;
+  const cleanup = (driver.finalization ?? {}) as Json;
+  check(
+    "exact_process_cleanup",
+    cleanup.processExited === true &&
+      cleanup.streamsDrained === true &&
+      cleanup.logWriterClosed === true,
+    { cleanup },
+  );
+  finalReceipt.status = failures.length === 0 ? "pass" : "fail";
+  finalReceipt.failures = failures;
+  finalReceipt.checks = checks;
 }
+
+console.log(JSON.stringify(finalReceipt, null, 2));
+if (failures.length > 0) process.exitCode = 1;

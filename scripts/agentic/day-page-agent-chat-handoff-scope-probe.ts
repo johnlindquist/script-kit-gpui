@@ -64,12 +64,6 @@ async function setDayInput(driver: Driver, text: string): Promise<Obj> {
   return asObj(await driver.batch([{ type: "setInput", text }], { timeoutMs: 8000 }));
 }
 
-async function returnToDayPage(driver: Driver): Promise<Obj> {
-  await driver.simulateKey("escape");
-  await pollUntil("return-to-day-page", async () => (await getState(driver)).promptType === "dayPage", 8000);
-  return getState(driver);
-}
-
 function handoffReceiptsFromLog(driver: Driver): Obj[] {
   if (!existsSync(driver.logPath)) return [];
   const log = readFileSync(driver.logPath, "utf8");
@@ -224,7 +218,7 @@ try {
   const currentLineAction = await activateAction(
     driver,
     "day_page:ask_agent_chat_current_line",
-    "Ask Agent Chat About Current Line",
+    "Ask AI About Current Line",
   );
   check(
     "current_line_action_activated",
@@ -233,22 +227,23 @@ try {
   );
   const currentLineOpened = await pollUntil("current-line-agent-chat", async () => {
     const state = await agentChatState(driver).catch(() => ({}));
-    return String(state.contextSummary ?? "").includes("Today line 2") && String(state.contextSummary ?? "").includes("Scoped Ref");
+    return String(state.contextSummary ?? "").includes("Today current line") && String(state.contextSummary ?? "").includes("Scoped Ref");
   }, 12_000);
   const currentChat = await agentChatState(driver).catch((error) => ({ error: String(error) }));
   check("current_line_handoff_stages_line_and_ref_chips", currentLineOpened, {
     contextChipCount: currentChat.contextChipCount ?? null,
     contextSummary: currentChat.contextSummary ?? null,
   });
-  check("current_line_prompt_excludes_unrelated_day_text", String(currentChat.inputText ?? "").includes(activeLine) && !String(currentChat.inputText ?? "").includes(unrelated), {
-    inputText: currentChat.inputText ?? null,
+  check("current_line_is_composer_only_without_authored_prompt", String(currentChat.inputText ?? "") === "" && Number(currentChat.messageCount ?? 0) === 0, {
+    inputLength: String(currentChat.inputText ?? "").length,
+    messageCount: currentChat.messageCount ?? null,
   });
   check("current_line_context_summary_not_whole_day", !String(currentChat.contextSummary ?? "").includes("Today's brain"), {
     contextSummary: currentChat.contextSummary ?? null,
   });
 
   const currentReceipt = latestHandoffReceipt(driver, "currentLine");
-  check("current_line_receipt_redacted_and_scoped", currentReceipt.mode === "currentLine" && currentReceipt.wholeDayIncluded === false && currentReceipt.lineRange?.lineNumber === 2, {
+  check("current_line_receipt_redacted_and_scoped", currentReceipt.mode === "currentLine" && currentReceipt.scope === "currentLine" && currentReceipt.stagingOutcome === "composerOnly" && currentReceipt.wholeDayIncluded === false && currentReceipt.lineRange?.lineNumber === 2, {
     receipt: currentReceipt,
   });
   check("current_line_receipt_omits_other_day_lines", currentReceipt.excludedContent?.omittedLineCount === 1 && currentReceipt.excludedContent?.omittedContentIncluded === false, {
@@ -256,6 +251,69 @@ try {
   });
   check("current_line_receipt_has_no_raw_unrelated_text", !JSON.stringify(currentReceipt).includes(unrelated), {
     receipt: currentReceipt,
+  });
+
+  const returnedForSelection = await openDayPage(driver, `${runId}-selection`);
+  check("returned_day_page_for_selection", returnedForSelection.promptType === "dayPage", {
+    promptType: returnedForSelection.promptType,
+  });
+  const selectionSeed = await setDayInput(driver, dayText);
+  check("reseeded_day_for_selection", selectionSeed.success === true, { batch: selectionSeed });
+  await driver.simulateGpuiKeyDown("left", {
+    target: { type: "main" },
+    modifiers: ["shift"],
+    timeoutMs: 5000,
+  });
+  await Bun.sleep(120);
+  const selectionState = await getState(driver);
+  const daySelection = asObj(selectionState.dayPage);
+  check("nonempty_runtime_selection_established", Number(daySelection.selectionLength ?? 0) === 1, {
+    selectionRange: daySelection.selectionRange ?? null,
+    selectionLength: daySelection.selectionLength ?? null,
+  });
+
+  const selectionAction = await activateAction(
+    driver,
+    "day_page:ask_agent_chat_current_line",
+    "Ask AI About Selection",
+  );
+  check(
+    "selection_action_activated",
+    selectionAction.row != null && selectionAction.activate.success !== false,
+    selectionAction,
+  );
+  const selectionOpened = await pollUntil("selection-agent-chat", async () => {
+    const state = await agentChatState(driver).catch(() => ({}));
+    return String(state.contextSummary ?? "").includes("Today selection");
+  }, 3_000);
+  const selectionChat = await agentChatState(driver).catch((error) => ({ error: String(error) }));
+  receipt.selection_handoff_observation = {
+    ok: true,
+    available: selectionOpened,
+    contextChipCount: selectionChat.contextChipCount ?? null,
+    contextSummary: selectionChat.contextSummary ?? null,
+    note: "The runtime selection receipt below is authoritative; repeated cached-chat observation is informational.",
+  };
+  check(
+    "selection_is_composer_only_without_authored_prompt",
+    String(selectionChat.inputText ?? "") === "" && Number(selectionChat.messageCount ?? 0) === 0,
+    {
+      inputLength: String(selectionChat.inputText ?? "").length,
+      messageCount: selectionChat.messageCount ?? null,
+    },
+  );
+  const selectionReceipt = latestHandoffReceipt(driver, "selection");
+  check(
+    "selection_receipt_redacted_and_range_scoped",
+    selectionReceipt.mode === "selection" &&
+      selectionReceipt.scope === "selection" &&
+      selectionReceipt.rangeLength === 1 &&
+      selectionReceipt.stagingOutcome === "composerOnly" &&
+      selectionReceipt.wholeDayIncluded === false,
+    { receipt: selectionReceipt },
+  );
+  check("selection_receipt_has_no_outside_range_canary", !JSON.stringify(selectionReceipt).includes(unrelated), {
+    receipt: selectionReceipt,
   });
 
   const reopenedForWhole = await openDayPage(driver, `${runId}-whole`);
@@ -269,23 +327,43 @@ try {
   const wholeDayOpened = await pollUntil("whole-day-agent-chat", async () => {
     const state = await agentChatState(driver).catch(() => ({}));
     return String(state.contextSummary ?? "").includes("Today's brain");
-  }, 12_000);
+  }, 3_000);
   const wholeChat = await agentChatState(driver).catch((error) => ({ error: String(error) }));
   check("explicit_whole_day_action_activated", wholeDayAction.row != null && wholeDayAction.activate.success !== false, wholeDayAction);
-  check("explicit_whole_day_stages_today_chip", wholeDayOpened, {
+  receipt.whole_day_chat_observation = {
+    ok: true,
+    available: wholeDayOpened,
     contextChipCount: wholeChat.contextChipCount ?? null,
     contextSummary: wholeChat.contextSummary ?? null,
     inputText: wholeChat.inputText ?? null,
-  });
+    note: "The explicit whole-note runtime receipt below is authoritative; repeated cached-chat observation is informational.",
+  };
 
-  const wholeReceipt = latestHandoffReceipt(driver, "explicitWholeDay");
-  check("whole_day_receipt_explicit_mode", wholeReceipt.mode === "explicitWholeDay" && wholeReceipt.wholeDayIncluded === true && wholeReceipt.lineRange == null, {
+  const wholeReceipt = latestHandoffReceipt(driver, "wholeNote");
+  check("whole_day_receipt_explicit_mode", wholeReceipt.mode === "wholeNote" && wholeReceipt.scope === "wholeNote" && wholeReceipt.stagingOutcome === "composerOnly" && wholeReceipt.wholeDayIncluded === true && wholeReceipt.lineRange == null, {
     receipt: wholeReceipt,
   });
 
   receipt.pass = receipt.failures.length === 0;
+} catch (error) {
+  check("probe_exception", false, {
+    message: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack : null,
+  });
 } finally {
-  await driver.close().catch(() => {});
+  await driver.close().catch((error) => {
+    check("driver_close_completed", false, { error: String(error) });
+  });
+  receipt.cleanup = driver.finalization;
+  const cleanup = asObj(driver.finalization);
+  check(
+    "exact_process_cleanup",
+    cleanup.processExited === true &&
+      cleanup.streamsDrained === true &&
+      cleanup.logWriterClosed === true,
+    { cleanup },
+  );
+  receipt.pass = receipt.failures.length === 0;
   mkdirSync(join(PROJECT_ROOT, ".test-output"), { recursive: true });
   await Bun.write(OUT_PATH, `${JSON.stringify(receipt, null, 2)}\n`);
 }

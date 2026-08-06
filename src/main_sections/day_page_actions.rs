@@ -101,6 +101,7 @@ fn day_page_agent_chat_fingerprint(value: &str) -> String {
 
 #[derive(Clone, Copy)]
 enum DayPageAgentHandoffMode {
+    Selection,
     CurrentLine,
     ExplicitWholeDay,
 }
@@ -108,14 +109,15 @@ enum DayPageAgentHandoffMode {
 impl DayPageAgentHandoffMode {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Selection => "selection",
             Self::CurrentLine => "currentLine",
-            Self::ExplicitWholeDay => "explicitWholeDay",
+            Self::ExplicitWholeDay => "wholeNote",
         }
     }
 
     fn source(self) -> &'static str {
         match self {
-            Self::CurrentLine => DAY_PAGE_CURRENT_LINE_AGENT_CHAT_CONTEXT_SOURCE,
+            Self::Selection | Self::CurrentLine => DAY_PAGE_CURRENT_LINE_AGENT_CHAT_CONTEXT_SOURCE,
             Self::ExplicitWholeDay => DAY_PAGE_AGENT_CHAT_CONTEXT_SOURCE,
         }
     }
@@ -126,6 +128,7 @@ impl DayPageAgentHandoffMode {
 }
 
 struct DayPageAgentHandoffPacket {
+    scope: crate::notes::ai_scope::NotesAiScope,
     parts: Vec<crate::ai::message_parts::AiContextPart>,
     prompt_seed: String,
     receipt: serde_json::Value,
@@ -160,7 +163,7 @@ pub(crate) fn day_page_host_actions_section(
             actions.push(
                 Action::new(
                     DAY_PAGE_PREVIEW_ADD_TO_AGENT_CHAT_ACTION_ID,
-                    "Add to Agent Chat",
+                    "Add Resource to Agent Chat",
                     Some("Attach only this kit:// preview URI to Agent Chat".to_string()),
                     ActionCategory::ScriptContext,
                 )
@@ -260,11 +263,22 @@ pub(crate) fn day_page_host_actions_section(
         .bound_date()
         .is_some_and(|date| date == view.local_today());
     if !view.session.is_viewing_fragment() && viewing_today {
+        let selection = view.notes_editor.read(cx).selection(cx);
+        let has_selection = selection.start < selection.end;
         actions.push(
             Action::new(
                 DAY_PAGE_ASK_AGENT_CHAT_CURRENT_LINE_ACTION_ID,
-                "Ask Agent Chat About Current Line",
-                Some("Attach only the active Today line and references on that line".to_string()),
+                if has_selection {
+                    "Ask AI About Selection"
+                } else {
+                    "Ask AI About Current Line"
+                },
+                Some(if has_selection {
+                    "Attach only the selected Today text and references inside that selection"
+                        .to_string()
+                } else {
+                    "Attach only the active Today line and references on that line".to_string()
+                }),
                 ActionCategory::ScriptContext,
             )
             .with_shortcut("cmd+enter")
@@ -340,16 +354,28 @@ impl DayPageView {
                 tracing::warn!(
                     target: "script_kit::day_page",
                     event = "day_page_kit_preview_agent_chat_blocked",
-                    uri = %preview.uri,
+                    uri_fingerprint = %day_page_agent_chat_fingerprint(&preview.uri),
                 );
             }
             return false;
         };
-        let prompt = self
-            .kit_resource_preview
-            .as_ref()
-            .map(|preview| format!("Ask about {}: ", preview.title))
-            .unwrap_or_else(|| "Ask about this resource: ".to_string());
+        let scope = crate::notes::ai_scope::NotesAiScope::Resource {
+            uri_identity: part.source().to_string(),
+        };
+        self.last_agent_chat_handoff_receipt = Some(serde_json::json!({
+            "schemaVersion": 1,
+            "receiptKind": "dayPage.agentChatHandoff",
+            "redacted": true,
+            "mode": scope.kind(),
+            "scope": scope.kind(),
+            "documentSemanticIdLength": scope.document_semantic_id().chars().count(),
+            "documentSemanticIdFingerprint": day_page_agent_chat_fingerprint(scope.document_semantic_id()),
+            "rangeLength": scope.range_length(),
+            "destination": "agentChat",
+            "stagingOutcome": "composerOnly",
+            "contextPartCount": 1,
+        }));
+        let prompt = String::new();
         let Some(app) = self.app.upgrade() else {
             return false;
         };
@@ -404,9 +430,13 @@ impl DayPageView {
     fn build_whole_day_agent_chat_packet(&self, cx: &App) -> DayPageAgentHandoffPacket {
         let date_label = self.day_page_agent_chat_date_label();
         let canonical_path = self.day_page_agent_chat_canonical_path(&date_label);
+        let scope = crate::notes::ai_scope::NotesAiScope::WholeNote {
+            document_id: format!("day:{date_label}"),
+        };
         let parts = vec![self.today_agent_chat_context_part(cx)];
         let receipt = self.build_agent_chat_handoff_receipt(
             DayPageAgentHandoffMode::ExplicitWholeDay,
+            &scope,
             &date_label,
             canonical_path.as_deref(),
             None,
@@ -415,8 +445,9 @@ impl DayPageView {
         );
 
         DayPageAgentHandoffPacket {
+            scope,
             parts,
-            prompt_seed: "Ask about Today's brain: ".to_string(),
+            prompt_seed: String::new(),
             receipt,
         }
     }
@@ -424,29 +455,49 @@ impl DayPageView {
     fn build_current_line_agent_chat_packet(&self, cx: &App) -> DayPageAgentHandoffPacket {
         let content = self.notes_editor.read(cx).content(cx);
         let selection = self.notes_editor.read(cx).selection(cx);
-        let active_line = active_day_page_line(&content, selection.end);
-        let line_text = active_line.text.trim();
         let date_label = self.day_page_agent_chat_date_label();
         let canonical_path = self.day_page_agent_chat_canonical_path(&date_label);
-        let source = format!(
-            "{}#line={}",
-            canonical_path.as_deref().unwrap_or("brain://days/Today"),
-            active_line.line_number
+        let document_id = format!("day:{date_label}");
+        let (scope, scoped_text) = crate::notes::ai_scope::selected_or_current_line_scope(
+            document_id,
+            &content,
+            selection,
         );
+        let mode = if matches!(scope, crate::notes::ai_scope::NotesAiScope::Selection { .. }) {
+            DayPageAgentHandoffMode::Selection
+        } else {
+            DayPageAgentHandoffMode::CurrentLine
+        };
+        let active_line = matches!(mode, DayPageAgentHandoffMode::CurrentLine).then(|| {
+            active_day_page_line(
+                &content,
+                scope.range().map(|range| range.end).unwrap_or_default(),
+            )
+        });
+        let source = format!(
+            "{}#scope={}",
+            canonical_path.as_deref().unwrap_or("brain://days/Today"),
+            scope.kind(),
+        );
+        let label = match mode {
+            DayPageAgentHandoffMode::Selection => format!("Today selection - {date_label}"),
+            DayPageAgentHandoffMode::CurrentLine => format!("Today current line - {date_label}"),
+            DayPageAgentHandoffMode::ExplicitWholeDay => unreachable!(),
+        };
 
         let mut parts = vec![crate::ai::message_parts::AiContextPart::TextBlock {
-            label: format!("Today line {} - {date_label}", active_line.line_number),
+            label,
             source,
-            text: if line_text.is_empty() {
-                "(Active Today line is empty.)".to_string()
+            text: if scoped_text.trim().is_empty() {
+                format!("({} is empty.)", scope.kind())
             } else {
-                line_text.to_string()
+                scoped_text.clone()
             },
             mime_type: Some("text/markdown".to_string()),
         }];
 
         for part in
-            script_kit_gpui::day_page::context_parts_from_day_page_markdown_links(active_line.text)
+            script_kit_gpui::day_page::context_parts_from_day_page_markdown_links(&scoped_text)
         {
             if let Some(part) = day_page_app_context_part_from_shared(part) {
                 push_unique_day_page_context_part(&mut parts, part);
@@ -454,27 +505,25 @@ impl DayPageView {
         }
 
         for (token, part) in &self.spine_handoff.mention_aliases {
-            if active_line.text.contains(token) {
+            if scoped_text.contains(token) {
                 push_unique_day_page_context_part(&mut parts, part.clone());
             }
         }
 
         let receipt = self.build_agent_chat_handoff_receipt(
-            DayPageAgentHandoffMode::CurrentLine,
+            mode,
+            &scope,
             &date_label,
             canonical_path.as_deref(),
-            Some(&active_line),
+            active_line.as_ref(),
             &parts,
             cx,
         );
 
         DayPageAgentHandoffPacket {
+            scope,
             parts,
-            prompt_seed: if line_text.is_empty() {
-                "Ask about this Today line: ".to_string()
-            } else {
-                line_text.to_string()
-            },
+            prompt_seed: String::new(),
             receipt,
         }
     }
@@ -496,6 +545,7 @@ impl DayPageView {
     fn build_agent_chat_handoff_receipt(
         &self,
         mode: DayPageAgentHandoffMode,
+        scope: &crate::notes::ai_scope::NotesAiScope,
         date_label: &str,
         canonical_path: Option<&str>,
         active_line: Option<&ActiveDayPageLine<'_>>,
@@ -534,6 +584,12 @@ impl DayPageView {
             "receiptKind": "dayPage.agentChatHandoff",
             "redacted": true,
             "mode": mode.as_str(),
+            "scope": scope.kind(),
+            "documentSemanticIdLength": scope.document_semantic_id().chars().count(),
+            "documentSemanticIdFingerprint": day_page_agent_chat_fingerprint(scope.document_semantic_id()),
+            "rangeLength": scope.range_length(),
+            "destination": "agentChat",
+            "stagingOutcome": "composerOnly",
             "source": mode.source(),
             "date": date_label,
             "canonicalPathChars": canonical_path.map(|path| path.chars().count()),
@@ -562,7 +618,6 @@ impl DayPageView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.save(cx);
         let packet = self.build_whole_day_agent_chat_packet(cx);
         self.last_agent_chat_handoff_receipt = Some(packet.receipt.clone());
         tracing::info!(
@@ -616,7 +671,6 @@ impl DayPageView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.save(cx);
         let packet = self.build_current_line_agent_chat_packet(cx);
         self.last_agent_chat_handoff_receipt = Some(packet.receipt.clone());
         tracing::info!(

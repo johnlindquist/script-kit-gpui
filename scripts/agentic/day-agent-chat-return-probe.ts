@@ -219,10 +219,10 @@ try {
     promptType: agentState.promptType,
     inputValue: agentState.inputValue,
   });
-  receipt.agent_chat_question_starter = {
-    ok: String(agentState.inputValue ?? "").includes("Today's brain"),
-    inputValue: agentState.inputValue,
-    note: "informational: credential-less setup mode may not expose the live composer",
+  receipt.agent_chat_composer_only = {
+    ok: String(agentState.inputValue ?? "") === "",
+    inputLength: String(agentState.inputValue ?? "").length,
+    note: "Ask without an authored question stages scope and leaves the composer empty",
   };
 
   const fixtureAttempt = (await driver.request(
@@ -236,10 +236,12 @@ try {
     { expect: "externalCommandResult", timeoutMs: 10_000 },
   )) as Json;
   const liveFixtureAvailable = fixtureAttempt.ok !== false && fixtureAttempt.success !== false;
-  check("live_agent_chat_fixture_unavailable_without_provider", !liveFixtureAvailable, {
+  receipt.live_agent_chat_fixture = {
+    ok: true,
+    available: liveFixtureAvailable,
     fixtureAttempt,
-    reason: "sandbox Pi provider credentials are not available on this machine",
-  });
+    note: "informational only; the provider-free mock path below owns return verification",
+  };
 
   await driver.simulateKey("escape");
   const afterSetupClose = (await driver.getState({ timeoutMs: 5000 })) as Json;
@@ -323,11 +325,24 @@ try {
 } finally {
   receipt.sessionDir = driver.sessionDir;
   receipt.logPath = driver.logPath;
+  await driver.close().catch((error) => {
+    check("driver_close_completed", false, { message: String(error) });
+  });
+  receipt.cleanup = driver.finalization;
+  const cleanup = (driver.finalization ?? {}) as Json;
+  check(
+    "exact_process_cleanup",
+    cleanup.processExited === true &&
+      cleanup.streamsDrained === true &&
+      cleanup.logWriterClosed === true,
+    { cleanup },
+  );
+  receipt.classification = (receipt.failures as string[]).length === 0 ? "fixed" : "failed";
+  receipt.pass = (receipt.failures as string[]).length === 0;
   writeFileSync(
     `.test-output/${runId}.json`,
     `${JSON.stringify(receipt, null, 2)}\n`,
   );
-  await driver.close().catch(() => {});
 }
 
 console.log(JSON.stringify(receipt, null, 2));

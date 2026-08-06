@@ -127,6 +127,8 @@ impl DayPageView {
 
         Self {
             app: app.downgrade(),
+            instance_id: cx.entity().entity_id().as_u64(),
+            host_return_generation: 0,
             session: DayPageDocumentSession::new(substrate),
             notes_editor,
             editor_state,
@@ -480,6 +482,8 @@ impl DayPageView {
 
     pub(crate) fn automation_state(&self, cx: &App) -> serde_json::Value {
         let input = self.automation_input_value(cx);
+        let selection = self.notes_editor.read(cx).selection(cx);
+        let editor_scroll = self.editor_state.read(cx).automation_scroll_metrics();
         let task_stats = day_page_task_stats(&input);
         let preview_anchor = self.automation_preview_anchor(&input, cx);
         let kit_resource_preview = match self.kit_resource_preview.as_ref() {
@@ -516,7 +520,17 @@ impl DayPageView {
         serde_json::json!({
             "schemaVersion": 1,
             "redacted": true,
+            "instanceId": self.instance_id,
+            "hostReturnGeneration": self.host_return_generation,
             "inputLength": input.chars().count(),
+            "inputFingerprint": day_page_context_round_trip_fingerprint(&input),
+            "dirty": self.session.is_dirty(),
+            "selectionRange": [selection.start, selection.end],
+            "selectionLength": selection.end.saturating_sub(selection.start),
+            "editorScroll": editor_scroll,
+            "documentIdentityFingerprint": day_page_context_round_trip_fingerprint(
+                &self.session.path().map(|path| path.display().to_string()).unwrap_or_else(|| "unbound".to_string())
+            ),
             "readMode": self.read_mode,
             "mode": if self.kit_resource_preview.is_some() {
                 "kitResourcePreview"
@@ -586,6 +600,19 @@ impl DayPageView {
                 view.focus_editor_at_end(window, cx);
             });
         });
+    }
+
+    pub(crate) fn focus_editor_preserving_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.read_mode || self.kit_resource_preview.is_some() {
+            self.focus_handle.focus(window, cx);
+        } else {
+            self.notes_editor
+                .update(cx, |editor, cx| editor.focus(window, cx));
+        }
     }
 
     fn focus_editor_at_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1937,7 +1964,7 @@ fn day_page_footer_buttons_for_preview(
         let primary = if availability.open_source_target.is_some() {
             FooterButtonConfig::new(FooterAction::Run, "↵", "Open Source")
         } else if availability.can_add_to_agent_chat {
-            FooterButtonConfig::new(FooterAction::Ai, "⌘↵", "Add to Agent Chat")
+            FooterButtonConfig::new(FooterAction::Ai, "⌘↵", "Add Resource to Agent Chat")
         } else {
             FooterButtonConfig::new(FooterAction::Copy, "⌘C", "Copy URI")
         };
@@ -1975,7 +2002,12 @@ impl ScriptListApp {
         // Page entity; re-entering Today resumes it (and abandons the search)
         // instead of binding a fresh view.
         if let Some(pending) = self.day_page_context_return.take() {
-            self.restore_day_page_view_after_round_trip(pending.entity, window, cx);
+            self.restore_day_page_view_after_round_trip(
+                pending.entity,
+                pending.snapshot,
+                window,
+                cx,
+            );
             return;
         }
 

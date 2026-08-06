@@ -402,8 +402,35 @@ impl NotesApp {
     pub(crate) fn on_editor_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.notes_editor
             .update(cx, |editor, cx| editor.sync_markdown_link_highlights(cx));
+        let previous_content = self
+            .active_day_binding
+            .as_ref()
+            .map(|day| day.content.clone())
+            .or_else(|| {
+                self.selected_note_id.and_then(|id| {
+                    self.notes
+                        .iter()
+                        .find(|note| note.id == id)
+                        .map(|note| note.content.clone())
+                })
+            })
+            .unwrap_or_default();
         let content = self.editor_state.read(cx).value();
-        let content_string = content.to_string();
+        let mut content_string = content.to_string();
+        if let Some((fixed, cursor)) =
+            crate::components::notes_editor::spine::mention_atomic_delete_fixup(
+                &previous_content,
+                &content_string,
+                &self.spine_runtime.mention_aliases,
+            )
+        {
+            self.editor_state.update(cx, |state, cx| {
+                state.set_value_preserving_scroll(fixed.clone(), cursor, window, cx);
+            });
+            content_string = fixed;
+        }
+        self.spine_runtime
+            .prune_mention_aliases_for_content(&content_string);
         self.spine_runtime.clear_transient_cache();
 
         // Auto-create a note if user is typing with no note selected

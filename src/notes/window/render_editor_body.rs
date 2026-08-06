@@ -217,8 +217,7 @@ impl NotesApp {
     ) -> Option<crate::components::notes_editor::spine::NotesEditorSpineRows> {
         if matches!(
             projection.active_segment_kind,
-            crate::spine::SpineSegmentKind::ContextMention { .. }
-                | crate::spine::SpineSegmentKind::ProjectCwd { .. }
+            crate::spine::SpineSegmentKind::ProjectCwd { .. }
         ) {
             return None;
         }
@@ -232,7 +231,7 @@ impl NotesApp {
             sections,
             crate::components::notes_editor::spine::notes_editor_supports_insert_resolve_action,
         );
-        (!rows.flat.is_empty()).then_some(rows)
+        (!rows.grouped.is_empty()).then_some(rows)
     }
 
     fn render_notes_spine_panel(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -368,15 +367,31 @@ impl NotesApp {
                 if resolution_source.as_ref() == "cwd" {
                     return false;
                 }
-                self.replace_notes_spine_segment(
+                let (replacement, alias) = if resolution_source.as_ref() == "context-builtin" {
+                    crate::components::notes_editor::spine::context_reference_for_part(
+                        replacement.as_ref(),
+                        None,
+                    )
+                    .map(|(reference, part)| (reference, Some(part)))
+                    .unwrap_or_else(|| (replacement.to_string(), None))
+                } else {
+                    (replacement.to_string(), None)
+                };
+                let applied = self.replace_notes_spine_segment(
                     model,
                     segment_index,
                     segment_byte_range,
-                    replacement.as_ref(),
+                    &replacement,
                     trailing_space,
                     window,
                     cx,
-                )
+                );
+                if applied {
+                    if let Some(part) = alias {
+                        self.spine_runtime.register_mention_alias(replacement, part);
+                    }
+                }
+                applied
             }
             crate::spine::SpineListAction::OpenFileSearchPortal { .. }
             | crate::spine::SpineListAction::OpenModeExit { .. }
