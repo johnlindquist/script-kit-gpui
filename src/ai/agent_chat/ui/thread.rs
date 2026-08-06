@@ -796,6 +796,7 @@ impl AgentChatThread {
             | AiCommand::RestartFlowRun(_)
             | AiCommand::ContinueInAgentChat(_)
             | AiCommand::InstallOrRepairComponent(_)
+            | AiCommand::RunSurfaceRecovery { .. }
             | AiCommand::CopyRedactedDiagnostics(_)
             | AiCommand::ClearPendingWork(_)
             | AiCommand::ScheduleRecoveredDismiss => None,

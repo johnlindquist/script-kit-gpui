@@ -576,6 +576,10 @@ pub enum RecoveryActionKind {
     RethreadFlow,
     RestartFlowRun,
     TrimContext,
+    RetrySameDestination,
+    ChooseDestination,
+    CopyTranscript,
+    OpenDictationHistory,
     CopyDetails,
 }
 
@@ -626,6 +630,10 @@ pub enum AiRecoveryAction {
     RethreadFlow,
     RestartFlowRun,
     TrimContext,
+    RetrySameDestination,
+    ChooseDestination,
+    CopyTranscript,
+    OpenDictationHistory,
     CopyDetails,
 }
 
@@ -648,6 +656,10 @@ impl AiRecoveryAction {
             Self::RethreadFlow => RecoveryActionKind::RethreadFlow,
             Self::RestartFlowRun => RecoveryActionKind::RestartFlowRun,
             Self::TrimContext => RecoveryActionKind::TrimContext,
+            Self::RetrySameDestination => RecoveryActionKind::RetrySameDestination,
+            Self::ChooseDestination => RecoveryActionKind::ChooseDestination,
+            Self::CopyTranscript => RecoveryActionKind::CopyTranscript,
+            Self::OpenDictationHistory => RecoveryActionKind::OpenDictationHistory,
             Self::CopyDetails => RecoveryActionKind::CopyDetails,
         }
     }
@@ -939,6 +951,13 @@ pub enum AiCommand {
     RestartFlowRun(RestartFlowRunCommand),
     ContinueInAgentChat(AgentChatEscalation),
     InstallOrRepairComponent(ComponentRecoveryCommand),
+    /// Execute a recovery action owned by the active product surface. The
+    /// surface must resolve this command through an installed callback before
+    /// advertising the corresponding capability.
+    RunSurfaceRecovery {
+        command_id: CommandId,
+        action: RecoveryActionKind,
+    },
     CopyRedactedDiagnostics(DiagnosticId),
     ClearPendingWork(WorkKey),
     ScheduleRecoveredDismiss,

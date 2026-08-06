@@ -117,6 +117,7 @@ fn running_state() -> AiOperationState {
             | AiCommand::RestartFlowRun(_)
             | AiCommand::ContinueInAgentChat(_)
             | AiCommand::InstallOrRepairComponent(_)
+            | AiCommand::RunSurfaceRecovery { .. }
             | AiCommand::CopyRedactedDiagnostics(_)
             | AiCommand::ClearPendingWork(_)
             | AiCommand::ScheduleRecoveredDismiss => None,
@@ -879,6 +880,47 @@ fn assert_command_invariants(
             AiCommand::ScheduleBackoff { .. } | AiCommand::StartTurn(_)
         )));
     }
+}
+
+#[test]
+fn destination_failures_offer_surface_owned_preservation_actions() {
+    let failure = AiFailure::new(
+        AiFailureKind::Input(InputFailure::DestinationStale),
+        RetrySafety::ExplicitUserConfirmation,
+    );
+    let plan = recovery_plan_for(
+        &identity(),
+        &failure,
+        ready().retry,
+        TurnRisk::MayMutate,
+        &ProgressSnapshot::none(),
+    );
+    assert!(plan.option(RecoveryActionKind::Retry).is_none());
+    assert!(
+        plan.option(RecoveryActionKind::RetrySameDestination)
+            .is_none()
+    );
+    for kind in [
+        RecoveryActionKind::ChooseDestination,
+        RecoveryActionKind::CopyTranscript,
+        RecoveryActionKind::OpenDictationHistory,
+    ] {
+        assert!(plan.option(kind).is_some_and(|option| option.enabled));
+    }
+
+    let mut state = ready();
+    state.phase = AiPhase::AwaitingRecovery { failure, plan };
+    let transition = transition_ok(
+        state,
+        AiOperationEvent::RecoverySelected(AiRecoveryAction::ChooseDestination),
+    );
+    assert!(matches!(
+        transition.commands.as_slice(),
+        [AiCommand::RunSurfaceRecovery {
+            action: RecoveryActionKind::ChooseDestination,
+            ..
+        }]
+    ));
 }
 
 fn representative_states() -> Vec<AiOperationState> {

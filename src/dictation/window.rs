@@ -418,12 +418,19 @@ type OverlayRetargetCallback = Box<
         + Sync
         + 'static,
 >;
+type OverlayRecoveryCallback = Arc<
+    dyn Fn(crate::dictation::DictationRecoveryAction, &mut App) -> Result<(), String>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Global abort callback set by the dictation runtime.
 static OVERLAY_ABORT_CALLBACK: Mutex<Option<OverlayAbortCallback>> = Mutex::new(None);
 /// Global submit callback set by the dictation runtime.
 static OVERLAY_SUBMIT_CALLBACK: Mutex<Option<OverlaySubmitCallback>> = Mutex::new(None);
 static OVERLAY_RETARGET_CALLBACK: Mutex<Option<OverlayRetargetCallback>> = Mutex::new(None);
+static OVERLAY_RECOVERY_CALLBACK: Mutex<Option<OverlayRecoveryCallback>> = Mutex::new(None);
 
 /// Register a callback to be invoked when the user confirms stop via
 /// Enter or the Stop button in the overlay.
@@ -447,6 +454,19 @@ pub fn set_overlay_retarget_callback(
         + 'static,
 ) {
     *OVERLAY_RETARGET_CALLBACK.lock() = Some(Box::new(callback));
+}
+
+pub fn set_overlay_recovery_callback(
+    callback: impl Fn(crate::dictation::DictationRecoveryAction, &mut App) -> Result<(), String>
+        + Send
+        + Sync
+        + 'static,
+) {
+    *OVERLAY_RECOVERY_CALLBACK.lock() = Some(Arc::new(callback));
+}
+
+pub(crate) fn overlay_recovery_callback_installed() -> bool {
+    OVERLAY_RECOVERY_CALLBACK.lock().is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -767,6 +787,9 @@ impl DictationMicrophonePopupLifetime {
 }
 
 const DICTATION_TARGET_ACTION_PREFIX: &str = "dictation_target:";
+const DICTATION_RECOVERY_CHOOSE_ACTION_ID: &str = "dictation_recovery:choose_destination";
+const DICTATION_RECOVERY_COPY_ACTION_ID: &str = "dictation_recovery:copy_transcript";
+const DICTATION_RECOVERY_HISTORY_ACTION_ID: &str = "dictation_recovery:open_history";
 
 fn dictation_target_action_icon(
     descriptor: &crate::dictation::DictationTargetDescriptor,
@@ -813,6 +836,52 @@ pub(crate) fn dictation_target_from_action_id(
     crate::dictation::DictationTarget::action_descriptors()
         .find(|descriptor| descriptor.stable_id == stable_id)
         .map(|descriptor| descriptor.target)
+}
+
+fn dictation_recovery_actions(
+    capabilities: crate::dictation::DictationFailureRecoveryCapabilities,
+) -> Vec<crate::actions::Action> {
+    use crate::actions::{Action, ActionCategory};
+    use crate::designs::icon_variations::IconName;
+
+    let mut actions = Vec::new();
+    if capabilities.choose_destination {
+        actions.push(
+            Action::new(
+                DICTATION_RECOVERY_CHOOSE_ACTION_ID,
+                "Choose Destination",
+                Some("Pick a new frozen destination for the saved transcript".to_string()),
+                ActionCategory::ScriptContext,
+            )
+            .with_icon(IconName::MagnifyingGlass)
+            .with_section("Recovery"),
+        );
+    }
+    if capabilities.copy_transcript {
+        actions.push(
+            Action::new(
+                DICTATION_RECOVERY_COPY_ACTION_ID,
+                "Copy Transcript",
+                Some("Copy the saved transcript without retrying delivery".to_string()),
+                ActionCategory::ScriptContext,
+            )
+            .with_icon(IconName::Copy)
+            .with_section("Recovery"),
+        );
+    }
+    if capabilities.open_dictation_history {
+        actions.push(
+            Action::new(
+                DICTATION_RECOVERY_HISTORY_ACTION_ID,
+                "Open Dictation History",
+                Some("Open the saved History entry".to_string()),
+                ActionCategory::ScriptContext,
+            )
+            .with_icon(IconName::File)
+            .with_section("Recovery"),
+        );
+    }
+    actions
 }
 
 /// The GPUI entity that renders the compact dictation pill.
@@ -980,21 +1049,47 @@ impl DictationOverlay {
             FooterAction::Actions => match self.state.phase {
                 DictationSessionPhase::Recording => self.open_destination_actions(window, cx),
                 DictationSessionPhase::Confirming => self.abort_overlay_session(window, cx),
+                DictationSessionPhase::Failed(_) => self.open_recovery_actions(window, cx),
                 DictationSessionPhase::Idle
                 | DictationSessionPhase::Transcribing
                 | DictationSessionPhase::Delivering
-                | DictationSessionPhase::Finished
-                | DictationSessionPhase::Failed(_) => {}
+                | DictationSessionPhase::Finished => {}
             },
             FooterAction::Close => {
                 let action = overlay_escape_action(&self.state.phase);
                 let _ = self.apply_dismiss_action(action, window, cx);
             }
+            FooterAction::Retry => {
+                if self
+                    .state
+                    .phase
+                    .clone()
+                    .failed_capabilities()
+                    .is_some_and(|capabilities| capabilities.retry_same_destination)
+                {
+                    self.invoke_recovery_action(
+                        crate::dictation::DictationRecoveryAction::RetrySameDestination,
+                        cx,
+                    );
+                }
+            }
+            FooterAction::Copy => {
+                if self
+                    .state
+                    .phase
+                    .clone()
+                    .failed_capabilities()
+                    .is_some_and(|capabilities| capabilities.copy_transcript)
+                {
+                    self.invoke_recovery_action(
+                        crate::dictation::DictationRecoveryAction::CopyTranscript,
+                        cx,
+                    );
+                }
+            }
             FooterAction::Replace
             | FooterAction::Append
-            | FooterAction::Copy
             | FooterAction::Expand
-            | FooterAction::Retry
             | FooterAction::Cwd
             | FooterAction::AgentModel
             | FooterAction::Tips => {}
@@ -1032,6 +1127,171 @@ impl DictationOverlay {
             .set_actions(dictation_target_actions(), cx);
         self.destination_command_bar.open_centered(window, cx);
         self.wire_destination_actions_activation(window, cx);
+    }
+
+    fn open_recovery_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let DictationSessionPhase::Failed(failure) = &self.state.phase else {
+            return;
+        };
+        let actions = dictation_recovery_actions(failure.capabilities);
+        if actions.is_empty() {
+            return;
+        }
+        self.destination_command_bar.set_actions(actions, cx);
+        self.destination_command_bar.open_centered(window, cx);
+        self.wire_recovery_actions_activation(window, cx);
+    }
+
+    fn invoke_recovery_action(
+        &mut self,
+        action: crate::dictation::DictationRecoveryAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(callback) = OVERLAY_RECOVERY_CALLBACK.lock().clone() else {
+            tracing::warn!(
+                category = "DICTATION",
+                action = ?action,
+                "Dictation recovery callback is unavailable"
+            );
+            return;
+        };
+        // Recovery can close or replace the overlay. Defer out of the overlay
+        // entity update so those window operations never re-enter this borrow.
+        cx.defer(move |cx| {
+            let result = callback(action, cx);
+            if let Err(error) = result {
+                tracing::warn!(
+                    category = "DICTATION",
+                    action = ?action,
+                    error_fingerprint = %crate::dictation::redacted_transcript_fingerprint(&error),
+                    "Dictation recovery action failed"
+                );
+            }
+        });
+    }
+
+    fn wire_recovery_actions_activation(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.destination_command_bar.dialog().cloned() else {
+            return;
+        };
+        let overlay = cx.entity().downgrade();
+        let activation_window = window.window_handle();
+        let close_window = activation_window;
+        let close_overlay = overlay.clone();
+        dialog.update(cx, |dialog, _cx| {
+            dialog.set_on_close(Arc::new(move |cx| {
+                let overlay = close_overlay.clone();
+                cx.defer(move |cx| {
+                    let _ = close_window.update(cx, |_root, window, cx| {
+                        let Some(overlay) = overlay.upgrade() else {
+                            return;
+                        };
+                        overlay.update(cx, |overlay, cx| {
+                            overlay.destination_command_bar.mark_closed_externally();
+                            overlay.focus_handle.focus(window, cx);
+                        });
+                    });
+                });
+            }));
+            dialog.set_on_activation(Arc::new(move |activation, _popup_window, cx| {
+                let crate::actions::ActionsDialogActivation::Executed { action_id, .. } =
+                    activation
+                else {
+                    return;
+                };
+                let overlay = overlay.clone();
+                cx.defer(move |cx| {
+                    let _ = activation_window.update(cx, |_root, window, cx| {
+                        let Some(overlay) = overlay.upgrade() else {
+                            return;
+                        };
+                        overlay.update(cx, |overlay, cx| {
+                            overlay.destination_command_bar.mark_closed_externally();
+                            match action_id.as_str() {
+                                DICTATION_RECOVERY_CHOOSE_ACTION_ID => {
+                                    overlay
+                                        .destination_command_bar
+                                        .set_actions(dictation_target_actions(), cx);
+                                    overlay.destination_command_bar.open_centered(window, cx);
+                                    overlay.wire_recovery_destination_activation(window, cx);
+                                }
+                                DICTATION_RECOVERY_COPY_ACTION_ID => {
+                                    overlay.destination_command_bar.close(cx);
+                                    overlay.invoke_recovery_action(
+                                        crate::dictation::DictationRecoveryAction::CopyTranscript,
+                                        cx,
+                                    );
+                                }
+                                DICTATION_RECOVERY_HISTORY_ACTION_ID => {
+                                    overlay.destination_command_bar.close(cx);
+                                    overlay.invoke_recovery_action(
+                                        crate::dictation::DictationRecoveryAction::OpenDictationHistory,
+                                        cx,
+                                    );
+                                }
+                                _ => {}
+                            }
+                            overlay.focus_handle.focus(window, cx);
+                        });
+                    });
+                });
+            }));
+        });
+    }
+
+    fn wire_recovery_destination_activation(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.destination_command_bar.dialog().cloned() else {
+            return;
+        };
+        let overlay = cx.entity().downgrade();
+        let activation_window = window.window_handle();
+        dialog.update(cx, |dialog, _cx| {
+            dialog.set_on_activation(Arc::new(move |activation, _popup_window, cx| {
+                let crate::actions::ActionsDialogActivation::Executed { action_id, .. } = activation
+                else {
+                    return;
+                };
+                let Some(target) = dictation_target_from_action_id(&action_id) else {
+                    return;
+                };
+                let overlay = overlay.clone();
+                cx.defer(move |cx| {
+                    let _ = activation_window.update(cx, |_root, window, cx| {
+                        let Some(overlay) = overlay.upgrade() else {
+                            return;
+                        };
+                        overlay.update(cx, |overlay, cx| {
+                            overlay.destination_command_bar.close(cx);
+                            let selection = OVERLAY_RETARGET_CALLBACK
+                                .lock()
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    "Dictation destination selector is unavailable".to_string()
+                                })
+                                .and_then(|callback| callback(target, cx));
+                            match selection {
+                                Ok(selection) => {
+                                    crate::dictation::retain_frozen_selection_for_delivery(selection);
+                                    overlay.invoke_recovery_action(
+                                        crate::dictation::DictationRecoveryAction::ChooseDestination,
+                                        cx,
+                                    );
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        category = "DICTATION",
+                                        ?target,
+                                        error_fingerprint = %crate::dictation::redacted_transcript_fingerprint(&error),
+                                        "Dictation recovery destination refused"
+                                    );
+                                }
+                            }
+                            overlay.focus_handle.focus(window, cx);
+                        });
+                    });
+                });
+            }));
+        });
     }
 
     fn wire_destination_actions_activation(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -1379,7 +1639,6 @@ impl DictationOverlay {
         crate::dictation::close_dictation_microphone_popup_window_for_owner_loss(cx);
         *OVERLAY_ABORT_CALLBACK.lock() = None;
         *OVERLAY_SUBMIT_CALLBACK.lock() = None;
-        *OVERLAY_RETARGET_CALLBACK.lock() = None;
         remove_global_escape_monitor();
         self.dematerialize_then_remove_overlay(window, cx);
         tracing::info!(category = "DICTATION", "Overlay closed from within entity");
@@ -2021,15 +2280,20 @@ impl DictationOverlay {
             }
         }
 
-        if command_k_requested
-            && matches!(
-                self.state.phase,
-                DictationSessionPhase::Recording | DictationSessionPhase::Confirming
-            )
-        {
-            self.open_destination_actions(window, cx);
-            cx.stop_propagation();
-            return;
+        if command_k_requested {
+            match self.state.phase {
+                DictationSessionPhase::Recording | DictationSessionPhase::Confirming => {
+                    self.open_destination_actions(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                DictationSessionPhase::Failed(_) => {
+                    self.open_recovery_actions(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         if dismiss_requested {
@@ -2104,6 +2368,21 @@ impl DictationOverlay {
                 cx.stop_propagation();
                 return;
             }
+        }
+
+        if crate::ui_foundation::is_key_enter(key)
+            && self
+                .state
+                .phase
+                .failed_capabilities()
+                .is_some_and(|capabilities| capabilities.retry_same_destination)
+        {
+            self.invoke_recovery_action(
+                crate::dictation::DictationRecoveryAction::RetrySameDestination,
+                cx,
+            );
+            cx.stop_propagation();
+            return;
         }
 
         if !dismiss_requested {
@@ -2289,8 +2568,8 @@ impl Render for DictationOverlay {
                     )
                     .into_any_element()
             }
-            DictationSessionPhase::Failed(msg) => {
-                let err_text: SharedString = format!("Error: {msg}").into();
+            DictationSessionPhase::Failed(failure) => {
+                let err_text: SharedString = failure.safe_message().into();
                 div()
                     .flex_1()
                     .flex()
@@ -2683,11 +2962,36 @@ pub(crate) fn dictation_native_footer_config(
             ));
             buttons
         }
+        DictationSessionPhase::Failed(failure) => {
+            let mut buttons = Vec::new();
+            if failure.capabilities.retry_same_destination {
+                buttons.push(FooterButtonConfig::new(
+                    FooterAction::Retry,
+                    ENTER_KEYCAP,
+                    "Retry Same Destination",
+                ));
+            }
+            if failure.capabilities.choose_destination
+                || failure.capabilities.copy_transcript
+                || failure.capabilities.open_dictation_history
+            {
+                buttons.push(FooterButtonConfig::new(
+                    FooterAction::Actions,
+                    DESTINATIONS_KEYCAP,
+                    "Recovery Actions",
+                ));
+            }
+            buttons.push(FooterButtonConfig::new(
+                FooterAction::Close,
+                ESC_KEYCAP,
+                ACTION_CLOSE_LABEL,
+            ));
+            buttons
+        }
         DictationSessionPhase::Idle => Vec::new(),
         DictationSessionPhase::Transcribing
         | DictationSessionPhase::Delivering
-        | DictationSessionPhase::Finished
-        | DictationSessionPhase::Failed(_) => {
+        | DictationSessionPhase::Finished => {
             vec![FooterButtonConfig::new(
                 FooterAction::Close,
                 ESC_KEYCAP,
@@ -2898,8 +3202,8 @@ pub(crate) fn render_dictation_overlay_state_preview(
             }
             band.into_any_element()
         }
-        DictationSessionPhase::Failed(msg) => {
-            let err_text: SharedString = format!("Error: {msg}").into();
+        DictationSessionPhase::Failed(failure) => {
+            let err_text: SharedString = failure.safe_message().into();
             div()
                 .flex_1()
                 .flex()
@@ -3574,6 +3878,36 @@ pub(crate) fn open_dictation_microphone_popup_fixture(cx: &mut App) -> anyhow::R
         .map_err(|error| anyhow::anyhow!("Failed to open Dictation microphone fixture: {error}"))
 }
 
+fn synthetic_dictation_failure_state() -> crate::dictation::DictationFailureState {
+    let failure = crate::ai::reliability::destination_failure(
+        false,
+        "synthetic Dictation recovery fixture failure",
+    );
+    crate::dictation::DictationFailureState {
+        operation_id: 0,
+        destination_id: "fixture-destination".to_string(),
+        destination_label: "Fixture Destination".to_string(),
+        identity_generation: 1,
+        transcript_id: "fixture-transcript".to_string(),
+        history_entry_id: "fixture-history".to_string(),
+        failure,
+        retry_safety: sk_protocol::ai_reliability::RetrySafety::Never,
+        preservation_receipt: crate::dictation::DictationTranscriptPreservationReceipt {
+            transcript_id: "fixture-transcript".to_string(),
+            transcript_len: 0,
+            transcript_fingerprint: crate::dictation::redacted_transcript_fingerprint(""),
+            history_entry_id: "fixture-history".to_string(),
+            history_saved: true,
+        },
+        capabilities: crate::dictation::DictationFailureRecoveryCapabilities {
+            retry_same_destination: false,
+            choose_destination: true,
+            copy_transcript: true,
+            open_dictation_history: true,
+        },
+    }
+}
+
 fn apply_test_dictation_overlay_override(
     mut state: DictationOverlayState,
 ) -> DictationOverlayState {
@@ -3590,7 +3924,7 @@ fn apply_test_dictation_overlay_override(
             "transcribing" => DictationSessionPhase::Transcribing,
             "delivering" => DictationSessionPhase::Delivering,
             "finished" => DictationSessionPhase::Finished,
-            "failed" => DictationSessionPhase::Failed("Synthetic fixture failure".to_string()),
+            "failed" => DictationSessionPhase::Failed(synthetic_dictation_failure_state()),
             _ => state.phase,
         };
     }

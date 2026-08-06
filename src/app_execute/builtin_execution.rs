@@ -5986,6 +5986,9 @@ impl ScriptListApp {
         trace_id: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        crate::dictation::clear_dictation_recovery_work();
+        crate::dictation::clear_dictation_return_origin();
+        let return_origin = self.capture_dictation_return_origin(cx).ok();
         let selection = match self.capture_dictation_target_selection(dictation_target, cx) {
             Ok(selection) => selection,
             Err(error) => {
@@ -6000,6 +6003,31 @@ impl ScriptListApp {
             }
         };
         let canonical_target = selection.target;
+        if let Some(origin) = return_origin {
+            crate::dictation::replace_dictation_return_origin(origin);
+        } else {
+            crate::dictation::replace_dictation_return_origin(
+                crate::dictation::DictationReturnOrigin {
+                    selection: selection.clone(),
+                    semantic_focus_id: match canonical_target {
+                        crate::dictation::DictationTarget::MainWindowFilter => "input:main-filter",
+                        crate::dictation::DictationTarget::MainWindowPrompt => "input:prompt",
+                        crate::dictation::DictationTarget::NotesEditor => "input:notes-editor",
+                        crate::dictation::DictationTarget::AiChatComposer
+                        | crate::dictation::DictationTarget::TabAiHarness => {
+                            "input:agent-chat-composer"
+                        }
+                        crate::dictation::DictationTarget::ExternalApp => "external-window",
+                        crate::dictation::DictationTarget::DayPageToday => "input:day-page-editor",
+                        crate::dictation::DictationTarget::QuickAiQuestion => {
+                            "input:quick-ai-composer"
+                        }
+                    }
+                    .to_string(),
+                    captured_generation: selection.selection_generation,
+                },
+            );
+        }
         match crate::dictation::toggle_dictation(canonical_target) {
             Ok(crate::dictation::DictationToggleOutcome::Started) => {
                 let _ = crate::dictation::set_dictation_session_selection(selection);
@@ -6028,7 +6056,14 @@ impl ScriptListApp {
                 );
                 let _ = crate::dictation::update_dictation_overlay(
                     crate::dictation::DictationOverlayState {
-                        phase: crate::dictation::DictationSessionPhase::Failed(error.to_string()),
+                        phase: crate::dictation::DictationSessionPhase::Failed(
+                            crate::dictation::dictation_pipeline_failure_state(
+                                0,
+                                canonical_target,
+                                &error.to_string(),
+                            ),
+                        ),
+                        target: canonical_target,
                         ..Default::default()
                     },
                     cx,
@@ -6303,6 +6338,29 @@ impl ScriptListApp {
         })
     }
 
+    fn capture_dictation_return_origin(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<crate::dictation::DictationReturnOrigin, String> {
+        let target = self.resolve_dictation_target();
+        let selection = self.capture_dictation_target_selection(target, cx)?;
+        let semantic_focus_id = match target {
+            crate::dictation::DictationTarget::MainWindowFilter => "input:main-filter",
+            crate::dictation::DictationTarget::MainWindowPrompt => "input:prompt",
+            crate::dictation::DictationTarget::NotesEditor => "input:notes-editor",
+            crate::dictation::DictationTarget::AiChatComposer
+            | crate::dictation::DictationTarget::TabAiHarness => "input:agent-chat-composer",
+            crate::dictation::DictationTarget::ExternalApp => "external-window",
+            crate::dictation::DictationTarget::DayPageToday => "input:day-page-editor",
+            crate::dictation::DictationTarget::QuickAiQuestion => "input:quick-ai-composer",
+        };
+        Ok(crate::dictation::DictationReturnOrigin {
+            captured_generation: selection.selection_generation,
+            selection,
+            semantic_focus_id: semantic_focus_id.to_string(),
+        })
+    }
+
     fn handle_dictation_started(
         &mut self,
         action: DictationBuiltinAction,
@@ -6352,11 +6410,11 @@ impl ScriptListApp {
     /// Shared by both `BuiltInFeature::Dictation` and
     /// `BuiltInFeature::DictationToAiHarness` so confirm/resume fixes
     /// only need one change.
-    fn start_dictation_overlay_session(&mut self, cx: &mut Context<Self>) {
-        let _ = crate::dictation::begin_overlay_session();
+    fn install_dictation_overlay_callbacks(&mut self, cx: &mut Context<Self>) {
         let app_entity = cx.entity().downgrade();
         let abort_app_entity = app_entity.clone();
         let retarget_app_entity = app_entity.clone();
+        let recovery_app_entity = app_entity.clone();
         crate::dictation::set_overlay_abort_callback(move |cx| {
             if let Some(app) = abort_app_entity.upgrade() {
                 app.update(cx, |this, cx| {
@@ -6386,6 +6444,19 @@ impl ScriptListApp {
                 this.capture_dictation_target_selection(target, cx)
             })
         });
+        crate::dictation::set_overlay_recovery_callback(move |action, cx| {
+            let app = recovery_app_entity
+                .upgrade()
+                .ok_or_else(|| "Dictation recovery host is no longer available".to_string())?;
+            app.update(cx, |this, cx| {
+                this.handle_dictation_recovery_action(action, cx)
+            })
+        });
+    }
+
+    fn start_dictation_overlay_session(&mut self, cx: &mut Context<Self>) {
+        let _ = crate::dictation::begin_overlay_session();
+        self.install_dictation_overlay_callbacks(cx);
         let _ = crate::dictation::open_dictation_overlay(cx);
         let _ = crate::dictation::update_dictation_overlay(
             crate::dictation::DictationOverlayState {
@@ -6414,7 +6485,7 @@ impl ScriptListApp {
     fn request_active_dictation_stop(
         &mut self,
         reason: crate::dictation::DictationStopReason,
-        _dictation_target: crate::dictation::DictationTarget,
+        dictation_target: crate::dictation::DictationTarget,
         transcribe: bool,
         cx: &mut Context<Self>,
     ) {
@@ -6536,7 +6607,11 @@ impl ScriptListApp {
                                 let _ = crate::dictation::update_dictation_overlay(
                                     crate::dictation::DictationOverlayState {
                                         phase: crate::dictation::DictationSessionPhase::Failed(
-                                            error_text,
+                                            crate::dictation::dictation_pipeline_failure_state(
+                                                request_id,
+                                                target,
+                                                &error_text,
+                                            ),
                                         ),
                                         target,
                                         ..Default::default()
@@ -6581,7 +6656,14 @@ impl ScriptListApp {
                 let _ = crate::dictation::open_dictation_overlay(cx);
                 let _ = crate::dictation::update_dictation_overlay(
                     crate::dictation::DictationOverlayState {
-                        phase: crate::dictation::DictationSessionPhase::Failed(error.to_string()),
+                        phase: crate::dictation::DictationSessionPhase::Failed(
+                            crate::dictation::dictation_pipeline_failure_state(
+                                0,
+                                dictation_target,
+                                &error.to_string(),
+                            ),
+                        ),
+                        target: dictation_target,
                         ..Default::default()
                     },
                     cx,
@@ -6634,6 +6716,7 @@ impl ScriptListApp {
                     target,
                     selection,
                     session_generation,
+                    None,
                     cx,
                 );
             });
@@ -6695,6 +6778,280 @@ impl ScriptListApp {
         .detach();
     }
 
+    fn focus_dictation_selection(
+        &mut self,
+        selection: &crate::dictation::DictationTargetSelection,
+        semantic_focus_id: &str,
+        validate_generation: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if validate_generation {
+            let Ok(current) = self.capture_dictation_target_selection(selection.target, cx) else {
+                return false;
+            };
+            if current.destination != selection.destination {
+                tracing::info!(
+                    category = "DICTATION",
+                    event = "dictation_stale_focus_callback_ignored",
+                    expected_generation = selection.selection_generation,
+                    observed_generation = current.selection_generation,
+                    semantic_focus_id,
+                );
+                return false;
+            }
+        }
+
+        match selection.target {
+            crate::dictation::DictationTarget::MainWindowFilter => {
+                script_kit_gpui::set_main_window_visible(true);
+                crate::platform::ensure_main_panel_configured(
+                    "builtin_execution::dictation_focus_main_filter",
+                );
+                crate::platform::show_main_window_without_activation();
+                self.pending_focus = Some(FocusTarget::MainFilter);
+                cx.notify();
+            }
+            crate::dictation::DictationTarget::MainWindowPrompt => {
+                script_kit_gpui::set_main_window_visible(true);
+                crate::platform::ensure_main_panel_configured(
+                    "builtin_execution::dictation_focus_prompt",
+                );
+                crate::platform::show_main_window_without_activation();
+                self.pending_focus = Some(match &self.current_view {
+                    AppView::SelectPrompt { .. } => FocusTarget::SelectPrompt,
+                    AppView::PathPrompt { .. } => FocusTarget::PathPrompt,
+                    AppView::EnvPrompt { .. } => FocusTarget::EnvPrompt,
+                    AppView::FormPrompt { .. } => FocusTarget::FormPrompt,
+                    AppView::TemplatePrompt { .. } => FocusTarget::TemplatePrompt,
+                    AppView::EditorPrompt { .. } | AppView::ScratchPadView { .. } => {
+                        FocusTarget::EditorPrompt
+                    }
+                    AppView::TermPrompt { .. } | AppView::QuickTerminalView { .. } => {
+                        FocusTarget::TermPrompt
+                    }
+                    AppView::ChatPrompt { .. } => FocusTarget::ChatPrompt,
+                    _ => FocusTarget::AppRoot,
+                });
+                cx.notify();
+            }
+            crate::dictation::DictationTarget::NotesEditor => {
+                let _ = crate::notes::open_notes_window(cx);
+            }
+            crate::dictation::DictationTarget::AiChatComposer
+            | crate::dictation::DictationTarget::TabAiHarness
+            | crate::dictation::DictationTarget::QuickAiQuestion => {
+                script_kit_gpui::set_main_window_visible(true);
+                crate::platform::ensure_main_panel_configured(
+                    "builtin_execution::dictation_focus_agent_chat",
+                );
+                crate::platform::show_main_window_without_activation();
+                self.pending_focus = Some(FocusTarget::AgentChat);
+                cx.notify();
+            }
+            crate::dictation::DictationTarget::DayPageToday => {
+                if matches!(self.current_view, AppView::DayPage { .. }) {
+                    script_kit_gpui::set_main_window_visible(true);
+                    crate::platform::ensure_main_panel_configured(
+                        "builtin_execution::dictation_focus_day_page",
+                    );
+                    crate::platform::show_main_window_without_activation();
+                    self.pending_focus = Some(FocusTarget::EditorPrompt);
+                    cx.notify();
+                }
+            }
+            crate::dictation::DictationTarget::ExternalApp => {
+                let Some(window_id) = selection.destination.external_window_id() else {
+                    return false;
+                };
+                cx.spawn(async move |_this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { crate::window_control::focus_window(window_id) })
+                        .await;
+                    if let Err(error) = result {
+                        tracing::info!(
+                            category = "DICTATION",
+                            event = "dictation_external_focus_restore_refused",
+                            error_fingerprint = %crate::dictation::redacted_transcript_fingerprint(&error.to_string()),
+                        );
+                    }
+                })
+                .detach();
+            }
+        }
+        true
+    }
+
+    pub(crate) fn restore_dictation_return_origin(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(origin) = crate::dictation::dictation_return_origin() else {
+            return false;
+        };
+        if origin.captured_generation != origin.selection.selection_generation {
+            return false;
+        }
+        let restored = self.focus_dictation_selection(
+            &origin.selection,
+            &origin.semantic_focus_id,
+            true,
+            cx,
+        );
+        if restored {
+            crate::dictation::clear_dictation_return_origin();
+        }
+        restored
+    }
+
+    fn focus_after_dictation_delivery(
+        &mut self,
+        selection: &crate::dictation::DictationTargetSelection,
+        cx: &mut Context<Self>,
+    ) {
+        let semantic_focus_id = match selection.target {
+            crate::dictation::DictationTarget::MainWindowFilter => "input:main-filter",
+            crate::dictation::DictationTarget::MainWindowPrompt => "input:prompt",
+            crate::dictation::DictationTarget::NotesEditor => "input:notes-editor",
+            crate::dictation::DictationTarget::AiChatComposer
+            | crate::dictation::DictationTarget::TabAiHarness => "input:agent-chat-composer",
+            crate::dictation::DictationTarget::ExternalApp => "external-window",
+            crate::dictation::DictationTarget::DayPageToday => "input:day-page-editor",
+            crate::dictation::DictationTarget::QuickAiQuestion => "input:quick-ai-composer",
+        };
+        let _ = self.focus_dictation_selection(selection, semantic_focus_id, false, cx);
+        crate::dictation::clear_dictation_return_origin();
+    }
+
+    fn present_dictation_delivery_failure(
+        &mut self,
+        request: crate::dictation::DictationDeliveryRequest,
+        audio_duration: std::time::Duration,
+        target: crate::dictation::DictationTarget,
+        failure: crate::ai::reliability::AppFailureRecord,
+        reason: crate::dictation::DictationDeliveryFailureReason,
+        retry_safety: sk_protocol::ai_reliability::RetrySafety,
+        cx: &mut Context<Self>,
+    ) {
+        let mut request = request;
+        if request.history_entry_id.is_empty() {
+            let history_entry = crate::dictation::record_dictation_history(
+                request.transcript.text(),
+                audio_duration,
+                target,
+            );
+            request.history_entry_id = history_entry.id;
+        }
+        let work = crate::dictation::DictationRecoveryWork {
+            request,
+            audio_duration,
+            target,
+            reason,
+        };
+        let failure_state = crate::dictation::preserve_dictation_recovery_work(
+            work,
+            failure,
+            retry_safety,
+            crate::dictation::overlay_recovery_callback_installed(),
+        );
+        let transcript = crate::dictation::dictation_recovery_work()
+            .map(|work| work.request.transcript.text().to_string())
+            .unwrap_or_default();
+        let _ = crate::dictation::open_dictation_overlay(cx);
+        let _ = crate::dictation::update_dictation_overlay(
+            crate::dictation::DictationOverlayState {
+                phase: crate::dictation::DictationSessionPhase::Failed(failure_state),
+                elapsed: audio_duration,
+                transcript: transcript.into(),
+                target,
+                ..Default::default()
+            },
+            cx,
+        );
+    }
+
+    fn handle_dictation_recovery_action(
+        &mut self,
+        action: crate::dictation::DictationRecoveryAction,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let work = crate::dictation::dictation_recovery_work()
+            .ok_or_else(|| "The saved Dictation transcript is no longer available".to_string())?;
+        match action {
+            crate::dictation::DictationRecoveryAction::CopyTranscript => {
+                arboard::Clipboard::new()
+                    .and_then(|mut clipboard| {
+                        clipboard.set_text(work.request.transcript.text().to_string())
+                    })
+                    .map_err(|error| format!("Could not copy the saved transcript: {error}"))?;
+                self.show_hud("Transcript copied".to_string(), Some(HUD_MEDIUM_MS), cx);
+                Ok(())
+            }
+            crate::dictation::DictationRecoveryAction::OpenDictationHistory => {
+                if work.request.history_entry_id.is_empty() {
+                    return Err("This transcript does not have a Dictation History entry".to_string());
+                }
+                let _ = crate::dictation::close_dictation_overlay(cx);
+                self.open_builtin_filterable_view(
+                    AppView::DictationHistoryView {
+                        filter: String::new(),
+                        selected_index: 0,
+                    },
+                    "Search dictation history...",
+                    true,
+                    cx,
+                );
+                Ok(())
+            }
+            crate::dictation::DictationRecoveryAction::RetrySameDestination
+            | crate::dictation::DictationRecoveryAction::ChooseDestination => {
+                let selection = if action
+                    == crate::dictation::DictationRecoveryAction::ChooseDestination
+                {
+                    crate::dictation::get_dictation_target_selection().ok_or_else(|| {
+                        "Choose a destination before retrying Dictation".to_string()
+                    })?
+                } else {
+                    work.request.selection.clone()
+                };
+                if action == crate::dictation::DictationRecoveryAction::RetrySameDestination
+                    && matches!(
+                        work.reason,
+                        crate::dictation::DictationDeliveryFailureReason::DestinationStale
+                            | crate::dictation::DictationDeliveryFailureReason::DestinationUnavailable
+                            | crate::dictation::DictationDeliveryFailureReason::MutationOutcomeUnknown
+                    )
+                {
+                    return Err("Retrying the same destination is not safe".to_string());
+                }
+                let target = selection.target;
+                let request = crate::dictation::DictationDeliveryRequest {
+                    delivery_id: crate::dictation::next_dictation_delivery_id(),
+                    session_generation: work.request.session_generation,
+                    selection: selection.clone(),
+                    transcript: work.request.transcript.clone(),
+                    history_entry_id: work.request.history_entry_id.clone(),
+                    attempt: work.request.attempt.saturating_add(1),
+                };
+                crate::dictation::replace_dictation_recovery_work(
+                    crate::dictation::DictationRecoveryWork {
+                        request: request.clone(),
+                        audio_duration: work.audio_duration,
+                        target,
+                        reason: work.reason,
+                    },
+                );
+                self.handle_dictation_transcript(
+                    Ok(Some(request.transcript.text().to_string())),
+                    work.audio_duration,
+                    target,
+                    Some(selection),
+                    request.session_generation,
+                    Some(request),
+                    cx,
+                );
+                Ok(())
+            }
+        }
+    }
+
     fn complete_internal_dictation_delivery(
         &mut self,
         request: crate::dictation::DictationDeliveryRequest,
@@ -6704,6 +7061,7 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) {
         let destination = target.destination();
+        crate::dictation::clear_dictation_recovery_work();
         let mutation_receipt = crate::dictation::DictationMutationReceipt {
             delivery_id: request.delivery_id,
             destination_kind: request.selection.destination.kind(),
@@ -6758,6 +7116,7 @@ impl ScriptListApp {
             cx,
         );
         self.schedule_dictation_overlay_close(cx, Self::DICTATION_FINISHED_LINGER);
+        self.focus_after_dictation_delivery(&request.selection, cx);
         if matches!(target, crate::dictation::DictationTarget::MainWindowFilter)
             && !script_kit_gpui::is_main_window_visible()
         {
@@ -6784,34 +7143,41 @@ impl ScriptListApp {
         target: crate::dictation::DictationTarget,
         frozen_selection: Option<crate::dictation::DictationTargetSelection>,
         session_generation: u64,
+        preserved_request: Option<crate::dictation::DictationDeliveryRequest>,
         cx: &mut Context<Self>,
     ) {
         match result {
             Ok(Some(transcript)) => {
-                let history_entry_id = if crate::config::load_user_preferences()
-                    .dictation
-                    .save_history_enabled()
-                {
-                    let history_entry = crate::dictation::record_dictation_history(
-                        &transcript,
-                        audio_duration,
-                        target,
-                    );
-                    tracing::info!(
-                        category = "DICTATION",
-                        event = "dictation_history_recorded_before_delivery",
-                        entry_id = %history_entry.id,
-                        target = %history_entry.target,
-                    );
-                    history_entry.id
-                } else {
-                    tracing::info!(
-                        category = "DICTATION",
-                        event = "dictation_history_skipped_by_preference",
-                        "dictation.saveHistory is disabled; transcript not persisted"
-                    );
-                    String::new()
-                };
+                let recovery_request = preserved_request;
+                let history_entry_id = recovery_request
+                    .as_ref()
+                    .map(|request| request.history_entry_id.clone())
+                    .unwrap_or_else(|| {
+                        if crate::config::load_user_preferences()
+                            .dictation
+                            .save_history_enabled()
+                        {
+                            let history_entry = crate::dictation::record_dictation_history(
+                                &transcript,
+                                audio_duration,
+                                target,
+                            );
+                            tracing::info!(
+                                category = "DICTATION",
+                                event = "dictation_history_recorded_before_delivery",
+                                entry_id = %history_entry.id,
+                                target = %history_entry.target,
+                            );
+                            history_entry.id
+                        } else {
+                            tracing::info!(
+                                category = "DICTATION",
+                                event = "dictation_history_skipped_by_preference",
+                                "dictation.saveHistory is disabled; transcript not persisted"
+                            );
+                            String::new()
+                        }
+                    });
                 // Show the recognized text while it is being delivered so the
                 // user gets confirmation of what was heard.
                 let _ = crate::dictation::update_dictation_overlay(
@@ -6824,44 +7190,69 @@ impl ScriptListApp {
                     },
                     cx,
                 );
-                let Some(selection) = frozen_selection else {
-                    tracing::error!(
-                        category = "DICTATION",
-                        ?target,
-                        "Dictation delivery refused because no frozen destination exists"
-                    );
-                    self.show_error_toast(
-                        "Dictation destination changed — transcript saved in History".to_string(),
-                        cx,
-                    );
-                    return;
+                let (selection, selection_refusal) = match frozen_selection {
+                    Some(selection) if selection.is_compatible_with(target) => (selection, None),
+                    Some(selection) => {
+                        tracing::error!(
+                            category = "DICTATION",
+                            ?target,
+                            frozen_target = ?selection.target,
+                            "Dictation delivery refused because target and frozen identity disagree"
+                        );
+                        let unavailable = crate::dictation::DictationTargetSelection {
+                            target,
+                            destination: crate::dictation::FrozenDictationDestination::Unavailable {
+                                target_id: target.sticky_label().to_string(),
+                                generation: selection.selection_generation,
+                            },
+                            display_label: target.overlay_label().to_string(),
+                            icon_identity: Some(target.descriptor().icon.to_string()),
+                            selection_generation: selection.selection_generation,
+                        };
+                        (
+                            unavailable,
+                            Some("Frozen Dictation target and destination disagree".to_string()),
+                        )
+                    }
+                    None => {
+                        tracing::error!(
+                            category = "DICTATION",
+                            ?target,
+                            "Dictation delivery refused because no frozen destination exists"
+                        );
+                        let generation = crate::dictation::dictation_target_generation();
+                        let unavailable = crate::dictation::DictationTargetSelection {
+                            target,
+                            destination: crate::dictation::FrozenDictationDestination::Unavailable {
+                                target_id: target.sticky_label().to_string(),
+                                generation,
+                            },
+                            display_label: target.overlay_label().to_string(),
+                            icon_identity: Some(target.descriptor().icon.to_string()),
+                            selection_generation: generation,
+                        };
+                        (
+                            unavailable,
+                            Some("Frozen Dictation destination is missing".to_string()),
+                        )
+                    }
                 };
-                if !selection.is_compatible_with(target) {
-                    tracing::error!(
-                        category = "DICTATION",
-                        ?target,
-                        frozen_target = ?selection.target,
-                        "Dictation delivery refused because target and frozen identity disagree"
+                let request = recovery_request.unwrap_or_else(|| {
+                    let delivery_id = crate::dictation::next_dictation_delivery_id();
+                    let immutable_transcript = crate::dictation::ImmutableDictationTranscript::new(
+                        format!("dictation-transcript-{session_generation}-{delivery_id}"),
+                        transcript.clone(),
                     );
-                    self.show_error_toast(
-                        "Dictation destination changed — transcript saved in History".to_string(),
-                        cx,
-                    );
-                    return;
-                }
-                let delivery_id = crate::dictation::next_dictation_delivery_id();
-                let immutable_transcript = crate::dictation::ImmutableDictationTranscript::new(
-                    format!("dictation-transcript-{session_generation}-{delivery_id}"),
-                    transcript.clone(),
-                );
-                let request = crate::dictation::DictationDeliveryRequest {
-                    delivery_id,
-                    session_generation,
-                    selection: selection.clone(),
-                    transcript: immutable_transcript,
-                    history_entry_id: history_entry_id.clone(),
-                    attempt: 1,
-                };
+                    crate::dictation::DictationDeliveryRequest {
+                        delivery_id,
+                        session_generation,
+                        selection: selection.clone(),
+                        transcript: immutable_transcript,
+                        history_entry_id: history_entry_id.clone(),
+                        attempt: 1,
+                    }
+                });
+                let delivery_id = request.delivery_id;
 
                 if !crate::dictation::claim_dictation_delivery(delivery_id) {
                     tracing::warn!(
@@ -6869,6 +7260,19 @@ impl ScriptListApp {
                         delivery_id,
                         ?target,
                         "Duplicate internal Dictation delivery refused before validation or mutation"
+                    );
+                    return;
+                }
+                if let Some(detail) = selection_refusal {
+                    let failure = crate::ai::reliability::destination_failure(true, &detail);
+                    self.present_dictation_delivery_failure(
+                        request,
+                        audio_duration,
+                        target,
+                        failure,
+                        crate::dictation::DictationDeliveryFailureReason::DestinationStale,
+                        sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
+                        cx,
                     );
                     return;
                 }
@@ -7096,7 +7500,15 @@ impl ScriptListApp {
                                 outcome = ?outcome,
                                 "Frozen Dictation destination refused delivery"
                             );
-                            self.show_error_toast(failure.primary_message().to_string(), cx);
+                            self.present_dictation_delivery_failure(
+                                request,
+                                audio_duration,
+                                target,
+                                failure,
+                                crate::dictation::DictationDeliveryFailureReason::DestinationStale,
+                                sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
+                                cx,
+                            );
                             return;
                         }
                     };
@@ -7133,8 +7545,13 @@ impl ScriptListApp {
                                         error_fingerprint = %crate::dictation::redacted_transcript_fingerprint(&detail),
                                         "Agent Chat Dictation delivery was refused"
                                     );
-                                    this.show_error_toast(
-                                        failure.primary_message().to_string(),
+                                    this.present_dictation_delivery_failure(
+                                        request,
+                                        audio_duration,
+                                        target,
+                                        failure,
+                                        crate::dictation::DictationDeliveryFailureReason::DestinationStale,
+                                        sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
                                         cx,
                                     );
                                 }
@@ -7151,8 +7568,13 @@ impl ScriptListApp {
                                         error_fingerprint = %crate::dictation::redacted_transcript_fingerprint(detail),
                                         "Agent Chat Dictation delivery outcome is unavailable"
                                     );
-                                    this.show_error_toast(
-                                        failure.primary_message().to_string(),
+                                    this.present_dictation_delivery_failure(
+                                        request,
+                                        audio_duration,
+                                        target,
+                                        failure,
+                                        crate::dictation::DictationDeliveryFailureReason::MutationOutcomeUnknown,
+                                        sk_protocol::ai_reliability::RetrySafety::Never,
                                         cx,
                                     );
                                 }
@@ -7190,7 +7612,15 @@ impl ScriptListApp {
                             error_fingerprint = %crate::dictation::redacted_transcript_fingerprint(&error),
                             "Frozen external Dictation destination refused delivery"
                         );
-                        self.show_error_toast(failure.primary_message().to_string(), cx);
+                        self.present_dictation_delivery_failure(
+                            request,
+                            audio_duration,
+                            target,
+                            failure,
+                            crate::dictation::DictationDeliveryFailureReason::DestinationStale,
+                            sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
+                            cx,
+                        );
                         return;
                     }
                     let crate::dictation::FrozenDictationDestination::ExternalApp {
@@ -7250,10 +7680,17 @@ impl ScriptListApp {
                                     error = %error_text,
                                     "Failed to yield focus before dictation paste"
                                 );
-                                this.show_error_toast(
-                                    format!(
-                                        "Dictation paste failed before paste step: {error_text}"
-                                    ),
+                                let failure = crate::ai::reliability::destination_failure(
+                                    true,
+                                    &error_text,
+                                );
+                                this.present_dictation_delivery_failure(
+                                    request.clone(),
+                                    audio_duration,
+                                    target,
+                                    failure,
+                                    crate::dictation::DictationDeliveryFailureReason::DestinationUnavailable,
+                                    sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
                                     cx,
                                 );
                                 this.schedule_dictation_transcriber_cleanup(
@@ -7290,7 +7727,15 @@ impl ScriptListApp {
                                     error_fingerprint = %crate::dictation::redacted_transcript_fingerprint(&detail),
                                     "Frozen external window could not be focused"
                                 );
-                                this.show_error_toast(failure.primary_message().to_string(), cx);
+                                this.present_dictation_delivery_failure(
+                                    request.clone(),
+                                    audio_duration,
+                                    target,
+                                    failure,
+                                    crate::dictation::DictationDeliveryFailureReason::DestinationStale,
+                                    sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
+                                    cx,
+                                );
                             });
                             return;
                         }
@@ -7321,6 +7766,8 @@ impl ScriptListApp {
                         if this.update(cx, |this, cx| {
                             match paste_result {
                                 Ok(()) => {
+                                    crate::dictation::clear_dictation_recovery_work();
+                                    crate::dictation::clear_dictation_return_origin();
                                     let _ = crate::dictation::record_delivery_receipt(
                                         delivery_id,
                                         session_generation,
@@ -7359,20 +7806,15 @@ impl ScriptListApp {
                                         outcome = ?outcome,
                                         "Failed to paste dictation transcript"
                                     );
-                                    let copied = arboard::Clipboard::new()
-                                        .and_then(|mut clipboard| {
-                                            clipboard.set_text(transcript.clone())
-                                        })
-                                        .is_ok();
-                                    let message = if copied {
-                                        format!(
-                                            "{} Transcript copied to the clipboard.",
-                                            failure.primary_message()
-                                        )
-                                    } else {
-                                        failure.primary_message().to_string()
-                                    };
-                                    this.show_error_toast(message, cx);
+                                    this.present_dictation_delivery_failure(
+                                        request.clone(),
+                                        audio_duration,
+                                        target,
+                                        failure,
+                                        crate::dictation::DictationDeliveryFailureReason::MutationOutcomeUnknown,
+                                        sk_protocol::ai_reliability::RetrySafety::Never,
+                                        cx,
+                                    );
                                 }
                             }
                             this.schedule_dictation_transcriber_cleanup(
@@ -7432,17 +7874,19 @@ impl ScriptListApp {
                         std::time::Duration::from_secs(300),
                     );
                     return;
-                } else {
-                    self.show_error_toast(
-                        format!("Dictation transcription failed: {error_text}"),
-                        cx,
-                    );
                 }
 
                 let _ = crate::dictation::update_dictation_overlay(
                     crate::dictation::DictationOverlayState {
-                        phase: crate::dictation::DictationSessionPhase::Failed(error_text),
+                        phase: crate::dictation::DictationSessionPhase::Failed(
+                            crate::dictation::dictation_pipeline_failure_state(
+                                session_generation,
+                                target,
+                                &error_text,
+                            ),
+                        ),
                         elapsed: audio_duration,
+                        target,
                         ..Default::default()
                     },
                     cx,
@@ -7554,10 +7998,34 @@ impl ScriptListApp {
                 .map_err(|error| format!("dictation destination unavailable: {error}"))?
         };
         let target = frozen_selection.target;
+        if crate::dictation::dictation_return_origin().is_none() {
+            crate::dictation::replace_dictation_return_origin(
+                crate::dictation::DictationReturnOrigin {
+                    captured_generation: frozen_selection.selection_generation,
+                    semantic_focus_id: match target {
+                        crate::dictation::DictationTarget::MainWindowFilter => "input:main-filter",
+                        crate::dictation::DictationTarget::MainWindowPrompt => "input:prompt",
+                        crate::dictation::DictationTarget::NotesEditor => "input:notes-editor",
+                        crate::dictation::DictationTarget::AiChatComposer
+                        | crate::dictation::DictationTarget::TabAiHarness => {
+                            "input:agent-chat-composer"
+                        }
+                        crate::dictation::DictationTarget::ExternalApp => "external-window",
+                        crate::dictation::DictationTarget::DayPageToday => "input:day-page-editor",
+                        crate::dictation::DictationTarget::QuickAiQuestion => {
+                            "input:quick-ai-composer"
+                        }
+                    }
+                    .to_string(),
+                    selection: frozen_selection.clone(),
+                },
+            );
+        }
         if freeze_only {
             crate::dictation::retain_frozen_selection_for_delivery(frozen_selection);
             return Ok(target);
         }
+        self.install_dictation_overlay_callbacks(cx);
         let result = Ok(resolution.transcript);
         self.handle_dictation_transcript(
             result,
@@ -7565,6 +8033,7 @@ impl ScriptListApp {
             target,
             Some(frozen_selection),
             0,
+            None,
             cx,
         );
         Ok(target)

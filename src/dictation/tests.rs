@@ -2095,8 +2095,13 @@ fn delivery_focus_yield_failure_surfaces_and_returns_before_paste() {
         "frontmost-app path must wrap update failures with a dictation-specific context"
     );
     assert!(
-        frontmost_src.contains("Dictation paste failed before paste step"),
-        "frontmost-app path must show a pre-paste failure toast"
+        frontmost_src.contains("present_dictation_delivery_failure")
+            && frontmost_src.contains("DestinationUnavailable"),
+        "frontmost-app path must preserve the transcript in typed recovery before returning"
+    );
+    assert!(
+        !frontmost_src.contains("Dictation paste failed before paste step"),
+        "pre-paste failures must not interpolate raw platform errors into user-visible copy"
     );
 
     let err_pos = frontmost_src
@@ -2756,13 +2761,20 @@ fn overlay_state_transitions_recording_to_transcribing_to_failed() {
     assert_eq!(transcribing.phase, DictationSessionPhase::Transcribing);
 
     let failed = DictationOverlayState {
-        phase: DictationSessionPhase::Failed("model load error".to_string()),
+        phase: DictationSessionPhase::Failed(super::runtime::dictation_pipeline_failure_state(
+            1,
+            super::types::DictationTarget::ExternalApp,
+            "model load error",
+        )),
         elapsed: recording.elapsed,
         ..Default::default()
     };
-    assert!(
-        matches!(failed.phase, DictationSessionPhase::Failed(ref msg) if msg.contains("model load"))
-    );
+    assert!(matches!(
+        failed.phase,
+        DictationSessionPhase::Failed(ref state)
+            if state.failure.failure.diagnostic.is_some()
+                && state.failure.primary_message() != "model load error"
+    ));
 }
 
 /// Prove that overlay state for a silent/empty recording closes without
@@ -4394,7 +4406,11 @@ fn overlay_dismissal_hides_processing_and_closes_terminal_phases() {
     }
     for phase in [
         DictationSessionPhase::Finished,
-        DictationSessionPhase::Failed("boom".to_string()),
+        DictationSessionPhase::Failed(super::runtime::dictation_pipeline_failure_state(
+            1,
+            super::types::DictationTarget::ExternalApp,
+            "boom",
+        )),
     ] {
         assert_eq!(
             overlay_escape_action(&phase),
@@ -4838,8 +4854,9 @@ fn internal_delivery_failure_refuses_without_frontmost_fallback() {
 
     assert!(
         handler_src.contains("Frozen Dictation destination refused delivery")
-            && handler_src.contains("transcript saved in History"),
-        "an unavailable frozen internal destination must preserve the transcript and refuse"
+            && handler_src.contains("present_dictation_delivery_failure")
+            && handler_src.contains("DestinationStale"),
+        "an unavailable frozen internal destination must preserve the typed transcript/History identity and refuse"
     );
     assert!(
         !handler_src.contains("falling back to frontmost app"),
@@ -5030,7 +5047,11 @@ fn overlay_destination_chip_click_behavior_matches_armed_option_matrix() {
         DictationSessionPhase::Transcribing,
         DictationSessionPhase::Delivering,
         DictationSessionPhase::Finished,
-        DictationSessionPhase::Failed("boom".to_string()),
+        DictationSessionPhase::Failed(super::runtime::dictation_pipeline_failure_state(
+            1,
+            super::types::DictationTarget::ExternalApp,
+            "boom",
+        )),
     ];
     for phase in non_interactive {
         for armed in [false, true] {
@@ -5830,6 +5851,156 @@ fn delivery_ids_are_claimed_before_mutation_at_most_once() {
         delivery_id
     ));
     assert!(!crate::dictation::claim_dictation_delivery(delivery_id));
+}
+
+static DICTATION_RECOVERY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn recovery_test_request(delivery_id: u64) -> crate::dictation::DictationDeliveryRequest {
+    use crate::dictation::{
+        DictationTarget, DictationTargetSelection, FrozenDictationDestination,
+        ImmutableDictationTranscript,
+    };
+    crate::dictation::DictationDeliveryRequest {
+        delivery_id,
+        session_generation: 7,
+        selection: DictationTargetSelection {
+            target: DictationTarget::MainWindowPrompt,
+            destination: FrozenDictationDestination::MainWindowPrompt {
+                prompt_id: "prompt-7".to_string(),
+                prompt_generation: 11,
+                input_generation: 13,
+            },
+            display_label: "Prompt".to_string(),
+            icon_identity: Some("text-cursor-input".to_string()),
+            selection_generation: 17,
+        },
+        transcript: ImmutableDictationTranscript::new(
+            "transcript-stable",
+            "PRIVATE RECOVERY TRANSCRIPT".to_string(),
+        ),
+        history_entry_id: "history-stable".to_string(),
+        attempt: 1,
+    }
+}
+
+#[test]
+fn stale_dictation_failure_preserves_identity_without_unsafe_retry() {
+    let _guard = DICTATION_RECOVERY_TEST_LOCK
+        .lock()
+        .expect("recovery test lock");
+    use crate::dictation::{
+        DictationDeliveryFailureReason, DictationRecoveryAction, DictationRecoveryWork,
+    };
+    use sk_protocol::ai_reliability::RetrySafety;
+
+    crate::dictation::clear_dictation_recovery_work();
+    let request = recovery_test_request(71);
+    let state = crate::dictation::preserve_dictation_recovery_work(
+        DictationRecoveryWork {
+            request: request.clone(),
+            audio_duration: Duration::from_secs(2),
+            target: request.selection.target,
+            reason: DictationDeliveryFailureReason::DestinationStale,
+        },
+        crate::ai::reliability::destination_failure(true, "RAW FAILURE CANARY"),
+        RetrySafety::ExplicitUserConfirmation,
+        true,
+    );
+
+    assert_eq!(state.transcript_id, "transcript-stable");
+    assert_eq!(state.history_entry_id, "history-stable");
+    assert_eq!(state.identity_generation, 17);
+    assert!(!state.capabilities.retry_same_destination);
+    assert!(state.capabilities.choose_destination);
+    assert!(state.capabilities.open_dictation_history);
+    assert!(!state.safe_message().contains("RAW FAILURE CANARY"));
+    assert!(!state
+        .capabilities
+        .actions()
+        .any(|action| action == DictationRecoveryAction::RetrySameDestination));
+    let preserved = crate::dictation::dictation_recovery_work().expect("preserved work");
+    assert_eq!(preserved.request.transcript.id(), "transcript-stable");
+    assert_eq!(preserved.request.history_entry_id, "history-stable");
+    crate::dictation::clear_dictation_recovery_work();
+}
+
+#[test]
+fn retry_capability_requires_safe_failure_and_installed_callback() {
+    let _guard = DICTATION_RECOVERY_TEST_LOCK
+        .lock()
+        .expect("recovery test lock");
+    use crate::dictation::{DictationDeliveryFailureReason, DictationRecoveryWork};
+    use sk_protocol::ai_reliability::RetrySafety;
+
+    let request = recovery_test_request(72);
+    let safe = crate::dictation::preserve_dictation_recovery_work(
+        DictationRecoveryWork {
+            request: request.clone(),
+            audio_duration: Duration::ZERO,
+            target: request.selection.target,
+            reason: DictationDeliveryFailureReason::MutationFailed,
+        },
+        crate::ai::reliability::destination_failure(false, "safe pre-mutation failure"),
+        RetrySafety::ExplicitUserConfirmation,
+        true,
+    );
+    assert!(safe.capabilities.retry_same_destination);
+
+    let missing_callback = crate::dictation::preserve_dictation_recovery_work(
+        DictationRecoveryWork {
+            request: request.clone(),
+            audio_duration: Duration::ZERO,
+            target: request.selection.target,
+            reason: DictationDeliveryFailureReason::MutationFailed,
+        },
+        crate::ai::reliability::destination_failure(false, "callback unavailable"),
+        RetrySafety::ExplicitUserConfirmation,
+        false,
+    );
+    assert_eq!(
+        missing_callback.capabilities,
+        crate::dictation::DictationFailureRecoveryCapabilities::default()
+    );
+
+    let unsafe_outcome = crate::dictation::preserve_dictation_recovery_work(
+        DictationRecoveryWork {
+            request,
+            audio_duration: Duration::ZERO,
+            target: crate::dictation::DictationTarget::MainWindowPrompt,
+            reason: DictationDeliveryFailureReason::MutationOutcomeUnknown,
+        },
+        crate::ai::reliability::destination_failure(false, "mutation result unknown"),
+        RetrySafety::Never,
+        true,
+    );
+    assert!(!unsafe_outcome.capabilities.retry_same_destination);
+    crate::dictation::clear_dictation_recovery_work();
+}
+
+#[test]
+fn dictation_return_origin_is_independent_from_retargeting() {
+    let _guard = DICTATION_RECOVERY_TEST_LOCK
+        .lock()
+        .expect("recovery test lock");
+    let original = recovery_test_request(73).selection;
+    let origin = crate::dictation::DictationReturnOrigin {
+        captured_generation: original.selection_generation,
+        selection: original.clone(),
+        semantic_focus_id: "input:prompt".to_string(),
+    };
+    crate::dictation::replace_dictation_return_origin(origin.clone());
+
+    let mut retargeted = original;
+    retargeted.target = crate::dictation::DictationTarget::DayPageToday;
+    retargeted.destination = crate::dictation::FrozenDictationDestination::DayPage {
+        date: chrono::NaiveDate::from_ymd_opt(2026, 8, 6).expect("valid date"),
+        substrate_fingerprint: "substrate".to_string(),
+        entity_generation: 4,
+    };
+    crate::dictation::retain_frozen_selection_for_delivery(retargeted);
+
+    assert_eq!(crate::dictation::dictation_return_origin(), Some(origin));
+    crate::dictation::clear_dictation_return_origin();
 }
 
 #[test]

@@ -11989,8 +11989,12 @@ impl AgentChatView {
             .filter(|recovery| recovery.enabled)
             .map(|recovery| {
                 let icon = match recovery.action.kind() {
-                    RecoveryActionKind::CopyDetails => IconName::Copy,
-                    RecoveryActionKind::Retry | RecoveryActionKind::CheckAgain => IconName::Refresh,
+                    RecoveryActionKind::CopyDetails | RecoveryActionKind::CopyTranscript => {
+                        IconName::Copy
+                    }
+                    RecoveryActionKind::Retry
+                    | RecoveryActionKind::RetrySameDestination
+                    | RecoveryActionKind::CheckAgain => IconName::Refresh,
                     RecoveryActionKind::ChooseCompatibleModel
                     | RecoveryActionKind::ChooseProvider
                     | RecoveryActionKind::ChooseProfile
@@ -11998,13 +12002,15 @@ impl AgentChatView {
                     | RecoveryActionKind::UpdateClient
                     | RecoveryActionKind::SignIn
                     | RecoveryActionKind::SwitchAccount
-                    | RecoveryActionKind::RepairComponent => IconName::Settings,
+                    | RecoveryActionKind::RepairComponent
+                    | RecoveryActionKind::ChooseDestination => IconName::Settings,
                     RecoveryActionKind::UseCurrentResults
                     | RecoveryActionKind::ContinueInAgentChat
                     | RecoveryActionKind::Reattach
                     | RecoveryActionKind::RethreadFlow
                     | RecoveryActionKind::RestartFlowRun
-                    | RecoveryActionKind::TrimContext => IconName::ArrowRight,
+                    | RecoveryActionKind::TrimContext
+                    | RecoveryActionKind::OpenDictationHistory => IconName::ArrowRight,
                 };
                 Action::new(
                     recovery.semantic_id,
@@ -12204,6 +12210,20 @@ impl AgentChatView {
                 }
                 AiCommand::InstallOrRepairComponent(_) => {
                     self.open_profile_trigger_picker(cx);
+                }
+                AiCommand::RunSurfaceRecovery { command_id, action } => {
+                    let failure = crate::ai::reliability::destination_failure(
+                        true,
+                        "surface-owned recovery callback is unavailable in Agent Chat",
+                    );
+                    tracing::warn!(
+                        target: "script_kit::agent_chat",
+                        event = "agent_chat_surface_recovery_rejected",
+                        ?action,
+                    );
+                    self.live_thread().update(cx, |thread, cx| {
+                        thread.fail_recovery_command(command_id, failure.failure, cx);
+                    });
                 }
                 AiCommand::ContinueInAgentChat(escalation) => {
                     let seed = self.live_thread().read(cx).quick_ai_handoff_seed();

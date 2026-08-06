@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 45 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 47 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -18,7 +18,7 @@
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
-| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C12 complete; WF-020 and WF-021 verified |
+| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C13 complete; WF-022 and WF-023 verified |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
 ## How to view the baseline proposal explorer
@@ -971,6 +971,41 @@
   4. Dictate to Ask AI. Verify one fresh Quick AI turn appears with zero context chips.
   5. Inspect `.test-output/cons-flow-c12/dictation-delivery-receipt.json`; each successful row must report one attempt/one mutation, redaction, and complete cleanup.
 - **Intentional differences preserved:** Host-specific undo/focus mechanics remain owned by each editor/window. Unknown-after-paste cannot offer same-destination retry; C13 adds the user-facing recovery controls without weakening this C12 safety boundary.
+
+### WF-022 — Preserve failed Dictation transcripts with performable recovery
+
+- **Status:** Complete. A delivery failure now carries one typed, redacted `DictationFailureState` plus one private immutable recovery payload; the failure card never formats raw platform/provider text and never re-transcribes the saved transcript.
+- **Commit boundary:** Workflow Safety C13 — `fix(dictation-recovery): preserve transcripts and restore focus [WF-022 WF-023]`.
+- **Changed behavior:** After transcription succeeds, any stale, unavailable, refused, or unknown delivery result retains the same transcript ID, fingerprint, History entry ID, destination identity, and attempt lineage. If History was disabled before delivery, the failure boundary creates one recovery History entry. The card says the transcript is safe and names the intended destination. Primary **Retry Same Destination** appears only for a known pre-mutation failure with a live callback; stale/unavailable and unknown-mutation failures omit it. **Choose Destination**, **Copy Transcript**, and **Open Dictation History** are projected only when their callbacks/resources are performable. Choose Destination captures a new frozen identity and reuses the same transcript/History entry.
+- **Exact owners:** `src/dictation/types.rs::{DictationFailureState,DictationTranscriptPreservationReceipt,DictationFailureRecoveryCapabilities,DictationRecoveryAction}`; `src/dictation/runtime.rs::{preserve_dictation_recovery_work,DictationRecoveryWork}`; `src/dictation/window.rs::{set_overlay_recovery_callback,open_recovery_actions,invoke_recovery_action}`; `src/app_execute/builtin_execution.rs::{present_dictation_delivery_failure,handle_dictation_recovery_action,handle_dictation_transcript}`; and shared reliability action kinds/commands under `crates/sk-protocol/src/ai_reliability/**` plus `src/ai/reliability/presentation.rs`.
+- **Focused proof:** Dictation suite PASS 286/286; AI reliability PASS 28/28; `sk-protocol` PASS 27/27; library check and binary build PASS. Model tests prove stale/unknown outcomes cannot retry, missing callbacks remove all actions, private debug/state omits transcript text, and shared destination recovery emits a surface-owned command.
+- **Runtime receipt:** `.test-output/cons-flow-c13/dictation-recovery-focus-receipt.json` → PASS. `stale-copy-history` induces a real stale Prompt identity, sees typed `DestinationStale`, no Retry, all three safe recovery actions, copies and restores the system clipboard, then opens the exact History entry. `choose-destination-delivers-once` captures a new Prompt identity and records one attempt/one mutation while retaining the same transcript fingerprint and History ID. Raw transcript canaries are absent.
+- **Negative controls:** The recovery card is message-only; actions live in the shared footer/Actions hosts. Raw errors remain behind `AppFailureRecord` diagnostic fingerprints. A claimed delivery ID is never replayed. Unknown possible paste mutation is `RetrySafety::Never`. No action is enabled without an installed callback, clipboard availability, or History entry. No current-view/frontmost fallback was added.
+- **User test/view:**
+  1. Start Dictation in a Prompt, change that Prompt input before submission, and submit. Verify **Dictation failed** says the transcript is safe and names Prompt.
+  2. Press Command+K. Verify **Choose Destination**, **Copy Transcript**, and **Open Dictation History** appear, while **Retry Same Destination** does not.
+  3. Choose **Copy Transcript** and paste into a temporary editor. Verify the original transcript is copied and the recovery card remains available.
+  4. Choose **Open Dictation History**. Verify the same saved transcript appears once.
+  5. Repeat the failure, choose **Choose Destination**, pick the current Prompt, and verify the transcript inserts once without a second History row.
+  6. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c13/script-kit-gpui" bun scripts/agentic/cons-flow-ux/dictation-recovery-focus-probe.ts`; expect three passing scenarios and `exactArtifactOwnedProcessCount:0`.
+- **Intentional differences preserved:** Copy uses the system clipboard because that is the product effect, but the probe restores the previous clipboard bytes. External paste remains native and can never offer same-destination retry after an unknown mutation result.
+
+### WF-023 — Restore Dictation focus from captured semantic identities
+
+- **Status:** Complete. Dictation captures one `DictationReturnOrigin` before concealment; retargeting changes only the delivery destination. Cancel and successful delivery now use different, generation-safe focus policies.
+- **Commit boundary:** Same Workflow Safety C13 commit as WF-022.
+- **Changed behavior:** Cancel/abort validates the original frozen Launcher, Prompt, Notes, Agent Chat, Today, or external-window identity before restoring its semantic control. A stale return callback does nothing rather than focusing a sibling/current window. Successful internal delivery focuses the actual destination editor/composer; external delivery keeps the exact frozen native window. Agent Chat/Quick AI focus the resulting composer. The microphone picker retains its lifecycle generation and returns to the Dictation overlay semantic panel. Processing Hide preserves current focus and recovery state.
+- **Exact owners:** `src/dictation/types.rs::DictationReturnOrigin`; `src/dictation/runtime.rs::{replace_dictation_return_origin,dictation_return_origin,clear_dictation_return_origin}`; `src/app_execute/builtin_execution.rs::{capture_dictation_return_origin,focus_dictation_selection,restore_dictation_return_origin,focus_after_dictation_delivery}`; `src/app_impl/window_orchestrator_bridge.rs::dispatch_window_event`; and the existing generation-safe microphone popup return contract in `src/dictation/window.rs`/`microphone_popup_window.rs`.
+- **Focused/runtime proof:** Window orchestrator tests PASS 34/34. Dictation tests prove the origin is independent from retargeting. The C13 runtime matrix proves retargeted Prompt delivery returns to a Prompt semantic focus and microphone picker Escape returns `focusedSemanticId: panel:dictation-overlay`; every Driver finalizes with `processExited:true`, `streamsDrained:true`, and `logWriterClosed:true`.
+- **Negative controls:** Return focus is never inferred at close time, never selected by app name, and never delayed by a fixed sleep. Original and destination identities are separate. Generation/owner mismatch refuses restoration. Failed stale delivery keeps the safe current overlay rather than activating another window.
+- **Build/governance:** Stable artifact `target-agent/artifacts/cons-flow-c13/script-kit-gpui`, SHA-256 `0bbfc82866d095a7c493a941b806b73e70bdd53132d5710d3bd50e69e5a7fc92`. Formatting and `git diff --check` PASS. Protected glass contracts PASS 40/40 and measured calibration fixture PASS 1/1; no locked motion/material/geometry value changed.
+- **User test/view:**
+  1. Open Dictation from Launcher, retarget to Notes, then cancel. Type immediately; verify typing returns to the original Launcher control, not Notes.
+  2. Repeat from a Prompt and from Notes. Retarget each time, cancel, and verify the original semantic input/editor receives typing only when its captured identity still exists.
+  3. Deliver to Launcher, Prompt, Notes, Today, Agent Chat, and Quick AI. Verify focus lands on the actual destination input/editor/composer after success.
+  4. Open the Dictation microphone picker, press Escape, and type a Dictation shortcut/key. Verify the picker closes and the overlay remains the focused semantic panel.
+  5. Replace/close the original Prompt, Note, or external window before cancel. Verify Dictation does not focus another instance with the same app/type.
+- **Intentional differences preserved:** Today can focus its editor only while the captured Day Page entity remains available. Native external focus uses exact CGWindow identity; internal surfaces use their owning GPUI focus targets.
 
 ## Verification ledger
 

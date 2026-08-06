@@ -259,11 +259,17 @@ pub fn recovery_plan_for(
                     RecoveryRole::Secondary,
                 ),
             ],
-            InputFailure::ContextUnavailable
-            | InputFailure::DestinationUnavailable
-            | InputFailure::DestinationStale => {
+            InputFailure::ContextUnavailable => {
                 vec![manual_retry_option(failure, retry, RecoveryRole::Primary)]
             }
+            InputFailure::DestinationUnavailable | InputFailure::DestinationStale => vec![
+                enabled(RecoveryActionKind::ChooseDestination, RecoveryRole::Primary),
+                enabled(RecoveryActionKind::CopyTranscript, RecoveryRole::Secondary),
+                enabled(
+                    RecoveryActionKind::OpenDictationHistory,
+                    RecoveryRole::Secondary,
+                ),
+            ],
         },
         AiFailureKind::Unknown => vec![manual_retry_option(failure, retry, RecoveryRole::Primary)],
     };
@@ -900,6 +906,10 @@ fn recovery_selected(
                         | AiRecoveryAction::RethreadFlow
                         | AiRecoveryAction::RestartFlowRun
                         | AiRecoveryAction::TrimContext
+                        | AiRecoveryAction::RetrySameDestination
+                        | AiRecoveryAction::ChooseDestination
+                        | AiRecoveryAction::CopyTranscript
+                        | AiRecoveryAction::OpenDictationHistory
                         | AiRecoveryAction::CopyDetails => ConfigurationTargetKind::Model,
                     },
                 }),
@@ -1010,6 +1020,18 @@ fn recovery_selected(
                     command_id,
                     kind: ConfigurationTargetKind::Context,
                 })
+            })
+        }
+        AiRecoveryAction::RetrySameDestination
+        | AiRecoveryAction::ChooseDestination
+        | AiRecoveryAction::CopyTranscript
+        | AiRecoveryAction::OpenDictationHistory => {
+            let surface_action = action.kind();
+            start_recovery_command(state, action, failure, plan, |command_id, _state| {
+                AiCommand::RunSurfaceRecovery {
+                    command_id,
+                    action: surface_action,
+                }
             })
         }
     }

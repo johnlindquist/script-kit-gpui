@@ -63,6 +63,18 @@ struct DictationSession {
 static SESSION: Mutex<Option<DictationSession>> = Mutex::new(None);
 static LAST_FROZEN_SELECTION: Mutex<Option<crate::dictation::DictationTargetSelection>> =
     Mutex::new(None);
+static DICTATION_RETURN_ORIGIN: Mutex<Option<crate::dictation::DictationReturnOrigin>> =
+    Mutex::new(None);
+
+#[derive(Debug, Clone)]
+pub(crate) struct DictationRecoveryWork {
+    pub request: crate::dictation::DictationDeliveryRequest,
+    pub audio_duration: Duration,
+    pub target: crate::dictation::DictationTarget,
+    pub reason: crate::dictation::DictationDeliveryFailureReason,
+}
+
+static DICTATION_RECOVERY_WORK: Mutex<Option<DictationRecoveryWork>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DictationStopReason {
@@ -277,6 +289,105 @@ pub fn set_overlay_phase(phase: DictationSessionPhase) -> bool {
 /// `getAgentChatState.dictationPhase`.
 pub fn current_dictation_phase() -> Option<DictationSessionPhase> {
     SESSION.lock().as_ref().map(|s| s.overlay_phase.clone())
+}
+
+pub(crate) fn replace_dictation_return_origin(origin: crate::dictation::DictationReturnOrigin) {
+    *DICTATION_RETURN_ORIGIN.lock() = Some(origin);
+    bump_dictation_state_generation();
+}
+
+pub(crate) fn dictation_return_origin() -> Option<crate::dictation::DictationReturnOrigin> {
+    DICTATION_RETURN_ORIGIN.lock().clone()
+}
+
+pub(crate) fn clear_dictation_return_origin() {
+    DICTATION_RETURN_ORIGIN.lock().take();
+    bump_dictation_state_generation();
+}
+
+pub(crate) fn dictation_pipeline_failure_state(
+    operation_id: u64,
+    target: crate::dictation::DictationTarget,
+    detail: &str,
+) -> crate::dictation::DictationFailureState {
+    let failure = crate::ai::reliability::context_unavailable_failure(detail);
+    crate::dictation::DictationFailureState {
+        operation_id,
+        destination_id: crate::dictation::redacted_transcript_fingerprint(target.sticky_label()),
+        destination_label: target.overlay_label().to_string(),
+        identity_generation: 0,
+        transcript_id: String::new(),
+        history_entry_id: String::new(),
+        failure,
+        retry_safety: sk_protocol::ai_reliability::RetrySafety::Never,
+        preservation_receipt: crate::dictation::DictationTranscriptPreservationReceipt {
+            transcript_id: String::new(),
+            transcript_len: 0,
+            transcript_fingerprint: crate::dictation::redacted_transcript_fingerprint(""),
+            history_entry_id: String::new(),
+            history_saved: false,
+        },
+        capabilities: crate::dictation::DictationFailureRecoveryCapabilities::default(),
+    }
+}
+
+pub(crate) fn preserve_dictation_recovery_work(
+    work: DictationRecoveryWork,
+    failure: crate::ai::reliability::AppFailureRecord,
+    retry_safety: sk_protocol::ai_reliability::RetrySafety,
+    recovery_callback_installed: bool,
+) -> crate::dictation::DictationFailureState {
+    let reason = work.reason;
+    let request = &work.request;
+    let history_saved = !request.history_entry_id.is_empty();
+    let capabilities = crate::dictation::DictationFailureRecoveryCapabilities {
+        retry_same_destination: recovery_callback_installed
+            && retry_safety != sk_protocol::ai_reliability::RetrySafety::Never
+            && !matches!(
+                reason,
+                crate::dictation::DictationDeliveryFailureReason::DestinationStale
+                    | crate::dictation::DictationDeliveryFailureReason::DestinationUnavailable
+                    | crate::dictation::DictationDeliveryFailureReason::MutationOutcomeUnknown
+            ),
+        choose_destination: recovery_callback_installed,
+        copy_transcript: recovery_callback_installed && arboard::Clipboard::new().is_ok(),
+        open_dictation_history: recovery_callback_installed && history_saved,
+    };
+    let state = crate::dictation::DictationFailureState {
+        operation_id: request.delivery_id,
+        destination_id: request.selection.destination.identity_fingerprint(),
+        destination_label: request.selection.display_label.clone(),
+        identity_generation: request.selection.selection_generation,
+        transcript_id: request.transcript.id().to_string(),
+        history_entry_id: request.history_entry_id.clone(),
+        failure,
+        retry_safety,
+        preservation_receipt: crate::dictation::DictationTranscriptPreservationReceipt {
+            transcript_id: request.transcript.id().to_string(),
+            transcript_len: request.transcript.len(),
+            transcript_fingerprint: request.transcript.fingerprint().to_string(),
+            history_entry_id: request.history_entry_id.clone(),
+            history_saved,
+        },
+        capabilities,
+    };
+    *DICTATION_RECOVERY_WORK.lock() = Some(work);
+    bump_dictation_state_generation();
+    state
+}
+
+pub(crate) fn dictation_recovery_work() -> Option<DictationRecoveryWork> {
+    DICTATION_RECOVERY_WORK.lock().clone()
+}
+
+pub(crate) fn replace_dictation_recovery_work(work: DictationRecoveryWork) {
+    *DICTATION_RECOVERY_WORK.lock() = Some(work);
+    bump_dictation_state_generation();
+}
+
+pub(crate) fn clear_dictation_recovery_work() {
+    DICTATION_RECOVERY_WORK.lock().take();
+    bump_dictation_state_generation();
 }
 
 /// Toggle dictation recording on/off.
@@ -1049,6 +1160,33 @@ pub fn automation_state() -> serde_json::Value {
             "redacted": true,
         })
     });
+    let recovery = match crate::dictation::last_dictation_overlay_state().phase {
+        DictationSessionPhase::Failed(state) => Some(serde_json::json!({
+            "operationId": state.operation_id,
+            "destinationId": state.destination_id,
+            "destinationLabel": state.destination_label,
+            "identityGeneration": state.identity_generation,
+            "transcriptId": state.transcript_id,
+            "historyEntryId": state.history_entry_id,
+            "failureCode": format!("{:?}", state.failure.failure.code),
+            "failureCategory": format!("{:?}", state.failure.failure.kind),
+            "safeSummary": state.failure.primary_message(),
+            "diagnosticFingerprint": state.failure.failure.diagnostic.as_ref().map(|value| value.fingerprint.0.clone()),
+            "retrySafety": format!("{:?}", state.retry_safety),
+            "preservation": {
+                "transcriptId": state.preservation_receipt.transcript_id,
+                "transcriptLength": state.preservation_receipt.transcript_len,
+                "transcriptFingerprint": state.preservation_receipt.transcript_fingerprint,
+                "historyEntryId": state.preservation_receipt.history_entry_id,
+                "historySaved": state.preservation_receipt.history_saved,
+            },
+            "actions": state.capabilities.actions().map(|action| format!("{:?}", action)).collect::<Vec<_>>(),
+            "messageOnlyCard": true,
+            "source": "runtime.dictation.recoveryState",
+            "redacted": true,
+        })),
+        _ => None,
+    };
 
     serde_json::json!({
         "schemaVersion": 1,
@@ -1105,6 +1243,7 @@ pub fn automation_state() -> serde_json::Value {
         "deliveryReceiptAvailable": crate::dictation::last_delivery_receipt().is_some(),
         "wrongTargetRefusal": crate::dictation::last_wrong_target_refusal(),
         "wrongTargetRefusalAvailable": crate::dictation::last_wrong_target_refusal().is_some(),
+        "recovery": recovery,
         "stop": crate::dictation::last_stop_receipt(),
         "cleanup": {
             "captureActive": is_recording,

@@ -181,6 +181,13 @@ pub enum FrozenDictationDestination {
     QuickAi {
         request_generation: u64,
     },
+    /// Fail-closed identity used only when a transcript exists but the original
+    /// destination snapshot is missing. It can be retargeted, copied, or opened
+    /// from History, but it is never valid for same-destination delivery.
+    Unavailable {
+        target_id: String,
+        generation: u64,
+    },
 }
 
 impl FrozenDictationDestination {
@@ -193,6 +200,7 @@ impl FrozenDictationDestination {
             Self::ExternalApp { .. } => "externalApp",
             Self::DayPage { .. } => "dayPage",
             Self::QuickAi { .. } => "quickAi",
+            Self::Unavailable { .. } => "unavailable",
         }
     }
 
@@ -253,6 +261,10 @@ impl FrozenDictationDestination {
                 entity_generation,
             } => format!("day:{date}:{substrate_fingerprint}:{entity_generation}"),
             Self::QuickAi { request_generation } => format!("quick-ai:{request_generation}"),
+            Self::Unavailable {
+                target_id,
+                generation,
+            } => format!("unavailable:{target_id}:{generation}"),
         };
         crate::dictation::redacted_transcript_fingerprint(&identity)
     }
@@ -386,6 +398,91 @@ pub enum DictationTargetPersistenceClass {
 pub enum DictationAutoSubmitPermission {
     Never,
     ExplicitSend,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictationTranscriptPreservationReceipt {
+    pub transcript_id: String,
+    pub transcript_len: usize,
+    pub transcript_fingerprint: String,
+    pub history_entry_id: String,
+    pub history_saved: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DictationRecoveryAction {
+    RetrySameDestination,
+    ChooseDestination,
+    CopyTranscript,
+    OpenDictationHistory,
+}
+
+impl DictationRecoveryAction {
+    pub fn shared_kind(self) -> sk_protocol::ai_reliability::RecoveryActionKind {
+        use sk_protocol::ai_reliability::RecoveryActionKind;
+        match self {
+            Self::RetrySameDestination => RecoveryActionKind::RetrySameDestination,
+            Self::ChooseDestination => RecoveryActionKind::ChooseDestination,
+            Self::CopyTranscript => RecoveryActionKind::CopyTranscript,
+            Self::OpenDictationHistory => RecoveryActionKind::OpenDictationHistory,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DictationFailureRecoveryCapabilities {
+    pub retry_same_destination: bool,
+    pub choose_destination: bool,
+    pub copy_transcript: bool,
+    pub open_dictation_history: bool,
+}
+
+impl DictationFailureRecoveryCapabilities {
+    pub fn actions(self) -> impl Iterator<Item = DictationRecoveryAction> {
+        [
+            self.retry_same_destination
+                .then_some(DictationRecoveryAction::RetrySameDestination),
+            self.choose_destination
+                .then_some(DictationRecoveryAction::ChooseDestination),
+            self.copy_transcript
+                .then_some(DictationRecoveryAction::CopyTranscript),
+            self.open_dictation_history
+                .then_some(DictationRecoveryAction::OpenDictationHistory),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictationFailureState {
+    pub operation_id: u64,
+    pub destination_id: String,
+    pub destination_label: String,
+    pub identity_generation: u64,
+    pub transcript_id: String,
+    pub history_entry_id: String,
+    pub failure: crate::ai::reliability::AppFailureRecord,
+    pub retry_safety: RetrySafety,
+    pub preservation_receipt: DictationTranscriptPreservationReceipt,
+    pub capabilities: DictationFailureRecoveryCapabilities,
+}
+
+impl DictationFailureState {
+    pub fn safe_message(&self) -> String {
+        format!(
+            "Your transcript is safe. Delivery to {} did not complete. {}",
+            self.destination_label,
+            self.failure.primary_message()
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictationReturnOrigin {
+    pub selection: DictationTargetSelection,
+    pub semantic_focus_id: String,
+    pub captured_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -641,7 +738,7 @@ pub enum DictationSessionPhase {
     Transcribing,
     Delivering,
     Finished,
-    Failed(String),
+    Failed(DictationFailureState),
 }
 
 impl DictationSessionPhase {
@@ -658,6 +755,13 @@ impl DictationSessionPhase {
             Self::Delivering => "delivering",
             Self::Finished => "finished",
             Self::Failed(_) => "failed",
+        }
+    }
+
+    pub fn failed_capabilities(&self) -> Option<DictationFailureRecoveryCapabilities> {
+        match self {
+            Self::Failed(state) => Some(state.capabilities),
+            _ => None,
         }
     }
 }

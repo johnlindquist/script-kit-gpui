@@ -83,8 +83,11 @@ pub use runtime::{
     DictationStopReason, DictationTranscriptResolution,
 };
 pub(crate) use runtime::{
-    record_fixture_dictation_target_selection, retain_frozen_selection_for_delivery,
-    toggled_post_stop_restart,
+    clear_dictation_recovery_work, clear_dictation_return_origin, dictation_pipeline_failure_state,
+    dictation_recovery_work, dictation_return_origin, preserve_dictation_recovery_work,
+    record_fixture_dictation_target_selection, replace_dictation_recovery_work,
+    replace_dictation_return_origin, retain_frozen_selection_for_delivery,
+    toggled_post_stop_restart, DictationRecoveryWork,
 };
 pub use setup::{
     build_dictation_setup_state, DictationHotkeyStatus, DictationMicrophonePermissionStatus,
@@ -100,23 +103,26 @@ pub use types::{
     CapturedAudioChunk, CompletedDictationCapture, DictationAutoSubmitPermission,
     DictationCaptureConfig, DictationCaptureEvent, DictationDeliveryFailureReason,
     DictationDeliveryOutcome, DictationDeliveryRequest, DictationDestination, DictationDeviceId,
-    DictationDeviceInfo, DictationDeviceTransport, DictationModelStatus, DictationMutationReceipt,
-    DictationRecoveryCapabilities, DictationSessionPhase, DictationSessionResult, DictationTarget,
-    DictationTargetDescriptor, DictationTargetPersistenceClass, DictationTargetSelection,
-    DictationToggleOutcome, FrozenAgentChatPolicy, FrozenDictationDestination,
+    DictationDeviceInfo, DictationDeviceTransport, DictationFailureRecoveryCapabilities,
+    DictationFailureState, DictationModelStatus, DictationMutationReceipt, DictationRecoveryAction,
+    DictationRecoveryCapabilities, DictationReturnOrigin, DictationSessionPhase,
+    DictationSessionResult, DictationTarget, DictationTargetDescriptor,
+    DictationTargetPersistenceClass, DictationTargetSelection, DictationToggleOutcome,
+    DictationTranscriptPreservationReceipt, FrozenAgentChatPolicy, FrozenDictationDestination,
     ImmutableDictationTranscript, RawAudioChunk, ALL_DICTATION_TARGETS,
 };
 pub use visualizer::{animate_bars, silent_bars};
 pub use window::{
     automation_layout_info, begin_overlay_session, close_dictation_overlay,
     is_dictation_overlay_open, open_dictation_overlay, overlay_generation,
-    reopen_last_dictation_overlay, set_overlay_abort_callback, set_overlay_retarget_callback,
-    set_overlay_submit_callback, update_dictation_overlay, DictationOverlay, DictationOverlayState,
+    reopen_last_dictation_overlay, set_overlay_abort_callback, set_overlay_recovery_callback,
+    set_overlay_retarget_callback, set_overlay_submit_callback, update_dictation_overlay,
+    DictationOverlay, DictationOverlayState,
 };
 pub(crate) use window::{
     destination_selector_spec, dictation_overlay_fixture_mode, dictation_window_lifecycle_receipt,
     last_dictation_overlay_state, open_dictation_microphone_popup_fixture,
-    set_dictation_overlay_fixture_mode,
+    overlay_recovery_callback_installed, set_dictation_overlay_fixture_mode,
 };
 
 #[cfg(test)]

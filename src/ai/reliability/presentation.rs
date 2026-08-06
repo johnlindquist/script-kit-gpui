@@ -120,7 +120,7 @@ impl Default for SurfaceRecoveryCapabilities {
     }
 }
 
-const ALL_RECOVERY_ACTION_KINDS: [RecoveryActionKind; 17] = [
+const ALL_RECOVERY_ACTION_KINDS: [RecoveryActionKind; 21] = [
     RecoveryActionKind::Retry,
     RecoveryActionKind::UseCurrentResults,
     RecoveryActionKind::ContinueInAgentChat,
@@ -137,6 +137,10 @@ const ALL_RECOVERY_ACTION_KINDS: [RecoveryActionKind; 17] = [
     RecoveryActionKind::RethreadFlow,
     RecoveryActionKind::RestartFlowRun,
     RecoveryActionKind::TrimContext,
+    RecoveryActionKind::RetrySameDestination,
+    RecoveryActionKind::ChooseDestination,
+    RecoveryActionKind::CopyTranscript,
+    RecoveryActionKind::OpenDictationHistory,
     RecoveryActionKind::CopyDetails,
 ];
 
@@ -614,6 +618,10 @@ fn recovery_action(kind: RecoveryActionKind, failure: &AiFailure) -> Option<AiRe
         RecoveryActionKind::RethreadFlow => AiRecoveryAction::RethreadFlow,
         RecoveryActionKind::RestartFlowRun => AiRecoveryAction::RestartFlowRun,
         RecoveryActionKind::TrimContext => AiRecoveryAction::TrimContext,
+        RecoveryActionKind::RetrySameDestination => AiRecoveryAction::RetrySameDestination,
+        RecoveryActionKind::ChooseDestination => AiRecoveryAction::ChooseDestination,
+        RecoveryActionKind::CopyTranscript => AiRecoveryAction::CopyTranscript,
+        RecoveryActionKind::OpenDictationHistory => AiRecoveryAction::OpenDictationHistory,
         RecoveryActionKind::CopyDetails => AiRecoveryAction::CopyDetails,
     })
 }
@@ -651,6 +659,10 @@ fn semantic_id_for_action(kind: RecoveryActionKind) -> &'static str {
         RecoveryActionKind::RethreadFlow => "ai-recovery-rethread-flow",
         RecoveryActionKind::RestartFlowRun => "ai-recovery-restart-flow-run",
         RecoveryActionKind::TrimContext => "ai-recovery-trim-context",
+        RecoveryActionKind::RetrySameDestination => "ai-recovery-retry-destination",
+        RecoveryActionKind::ChooseDestination => "ai-recovery-choose-destination",
+        RecoveryActionKind::CopyTranscript => "ai-recovery-copy-transcript",
+        RecoveryActionKind::OpenDictationHistory => "ai-recovery-open-dictation-history",
         RecoveryActionKind::CopyDetails => "ai-recovery-copy-details",
     }
 }
@@ -673,6 +685,10 @@ fn label_for_action(kind: RecoveryActionKind) -> &'static str {
         RecoveryActionKind::RethreadFlow => "Start a new thread",
         RecoveryActionKind::RestartFlowRun => "Restart Flow",
         RecoveryActionKind::TrimContext => "Trim context",
+        RecoveryActionKind::RetrySameDestination => "Retry same destination",
+        RecoveryActionKind::ChooseDestination => "Choose destination",
+        RecoveryActionKind::CopyTranscript => "Copy transcript",
+        RecoveryActionKind::OpenDictationHistory => "Open Dictation History",
         RecoveryActionKind::CopyDetails => "Copy details",
     }
 }
@@ -695,6 +711,10 @@ fn progress_copy(action: &AiRecoveryAction) -> &'static str {
         AiRecoveryAction::RethreadFlow => "Starting a new Flow conversation thread.",
         AiRecoveryAction::RestartFlowRun => "Starting one new Flow run.",
         AiRecoveryAction::TrimContext => "Preparing a smaller conversation context.",
+        AiRecoveryAction::RetrySameDestination => "Retrying the saved transcript once.",
+        AiRecoveryAction::ChooseDestination => "Opening the Dictation destination selector.",
+        AiRecoveryAction::CopyTranscript => "Copying the saved transcript.",
+        AiRecoveryAction::OpenDictationHistory => "Opening Dictation History.",
         AiRecoveryAction::CopyDetails => "Preparing safe diagnostic details.",
     }
 }
@@ -726,6 +746,10 @@ fn recovered_copy(action: &AiRecoveryAction, selection: &AiSelectionState) -> &'
         | AiRecoveryAction::CheckAgain
         | AiRecoveryAction::ConfigureProvider
         | AiRecoveryAction::TrimContext
+        | AiRecoveryAction::RetrySameDestination
+        | AiRecoveryAction::ChooseDestination
+        | AiRecoveryAction::CopyTranscript
+        | AiRecoveryAction::OpenDictationHistory
         | AiRecoveryAction::CopyDetails => "Recovery completed successfully.",
     }
 }
