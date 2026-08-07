@@ -97,6 +97,49 @@ fn test_elements_result_contains_expected_semantic_ids() {
 }
 
 #[test]
+fn test_elements_result_serializes_explicit_projection_quality() {
+    let response = crate::protocol::Message::elements_result_with_projection(
+        "projection-1".to_string(),
+        "settings".to_string(),
+        1,
+        ProjectionQuality::Complete,
+        Vec::new(),
+        vec![ElementInfo::panel("settings")],
+        1,
+        None,
+        None,
+        Vec::new(),
+    );
+    let json = serde_json::to_value(&response).expect("Should serialize projection");
+    assert_eq!(json["semanticSurface"], "settings");
+    assert_eq!(json["projectionVersion"], 1);
+    assert_eq!(json["projectionQuality"], "complete");
+    assert_eq!(json["reasonCodes"], serde_json::Value::Null);
+}
+
+#[test]
+fn test_elements_result_serializes_partial_projection_reasons() {
+    let response = crate::protocol::Message::elements_result_with_projection(
+        "projection-2".to_string(),
+        "flowSession".to_string(),
+        1,
+        ProjectionQuality::Partial,
+        vec![ProjectionReason::RuntimeEntityMissing],
+        vec![ElementInfo::panel("flow-session")],
+        1,
+        None,
+        None,
+        vec!["flow_session_entity_missing".to_string()],
+    );
+    let json = serde_json::to_value(&response).expect("Should serialize projection");
+    assert_eq!(json["projectionQuality"], "partial");
+    assert_eq!(
+        json["reasonCodes"],
+        serde_json::json!(["runtimeEntityMissing"]),
+    );
+}
+
+#[test]
 fn test_elements_result_serializes_editor_runtime_metadata() {
     let mut editor = ElementInfo::input("notes-editor", Some("# Heading"), true);
     editor.style = Some(ElementStyleInfo {
@@ -186,6 +229,10 @@ fn test_elements_result_roundtrip_preserves_structure() {
     match parsed {
         crate::protocol::Message::ElementsResult {
             request_id,
+            semantic_surface,
+            projection_version,
+            projection_quality,
+            reason_codes,
             elements: parsed_elements,
             total_count,
             truncated,
@@ -194,6 +241,10 @@ fn test_elements_result_roundtrip_preserves_structure() {
             warnings,
         } => {
             assert_eq!(request_id, "rt-1");
+            assert_eq!(semantic_surface, "legacyUnknown");
+            assert_eq!(projection_version, 1);
+            assert_eq!(projection_quality, ProjectionQuality::Unsupported);
+            assert_eq!(reason_codes, vec![ProjectionReason::CollectorUnavailable]);
             assert_eq!(total_count, 3);
             assert!(!truncated);
             assert!(focused_semantic_id.is_none());
@@ -637,6 +688,10 @@ fn test_elements_result_roundtrip_preserves_observation_receipt() {
     match parsed {
         crate::protocol::Message::ElementsResult {
             request_id,
+            semantic_surface,
+            projection_version,
+            projection_quality,
+            reason_codes,
             elements: parsed_elements,
             total_count,
             truncated,
@@ -645,6 +700,10 @@ fn test_elements_result_roundtrip_preserves_observation_receipt() {
             warnings,
         } => {
             assert_eq!(request_id, "rt-1");
+            assert_eq!(semantic_surface, "legacyUnknown");
+            assert_eq!(projection_version, 1);
+            assert_eq!(projection_quality, ProjectionQuality::Unsupported);
+            assert_eq!(reason_codes, vec![ProjectionReason::CollectorUnavailable]);
             assert_eq!(total_count, 10);
             assert!(truncated);
             assert_eq!(focused_semantic_id.as_deref(), Some("input:filter"));

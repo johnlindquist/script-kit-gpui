@@ -4768,11 +4768,17 @@ impl ScriptListApp {
                     .as_ref()
                     .map(|t| crate::windows::resolve_automation_window(Some(t)));
 
-                let snapshot = match resolved_target {
+                let (
+                    snapshot,
+                    semantic_surface,
+                    projection_version,
+                    projection_quality,
+                    reason_codes,
+                ) = match resolved_target {
                     Some(Ok(ref resolved))
                         if resolved.kind != protocol::AutomationWindowKind::Main =>
                     {
-                        crate::windows::automation_surface_collector::collect_surface_snapshot(
+                        let snapshot = crate::windows::automation_surface_collector::collect_surface_snapshot(
                             resolved,
                             max_elements,
                             cx,
@@ -4789,12 +4795,28 @@ impl ScriptListApp {
                                 )],
                                 quality: crate::windows::automation_surface_collector::SnapshotQuality::PanelOnly,
                             }
-                        })
+                        });
+                        let quality = snapshot.quality;
+                        let semantic_surface = resolved
+                            .semantic_surface
+                            .clone()
+                            .unwrap_or_else(|| format!("{:?}", resolved.kind));
+                        (
+                            snapshot,
+                            semantic_surface,
+                            1,
+                            quality.projection_quality(),
+                            quality.reason_codes(),
+                        )
                     }
                     Some(Err(ref err)) => {
                         if let Some(ref sender) = self.response_sender {
-                            let _ = sender.try_send(Message::elements_result(
+                            let _ = sender.try_send(Message::elements_result_with_projection(
                                 request_id.clone(),
+                                "unresolvedTarget".to_string(),
+                                1,
+                                protocol::ProjectionQuality::Unsupported,
+                                vec![protocol::ProjectionReason::TargetResolutionFailed],
                                 Vec::new(),
                                 0,
                                 None,
@@ -4814,14 +4836,29 @@ impl ScriptListApp {
                             include_headers,
                             cx,
                         );
-                        crate::windows::automation_surface_collector::SurfaceElementSnapshot {
+                        let semantic_surface = outcome.semantic_surface.clone();
+                        let projection_version = outcome.version;
+                        let projection_quality = outcome.projection_quality;
+                        let reason_codes = outcome.reason_codes.clone();
+                        let snapshot = crate::windows::automation_surface_collector::SurfaceElementSnapshot {
                             total_count: outcome.total_count,
                             focused_semantic_id: outcome.focused_semantic_id(),
                             selected_semantic_id: outcome.selected_semantic_id(),
                             warnings: outcome.warnings.clone(),
                             elements: outcome.elements,
-                            quality: crate::windows::automation_surface_collector::SnapshotQuality::Full,
-                        }
+                            quality: match projection_quality {
+                                protocol::ProjectionQuality::Complete => crate::windows::automation_surface_collector::SnapshotQuality::Full,
+                                protocol::ProjectionQuality::Partial
+                                | protocol::ProjectionQuality::Unsupported => crate::windows::automation_surface_collector::SnapshotQuality::PanelOnly,
+                            },
+                        };
+                        (
+                            snapshot,
+                            semantic_surface,
+                            projection_version,
+                            projection_quality,
+                            reason_codes,
+                        )
                     }
                 };
 
@@ -4841,8 +4878,12 @@ impl ScriptListApp {
                     "ui.elements.result"
                 );
 
-                let response = Message::elements_result(
+                let response = Message::elements_result_with_projection(
                     request_id.clone(),
+                    semantic_surface,
+                    projection_version,
+                    projection_quality,
+                    reason_codes,
                     snapshot.elements,
                     snapshot.total_count,
                     snapshot.focused_semantic_id,

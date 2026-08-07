@@ -179,6 +179,30 @@ pub struct ElementContentDescriptor {
     pub value: Option<RedactedElementContent>,
 }
 
+/// How completely a collector projects the active surface into semantic elements.
+///
+/// This is deliberately closed: a new quality state must update every protocol
+/// consumer rather than silently degrading to a successful boolean.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectionQuality {
+    Complete,
+    Partial,
+    Unsupported,
+}
+
+/// Typed reasons why a semantic projection is not complete.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectionReason {
+    PanelOnly,
+    UnsupportedCustomDocument,
+    RuntimeEntityMissing,
+    SemanticControlsUnavailable,
+    CollectorUnavailable,
+    TargetResolutionFailed,
+}
+
 /// Information about a UI element returned by getElements.
 ///
 /// Product-authored labels may remain in `text`/`value`. User, external, path,

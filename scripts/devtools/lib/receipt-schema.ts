@@ -142,9 +142,44 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
     primitiveId: "devtools.elements.snapshot",
     tool: "script-kit-devtools.elements",
     commands: ["elements.snapshot"],
-    requiredPaths: [...commonTargetFields, "semanticSurface", "nodes[].semanticId", "duplicateSemanticIds"],
+    requiredPaths: [
+      ...commonTargetFields,
+      "semanticSurface",
+      "semanticProjection.semanticSurface",
+      "semanticProjection.version",
+      "semanticProjection.quality",
+      "semanticProjection.reasonCodes",
+      "semanticProjection.proofMode",
+      "semanticProjection.proofAllowed",
+      "nodes[].semanticId",
+      "duplicateSemanticIds",
+    ],
     forbidMissingPrimitivesOnPass: true,
-    description: "Capture privacy-safe semantic element measurements.",
+    predicates: [{
+      id: "semantic-projection-quality",
+      validate(receipt, disposition) {
+        const projection = receipt.semanticProjection && typeof receipt.semanticProjection === "object"
+          ? receipt.semanticProjection as JsonObject
+          : {};
+        if (Object.keys(projection).length === 0 && disposition !== "EVALUABLE_PASS") {
+          return [];
+        }
+        const quality = projection.quality;
+        const reasons = Array.isArray(projection.reasonCodes) ? projection.reasonCodes : [];
+        const errors: string[] = [];
+        if (quality !== "complete" && reasons.length === 0) {
+          errors.push("incomplete semantic projection requires typed reason codes");
+        }
+        if (disposition === "EVALUABLE_PASS" && quality !== "complete") {
+          errors.push("semantic action/focus proof requires a complete projection");
+        }
+        if (disposition === "EVALUABLE_PASS" && projection.proofAllowed !== true) {
+          errors.push("pass receipt must explicitly allow semantic proof");
+        }
+        return errors;
+      },
+    }],
+    description: "Capture privacy-safe semantic element measurements with explicit projection quality.",
   }),
   schema({
     primitiveId: "devtools.layout.measure",
@@ -166,8 +201,27 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
     primitiveId: "devtools.focus.inspect",
     tool: "script-kit-devtools.focus",
     commands: ["focus.inspect"],
-    requiredPaths: [...commonTargetFields, "windowFocused", "focusedSemanticId", "keyboardOwner"],
+    requiredPaths: [
+      ...commonTargetFields,
+      "windowFocused",
+      "focusedSemanticId",
+      "keyboardOwner",
+      "semanticProjection.quality",
+      "semanticProjection.proofAllowed",
+    ],
     forbidMissingPrimitivesOnPass: true,
+    predicates: [{
+      id: "focus-requires-complete-projection",
+      validate(receipt, disposition) {
+        if (disposition !== "EVALUABLE_PASS") return [];
+        const projection = receipt.semanticProjection && typeof receipt.semanticProjection === "object"
+          ? receipt.semanticProjection as JsonObject
+          : {};
+        return projection.quality === "complete" && projection.proofAllowed === true
+          ? []
+          : ["focus proof requires a complete semantic projection"];
+      },
+    }],
     description: "Inspect focus and keyboard ownership without claiming activation.",
   }),
   schema({

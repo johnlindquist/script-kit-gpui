@@ -154,7 +154,15 @@ const prepared = prepareValidatedReceipt("devtools.elements.snapshot", {
   classification: "ok",
   requestedTarget: { selector: { type: "main" } },
   target: { automationId: "main" },
-  semanticSurface: { surfaceKind: "ScriptList" },
+  semanticSurface: { surfaceKind: "ScriptList", collectorSurface: "scriptList" },
+  semanticProjection: {
+    semanticSurface: "scriptList",
+    version: 1,
+    quality: "complete",
+    reasonCodes: [],
+    proofMode: "inspection",
+    proofAllowed: true,
+  },
   nodes: [{ semanticId: "privacy-canary" }],
   duplicateSemanticIds: [],
   transaction: {

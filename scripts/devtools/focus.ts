@@ -62,13 +62,22 @@ function nativeFooterSnapshot(state: JsonObject) {
   };
 }
 
-function classify(targetReceipt: JsonObject, stateEnvelope: JsonObject, elementsEnvelope: JsonObject, focused: JsonObject | null) {
+function classify(
+  targetReceipt: JsonObject,
+  stateEnvelope: JsonObject,
+  elementsEnvelope: JsonObject,
+  elements: JsonObject,
+  focused: JsonObject | null,
+) {
   if (targetReceipt.classification !== "ok") {
     return targetReceipt.classification ?? "blocked-by-target-ambiguity";
   }
   const transport = classifyEnvelopes([stateEnvelope, elementsEnvelope]);
   if (transport !== "ok") {
     return transport;
+  }
+  if (elements.projectionQuality !== "complete") {
+    return "blocked-by-unsupported-projection";
   }
   if (!focused) {
     return "blocked-by-missing-primitive";
@@ -115,7 +124,7 @@ async function main() {
   const focusedSemanticId = elements.focusedSemanticId ?? null;
   const selectedSemanticId = elements.selectedSemanticId ?? null;
   const focused = focusedNode(nodes, focusedSemanticId);
-  const classification = classify(targetReceipt, stateEnvelope, elementsEnvelope, focused);
+  const classification = classify(targetReceipt, stateEnvelope, elementsEnvelope, elements, focused);
   const nativeFooter = nativeFooterSnapshot(state);
 
   emitValidatedReceipt("devtools.focus.inspect", finishReceipt(
@@ -133,6 +142,14 @@ async function main() {
       selectedNode: safeNode(nodes.find((node) => node.semanticId === selectedSemanticId) ?? null),
       activeFooter: state.activeFooter ?? null,
       nativeFooter,
+      semanticProjection: {
+        semanticSurface: elements.semanticSurface ?? null,
+        version: elements.projectionVersion ?? null,
+        quality: elements.projectionQuality ?? null,
+        reasonCodes: elements.reasonCodes ?? [],
+        proofMode: "focus",
+        proofAllowed: elements.projectionQuality === "complete",
+      },
       submitDiagnostics: diagnostic(state.submitDiagnostics ?? null),
       receipts: {
         target: { classification: targetReceipt.classification ?? null },
@@ -151,6 +168,7 @@ async function main() {
       },
       missingPrimitives: [
         !focused ? "focusedSemanticId" : "",
+        elements.projectionQuality === "complete" ? "" : "completeSemanticProjection",
         stateEnvelope.status === "error" ? "stateResult" : "",
         elementsEnvelope.status === "error" ? "elementsResult" : "",
         targetReceipt.classification !== "ok" ? "strictTargetIdentity" : "",

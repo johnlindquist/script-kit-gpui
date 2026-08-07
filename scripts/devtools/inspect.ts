@@ -230,8 +230,16 @@ function capabilityDetails(report: {
     if (elementCount === 0) {
       return capabilityStatus("blocked", "getElements", "semantic element collection returned no nodes", "add-surface-element-collector");
     }
-    if (report.inspect.semanticQuality && report.inspect.semanticQuality !== "full") {
-      return capabilityStatus("partial", "getElements + inspectAutomationWindow", `semanticQuality=${String(report.inspect.semanticQuality)}`, "add-surface-element-collector");
+    if (report.elements.projectionQuality !== "complete") {
+      const reasons = Array.isArray(report.elements.reasonCodes)
+        ? report.elements.reasonCodes.join(",")
+        : "missing reason codes";
+      return capabilityStatus(
+        "partial",
+        "getElements",
+        `projectionQuality=${String(report.elements.projectionQuality ?? "missing")}; reasons=${reasons}`,
+        "add-surface-element-collector",
+      );
     }
     return capabilityStatus("supported", "getElements + inspectAutomationWindow");
   })();
@@ -293,11 +301,11 @@ function missingFieldDetails(report: {
       nextPrimitive: details.elements.nextPrimitive ?? "add-surface-element-collector",
     });
   }
-  if (report.inspect.semanticQuality && report.inspect.semanticQuality !== "full") {
+  if (report.elements.projectionQuality !== "complete") {
     missing.push({
-      field: "full_semantic_elements",
-      reason: details.elements.reason ?? "semantic quality is partial",
-      blocks: ["row-level proof", "popup content proof", "accessibility mapping"],
+      field: "complete_semantic_projection",
+      reason: details.elements.reason ?? "semantic projection is not complete",
+      blocks: ["row-level proof", "action/focus proof", "accessibility mapping"],
       nextPrimitive: details.elements.nextPrimitive ?? "add-surface-element-collector",
     });
   }
@@ -349,7 +357,7 @@ function capabilities(report: {
   return {
     state: !["tool_error", "unsupported", "target_resolution_failed"].includes(statePromptType(report.state)),
     elements: Array.isArray(report.elements.elements) && report.elements.elements.length > 0,
-    fullSemantics: report.inspect.semanticQuality === "full",
+    fullSemantics: report.elements.projectionQuality === "complete",
     layout: Array.isArray(components) && components.length > 0,
     screenshotMetadata: pickNumber(report.inspect, "screenshotWidth", "screenshot_width") != null
       && pickNumber(report.inspect, "screenshotHeight", "screenshot_height") != null,
@@ -611,6 +619,13 @@ async function main() {
       targetBoundsInScreenshot: inspect.targetBoundsInScreenshot ?? null,
       surfaceHitPoint: inspect.surfaceHitPoint ?? null,
       suggestedHitPoints,
+    },
+    semanticProjection: {
+      semanticSurface: elements.semanticSurface ?? null,
+      version: elements.projectionVersion ?? null,
+      quality: elements.projectionQuality ?? null,
+      reasonCodes: elements.reasonCodes ?? [],
+      proofAllowed: elements.projectionQuality === "complete",
     },
     capabilities: capabilities(report),
     capabilityDetails: capabilityDetails(report),

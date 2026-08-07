@@ -12,14 +12,69 @@ fn root_file_semantic_kind(file_type: crate::file_search::FileType) -> &'static 
 /// for the `elementsResult` protocol response.
 #[derive(Debug, Clone)]
 pub(crate) struct ElementCollectionOutcome {
+    pub semantic_surface: String,
+    pub version: u32,
+    pub projection_quality: protocol::ProjectionQuality,
+    pub reason_codes: Vec<protocol::ProjectionReason>,
     pub elements: Vec<protocol::ElementInfo>,
     pub total_count: usize,
     pub warnings: Vec<String>,
 }
 
 impl ElementCollectionOutcome {
-    pub fn new(elements: Vec<protocol::ElementInfo>, total_count: usize) -> Self {
+    const VERSION: u32 = 1;
+
+    pub fn complete(
+        semantic_surface: impl Into<String>,
+        elements: Vec<protocol::ElementInfo>,
+        total_count: usize,
+    ) -> Self {
         Self {
+            semantic_surface: semantic_surface.into(),
+            version: Self::VERSION,
+            projection_quality: protocol::ProjectionQuality::Complete,
+            reason_codes: Vec::new(),
+            elements,
+            total_count,
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn complete_from(
+        semantic_surface: impl Into<String>,
+        (elements, total_count): (Vec<protocol::ElementInfo>, usize),
+    ) -> Self {
+        Self::complete(semantic_surface, elements, total_count)
+    }
+
+    pub fn partial(
+        semantic_surface: impl Into<String>,
+        reason: protocol::ProjectionReason,
+        elements: Vec<protocol::ElementInfo>,
+        total_count: usize,
+    ) -> Self {
+        Self {
+            semantic_surface: semantic_surface.into(),
+            version: Self::VERSION,
+            projection_quality: protocol::ProjectionQuality::Partial,
+            reason_codes: vec![reason],
+            elements,
+            total_count,
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn unsupported(
+        semantic_surface: impl Into<String>,
+        reason: protocol::ProjectionReason,
+        elements: Vec<protocol::ElementInfo>,
+        total_count: usize,
+    ) -> Self {
+        Self {
+            semantic_surface: semantic_surface.into(),
+            version: Self::VERSION,
+            projection_quality: protocol::ProjectionQuality::Unsupported,
+            reason_codes: vec![reason],
             elements,
             total_count,
             warnings: Vec::new(),
@@ -43,12 +98,6 @@ impl ElementCollectionOutcome {
             .iter()
             .find(|element| element.selected == Some(true))
             .map(|element| element.semantic_id.clone())
-    }
-}
-
-impl From<(Vec<protocol::ElementInfo>, usize)> for ElementCollectionOutcome {
-    fn from((elements, total_count): (Vec<protocol::ElementInfo>, usize)) -> Self {
-        Self::new(elements, total_count)
     }
 }
 
@@ -298,7 +347,11 @@ impl ScriptListApp {
                     .chain(list_elements)
                     .take(limit)
                     .collect();
-                ElementCollectionOutcome::new(elements, context_count + list_total)
+                ElementCollectionOutcome::complete(
+                    "scriptList",
+                    elements,
+                    context_count + list_total,
+                )
             }
 
             AppView::AgentChatView { entity } => {
@@ -306,7 +359,8 @@ impl ScriptListApp {
                     .read(cx)
                     .collect_focused_text_mini_elements(limit, cx);
                 if !focused_text_elements.is_empty() {
-                    ElementCollectionOutcome::new(
+                    ElementCollectionOutcome::complete(
+                        "focusedTextMini",
                         focused_text_elements.clone(),
                         focused_text_elements.len(),
                     )
@@ -352,7 +406,8 @@ impl ScriptListApp {
                         elements.extend(Self::ai_recovery_elements(&spec));
                     }
                     let total_count = elements.len();
-                    ElementCollectionOutcome::new(
+                    ElementCollectionOutcome::complete(
+                        "agentChat",
                         elements.into_iter().take(limit).collect(),
                         total_count,
                     )
@@ -362,7 +417,7 @@ impl ScriptListApp {
             AppView::DayPage { entity } => {
                 let (elements, total_count) =
                     entity.read(cx).collect_day_page_elements(limit, self, cx);
-                ElementCollectionOutcome::new(elements, total_count)
+                ElementCollectionOutcome::complete("dayPage", elements, total_count)
             }
 
             AppView::PermissionsWizardView { selected_index } => {
@@ -404,56 +459,62 @@ impl ScriptListApp {
                 }
 
                 let total_count = elements.len();
-                ElementCollectionOutcome::new(
+                ElementCollectionOutcome::complete(
+                    "permissionsWizard",
                     elements.into_iter().take(limit).collect(),
                     total_count,
                 )
             }
 
-            AppView::ArgPrompt { choices, .. } => self
-                .collect_choice_view_elements(
+            AppView::ArgPrompt { choices, .. } => ElementCollectionOutcome::complete_from(
+                "argPrompt",
+                self.collect_choice_view_elements(
                     "filter",
                     self.arg_input.text().to_string(),
                     choices,
                     self.arg_selected_index,
                     limit,
-                )
-                .into(),
+                ),
+            ),
 
-            AppView::MiniPrompt { choices, .. } => self
-                .collect_choice_view_elements(
+            AppView::MiniPrompt { choices, .. } => ElementCollectionOutcome::complete_from(
+                "miniPrompt",
+                self.collect_choice_view_elements(
                     "filter",
                     self.arg_input.text().to_string(),
                     choices,
                     self.arg_selected_index,
                     limit,
-                )
-                .into(),
+                ),
+            ),
 
-            AppView::MicroPrompt { choices, .. } => self
-                .collect_choice_view_elements(
+            AppView::MicroPrompt { choices, .. } => ElementCollectionOutcome::complete_from(
+                "microPrompt",
+                self.collect_choice_view_elements(
                     "filter",
                     self.arg_input.text().to_string(),
                     choices,
                     self.arg_selected_index,
                     limit,
-                )
-                .into(),
+                ),
+            ),
 
             AppView::ClipboardHistoryView {
                 filter,
                 selected_index,
             } => {
                 let rows = self.clipboard_history_visible_row_labels(filter);
-                self.collect_named_rows(
-                    "clipboard-filter",
-                    filter.clone(),
-                    "clipboard-history",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "clipboardHistory",
+                    self.collect_named_rows(
+                        "clipboard-filter",
+                        filter.clone(),
+                        "clipboard-history",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::ProfileSearchView {
@@ -466,15 +527,17 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 let rows = self.app_launcher_visible_row_names(filter);
-                self.collect_named_rows(
-                    "app-filter",
-                    filter.clone(),
-                    "apps",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "appLauncher",
+                    self.collect_named_rows(
+                        "app-filter",
+                        filter.clone(),
+                        "apps",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::WindowSwitcherView {
@@ -494,15 +557,17 @@ impl ScriptListApp {
                         .filter(|row| row.to_lowercase().contains(&filter_lower))
                         .collect()
                 };
-                self.collect_named_rows(
-                    "window-filter",
-                    filter.clone(),
-                    "windows",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "windowSwitcher",
+                    self.collect_named_rows(
+                        "window-filter",
+                        filter.clone(),
+                        "windows",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::BrowserTabsView {
@@ -510,15 +575,17 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 let rows = self.browser_tabs_visible_row_labels(filter);
-                self.collect_named_rows(
-                    "browser-tabs-filter",
-                    filter.clone(),
-                    "browser-tabs",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "browserTabs",
+                    self.collect_named_rows(
+                        "browser-tabs-filter",
+                        filter.clone(),
+                        "browser-tabs",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::BrowserHistoryView {
@@ -539,15 +606,17 @@ impl ScriptListApp {
                     .map(|hit| hit.entry.display_title().to_string())
                     .collect()
                 };
-                self.collect_named_rows(
-                    "browser-history-filter",
-                    filter.clone(),
-                    "browser-history",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "browserHistory",
+                    self.collect_named_rows(
+                        "browser-history-filter",
+                        filter.clone(),
+                        "browser-history",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::AgentChatHistoryView {
@@ -555,15 +624,17 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 let rows = Self::agent_chat_history_visible_row_labels(filter);
-                self.collect_named_rows(
-                    "agent_chat-history-filter",
-                    filter.clone(),
-                    "agent_chat-history",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "agentChatHistory",
+                    self.collect_named_rows(
+                        "agent_chat-history-filter",
+                        filter.clone(),
+                        "agent_chat-history",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::DictationHistoryView {
@@ -644,12 +715,13 @@ impl ScriptListApp {
                         },
                     );
                 }
-                (elements, total_count).into()
+                ElementCollectionOutcome::complete("dictationHistory", elements, total_count)
             }
 
-            AppView::NotesBrowseView { search } => {
-                self.collect_notes_browse_elements(search, limit).into()
-            }
+            AppView::NotesBrowseView { search } => ElementCollectionOutcome::complete_from(
+                "notesBrowse",
+                self.collect_notes_browse_elements(search, limit),
+            ),
 
             AppView::FileSearchView {
                 ref query,
@@ -662,15 +734,17 @@ impl ScriptListApp {
                     .filter_map(|&result_index| self.cached_file_results.get(result_index))
                     .map(|entry| format!("{} — {}", entry.name, entry.path))
                     .collect();
-                self.collect_named_rows(
-                    "file-search-input",
-                    query.clone(),
-                    "file-results",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "fileSearch",
+                    self.collect_named_rows(
+                        "file-search-input",
+                        query.clone(),
+                        "file-results",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::ProcessManagerView {
@@ -678,15 +752,17 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 let rows = self.process_manager_visible_row_names(filter);
-                self.collect_named_rows(
-                    "process-filter",
-                    filter.clone(),
-                    "processes",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "processManager",
+                    self.collect_named_rows(
+                        "process-filter",
+                        filter.clone(),
+                        "processes",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::FlowUxView {
@@ -761,7 +837,7 @@ impl ScriptListApp {
                         style: None,
                     });
                 }
-                ElementCollectionOutcome::new(elements, total_count)
+                ElementCollectionOutcome::complete("flowDesk", elements, total_count)
             }
 
             AppView::SettingsView {
@@ -769,15 +845,17 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 let rows = self.settings_visible_row_names(filter);
-                self.collect_named_rows(
-                    "settings-filter",
-                    filter.clone(),
+                ElementCollectionOutcome::complete_from(
                     "settings",
-                    &rows,
-                    *selected_index,
-                    limit,
+                    self.collect_named_rows(
+                        "settings-filter",
+                        filter.clone(),
+                        "settings",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::CurrentAppCommandsView {
@@ -785,15 +863,17 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 let rows = self.current_app_commands_visible_row_names(filter);
-                self.collect_named_rows(
-                    "current-app-commands-filter",
-                    filter.clone(),
-                    "menu-commands",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "currentAppCommands",
+                    self.collect_named_rows(
+                        "current-app-commands-filter",
+                        filter.clone(),
+                        "menu-commands",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::SearchAiPresetsView {
@@ -801,18 +881,20 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 let rows = Self::ai_preset_search_visible_row_labels(filter);
-                self.collect_filterable_rows_with_info_empty(
-                    "ai-presets-filter",
-                    filter.clone(),
-                    "ai-presets",
-                    "ai-presets-empty",
-                    AiPresetSearchEmptyState::from_filter(filter).message(),
-                    "sparkles",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "searchAiPresets",
+                    self.collect_filterable_rows_with_info_empty(
+                        "ai-presets-filter",
+                        filter.clone(),
+                        "ai-presets",
+                        "ai-presets-empty",
+                        AiPresetSearchEmptyState::from_filter(filter).message(),
+                        "sparkles",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::FavoritesBrowseView {
@@ -820,18 +902,20 @@ impl ScriptListApp {
                 selected_index,
             } => {
                 let rows = self.filtered_favorite_ids_for_filter(filter);
-                self.collect_filterable_rows_with_info_empty(
-                    "favorites-filter",
-                    filter.clone(),
-                    "favorites",
-                    "favorites-empty",
-                    FavoritesEmptyState::from_filter(filter).message(),
-                    "star",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "favoritesBrowse",
+                    self.collect_filterable_rows_with_info_empty(
+                        "favorites-filter",
+                        filter.clone(),
+                        "favorites",
+                        "favorites-empty",
+                        FavoritesEmptyState::from_filter(filter).message(),
+                        "star",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::SdkReferenceView {
@@ -840,15 +924,17 @@ impl ScriptListApp {
                 entries,
             } => {
                 let rows = crate::mcp_resources::sdk_reference_visible_row_names(entries, filter);
-                self.collect_named_rows(
-                    "sdk-reference-filter",
-                    filter.clone(),
-                    "sdk-functions",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "sdkReference",
+                    self.collect_named_rows(
+                        "sdk-reference-filter",
+                        filter.clone(),
+                        "sdk-functions",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
             AppView::TipsView {
                 filter,
@@ -870,15 +956,17 @@ impl ScriptListApp {
                     })
                     .map(|tip| tip.title.clone())
                     .collect();
-                self.collect_named_rows(
-                    "tips-filter",
-                    filter.clone(),
+                ElementCollectionOutcome::complete_from(
                     "tips",
-                    &rows,
-                    *selected_index,
-                    limit,
+                    self.collect_named_rows(
+                        "tips-filter",
+                        filter.clone(),
+                        "tips",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::ScriptTemplateCatalogView {
@@ -889,15 +977,17 @@ impl ScriptListApp {
                 let rows = crate::mcp_resources::script_template_catalog_visible_row_names(
                     templates, filter,
                 );
-                self.collect_named_rows(
-                    "script-template-filter",
-                    filter.clone(),
-                    "script-templates",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "scriptTemplateCatalog",
+                    self.collect_named_rows(
+                        "script-template-filter",
+                        filter.clone(),
+                        "script-templates",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::EmojiPickerView {
@@ -914,15 +1004,17 @@ impl ScriptListApp {
                     })
                     .map(|emoji| emoji.name.to_string())
                     .collect();
-                self.collect_named_rows(
-                    "emoji-filter",
-                    filter.clone(),
-                    "emoji-results",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "emojiPicker",
+                    self.collect_named_rows(
+                        "emoji-filter",
+                        filter.clone(),
+                        "emoji-results",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::BrowseKitsView {
@@ -931,15 +1023,17 @@ impl ScriptListApp {
                 results,
             } => {
                 let rows = Self::kit_store_browse_visible_row_labels(results);
-                self.collect_named_rows(
-                    "kit-search",
-                    query.clone(),
-                    "kit-results",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "browseKits",
+                    self.collect_named_rows(
+                        "kit-search",
+                        query.clone(),
+                        "kit-results",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
             AppView::MigrateV1View {
                 filter,
@@ -950,15 +1044,17 @@ impl ScriptListApp {
                     .into_iter()
                     .filter_map(|ix| board.rows.get(ix).map(|row| row.file.clone()))
                     .collect();
-                self.collect_named_rows(
-                    "migrate-v1-filter",
-                    filter.clone(),
-                    "migrate-v1-results",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "migrateV1",
+                    self.collect_named_rows(
+                        "migrate-v1-filter",
+                        filter.clone(),
+                        "migrate-v1-results",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::InstalledKitsView {
@@ -967,15 +1063,17 @@ impl ScriptListApp {
                 kits,
             } => {
                 let rows = Self::kit_store_installed_visible_row_labels(kits, filter);
-                self.collect_named_rows(
-                    "installed-kits-filter",
-                    filter.clone(),
-                    "installed-kits",
-                    &rows,
-                    *selected_index,
-                    limit,
+                ElementCollectionOutcome::complete_from(
+                    "installedKits",
+                    self.collect_named_rows(
+                        "installed-kits-filter",
+                        filter.clone(),
+                        "installed-kits",
+                        &rows,
+                        *selected_index,
+                        limit,
+                    ),
                 )
-                .into()
             }
 
             AppView::ThemeChooserView {
@@ -1500,7 +1598,7 @@ impl ScriptListApp {
 
                 let total_count = elements.len();
                 elements.truncate(limit);
-                ElementCollectionOutcome::new(elements, total_count)
+                ElementCollectionOutcome::complete("themeChooser", elements, total_count)
             }
 
             AppView::ActionsDialog => {
@@ -1538,7 +1636,7 @@ impl ScriptListApp {
                     if elements.len() > limit {
                         elements.truncate(limit);
                     }
-                    ElementCollectionOutcome::new(elements, total_count)
+                    ElementCollectionOutcome::complete("actionsDialog", elements, total_count)
                 } else {
                     let total_count = 1;
                     let elements: Vec<protocol::ElementInfo> =
@@ -1546,8 +1644,13 @@ impl ScriptListApp {
                             .into_iter()
                             .take(limit)
                             .collect();
-                    ElementCollectionOutcome::new(elements, total_count)
-                        .with_warning("panel_only_actions_dialog")
+                    ElementCollectionOutcome::partial(
+                        "actionsDialog",
+                        protocol::ProjectionReason::RuntimeEntityMissing,
+                        elements,
+                        total_count,
+                    )
+                    .with_warning("panel_only_actions_dialog")
                 }
             }
 
@@ -1558,8 +1661,13 @@ impl ScriptListApp {
                         .into_iter()
                         .take(limit)
                         .collect();
-                ElementCollectionOutcome::new(elements, total_count)
-                    .with_warning("panel_only_div_prompt")
+                ElementCollectionOutcome::unsupported(
+                    "divPrompt",
+                    protocol::ProjectionReason::UnsupportedCustomDocument,
+                    elements,
+                    total_count,
+                )
+                .with_warning("panel_only_div_prompt")
             }
 
             AppView::FormPrompt { entity, .. } => {
@@ -1604,7 +1712,10 @@ impl ScriptListApp {
                 )
             }
 
-            AppView::SelectPrompt { entity, .. } => entity.read(cx).collect_elements(limit).into(),
+            AppView::SelectPrompt { entity, .. } => ElementCollectionOutcome::complete_from(
+                "selectPrompt",
+                entity.read(cx).collect_elements(limit),
+            ),
 
             AppView::PathPrompt { entity, .. } => {
                 let path_prompt = entity.read(cx);
@@ -1852,7 +1963,7 @@ impl ScriptListApp {
 
                 let total_count = all_elements.len();
                 let elements = all_elements.into_iter().take(limit).collect();
-                ElementCollectionOutcome::new(elements, total_count)
+                ElementCollectionOutcome::complete("creationFeedback", elements, total_count)
             }
 
             AppView::ConfirmPrompt {
@@ -1883,7 +1994,7 @@ impl ScriptListApp {
                 .into_iter()
                 .take(limit)
                 .collect();
-                ElementCollectionOutcome::new(elements, 3)
+                ElementCollectionOutcome::complete("confirmPrompt", elements, 3)
             }
 
             AppView::WebcamView { .. } => {
@@ -1893,8 +2004,13 @@ impl ScriptListApp {
                         .into_iter()
                         .take(limit)
                         .collect();
-                ElementCollectionOutcome::new(elements, total_count)
-                    .with_warning("panel_only_webcam")
+                ElementCollectionOutcome::partial(
+                    "webcam",
+                    protocol::ProjectionReason::SemanticControlsUnavailable,
+                    elements,
+                    total_count,
+                )
+                .with_warning("panel_only_webcam")
             }
 
             AppView::ScratchPadView { entity, .. } => {
@@ -2094,7 +2210,9 @@ impl ScriptListApp {
                         total_count,
                     )
                 } else {
-                    ElementCollectionOutcome::new(
+                    ElementCollectionOutcome::partial(
+                        "flowSession",
+                        protocol::ProjectionReason::RuntimeEntityMissing,
                         vec![protocol::ElementInfo::panel("flow-session")],
                         1,
                     )
@@ -2102,16 +2220,38 @@ impl ScriptListApp {
                 }
             }
 
-            _ => {
-                let total_count = 1;
-                let elements: Vec<protocol::ElementInfo> =
-                    vec![protocol::ElementInfo::panel("current-view")]
-                        .into_iter()
-                        .take(limit)
-                        .collect();
-                ElementCollectionOutcome::new(elements, total_count)
-                    .with_warning("collector_used_current_view_fallback")
-            }
+            AppView::About { .. } => ElementCollectionOutcome::partial(
+                "about",
+                protocol::ProjectionReason::CollectorUnavailable,
+                vec![protocol::ElementInfo::panel("about")]
+                    .into_iter()
+                    .take(limit)
+                    .collect(),
+                1,
+            )
+            .with_warning("panel_only_about"),
+
+            AppView::CreateAiPresetView { .. } => ElementCollectionOutcome::partial(
+                "createAiPreset",
+                protocol::ProjectionReason::SemanticControlsUnavailable,
+                vec![protocol::ElementInfo::panel("create-ai-preset")]
+                    .into_iter()
+                    .take(limit)
+                    .collect(),
+                1,
+            )
+            .with_warning("panel_only_create_ai_preset"),
+
+            AppView::ScriptIssuesView { .. } => ElementCollectionOutcome::partial(
+                "scriptIssues",
+                protocol::ProjectionReason::CollectorUnavailable,
+                vec![protocol::ElementInfo::panel("script-issues")]
+                    .into_iter()
+                    .take(limit)
+                    .collect(),
+                1,
+            )
+            .with_warning("panel_only_script_issues"),
         };
 
         if include_headers {
@@ -2816,10 +2956,10 @@ impl ScriptListApp {
         }
 
         if truncated {
-            return ElementCollectionOutcome::new(elements, total_count)
+            return ElementCollectionOutcome::complete("profileSearch", elements, total_count)
                 .with_warning("profile_search_elements_truncated_by_limit");
         }
-        ElementCollectionOutcome::new(elements, total_count)
+        ElementCollectionOutcome::complete("profileSearch", elements, total_count)
     }
 
     fn collect_filterable_rows_with_info_empty(
@@ -2918,7 +3058,7 @@ impl ScriptListApp {
                 used_panel_fallback = false,
                 "Collected semantic elements for inspectable surface"
             );
-            return ElementCollectionOutcome::new(elements, total_count);
+            return ElementCollectionOutcome::complete(surface, elements, total_count);
         }
 
         let total_count = 1;
@@ -2933,7 +3073,13 @@ impl ScriptListApp {
             used_panel_fallback = true,
             "Collected semantic elements for inspectable surface"
         );
-        ElementCollectionOutcome::new(elements, total_count).with_warning(warning)
+        ElementCollectionOutcome::partial(
+            surface,
+            protocol::ProjectionReason::PanelOnly,
+            elements,
+            total_count,
+        )
+        .with_warning(warning)
     }
 
     fn preview_value(value: &str, max_chars: usize) -> String {
@@ -4071,6 +4217,72 @@ mod info_state_semantic_tests {
         assert_eq!(root.source_name.as_deref(), Some("favorites-empty"));
         assert_eq!(root.value.as_deref(), Some("star"));
         assert_eq!(root.kind.as_deref(), Some("neutral"));
+    }
+}
+
+#[cfg(test)]
+mod app_layout_projection_tests {
+    use super::*;
+
+    #[test]
+    fn complete_projection_has_no_degradation_reasons() {
+        let outcome = ElementCollectionOutcome::complete(
+            "settings",
+            vec![protocol::ElementInfo::panel("settings")],
+            1,
+        );
+        assert_eq!(outcome.semantic_surface, "settings");
+        assert_eq!(outcome.version, 1);
+        assert_eq!(
+            outcome.projection_quality,
+            protocol::ProjectionQuality::Complete
+        );
+        assert!(outcome.reason_codes.is_empty());
+    }
+
+    #[test]
+    fn partial_and_unsupported_projections_are_typed() {
+        let partial = ElementCollectionOutcome::partial(
+            "flowSession",
+            protocol::ProjectionReason::RuntimeEntityMissing,
+            vec![protocol::ElementInfo::panel("flow-session")],
+            1,
+        );
+        assert_eq!(partial.projection_quality, protocol::ProjectionQuality::Partial);
+        assert_eq!(
+            partial.reason_codes,
+            vec![protocol::ProjectionReason::RuntimeEntityMissing]
+        );
+
+        let unsupported = ElementCollectionOutcome::unsupported(
+            "divPrompt",
+            protocol::ProjectionReason::UnsupportedCustomDocument,
+            vec![protocol::ElementInfo::panel("div-prompt")],
+            1,
+        );
+        assert_eq!(
+            unsupported.projection_quality,
+            protocol::ProjectionQuality::Unsupported
+        );
+        assert_eq!(
+            unsupported.reason_codes,
+            vec![protocol::ProjectionReason::UnsupportedCustomDocument]
+        );
+    }
+
+    #[test]
+    fn empty_surface_finalizer_cannot_fabricate_completeness() {
+        let outcome = ScriptListApp::finalize_surface_outcome(
+            "fixture",
+            "fixture",
+            "panel_only_fixture",
+            10,
+            Vec::new(),
+            0,
+        );
+        assert_eq!(outcome.projection_quality, protocol::ProjectionQuality::Partial);
+        assert_eq!(outcome.reason_codes, vec![protocol::ProjectionReason::PanelOnly]);
+        assert_eq!(outcome.warnings, vec!["panel_only_fixture"]);
     }
 }
 

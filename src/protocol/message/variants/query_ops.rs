@@ -317,6 +317,18 @@ macro_rules! protocol_message_variants_query_ops {
     ElementsResult {
         #[serde(rename = "requestId")]
         request_id: String,
+        /// Stable semantic surface identifier chosen by the owning collector.
+        #[serde(rename = "semanticSurface")]
+        semantic_surface: String,
+        /// Version of the semantic projection contract for this surface.
+        #[serde(rename = "projectionVersion")]
+        projection_version: u32,
+        /// Whether the active surface is completely, partially, or not supported.
+        #[serde(rename = "projectionQuality")]
+        projection_quality: ProjectionQuality,
+        /// Typed limitations for partial or unsupported projections.
+        #[serde(rename = "reasonCodes", default, skip_serializing_if = "Vec::is_empty")]
+        reason_codes: Vec<ProjectionReason>,
         /// List of visible UI elements
         elements: Vec<ElementInfo>,
         /// Total number of elements (may be larger than returned if limit applied)

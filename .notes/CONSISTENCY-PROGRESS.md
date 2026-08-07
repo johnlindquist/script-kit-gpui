@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 51 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 52 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -19,7 +19,7 @@
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
 | Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C14 complete; local lane audit PASS on one stable artifact |
-| Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01–C03 complete; C04 next |
+| Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01–C04 complete; C05 next |
 
 ## How to view the baseline proposal explorer
 
@@ -184,6 +184,55 @@
   3. Confirm each runtime surface has `rawContentReturned: false`, a content kind, character/byte lengths, and `fingerprintAvailable: true` but no authored text.
   4. Confirm cleanup says `processExited`, `streamsDrained`, and `logWriterClosed` are true, `ownedProcessCount` is 0, and `clipboardTouched` is false.
   5. Run `bun test scripts/devtools/privacy.test.ts scripts/devtools/receipt-output.test.ts`; expect all tests to pass, including the denied fixture-cleartext negative control.
+
+### PF-004 — Make semantic projections exhaustive and proof-mode aware
+
+- **Stage:** 2
+- **Status:** Complete
+- **Findings/guidelines addressed:** Every primary `AppView` must declare what semantic surface it projects and whether that projection is complete, partial, or unsupported. Panel-only or missing-runtime projections must remain inspectable without being accepted as action, focus, activation, or AX proof.
+- **User-facing expectation:** Automation can safely inspect every declared surface, but it can only claim action/focus/AX readiness when the owning collector reports a complete projection. Settings now exposes a complete, uniquely identified semantic tree with explicit action, enabled, disabled-reason, focus, selection, activation, owner, bounds, and measurement metadata.
+- **Prior red or bounded blocker:** `collect_visible_elements_with_headers` ended in a wildcard current-view fallback; `finalize_surface_outcome` could make a panel fallback look complete; `ElementsResult` carried no typed projection quality/reasons; and the Elements, Focus, and composed Inspect tools could treat incomplete semantic data as sufficient proof.
+- **Behavior/tooling changed:** Added closed `ProjectionQuality::{Complete,Partial,Unsupported}` and typed `ProjectionReason` protocol enums; made every primary `AppView` arm explicit with a named semantic surface; removed the wildcard fallback and the generic tuple-to-complete conversion; made empty/panel fallback partial; propagated projection metadata through `ElementsResult`; made the legacy constructor fail closed as `legacyUnknown`/unsupported; expanded semantic node measurements; and gated action/focus/AX proof on complete projections with duplicate-ID rejection.
+- **Owners:** Primary AppView semantic collection, secondary-window snapshot grading, protocol query construction, Elements/Focus/Inspect proof classification, executable receipt validation, and the PF-004 runtime probe.
+- **Files and symbols:**
+  - `src/app_layout/collect_elements.rs::{ElementCollectionOutcome,collect_visible_elements_with_headers,finalize_surface_outcome}`
+  - `src/windows/automation_surface_collector.rs::SnapshotQuality::{projection_quality,reason_codes}`
+  - `src/protocol/types/elements_actions_scriptlets.rs::{ProjectionQuality,ProjectionReason}`
+  - `src/protocol/message/variants/query_ops.rs::ElementsResult`
+  - `src/protocol/message/constructors/query_ops.rs::{elements_result,elements_result_with_projection}`
+  - `src/prompt_handler/mod.rs` `GetElements` response path
+  - `scripts/devtools/elements.ts::{semanticProjection,snapshot,classify}`
+  - `scripts/devtools/{focus,inspect,schema}.ts`
+  - `scripts/devtools/lib/receipt-schema.ts`
+  - `scripts/agentic/cons-proof-gov/semantic-projection-proof.ts`
+- **Intended contract:** `Complete` means the semantic collector owns every primitive needed by the requested proof mode. `Partial` and `Unsupported` require typed reasons and may support inspection only. They cannot satisfy action, focus, activation, or AX proof. Duplicate semantic IDs are invalid identity, not a warning.
+- **Model truth:** Three binary-target Rust model tests prove complete projections have no degradation reasons, partial/unsupported projections carry typed reasons, and an empty surface finalizer cannot fabricate completeness. Twenty-four protocol tests prove explicit complete/partial serialization and the legacy fail-closed shape. The exhaustive Rust `AppView` match has no wildcard, so a newly added variant requires an explicit projection decision at compile time.
+- **Rendered/paint truth:** Not applicable: PF-004 grades semantic projection fidelity and does not claim native paint or pixel fidelity. Bounds remain semantic measurements; PF-005/PF-006 own model/paint and glyph-fit joins.
+- **Native AX truth:** No AX parity claim is made. A complete semantic projection is a prerequisite for later AX proof, not a substitute for an independently observed AX peer.
+- **User interaction outcome:** The real sandboxed Settings surface returned `semanticSurface: "settings"`, projection version 1, `projectionQuality: "complete"`, action proof allowed, 15 nodes, and zero duplicate semantic IDs. Synthetic Partial panel, unsupported custom document, missing Flow entity, and duplicate-ID controls all failed closed with their expected distinct classifications.
+- **Remaining uncertainty:** Partial surfaces intentionally remain visible to inspection. Their limitations are explicit and do not count as action/focus/AX completion; PF-007 will add independent semantic↔AX parity and activation receipts.
+- **Protected/out-of-scope values:** No glass owner, fixture, motion curve, geometry threshold, opacity, design token, user data, clipboard, credential, or system permission changed.
+- **Positive receipt:** `.artifacts/consistency/PF-004/semantic-projection.json` → `RUNTIME-CONFIRMED`.
+- **Negative controls:** The same receipt records `partialActionProofBlocked: true`, `unsupportedCustomDocumentBlocked: true`, `missingFlowEntityBlocked: true`, and `duplicateSemanticIdsInvalid: true`. Receipt-schema tests also prove that marking a partial projection as pass yields `INVALID_SCHEMA`/exit 4.
+- **Verification commands:** `bun test scripts/devtools/schema.test.ts scripts/devtools/elements.test.ts scripts/devtools/receipt-schema.test.ts scripts/devtools/privacy.test.ts scripts/devtools/surface.test.ts scripts/devtools/scroll.test.ts scripts/devtools/driver-lifecycle.test.ts scripts/devtools/receipt-output.test.ts scripts/devtools/__tests__/client-lib.test.ts scripts/devtools/target-identity.test.ts scripts/devtools/compare.test.ts` → 77 passed, 0 failed, 267 expectations; `RUST_MIN_STACK=268435456 ./scripts/agentic/agent-cargo.sh test --bin script-kit-gpui app_layout_projection_tests` → 3 passed; `RUST_MIN_STACK=268435456 ./scripts/agentic/agent-cargo.sh test --lib protocol::types::tests::get_elements -- --nocapture` → 24 passed; `./scripts/agentic/agent-cargo.sh check --lib` → PASS.
+- **Compatibility proof:** PF-001 producer matrix remains `PASS` with 17 registered primitives and 15/15 validated producers. PF-003 reran against the exact final C04 artifact and remained `RUNTIME-CONFIRMED` with zero protocol-response canary matches and no raw receipt content.
+- **Binary SHA:** `40091817d02ffd9d68147f03519ec95685c8f4f2cefe4e1746d89a853f1ee009` at `target-agent/artifacts/cons-proof-c04/script-kit-gpui`.
+- **Fixture SHA:** The Settings fixture is generated by the real built-in entry path; typed negative fixtures are embedded in the probe and do not use live user data.
+- **Privacy:** The runtime proof uses a sandbox home and emits semantic metadata only. The final PF-003 compatibility receipt confirms `rawContentReturned: false`, zero protocol-response canary matches, and `clipboardTouched: false`.
+- **Interference:** Hidden protocol proof used no native pointer, keyboard, screenshot, microphone, clipboard, or permission mutation.
+- **Cleanup:** `processExited: true`, `streamsDrained: true`, `logWriterClosed: true`, `ownedProcessCount: 0`, `closeError: null`, and `clipboardTouched: false`; a second exact-executable process scan also returned 0.
+- **Governance:** Source-audit inventory reports 2,814 reader sites and no new guarded readers relative to `main`; scanner unit tests 34/34; source-audit ratchet 1/1; hardcoded visual inventory reports no additions. Protected-glass anti-drift tests pass 40/40 and the production calibration fixture passes 1/1.
+- **Generated projections:** Protocol re-exports and descriptive DevTools schema were updated from the owning typed definitions. No generated design-token file was hand-edited.
+- **Verified commit:** C04 commit containing this section; exact hash is reported by `git log -1 --oneline` after the boundary is created.
+- **Commit boundary:** C04 — PF-004.
+- **Intentional differences preserved:** Complete, Partial, and Unsupported remain distinct; product-static semantic labels remain readable while user content remains redacted; semantic, rendered, and AX truth remain separate; primary `AppView` and secondary-window collectors keep their different owning mechanics while mapping into one protocol quality vocabulary.
+- **User test/view:**
+  1. Run `SCRIPT_KIT_GPUI_BINARY=target-agent/artifacts/cons-proof-c04/script-kit-gpui bun scripts/agentic/cons-proof-gov/semantic-projection-proof.ts`; expect `classification: "RUNTIME-CONFIRMED"`.
+  2. Open `.artifacts/consistency/PF-004/semantic-projection.json`; under `settings`, confirm semantic surface `settings`, version `1`, quality `complete`, proof mode `action`, `proofAllowed: true`, returned count `15`, and an empty duplicate-ID list.
+  3. In the same receipt, confirm all four negative controls are true: partial action proof blocked, unsupported custom document blocked, missing Flow entity blocked, and duplicate IDs invalid.
+  4. Run `bun test scripts/devtools/elements.test.ts scripts/devtools/receipt-schema.test.ts`; confirm incomplete projections require typed reasons, partial action proof blocks, and a false pass on a partial projection is invalid schema.
+  5. Run `RUST_MIN_STACK=268435456 ./scripts/agentic/agent-cargo.sh test --bin script-kit-gpui app_layout_projection_tests`; expect 3 passed and 0 failed, including the no-fabricated-completeness model test.
+  6. Confirm the runtime receipt cleanup has all three lifecycle booleans true and `ownedProcessCount: 0`; `ps` should show no process whose executable path exactly equals the pinned C04 artifact.
 
 ### UX-002 — Establish one canonical shortcut token stream
 

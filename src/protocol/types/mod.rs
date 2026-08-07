@@ -71,7 +71,8 @@ pub use chat::{ChatMessagePosition, ChatMessageRole, ChatPromptConfig, ChatPromp
 pub use elements_actions_scriptlets::{
     ConversationSemanticAction, ConversationSemanticRole, ElementContentDescriptor,
     ElementContentKind, ElementEditorRuntimeInfo, ElementInfo, ElementStyleInfo, ElementType,
-    ProtocolAction, RedactedElementContent, ScriptletData, ScriptletMetadataData,
+    ProjectionQuality, ProjectionReason, ProtocolAction, RedactedElementContent, ScriptletData,
+    ScriptletMetadataData,
 };
 pub use grid_layout::{
     AppKitFidelityColor, AppKitFidelityImage, AppKitFidelityLayer, AppKitFidelityNode,

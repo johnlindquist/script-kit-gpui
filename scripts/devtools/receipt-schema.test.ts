@@ -132,7 +132,15 @@ describe("executable receipt registry", () => {
       classification: "ok",
       requestedTarget: {},
       target: {},
-      semanticSurface: {},
+      semanticSurface: { collectorSurface: "fixture" },
+      semanticProjection: {
+        semanticSurface: "fixture",
+        version: 1,
+        quality: "complete",
+        reasonCodes: [],
+        proofMode: "inspection",
+        proofAllowed: true,
+      },
       nodes: [
         { semanticId: "same" },
         { semanticId: "same" },
@@ -142,6 +150,42 @@ describe("executable receipt registry", () => {
     });
     expect(validation.valid).toBe(false);
     expect(validation.errors).toContain("duplicate semantic IDs are not evaluable");
+  });
+
+  test("partial semantic projections remain typed blocks and cannot claim pass", () => {
+    const candidate = {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.elements",
+      command: "elements.snapshot",
+      classification: "blocked-by-unsupported-projection",
+      requestedTarget: { selector: { type: "main" } },
+      target: { automationId: "main" },
+      semanticSurface: { collectorSurface: "about" },
+      semanticProjection: {
+        semanticSurface: "about",
+        version: 1,
+        quality: "partial",
+        reasonCodes: ["collectorUnavailable"],
+        proofMode: "action",
+        proofAllowed: false,
+      },
+      nodes: [{ semanticId: "panel:about" }],
+      duplicateSemanticIds: [],
+      transaction: proofTransaction(),
+      missingPrimitives: ["completeSemanticProjection"],
+      errors: [],
+    };
+    const blocked = prepareValidatedReceipt("devtools.elements.snapshot", candidate);
+    expect(blocked.receipt.disposition).toBe("BLOCKED_UNSUPPORTED_PROJECTION");
+    expect(blocked.exitCode).toBe(3);
+
+    const falsePass = prepareValidatedReceipt("devtools.elements.snapshot", {
+      ...candidate,
+      classification: "ok",
+      missingPrimitives: [],
+    });
+    expect(falsePass.receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(falsePass.exitCode).toBe(4);
   });
 
   test("duplicate keyboard key requires explicit routing priority", () => {

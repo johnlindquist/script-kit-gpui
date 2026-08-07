@@ -180,9 +180,37 @@ impl Message {
         }
     }
 
-    /// Create an elements result response with observation receipt metadata
+    /// Create a legacy elements result. It is deliberately marked unsupported:
+    /// callers that can prove a projection must use `elements_result_with_projection`.
     pub fn elements_result(
         request_id: String,
+        elements: Vec<ElementInfo>,
+        total_count: usize,
+        focused_semantic_id: Option<String>,
+        selected_semantic_id: Option<String>,
+        warnings: Vec<String>,
+    ) -> Self {
+        Self::elements_result_with_projection(
+            request_id,
+            "legacyUnknown".to_string(),
+            1,
+            ProjectionQuality::Unsupported,
+            vec![ProjectionReason::CollectorUnavailable],
+            elements,
+            total_count,
+            focused_semantic_id,
+            selected_semantic_id,
+            warnings,
+        )
+    }
+
+    /// Create an elements result response with observation receipt metadata.
+    pub fn elements_result_with_projection(
+        request_id: String,
+        semantic_surface: String,
+        projection_version: u32,
+        projection_quality: ProjectionQuality,
+        reason_codes: Vec<ProjectionReason>,
         elements: Vec<ElementInfo>,
         total_count: usize,
         focused_semantic_id: Option<String>,
@@ -192,6 +220,10 @@ impl Message {
         let truncated = elements.len() < total_count;
         Message::ElementsResult {
             request_id,
+            semantic_surface,
+            projection_version,
+            projection_quality,
+            reason_codes,
             elements,
             total_count,
             truncated,

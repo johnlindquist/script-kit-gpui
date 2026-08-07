@@ -25,6 +25,22 @@ pub enum SnapshotQuality {
     PanelOnly,
 }
 
+impl SnapshotQuality {
+    pub const fn projection_quality(self) -> crate::protocol::ProjectionQuality {
+        match self {
+            Self::Full => crate::protocol::ProjectionQuality::Complete,
+            Self::PanelOnly => crate::protocol::ProjectionQuality::Partial,
+        }
+    }
+
+    pub fn reason_codes(self) -> Vec<crate::protocol::ProjectionReason> {
+        match self {
+            Self::Full => Vec::new(),
+            Self::PanelOnly => vec![crate::protocol::ProjectionReason::PanelOnly],
+        }
+    }
+}
+
 /// Lightweight snapshot of semantic elements from a non-main surface.
 #[derive(Clone, Debug, Default)]
 pub struct SurfaceElementSnapshot {
