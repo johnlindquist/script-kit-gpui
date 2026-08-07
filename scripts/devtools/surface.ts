@@ -228,6 +228,7 @@ async function main() {
       classification,
       requestedSurfaceKind: surfaceKind,
       target: targetReceipt.resolvedTarget ?? null,
+      transaction: targetReceipt.transaction,
       requestedTarget: targetReceipt.requestedTarget ?? null,
       contract,
       runtime: {

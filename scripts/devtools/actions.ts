@@ -1914,6 +1914,7 @@ async function main() {
     session: args.session,
     requestedTarget: targetReceipt.requestedTarget ?? { selector },
     target,
+    transaction: targetReceipt.transaction,
     parentTarget: parent,
     startReceipt: diagnostic(startReceipt),
     parentOpenReceipt: diagnostic(parentOpenReceipt),

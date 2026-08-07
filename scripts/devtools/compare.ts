@@ -96,13 +96,21 @@ function targetSelector(receipt: JsonObject) {
   return requestedTarget.selector ?? pathValue(receipt, "requestedTarget") ?? null;
 }
 
-function targetIdentity(receipt: JsonObject) {
+export function targetIdentity(receipt: JsonObject) {
+  const transaction = asObject(receipt.transaction);
   const target = asObject(receipt.target ?? receipt.targetAfter ?? receipt.resolvedTarget);
   return {
-    automationId: target.automationId ?? target.stableTargetId ?? null,
-    surfaceKind: target.surfaceKind ?? null,
-    appViewVariant: target.appViewVariant ?? null,
-    targetKind: target.targetKind ?? null,
+    automationId: transaction.automationId ?? target.automationId ?? target.stableTargetId ?? null,
+    windowInstanceId: transaction.windowInstanceId ?? target.windowInstanceId ?? null,
+    windowGeneration: transaction.windowGeneration ?? target.windowGeneration ?? null,
+    windowKind: transaction.windowKind ?? target.windowKind ?? target.targetKind ?? null,
+    hostKind: transaction.hostKind ?? target.hostKind ?? null,
+    surfaceKind: transaction.surfaceKind ?? target.surfaceKind ?? null,
+    semanticSurface: transaction.semanticSurface ?? target.semanticSurface ?? null,
+    appViewVariant: transaction.appViewVariant ?? target.appViewVariant ?? null,
+    targetGeneration: transaction.targetGeneration ?? target.targetGeneration ?? null,
+    surfaceGeneration: transaction.surfaceGeneration ?? target.surfaceGeneration ?? null,
+    dataGeneration: transaction.dataGeneration ?? target.dataGeneration ?? null,
   };
 }
 
@@ -139,9 +147,50 @@ function sameStringArray(left: string[], right: string[]) {
   return stableJson(left) === stableJson(right);
 }
 
+export function comparisonBasis(receipt: JsonObject) {
+  const identity = targetIdentity(receipt);
+  const fixture = asObject(receipt.fixture);
+  const window = asObject(receipt.window);
+  const viewport = receipt.viewportRect ?? window.rect ?? null;
+  return {
+    fixtureId: fixture.id ?? null,
+    targetSelector: targetSelector(receipt),
+    windowKind: identity.windowKind,
+    hostKind: identity.hostKind,
+    surfaceKind: identity.surfaceKind,
+    semanticSurface: identity.semanticSurface,
+    appViewVariant: identity.appViewVariant,
+    viewport,
+    backingScaleFactor: asObject(receipt.transaction).backingScaleFactor ?? null,
+    userPath: receipt.command ?? null,
+    metricNames: metricNames(receipt),
+  };
+}
+
+function sourceIdentity(receipt: JsonObject) {
+  const binary = asObject(receipt.binary);
+  const repository = asObject(receipt.repository);
+  return {
+    binarySha256: binary.sha256 ?? null,
+    implementationFingerprint: repository.implementationFingerprint ?? null,
+    gitCommit: repository.gitCommit ?? null,
+  };
+}
+
 function classify(assertions: JsonObject, args: Args, red: JsonObject, green: JsonObject) {
-  if (!assertions.samePrimitiveStack || !assertions.sameTargetSelector || !assertions.metricNamesComparable) {
+  if (args.requireFixed && assertions.distinctWindowInstances !== true) {
+    return "invalid-identity";
+  }
+  if (
+    !assertions.samePrimitiveStack
+    || !assertions.sameUserPath
+    || !assertions.sameComparisonBasis
+    || !assertions.metricNamesComparable
+  ) {
     return "blocked-by-missing-primitive";
+  }
+  if (args.requireFixed && assertions.implementationChanged !== true) {
+    return "invalid-binary";
   }
   if (args.requireFixed && !(red.classification !== "ok" && green.classification === "ok")) {
     return "not-reproduced";
@@ -162,11 +211,27 @@ async function main() {
   const greenTargetSelector = targetSelector(green);
   const redMetrics = metricNames(red);
   const greenMetrics = metricNames(green);
+  const redIdentity = targetIdentity(red);
+  const greenIdentity = targetIdentity(green);
+  const redBasis = comparisonBasis(red);
+  const greenBasis = comparisonBasis(green);
+  const redSource = sourceIdentity(red);
+  const greenSource = sourceIdentity(green);
   const assertions = {
     samePrimitiveStack: sameStringArray(redStack, greenStack),
     sameUserPath: red.command === green.command,
     sameTargetSelector: stableJson(redTargetSelector) === stableJson(greenTargetSelector),
-    targetIdentityComparable: targetIdentity(red).surfaceKind === targetIdentity(green).surfaceKind,
+    sameComparisonBasis: stableJson(redBasis) === stableJson(greenBasis),
+    targetIdentityComparable:
+      redIdentity.windowKind === greenIdentity.windowKind
+      && redIdentity.hostKind === greenIdentity.hostKind
+      && redIdentity.surfaceKind === greenIdentity.surfaceKind
+      && redIdentity.appViewVariant === greenIdentity.appViewVariant,
+    distinctWindowInstances:
+      typeof redIdentity.windowInstanceId === "string"
+      && typeof greenIdentity.windowInstanceId === "string"
+      && redIdentity.windowInstanceId !== greenIdentity.windowInstanceId,
+    implementationChanged: stableJson(redSource) !== stableJson(greenSource),
     metricNamesComparable: sameStringArray(redMetrics, greenMetrics),
   };
 
@@ -181,10 +246,66 @@ async function main() {
     sameUserPath: assertions.sameUserPath,
     sameTargetSelector: assertions.sameTargetSelector,
     targetIdentityComparable: assertions.targetIdentityComparable,
-    assertions,
+    comparisonAssertions: assertions,
+    assertions: [
+      {
+        id: "same-primitive-stack",
+        required: true,
+        sourceLayer: "governance",
+        expected: true,
+        observed: assertions.samePrimitiveStack,
+        pass: assertions.samePrimitiveStack,
+      },
+      {
+        id: "same-user-path",
+        required: true,
+        sourceLayer: "governance",
+        expected: true,
+        observed: assertions.sameUserPath,
+        pass: assertions.sameUserPath,
+      },
+      {
+        id: "same-comparison-basis",
+        required: true,
+        sourceLayer: "governance",
+        expected: true,
+        observed: assertions.sameComparisonBasis,
+        pass: assertions.sameComparisonBasis,
+      },
+      {
+        id: "metric-names-comparable",
+        required: true,
+        sourceLayer: "governance",
+        expected: true,
+        observed: assertions.metricNamesComparable,
+        pass: assertions.metricNamesComparable,
+      },
+      ...(args.requireFixed
+        ? [
+            {
+              id: "distinct-window-instances",
+              required: true,
+              sourceLayer: "governance",
+              expected: true,
+              observed: assertions.distinctWindowInstances,
+              pass: assertions.distinctWindowInstances,
+            },
+            {
+              id: "implementation-changed",
+              required: true,
+              sourceLayer: "governance",
+              expected: true,
+              observed: assertions.implementationChanged,
+              pass: assertions.implementationChanged,
+            },
+          ]
+        : []),
+    ],
     primitiveStack: { red: redStack, green: greenStack },
     targetSelector: { red: redTargetSelector, green: greenTargetSelector },
-    targetIdentity: { red: targetIdentity(red), green: targetIdentity(green) },
+    targetIdentity: { red: redIdentity, green: greenIdentity },
+    comparisonBasis: { red: redBasis, green: greenBasis },
+    sourceIdentity: { red: redSource, green: greenSource },
     metricNames: { red: redMetrics, green: greenMetrics },
     classificationDelta: {
       red: red.classification ?? null,
@@ -192,11 +313,15 @@ async function main() {
     },
     warnings: [
       assertions.samePrimitiveStack ? "" : "red and green receipts use different primitive stacks",
+      assertions.sameUserPath ? "" : "red and green receipts use different user paths",
       assertions.sameTargetSelector ? "" : "red and green receipts use different target selectors",
+      assertions.sameComparisonBasis ? "" : "red and green receipts have different comparison bases",
+      !args.requireFixed || assertions.distinctWindowInstances ? "" : "red and green reused one window instance",
+      !args.requireFixed || assertions.implementationChanged ? "" : "fixed proof reused the same implementation identity",
       assertions.metricNamesComparable ? "" : "red and green receipts expose different metric names",
     ].filter(Boolean),
     errors: [],
   });
 }
 
-await main();
+if (import.meta.main) await main();

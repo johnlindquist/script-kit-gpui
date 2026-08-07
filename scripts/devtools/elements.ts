@@ -128,6 +128,7 @@ async function main() {
       classification,
       requestedTarget: targetReceipt.requestedTarget ?? { selector },
       target: targetReceipt.resolvedTarget ?? null,
+      transaction: targetReceipt.transaction,
       semanticSurface: {
         surfaceKind: (targetReceipt.resolvedTarget as JsonObject | undefined)?.surfaceKind ?? null,
         appViewVariant: (targetReceipt.resolvedTarget as JsonObject | undefined)?.appViewVariant ?? null,

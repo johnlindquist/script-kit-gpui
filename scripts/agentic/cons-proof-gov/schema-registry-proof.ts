@@ -38,6 +38,42 @@ function fingerprint(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function proofTransaction(): Obj {
+  return {
+    transactionId: "proof:pf001-layout",
+    runId: "pf001-schema-proof",
+    capturedAt: "2026-08-07T00:00:00.000Z",
+    pid: process.pid,
+    processStartTime: "fixture-process",
+    binarySha256: "a".repeat(64),
+    automationId: "main",
+    windowInstanceId: "main@1",
+    windowGeneration: 1,
+    nativeWindowId: null,
+    axWindowId: null,
+    windowKind: "Main",
+    hostKind: null,
+    parentAutomationId: null,
+    parentWindowInstanceId: null,
+    openerAutomationId: null,
+    surfaceKind: "ScriptList",
+    semanticSurface: "scriptList",
+    appViewVariant: "ScriptList",
+    routeId: null,
+    routeStack: [],
+    screenId: null,
+    backingScaleFactor: 2,
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+    targetGeneration: 1,
+    surfaceGeneration: 1,
+    dataGeneration: 1,
+    layoutGeneration: null,
+    selectionGeneration: null,
+    scrollGeneration: null,
+    frameGeneration: null,
+  };
+}
+
 function layoutReceipt(extra: Obj = {}): Obj {
   return {
     schemaVersion: 2,
@@ -53,6 +89,7 @@ function layoutReceipt(extra: Obj = {}): Obj {
     regions: [],
     resizePressure: { windowCanGrow: true },
     pressure: { pressureScore: 0 },
+    transaction: proofTransaction(),
     missingPrimitives: [],
     warnings: [],
     errors: [],
@@ -149,6 +186,7 @@ const negativeControls = {
       semanticSurface: {},
       nodes: [{ semanticId: "same" }, { semanticId: "same" }],
       duplicateSemanticIds: ["same"],
+      transaction: proofTransaction(),
       missingPrimitives: [],
       errors: [],
     },
@@ -166,6 +204,7 @@ const negativeControls = {
       inputOwnership: "host",
       bindings: [{ key: "cmd+k" }, { key: "cmd+k" }],
       duplicateKeys: ["cmd+k"],
+      transaction: proofTransaction(),
       missingPrimitives: [],
       errors: [],
     },

@@ -7,6 +7,43 @@ import {
 import { diagnostic } from "./lib/privacy.ts";
 import { pickWindows } from "./lib/target-identity.ts";
 
+function proofTransaction(extra: Record<string, unknown> = {}) {
+  return {
+    transactionId: "proof:test",
+    runId: "receipt-schema-test",
+    capturedAt: "2026-08-07T00:00:00.000Z",
+    pid: 42,
+    processStartTime: "Fri Aug 7 00:00:00 2026",
+    binarySha256: "a".repeat(64),
+    automationId: "main",
+    windowInstanceId: "main@1",
+    nativeWindowId: null,
+    axWindowId: null,
+    windowKind: "Main",
+    hostKind: null,
+    parentAutomationId: null,
+    parentWindowInstanceId: null,
+    openerAutomationId: null,
+    surfaceKind: "ScriptList",
+    semanticSurface: "scriptList",
+    appViewVariant: "ScriptList",
+    routeId: null,
+    routeStack: [],
+    screenId: null,
+    backingScaleFactor: 2,
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+    windowGeneration: 1,
+    targetGeneration: 1,
+    surfaceGeneration: 1,
+    dataGeneration: 1,
+    layoutGeneration: null,
+    selectionGeneration: null,
+    scrollGeneration: null,
+    frameGeneration: null,
+    ...extra,
+  };
+}
+
 function baseReceipt(extra: Record<string, unknown> = {}) {
   return {
     schemaVersion: 2,
@@ -19,6 +56,7 @@ function baseReceipt(extra: Record<string, unknown> = {}) {
     regions: [],
     resizePressure: { windowCanGrow: true },
     pressure: { pressureScore: 0 },
+    transaction: proofTransaction(),
     missingPrimitives: [],
     warnings: [],
     errors: [],
@@ -52,6 +90,15 @@ describe("executable receipt registry", () => {
     expect(prepared.exitCode).toBe(4);
     expect(prepared.receipt.disposition).toBe("INVALID_SCHEMA");
     expect(JSON.stringify(prepared.receipt)).toContain("target");
+  });
+
+  test("missing proof transaction identity fails an evaluable receipt", () => {
+    const prepared = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({ transaction: null }),
+    );
+    expect(prepared.receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(JSON.stringify(prepared.receipt)).toContain("missing proof transaction field");
   });
 
   test("required null and pass-with-missing-primitives fail closed", () => {
@@ -109,6 +156,7 @@ describe("executable receipt registry", () => {
       inputOwnership: "host",
       bindings: [{ key: "cmd+k" }, { key: "cmd+k" }],
       duplicateKeys: ["cmd+k"],
+      transaction: proofTransaction(),
       missingPrimitives: [],
     };
     expect(validateReceipt("devtools.keyboard.inspect", receipt).valid).toBe(false);
@@ -170,6 +218,31 @@ describe("executable receipt registry", () => {
     expect(prepared.validation.valid).toBe(true);
     expect(prepared.receipt.disposition).toBe("BLOCKED_STALE_GENERATION");
     expect(prepared.exitCode).toBe(3);
+  });
+
+  test("declared-transition producers require the same complete transaction identity", () => {
+    const candidate = {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.dictation",
+      command: "dictation.deliverFixture",
+      classification: "ok",
+      safety: { syntheticTranscriptInjected: true },
+      target: { requested: "mainWindowFilter" },
+      delivery: { advanced: true },
+      missingPrimitives: [],
+      transaction: proofTransaction(),
+      errors: [],
+    };
+    const valid = prepareValidatedReceipt("devtools.dictation.deliverFixture", candidate);
+    expect(valid.receipt.disposition).toBe("EVALUABLE_PASS");
+    expect(valid.exitCode).toBe(0);
+
+    const invalid = prepareValidatedReceipt("devtools.dictation.deliverFixture", {
+      ...candidate,
+      transaction: null,
+    });
+    expect(invalid.receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(invalid.exitCode).toBe(4);
   });
 
   test("ReceiptEnvelopeV2 is complete and pass is derived from disposition", () => {

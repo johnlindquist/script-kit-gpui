@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver.ts";
 import {
   diagnostic,
@@ -157,6 +157,39 @@ const prepared = prepareValidatedReceipt("devtools.elements.snapshot", {
   semanticSurface: { surfaceKind: "ScriptList" },
   nodes: [{ semanticId: "privacy-canary" }],
   duplicateSemanticIds: [],
+  transaction: {
+    transactionId: "proof:pf003-canary",
+    runId: "pf003-canary-fixture",
+    capturedAt: "2026-08-07T00:00:00.000Z",
+    pid: process.pid,
+    processStartTime: "fixture-process",
+    binarySha256: "a".repeat(64),
+    automationId: "main",
+    windowInstanceId: "main@1",
+    windowGeneration: 1,
+    nativeWindowId: null,
+    axWindowId: null,
+    windowKind: "Main",
+    hostKind: null,
+    parentAutomationId: null,
+    parentWindowInstanceId: null,
+    openerAutomationId: null,
+    surfaceKind: "ScriptList",
+    semanticSurface: "scriptList",
+    appViewVariant: "ScriptList",
+    routeId: null,
+    routeStack: [],
+    screenId: null,
+    backingScaleFactor: 2,
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+    targetGeneration: 1,
+    surfaceGeneration: 1,
+    dataGeneration: 1,
+    layoutGeneration: null,
+    selectionGeneration: null,
+    scrollGeneration: null,
+    frameGeneration: null,
+  },
   missingPrimitives: [],
   canaryFamily: {
     note: userContent(canaries.note),
@@ -323,7 +356,7 @@ const receipt = {
   taskId: "PF-003",
   classification: runtimePassed && cleanupPassed ? "RUNTIME-CONFIRMED" : "RUNTIME-FAILED",
   artifact: {
-    executable: "target-agent/artifacts/cons-proof-c02/script-kit-gpui",
+    executable: relative(process.cwd(), binary),
     sha256: sha256(binary),
   },
   typedCanaryFixture: {

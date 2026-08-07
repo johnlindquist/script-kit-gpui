@@ -393,6 +393,7 @@ async function main() {
       classification,
       requestedTarget: targetReceipt.requestedTarget ?? { selector },
       target: targetReceipt.resolvedTarget ?? null,
+      transaction: targetReceipt.transaction,
       scroll: {
         surface: scroll.surface ?? null,
         implementation: scroll.implementation ?? null,

@@ -36,6 +36,11 @@ struct AutomationRegistryState {
     focused_id: Option<String>,
     main_id: Option<String>,
     kind_index: HashMap<AutomationWindowKind, Vec<String>>,
+    /// Process-local monotonic identity for window lifetimes whose native owner
+    /// does not already provide a generation. It advances only when a stable ID
+    /// is absent from the registry, so ordinary metadata upserts preserve the
+    /// current lifetime while close/reopen receives a distinct instance.
+    next_generation: u64,
 }
 
 static AUTOMATION_WINDOWS: LazyLock<Mutex<AutomationRegistryState>> =
@@ -91,8 +96,20 @@ fn rebuild_indexes(state: &mut AutomationRegistryState) {
 /// If an entry with the same `id` already exists it is replaced.
 /// When the new entry has `focused == true`, all other entries are
 /// unfocused first.
-pub fn upsert_automation_window(info: AutomationWindowInfo) {
+pub fn upsert_automation_window(mut info: AutomationWindowInfo) {
     let mut state = AUTOMATION_WINDOWS.lock();
+    if info.generation.is_none() {
+        info.generation = state
+            .windows
+            .get(&info.id)
+            .and_then(|existing| existing.generation)
+            .or_else(|| {
+                state.next_generation = state.next_generation.saturating_add(1);
+                Some(state.next_generation)
+            });
+    } else if let Some(generation) = info.generation {
+        state.next_generation = state.next_generation.max(generation);
+    }
     if info.focused {
         for existing in state.windows.values_mut() {
             existing.focused = false;
@@ -1101,6 +1118,36 @@ mod tests {
         remove_automation_window(&format!("{p}:main"));
         remove_automation_window(&format!("{p}:notes"));
         remove_automation_window(&format!("{p}:popup"));
+    }
+
+    #[test]
+    fn registry_assigns_monotonic_lifetimes_and_preserves_metadata_updates() {
+        let _registry_guard = registry_guard();
+        let p = test_prefix();
+        let id = format!("{p}:notes");
+
+        upsert_automation_window(make_info(&p, "notes", AutomationWindowKind::Notes));
+        let first = automation_window_by_id(&id)
+            .and_then(|info| info.generation)
+            .expect("new lifetime receives a generation");
+
+        let mut update = make_info(&p, "notes", AutomationWindowKind::Notes);
+        update.visible = false;
+        upsert_automation_window(update);
+        assert_eq!(
+            automation_window_by_id(&id).and_then(|info| info.generation),
+            Some(first),
+            "metadata upserts must preserve the same lifetime",
+        );
+
+        remove_automation_window(&id);
+        upsert_automation_window(make_info(&p, "notes", AutomationWindowKind::Notes));
+        let reopened = automation_window_by_id(&id)
+            .and_then(|info| info.generation)
+            .expect("reopened lifetime receives a generation");
+        assert!(reopened > first, "reopen must allocate a newer lifetime");
+
+        remove_automation_window(&id);
     }
 
     #[test]

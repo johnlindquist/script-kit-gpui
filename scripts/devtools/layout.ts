@@ -634,6 +634,7 @@ async function main() {
         limit,
         requestedTarget: targetReceipt.requestedTarget ?? { selector },
         target: targetReceipt.resolvedTarget ?? null,
+        transaction: targetReceipt.transaction,
         layoutEvidenceFreshness: {
           schemaVersion: 1,
           generatedAt: new Date().toISOString(),

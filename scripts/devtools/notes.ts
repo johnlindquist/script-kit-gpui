@@ -686,6 +686,7 @@ async function runResizeCompare(args: Args) {
       classification: fixed ? "ok" : "reproduced",
       session: args.session,
       target: afterShrinkTarget.resolvedTarget ?? null,
+      transaction: afterShrinkTarget.transaction,
       safety: {
         mutatesNotesEditor: true,
         sandboxRequired: true,
@@ -858,6 +859,7 @@ async function runInspect(args: Args) {
       },
     },
     target: target.resolvedTarget ?? null,
+    transaction: target.transaction,
     requestedTarget: target.requestedTarget ?? { selector: { type: "kind", kind: "notes" } },
     notesState: state,
     runtimeState: diagnostic(runtimeState),

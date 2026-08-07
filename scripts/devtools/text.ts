@@ -121,6 +121,7 @@ async function main() {
       classification,
       requestedTarget: targetReceipt.requestedTarget ?? { selector },
       target: targetReceipt.resolvedTarget ?? null,
+      transaction: targetReceipt.transaction,
       textSummary: {
         contentKind: "UserContent",
         rawContentReturned: false,

@@ -1396,6 +1396,7 @@ async function main() {
     blockedAction,
     requestedTarget: targetReceipt.requestedTarget ?? { selector },
     targetBefore: before.target ?? targetReceipt.resolvedTarget ?? null,
+    transaction: targetReceipt.transaction,
     input: {
       text: userContent(args.actionKind === "set-input" ? args.text : null),
       semanticId: args.actionKind === "select" ? args.semanticId : null,

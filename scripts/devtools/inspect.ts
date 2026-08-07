@@ -1,8 +1,14 @@
 #!/usr/bin/env bun
 
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
-import { diagnostic, externalContent, userContent } from "./lib/privacy.ts";
+import { diagnostic, externalContent, productStatic, userContent } from "./lib/privacy.ts";
 import { classifyTransportError } from "./lib/transport-errors.ts";
+import {
+  compareWindowLifetimeSnapshots,
+  proofTransactionIdentity,
+  strictTransactionMissingFields,
+  targetIdentity,
+} from "./lib/target-identity.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -511,17 +517,50 @@ async function main() {
     requestId: requestId("layout"),
     target,
   }, "layoutInfoResult", args.timeoutMs);
+  const windowsAfterEnvelope = await rpc(args.session, {
+    type: "listAutomationWindows",
+    requestId: requestId("windows-after"),
+  }, "automationWindowListResult", args.timeoutMs);
 
   const windows = responseOf(windowsEnvelope);
   const inspect = responseOf(inspectEnvelope).snapshot as JsonObject | undefined ?? responseOf(inspectEnvelope);
   const state = responseOf(stateEnvelope);
   const elements = responseOf(elementsEnvelope);
   const layout = responseOf(layoutEnvelope);
+  const windowsAfter = responseOf(windowsAfterEnvelope);
+  const identity = targetIdentity(
+    { target, strict: true, expectedSurfaceKind: args.surface ?? "" },
+    inspect,
+    windows,
+  );
+  const transaction = proofTransactionIdentity(args.session, identity.resolvedTarget);
+  const transactionMissingFields = strictTransactionMissingFields(transaction);
+  const lifetimeConsistency = compareWindowLifetimeSnapshots(
+    identity.resolvedTarget.automationId,
+    windows,
+    windowsAfter,
+  );
   const report = { state, elements, layout, inspect };
-  const missing = missingFields(report);
+  const missing = [
+    ...missingFields(report),
+    ...transactionMissingFields.map((field) => `transaction.${field}`),
+    ...(lifetimeConsistency.consistent ? [] : ["transaction.windowLifetime"]),
+  ];
   const missingDetails = missingFieldDetails(report);
-  const errors = rpcErrors(windowsEnvelope, inspectEnvelope, stateEnvelope, elementsEnvelope, layoutEnvelope);
-  const classificationValue = classification(errors, missing);
+  const errors = rpcErrors(
+    windowsEnvelope,
+    inspectEnvelope,
+    stateEnvelope,
+    elementsEnvelope,
+    layoutEnvelope,
+    windowsAfterEnvelope,
+  );
+  const baseClassification = classification(errors, missing);
+  const classificationValue = baseClassification !== "ok"
+    ? baseClassification
+    : lifetimeConsistency.consistent
+      ? "ok"
+      : "blocked-by-stale-generation";
   const screenshotWidth = pickNumber(inspect, "screenshotWidth", "screenshot_width");
   const screenshotHeight = pickNumber(inspect, "screenshotHeight", "screenshot_height");
   const suggestedHitPoints = pickArray(inspect, "suggestedHitPoints", "suggested_hit_points");
@@ -547,22 +586,15 @@ async function main() {
       hints: [userContent(args.bug ?? null), args.surface].filter(Boolean),
     },
     requestedTarget: target,
-    resolvedTarget: {
-      automationId: inspect.windowId ?? null,
-      stableTargetId: inspect.stableTargetId ?? inspect.windowId ?? null,
-      nativeWindowId: inspect.osWindowId ?? null,
-      targetKind: inspect.windowKind ?? null,
-      surfaceKind: inspect.surfaceKind ?? null,
-      appViewVariant: inspect.appViewVariant ?? null,
-      targetGeneration: inspect.targetGeneration ?? null,
-      surfaceGeneration: inspect.surfaceGeneration ?? null,
-      dataGeneration: inspect.dataGeneration ?? null,
-      bounds: inspect.resolvedBounds ?? null,
-      visible: inspect.visible ?? null,
-      frontmost: inspect.frontmost ?? null,
-      focused: inspect.focused ?? null,
-      strictTargetMatch: inspect.strictTargetMatch ?? null,
-      ambiguity: inspect.ambiguity ?? null,
+    resolvedTarget: identity.resolvedTarget,
+    transaction,
+    transactionValidation: {
+      valid: lifetimeConsistency.consistent && transactionMissingFields.length === 0,
+      lifetimeConsistency: {
+        ...lifetimeConsistency,
+        errors: productStatic(lifetimeConsistency.errors),
+      },
+      missingFields: transactionMissingFields,
     },
     visibleWindowProof: visibleWindowProof(inspect),
     primitiveStack: stack,

@@ -1172,7 +1172,7 @@ impl ScriptListApp {
             })
             .flatten();
         let target_fingerprint = format!(
-            "{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}",
+            "{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             resolved.kind,
             resolved.focused,
             resolved.visible,
@@ -1180,7 +1180,8 @@ impl ScriptListApp {
             resolved.parent_window_id,
             resolved.parent_kind,
             resolved.semantic_surface,
-            resolved.pid
+            resolved.pid,
+            resolved.generation,
         );
         let surface_fingerprint = format!(
             "{:?}|{:?}|{:?}|{:?}",

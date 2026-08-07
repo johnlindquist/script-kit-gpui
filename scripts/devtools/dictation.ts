@@ -2,6 +2,7 @@
 
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
 import { diagnostic } from "./lib/privacy.ts";
+import { resolveTargetReceipt } from "./lib/target-identity.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -338,6 +339,16 @@ async function state(session: string, timeoutMs: number) {
 
 async function deliverFixture(args: Args) {
   await maybeStartAndShow(args);
+  const targetBefore = await resolveTargetReceipt(
+    {
+      session: args.session,
+      target: { type: "main" },
+      strict: true,
+      expectedSurfaceKind: "",
+      timeoutMs: args.timeoutMs,
+    },
+    { tool: "dictation-deliver-before" },
+  );
   const before = await state(args.session, args.timeoutMs);
   const beforeGeneration = deliveryGeneration(before);
   const beforeRefusalGeneration = wrongTargetRefusalGeneration(before);
@@ -359,6 +370,16 @@ async function deliverFixture(args: Args) {
     String(args.timeoutMs),
   ], "pushDictationResult");
   const after = await state(args.session, args.timeoutMs);
+  const targetAfter = await resolveTargetReceipt(
+    {
+      session: args.session,
+      target: { type: "main" },
+      strict: true,
+      expectedSurfaceKind: "",
+      timeoutMs: args.timeoutMs,
+    },
+    { tool: "dictation-deliver-after" },
+  );
   const afterReceipt = deliveryReceipt(after);
   const afterGeneration = deliveryGeneration(after);
   const afterRefusalReceipt = wrongTargetRefusalReceipt(after);
@@ -378,13 +399,38 @@ async function deliverFixture(args: Args) {
     refusalAdvanced &&
     afterRefusalReceipt?.redacted === true &&
     afterRefusalReceipt?.noDeliveryAttempted === true;
-  const classification = args.expectRefusal
+  const sameWindowInstance =
+    targetBefore.transaction.windowInstanceId != null
+    && targetBefore.transaction.windowInstanceId === targetAfter.transaction.windowInstanceId;
+  const sameProcess =
+    targetBefore.transaction.pid != null
+    && targetBefore.transaction.pid === targetAfter.transaction.pid
+    && targetBefore.transaction.processStartTime === targetAfter.transaction.processStartTime;
+  const sameBinary =
+    targetBefore.transaction.binarySha256 != null
+    && targetBefore.transaction.binarySha256 === targetAfter.transaction.binarySha256;
+  const targetTransitionValid =
+    targetBefore.classification === "ok"
+    && targetAfter.classification === "ok"
+    && sameWindowInstance
+    && sameProcess
+    && sameBinary;
+  const deliveryClassification = args.expectRefusal
     ? refusalProven ? "ok" : "blocked-by-missing-primitive"
     : sendReceipt.status === "error"
       ? "blocked-by-timeout"
       : deliveryAdvanced && redacted && insertionRangeAvailable
         ? "ok"
         : "blocked-by-missing-primitive";
+  const classification = targetBefore.classification !== "ok"
+    ? targetBefore.classification
+    : targetAfter.classification !== "ok"
+      ? targetAfter.classification
+      : !sameBinary
+        ? "invalid-binary"
+        : !sameWindowInstance || !sameProcess
+          ? "blocked-by-stale-generation"
+          : deliveryClassification;
 
   emitValidatedReceipt("devtools.dictation.deliverFixture", {
     schemaVersion: 2,
@@ -392,6 +438,15 @@ async function deliverFixture(args: Args) {
     command: "dictation.deliverFixture",
     classification,
     session: args.session,
+    transaction: targetBefore.transaction,
+    transactionTransition: {
+      valid: targetTransitionValid,
+      before: targetBefore.transaction,
+      after: targetAfter.transaction,
+      sameWindowInstance,
+      sameProcess,
+      sameBinary,
+    },
     safety: {
       noMicrophoneCaptureRequired: true,
       syntheticTranscriptInjected: true,
@@ -425,6 +480,7 @@ async function deliverFixture(args: Args) {
       noDeliveryAttempted: afterRefusalReceipt?.noDeliveryAttempted === true,
     },
     missingPrimitives: [
+      targetTransitionValid ? "" : "stable target proof transaction",
       args.expectRefusal
         ? ""
         : deliveryAdvanced ? "" : "target delivery generation",

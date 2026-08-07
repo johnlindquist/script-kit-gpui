@@ -237,6 +237,7 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
     commands: ["dictation.inspect"],
     requiredPaths: ["passiveSafety", "coverage", "runtimeState", "sourceEvidence", "missingPrimitives"],
     forbidMissingPrimitivesOnPass: true,
+    identityPolicy: "none",
     description: "Passively inspect redacted Dictation readiness and delivery facts.",
   }),
   schema({
@@ -338,6 +339,10 @@ function dispositionForClassification(classification: unknown): ReceiptDispositi
   if (value.includes("timeout") || value.includes("queue") || value.includes("parse-error")) return "BLOCKED_TIMEOUT";
   if (value.includes("scope-drift")) return "BLOCKED_SCOPE_DRIFT";
   if (value.includes("unsupported-projection")) return "BLOCKED_UNSUPPORTED_PROJECTION";
+  if (value.includes("invalid-identity")) return "INVALID_IDENTITY";
+  if (value.includes("invalid-generation")) return "INVALID_GENERATION";
+  if (value.includes("invalid-binary")) return "INVALID_BINARY";
+  if (value.includes("invalid-fixture")) return "INVALID_FIXTURE";
   if (value.includes("interference")) return "INVALID_INTERFERENCE";
   if (value.includes("observer")) return "INVALID_OBSERVER";
   if (value.includes("cleanup")) return "INVALID_CLEANUP";
@@ -347,6 +352,32 @@ function dispositionForClassification(classification: unknown): ReceiptDispositi
 
 function isEvaluable(disposition: ReceiptDisposition): boolean {
   return disposition === "EVALUABLE_PASS" || disposition === "EVALUABLE_FAIL";
+}
+
+function transactionIdentityErrors(receipt: JsonObject): string[] {
+  const transaction = asObject(receipt.transaction);
+  const required = [
+    "transactionId",
+    "runId",
+    "pid",
+    "processStartTime",
+    "binarySha256",
+    "automationId",
+    "windowInstanceId",
+    "windowGeneration",
+    "windowKind",
+    "bounds",
+    "targetGeneration",
+    "surfaceGeneration",
+    "dataGeneration",
+  ];
+  const errors = required
+    .filter((field) => transaction[field] === null || transaction[field] === undefined || transaction[field] === "")
+    .map((field) => `missing proof transaction field: ${field}`);
+  if (transaction.surfaceKind == null && transaction.semanticSurface == null) {
+    errors.push("missing proof transaction field: surfaceKind|semanticSurface");
+  }
+  return errors;
 }
 
 function invalidDispositionFor(errors: string[]): ReceiptDisposition {
@@ -396,6 +427,9 @@ export function validateReceipt(
   if (isEvaluable(requestedDisposition)) {
     for (const field of definition.nonNullPaths) {
       if (!hasRequiredPath(receipt, field)) errors.push(`missing required field: ${field}`);
+    }
+    if (definition.identityPolicy !== "none") {
+      errors.push(...transactionIdentityErrors(receipt));
     }
   }
 

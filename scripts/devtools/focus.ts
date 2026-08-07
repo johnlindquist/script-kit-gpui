@@ -124,6 +124,7 @@ async function main() {
       classification,
       requestedTarget: targetReceipt.requestedTarget ?? { selector },
       target: targetReceipt.resolvedTarget ?? null,
+      transaction: targetReceipt.transaction,
       windowFocused: state.isFocused ?? null,
       windowVisible: state.windowVisible ?? null,
       focusedSemanticId,

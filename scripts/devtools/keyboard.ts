@@ -129,6 +129,7 @@ async function main() {
       classification,
       requestedTarget: targetReceipt.requestedTarget ?? { selector },
       target: targetReceipt.resolvedTarget ?? null,
+      transaction: targetReceipt.transaction,
       keyboardPolicy: surfaceContract.keyboardPolicy ?? null,
       inputOwnership: surfaceContract.inputOwnership ?? null,
       focusPolicy: surfaceContract.focusPolicy ?? null,

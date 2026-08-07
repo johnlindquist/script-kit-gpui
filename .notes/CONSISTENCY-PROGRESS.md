@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 50 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 51 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -19,7 +19,7 @@
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
 | Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C14 complete; local lane audit PASS on one stable artifact |
-| Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01–C02 complete; C03 next |
+| Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01–C03 complete; C04 next |
 
 ## How to view the baseline proposal explorer
 
@@ -95,6 +95,50 @@
   3. Run `bun scripts/devtools/schema.ts validate --primitive devtools.layout.measure --receipt .artifacts/consistency/PF-001/positive-layout-input.json`; expect exit 0, `schemaVersion: 2`, `disposition: "EVALUABLE_PASS"`, and `producerValidation.valid: true`.
   4. Run `bun scripts/devtools/schema.ts validate --primitive devtools.layout.measure --receipt .artifacts/consistency/PF-001/negative-missing-bounds-input.json`; expect a nonzero exit (4) and `disposition: "INVALID_SCHEMA"`.
   5. Run `bun scripts/devtools/schema.ts registry`; confirm keyboard inspection has `activationProof: false` and every entry has version, non-null paths, allowed dispositions, privacy policy, and identity policy.
+
+### PF-002 — Bind proof receipts to exact window lifetimes and generations
+
+- **Stage:** 2
+- **Status:** Complete
+- **Findings/guidelines addressed:** Target-scoped proof must bind every observation to one process, binary, automation window lifetime, host/surface identity, and target/surface/data generation set. A stable automation ID alone cannot prove that evidence came from the same window instance.
+- **User-facing expectation:** DevTools receipts now distinguish `notes@2` from a reopened `notes@3`, reject requests for the retired instance, preserve attached-popup parent lifetime identity, and refuse red/green claims that reuse an instance or compare unlike hosts/surfaces.
+- **Prior red or bounded blocker:** Automation targets exposed a stable ID but no lifetime generation; metadata upserts and reopen events were indistinguishable; target-scoped receipts did not require a process/binary/generation transaction; and red/green comparison could accept the same window instance or unlike hosts.
+- **Behavior/tooling changed:** The automation registry assigns monotonic lifetime generations and preserves them across metadata updates; exact `Instance { id, generation }` targets reject retired generations; inspect generation fingerprints include the window lifetime; target resolution performs pre/inspect/post registry checks; transactions bind process start time, binary SHA, window/parent instance, host/AppView/surface, bounds, and target/surface/data generations; every target-scoped producer propagates the transaction; Dictation fixture delivery records and validates a declared pre/post transaction; and red/green comparison requires distinct instances, changed implementation identity, and one comparable user path/host/surface basis.
+- **Owners:** Automation window registry, inspect generation owner, DevTools target identity and receipt schema, target-scoped producers, comparison gate, and the PF-002 real-runtime probe.
+- **Files and symbols:**
+  - `src/windows/automation_registry.rs::{AutomationRegistryState::next_generation,upsert_automation_window,resolve_automation_window}`
+  - `src/prompt_handler/mod.rs::next_inspect_generations`
+  - `scripts/devtools/lib/target-identity.ts::{stableWindowInstanceId,targetIdentity,proofTransactionIdentity,strictTransactionMissingFields,compareWindowLifetimeSnapshots,resolveTargetReceipt}`
+  - `scripts/devtools/lib/receipt-schema.ts::{transactionIdentityErrors,validateReceipt}`
+  - `scripts/devtools/compare.ts::{targetIdentity,comparisonBasis,classify}`
+  - `scripts/devtools/dictation.ts::deliverFixture`
+  - `scripts/devtools/{targets,surface,elements,layout,scroll,focus,text,keyboard,actions,act,notes,inspect}.ts`
+  - `scripts/agentic/cons-proof-gov/transaction-identity-probe.ts`
+- **Intended contract:** One evaluable target-scoped receipt has one complete transaction. Passive evidence must preserve process, binary, window instance, host/surface/AppView, bounds, and target/surface/data generations from its pre-capture identity through its post-capture identity. Reopen creates a new `windowInstanceId`; cross-run fixed comparison requires a different instance and different implementation while preserving the comparison basis.
+- **Model truth:** Registry tests prove initial generation assignment, metadata preservation, monotonic reopen, and exact-instance cleanup/resolution. TypeScript tests prove transaction completeness, parent lifetime projection, generation drift refusal, distinct-instance comparison, implementation change, and unlike-host blocking.
+- **Runtime truth:** `.artifacts/consistency/PF-002/transaction-identity.json` is `RUNTIME-CONFIRMED` against a pinned binary. Main evidence retained `main@1` and target/surface/data generation `1/1/1`; Notes closed and reopened as `notes@2` → `notes@3`; the old exact target failed both while closed and after reopen; the new target succeeded; and `actions-dialog@4` preserved `parentAutomationId: notes`, `parentWindowInstanceId: notes@3`, and `hostKind: attachedPopup`.
+- **Rendered/paint truth:** Not applicable: PF-002 proves identity and generation ownership, not visual fidelity. Screenshot dimensions are not used as a substitute for target identity.
+- **Native AX truth:** Native/AX IDs remain optional supplemental identifiers; automation lifetime plus process/binary/generations is authoritative. No AX claim is made when `axWindowId` is absent.
+- **User interaction outcome:** A real sandboxed Notes window can be closed and reopened without a stale proof silently attaching to the new lifetime. An attached Actions popup remains bound to its actual Notes parent instance.
+- **Negative controls:** Reusing one red/green `windowInstanceId` returns `INVALID_IDENTITY`/exit 4; comparing unlike hosts returns `BLOCKED_MISSING_PRIMITIVE`/exit 3; a retired exact Notes target cannot resolve while closed or after reopen; and an evaluable declared-transition receipt without a complete transaction returns `INVALID_SCHEMA`/exit 4.
+- **Protected/out-of-scope values:** No glass owner, motion fixture, geometry threshold, visual token, generated design value, real home data, clipboard, credential, or native input path changed.
+- **Positive receipt:** `.artifacts/consistency/PF-002/transaction-identity.json` → `RUNTIME-CONFIRMED`.
+- **Verification commands:** `bun test scripts/devtools/schema.test.ts scripts/devtools/surface.test.ts scripts/devtools/scroll.test.ts scripts/devtools/driver-lifecycle.test.ts scripts/devtools/receipt-schema.test.ts scripts/devtools/privacy.test.ts scripts/devtools/receipt-output.test.ts scripts/devtools/__tests__/client-lib.test.ts scripts/devtools/target-identity.test.ts scripts/devtools/compare.test.ts` → 68 passed, 0 failed, 242 expectations; `RUST_MIN_STACK=268435456 ./scripts/agentic/agent-cargo.sh test --lib windows::automation_registry::tests -- --nocapture` → 21 passed; `RUST_MIN_STACK=268435456 ./scripts/agentic/agent-cargo.sh check --lib` → PASS; stable binary build → PASS.
+- **Binary SHA:** `10a515e012e9a4833411fb5c462cbe3a093a328a52f4c4b5194ec29fae89aa22` at `target-agent/artifacts/cons-proof-c03/script-kit-gpui`.
+- **Privacy:** Transactions contain product/static identity and fingerprints, never user-authored content. PF-003 reran on the same C03 binary with four runtime surfaces, zero protocol-response canary matches, and no raw receipt content.
+- **Interference:** Hidden protocol proof used a sandbox home and no native pointer, keyboard, screenshot, microphone, clipboard, or system-settings mutation.
+- **Cleanup:** `processExited: true`, `streamsDrained: true`, `logWriterClosed: true`, `ownedProcessCount: 0`, `closeError: null`, `clipboardTouched: false` for both PF-002 and the PF-003 compatibility rerun.
+- **Governance:** Source-audit inventory reports no new guarded readers; scanner tests 34/34; source-audit ratchet 1/1; hardcoded visual inventory reports no additions; glass anti-drift tests 40/40 and production calibration fixture 1/1.
+- **Verified commit:** C03 commit containing this section; exact hash is reported by `git log -1 --oneline` after the boundary is created.
+- **Commit boundary:** C03 — PF-002.
+- **Intentional differences preserved:** Stable automation ID identifies a logical target across reopen, while `windowInstanceId` identifies one lifetime. Within-run passive proof requires the same instance/generations; cross-run fixed proof requires a different instance and implementation but the same user path, host, surface, fixture, viewport, and metric basis.
+- **User test/view:**
+  1. Run `SCRIPT_KIT_GPUI_BINARY=target-agent/artifacts/cons-proof-c03/script-kit-gpui bun scripts/agentic/cons-proof-gov/transaction-identity-probe.ts`; expect `classification: "RUNTIME-CONFIRMED"`.
+  2. Open `.artifacts/consistency/PF-002/transaction-identity.json`; confirm `proof.main.sameTransaction: true` and one unchanged main process/binary/window/generation identity before and after state/elements/layout evidence.
+  3. Inspect `proof.reopen`; confirm the stable ID remains `notes`, the generation advances from `2` to `3`, both stale checks return no resolved window, and `currentInstanceAccepted` is true.
+  4. Inspect `proof.attachedPopup.transaction`; confirm `hostKind: "attachedPopup"`, `parentAutomationId: "notes"`, and `parentWindowInstanceId` equals the reopened Notes instance.
+  5. Run `bun test scripts/devtools/target-identity.test.ts scripts/devtools/compare.test.ts scripts/devtools/receipt-schema.test.ts`; expect the stale-instance, reused-instance, unlike-host, and missing-transaction negative controls to pass.
+  6. Confirm receipt cleanup has all three lifecycle booleans true and `ownedProcessCount: 0`; `ps` should show no process whose executable path exactly equals the pinned C03 artifact.
 
 ### PF-003 — Redact private content recursively in receipts and semantic projections
 

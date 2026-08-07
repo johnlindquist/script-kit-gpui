@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * scripts/devtools/lib/target-identity.ts — strict target identity resolution,
  * extracted from targets.ts so inspector CLIs (elements/focus/layout/keyboard/
@@ -13,6 +15,7 @@ import {
   type JsonObject,
   type TargetArgs,
   asArray,
+  binaryFingerprint,
   classifyEnvelopes,
   hasSessionLifecycleError,
   lifecycleCodes,
@@ -24,7 +27,7 @@ import {
   rpc,
   run,
 } from "./client.ts";
-import { externalContent } from "./privacy.ts";
+import { externalContent, productStatic } from "./privacy.ts";
 
 export function stableWindowKind(value: unknown) {
   if (value === "actionsDialog") return "ActionsDialog";
@@ -39,22 +42,47 @@ export function stableWindowKind(value: unknown) {
   return value ?? null;
 }
 
+function derivedHostKind(windowKind: unknown): string | null {
+  const stable = stableWindowKind(windowKind);
+  if (stable === "Main") return "mainWindow";
+  if (stable === "ActionsDialog" || stable === "PromptPopup") return "attachedPopup";
+  if (typeof stable === "string") return "detachedWindow";
+  return null;
+}
+
+export function stableWindowInstanceId(
+  automationId: unknown,
+  generation: unknown,
+): string | null {
+  return typeof automationId === "string"
+      && automationId.length > 0
+      && typeof generation === "number"
+    ? `${automationId}@${generation}`
+    : null;
+}
+
 export function pickWindows(windows: JsonObject) {
-  return asArray(windows.windows ?? windows.automationWindows ?? windows.targets).map((window, index) => ({
-    index,
-    automationId: window.id ?? window.windowId ?? window.automationId ?? null,
-    windowKind: stableWindowKind(window.kind ?? window.windowKind),
-    title: externalContent(window.title ?? null),
-    visible: window.visible ?? null,
-    focused: window.focused ?? null,
-    bounds: window.bounds ?? window.resolvedBounds ?? null,
-    surfaceKind: window.surfaceKind ?? null,
-    semanticSurface: window.semanticSurface ?? null,
-    appViewVariant: window.appViewVariant ?? null,
-    parentAutomationId: window.parentAutomationId ?? window.parentWindowId ?? null,
-    parentKind: window.parentKind ?? null,
-    pid: window.pid ?? null,
-  }));
+  return asArray(windows.windows ?? windows.automationWindows ?? windows.targets).map((window, index) => {
+    const automationId = window.id ?? window.windowId ?? window.automationId ?? null;
+    const windowGeneration = window.generation ?? window.windowGeneration ?? null;
+    return {
+      index,
+      automationId,
+      windowInstanceId: stableWindowInstanceId(automationId, windowGeneration),
+      windowGeneration,
+      windowKind: stableWindowKind(window.kind ?? window.windowKind),
+      title: externalContent(window.title ?? null),
+      visible: window.visible ?? null,
+      focused: window.focused ?? null,
+      bounds: window.bounds ?? window.resolvedBounds ?? null,
+      surfaceKind: window.surfaceKind ?? null,
+      semanticSurface: window.semanticSurface ?? null,
+      appViewVariant: window.appViewVariant ?? null,
+      parentAutomationId: window.parentAutomationId ?? window.parentWindowId ?? null,
+      parentKind: window.parentKind ?? null,
+      pid: window.pid ?? null,
+    };
+  });
 }
 
 type SurfaceCandidate = { field: string; value: string };
@@ -138,7 +166,21 @@ export function targetIdentity(args: TargetIdentityArgs, inspect: JsonObject, wi
   const snapshot = (inspect.snapshot as JsonObject | undefined) ?? inspect;
   const resolvedBounds = snapshot.resolvedBounds ?? snapshot.bounds ?? null;
   const windowId = snapshot.windowId ?? snapshot.id ?? null;
-  const listedWindow = pickWindows(windows).find((window) => window.automationId === windowId) ?? {};
+  const listedWindows = pickWindows(windows);
+  const listedWindow = listedWindows.find((window) => window.automationId === windowId) ?? {};
+  const windowGeneration = snapshot.windowGeneration
+    ?? snapshot.generation
+    ?? (listedWindow as JsonObject).windowGeneration
+    ?? null;
+  const windowInstanceId = stableWindowInstanceId(windowId, windowGeneration);
+  const windowKind = stableWindowKind(
+    snapshot.windowKind ?? snapshot.kind ?? (listedWindow as JsonObject).windowKind,
+  );
+  const parentAutomationId = snapshot.parentAutomationId
+    ?? snapshot.parentWindowId
+    ?? (listedWindow as JsonObject).parentAutomationId
+    ?? null;
+  const parentWindow = listedWindows.find((window) => window.automationId === parentAutomationId);
   const match = surfaceMatch(snapshot, listedWindow as JsonObject, args.expectedSurfaceKind);
   const strictTargetMatch = Boolean(windowId) && match.ok;
   const ambiguity = args.strict && !windowId ? pickWindows(windows) : [];
@@ -152,11 +194,16 @@ export function targetIdentity(args: TargetIdentityArgs, inspect: JsonObject, wi
     resolvedTarget: {
       automationId: windowId,
       stableTargetId: windowId,
+      windowInstanceId,
+      windowGeneration,
+      windowKind,
       targetKind: snapshot.windowKind ?? snapshot.kind ?? null,
-      hostKind: snapshot.hostKind ?? null,
-      parentAutomationId:
-        snapshot.parentAutomationId ?? snapshot.parentWindowId ?? (listedWindow as JsonObject).parentAutomationId ?? null,
+      hostKind: snapshot.hostKind ?? derivedHostKind(windowKind),
+      parentAutomationId,
+      parentWindowInstanceId: parentWindow?.windowInstanceId ?? null,
       openerAutomationId: snapshot.openerAutomationId ?? null,
+      nativeWindowId: snapshot.osWindowId ?? snapshot.nativeWindowId ?? null,
+      axWindowId: snapshot.axWindowId ?? null,
       surfaceKind: snapshot.surfaceKind ?? null,
       semanticSurface: snapshot.semanticSurface ?? (listedWindow as JsonObject).semanticSurface ?? null,
       appViewVariant: snapshot.appViewVariant ?? null,
@@ -167,8 +214,13 @@ export function targetIdentity(args: TargetIdentityArgs, inspect: JsonObject, wi
       targetGeneration: snapshot.targetGeneration ?? null,
       surfaceGeneration: snapshot.surfaceGeneration ?? null,
       dataGeneration: snapshot.dataGeneration ?? null,
+      layoutGeneration: snapshot.layoutGeneration ?? null,
+      selectionGeneration: snapshot.selectionGeneration ?? null,
+      scrollGeneration: snapshot.scrollGeneration ?? null,
+      frameGeneration: snapshot.frameGeneration ?? null,
       bounds: resolvedBounds,
       screenId: snapshot.screenId ?? null,
+      backingScaleFactor: snapshot.backingScaleFactor ?? null,
       zOrder: snapshot.zOrder ?? null,
       visible: snapshot.visible ?? null,
       frontmost: snapshot.frontmost ?? null,
@@ -194,6 +246,191 @@ export function targetIdentity(args: TargetIdentityArgs, inspect: JsonObject, wi
           : null,
       ambiguity,
     },
+  };
+}
+
+export interface ProofTransactionIdentity extends JsonObject {
+  transactionId: string;
+  runId: string;
+  capturedAt: string;
+  pid: number | null;
+  processStartTime: string | null;
+  binarySha256: string | null;
+  automationId: string | null;
+  windowInstanceId: string | null;
+  nativeWindowId: number | null;
+  axWindowId: string | null;
+  windowKind: string | null;
+  hostKind: string | null;
+  parentAutomationId: string | null;
+  parentWindowInstanceId: string | null;
+  openerAutomationId: string | null;
+  surfaceKind: string | null;
+  semanticSurface: string | null;
+  appViewVariant: string | null;
+  routeId: string | null;
+  routeStack: unknown[];
+  screenId: string | null;
+  backingScaleFactor: number | null;
+  bounds: unknown;
+  windowGeneration: number | null;
+  targetGeneration: number | null;
+  surfaceGeneration: number | null;
+  dataGeneration: number | null;
+  layoutGeneration: number | null;
+  selectionGeneration: number | null;
+  scrollGeneration: number | null;
+  frameGeneration: number | null;
+}
+
+function processStartTime(pid: unknown): string | null {
+  if (typeof pid !== "number" || !Number.isFinite(pid)) return null;
+  const result = Bun.spawnSync(["ps", "-p", String(pid), "-o", "lstart="], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode !== 0) return null;
+  const value = new TextDecoder().decode(result.stdout).trim();
+  return value || null;
+}
+
+export function proofTransactionIdentity(
+  session: string,
+  resolvedTarget: JsonObject,
+  capturedAt = new Date().toISOString(),
+): ProofTransactionIdentity {
+  const pid = typeof resolvedTarget.pid === "number" ? resolvedTarget.pid : null;
+  const binary = binaryFingerprint(session);
+  const identitySeed = JSON.stringify({
+    session,
+    capturedAt,
+    automationId: resolvedTarget.automationId ?? null,
+    windowInstanceId: resolvedTarget.windowInstanceId ?? null,
+    targetGeneration: resolvedTarget.targetGeneration ?? null,
+    surfaceGeneration: resolvedTarget.surfaceGeneration ?? null,
+    dataGeneration: resolvedTarget.dataGeneration ?? null,
+  });
+  return {
+    transactionId: `proof:${createHash("sha256").update(identitySeed).digest("hex").slice(0, 24)}`,
+    runId: session,
+    capturedAt,
+    pid,
+    processStartTime: processStartTime(pid),
+    binarySha256: binary?.sha256 ?? null,
+    automationId: typeof resolvedTarget.automationId === "string"
+      ? resolvedTarget.automationId
+      : null,
+    windowInstanceId: typeof resolvedTarget.windowInstanceId === "string"
+      ? resolvedTarget.windowInstanceId
+      : null,
+    nativeWindowId: typeof resolvedTarget.nativeWindowId === "number"
+      ? resolvedTarget.nativeWindowId
+      : null,
+    axWindowId: typeof resolvedTarget.axWindowId === "string"
+      ? resolvedTarget.axWindowId
+      : null,
+    windowKind: typeof resolvedTarget.windowKind === "string"
+      ? resolvedTarget.windowKind
+      : typeof resolvedTarget.targetKind === "string"
+        ? resolvedTarget.targetKind
+        : null,
+    hostKind: typeof resolvedTarget.hostKind === "string" ? resolvedTarget.hostKind : null,
+    parentAutomationId: typeof resolvedTarget.parentAutomationId === "string"
+      ? resolvedTarget.parentAutomationId
+      : null,
+    parentWindowInstanceId: typeof resolvedTarget.parentWindowInstanceId === "string"
+      ? resolvedTarget.parentWindowInstanceId
+      : null,
+    openerAutomationId: typeof resolvedTarget.openerAutomationId === "string"
+      ? resolvedTarget.openerAutomationId
+      : null,
+    surfaceKind: typeof resolvedTarget.surfaceKind === "string" ? resolvedTarget.surfaceKind : null,
+    semanticSurface: typeof resolvedTarget.semanticSurface === "string"
+      ? resolvedTarget.semanticSurface
+      : null,
+    appViewVariant: typeof resolvedTarget.appViewVariant === "string"
+      ? resolvedTarget.appViewVariant
+      : null,
+    routeId: typeof resolvedTarget.routeId === "string" ? resolvedTarget.routeId : null,
+    routeStack: Array.isArray(resolvedTarget.routeStack) ? resolvedTarget.routeStack : [],
+    screenId: typeof resolvedTarget.screenId === "string" ? resolvedTarget.screenId : null,
+    backingScaleFactor: typeof resolvedTarget.backingScaleFactor === "number"
+      ? resolvedTarget.backingScaleFactor
+      : null,
+    bounds: resolvedTarget.bounds ?? null,
+    windowGeneration: typeof resolvedTarget.windowGeneration === "number"
+      ? resolvedTarget.windowGeneration
+      : null,
+    targetGeneration: typeof resolvedTarget.targetGeneration === "number"
+      ? resolvedTarget.targetGeneration
+      : null,
+    surfaceGeneration: typeof resolvedTarget.surfaceGeneration === "number"
+      ? resolvedTarget.surfaceGeneration
+      : null,
+    dataGeneration: typeof resolvedTarget.dataGeneration === "number"
+      ? resolvedTarget.dataGeneration
+      : null,
+    layoutGeneration: typeof resolvedTarget.layoutGeneration === "number"
+      ? resolvedTarget.layoutGeneration
+      : null,
+    selectionGeneration: typeof resolvedTarget.selectionGeneration === "number"
+      ? resolvedTarget.selectionGeneration
+      : null,
+    scrollGeneration: typeof resolvedTarget.scrollGeneration === "number"
+      ? resolvedTarget.scrollGeneration
+      : null,
+    frameGeneration: typeof resolvedTarget.frameGeneration === "number"
+      ? resolvedTarget.frameGeneration
+      : null,
+  };
+}
+
+export function strictTransactionMissingFields(
+  transaction: ProofTransactionIdentity,
+): string[] {
+  return [
+    transaction.automationId ? "" : "automationId",
+    transaction.windowInstanceId ? "" : "windowInstanceId",
+    transaction.windowGeneration != null ? "" : "windowGeneration",
+    transaction.pid != null ? "" : "pid",
+    transaction.processStartTime ? "" : "processStartTime",
+    transaction.binarySha256 ? "" : "binarySha256",
+    transaction.windowKind ? "" : "windowKind",
+    transaction.surfaceKind || transaction.semanticSurface ? "" : "surfaceKind",
+    transaction.windowKind !== "Main" || transaction.appViewVariant ? "" : "appViewVariant",
+    transaction.bounds != null ? "" : "bounds",
+    transaction.targetGeneration != null ? "" : "targetGeneration",
+    transaction.surfaceGeneration != null ? "" : "surfaceGeneration",
+    transaction.dataGeneration != null ? "" : "dataGeneration",
+  ].filter(Boolean);
+}
+
+export function compareWindowLifetimeSnapshots(
+  automationId: unknown,
+  beforeWindows: JsonObject,
+  afterWindows: JsonObject,
+) {
+  const before = pickWindows(beforeWindows).find((window) => window.automationId === automationId);
+  const after = pickWindows(afterWindows).find((window) => window.automationId === automationId);
+  const errors = [
+    before ? "" : "target missing from pre-inspection registry snapshot",
+    after ? "" : "target missing from post-inspection registry snapshot",
+    before && after && before.windowInstanceId !== after.windowInstanceId
+      ? "window instance changed during target inspection"
+      : "",
+    before && after && before.pid !== after.pid
+      ? "window owner pid changed during target inspection"
+      : "",
+    before && after && JSON.stringify(before.bounds) !== JSON.stringify(after.bounds)
+      ? "window bounds changed during target inspection"
+      : "",
+  ].filter(Boolean);
+  return {
+    consistent: errors.length === 0,
+    automationId: automationId ?? null,
+    before: before ?? null,
+    after: after ?? null,
+    errors,
   };
 }
 
@@ -242,7 +479,10 @@ export interface TargetReceipt extends JsonObject {
   classification: string;
   requestedTarget: JsonObject;
   resolvedTarget: JsonObject;
+  transaction: ProofTransactionIdentity;
+  transactionValidation: JsonObject;
   windows: JsonObject[];
+  windowsAfter: JsonObject[];
   errors: JsonObject[];
 }
 
@@ -280,13 +520,46 @@ export async function resolveTargetReceipt(
     args.timeoutMs,
   );
   const inspect = responseOf(inspectEnvelope);
-  const inspectErrors = [...errors, inspectEnvelope].filter((value) => value.status === "error");
+  const windowsAfterEnvelope = await rpc(
+    args.session,
+    { type: "listAutomationWindows", requestId: requestId(tool, "list-after") },
+    "automationWindowListResult",
+    args.timeoutMs,
+  );
+  const windowsAfter = responseOf(windowsAfterEnvelope);
+  const inspectErrors = [...errors, inspectEnvelope, windowsAfterEnvelope]
+    .filter((value) => value.status === "error");
   const identity = targetIdentity(args, inspect, windows);
+  const transaction = proofTransactionIdentity(args.session, identity.resolvedTarget);
+  const transactionMissingFields = strictTransactionMissingFields(transaction);
+  const lifetimeConsistency = compareWindowLifetimeSnapshots(
+    identity.resolvedTarget.automationId,
+    windows,
+    windowsAfter,
+  );
+  const baseClassification = classifyTarget(args, identity, inspectErrors);
+  const classification = baseClassification !== "ok"
+    ? baseClassification
+    : !lifetimeConsistency.consistent
+      ? "blocked-by-stale-generation"
+      : args.strict && transactionMissingFields.length > 0
+        ? "blocked-by-missing-primitive"
+        : "ok";
 
   return {
-    classification: classifyTarget(args, identity, inspectErrors),
+    classification,
     ...identity,
+    transaction,
+    transactionValidation: {
+      valid: lifetimeConsistency.consistent && transactionMissingFields.length === 0,
+      lifetimeConsistency: {
+        ...lifetimeConsistency,
+        errors: productStatic(lifetimeConsistency.errors),
+      },
+      missingFields: transactionMissingFields,
+    },
     windows: pickWindows(windows) as unknown as JsonObject[],
+    windowsAfter: pickWindows(windowsAfter) as unknown as JsonObject[],
     rawInspect: inspect,
     lifecycleCodes: lifecycleCodes(inspectErrors),
     lifecycleDetails: primaryLifecycleDetails(inspectErrors),
