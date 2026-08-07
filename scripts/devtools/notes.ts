@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 
 import { classifyEnvelopeError } from "./lib/client.ts";
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic } from "./lib/privacy.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -469,7 +471,7 @@ function classify(target: JsonObject, elements: JsonObject, requiredMissing: str
 
 function unsafeResizeReceipt(args: Args, classification: string, reason: string, extra: JsonObject = {}) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     tool: "script-kit-devtools.notes",
     command: "notes.resize-compare",
     classification,
@@ -484,6 +486,18 @@ function unsafeResizeReceipt(args: Args, classification: string, reason: string,
     reason,
     ...extra,
   };
+}
+
+function emitUnsafeResizeReceipt(
+  args: Args,
+  classification: string,
+  reason: string,
+  extra: JsonObject = {},
+) {
+  emitValidatedReceipt(
+    "devtools.notes.resizeCompare",
+    unsafeResizeReceipt(args, classification, reason, extra),
+  );
 }
 
 async function sessionStatus(session: string) {
@@ -557,21 +571,21 @@ async function waitForStableNotesHeight(args: Args, maxReads = 6): Promise<void>
 
 async function runResizeCompare(args: Args) {
   if (!args.sandbox && !args.confirmRealNotesMutation) {
-    console.log(JSON.stringify(unsafeResizeReceipt(args, "blocked-by-real-data-risk", "notes.resize-compare mutates the Notes editor and requires --sandbox or --confirm-real-notes-mutation."), null, 2));
+    emitUnsafeResizeReceipt(args, "blocked-by-real-data-risk", "notes.resize-compare mutates the Notes editor and requires --sandbox or --confirm-real-notes-mutation.");
     return;
   }
   if (args.confirmRealNotesMutation) {
-    console.log(JSON.stringify(unsafeResizeReceipt(args, "blocked-by-real-data-risk", "Real Notes mutation is intentionally not implemented for this DevTools primitive yet. Use --sandbox."), null, 2));
+    emitUnsafeResizeReceipt(args, "blocked-by-real-data-risk", "Real Notes mutation is intentionally not implemented for this DevTools primitive yet. Use --sandbox.");
     return;
   }
   if (!args.start) {
-    console.log(JSON.stringify(unsafeResizeReceipt(args, "blocked-by-unsafe-operation", "notes.resize-compare requires --start so the app can be launched with SCRIPT_KIT_TEST_NOTES_DB_PATH."), null, 2));
+    emitUnsafeResizeReceipt(args, "blocked-by-unsafe-operation", "notes.resize-compare requires --start so the app can be launched with SCRIPT_KIT_TEST_NOTES_DB_PATH.");
     return;
   }
 
   const beforeStatus = await sessionStatus(args.session);
   if (beforeStatus.alive === true) {
-    console.log(JSON.stringify(unsafeResizeReceipt(args, "blocked-by-unsafe-operation", "Refusing to reuse a running session for sandboxed Notes mutation. Use a fresh session name or stop it first.", { beforeStatus }), null, 2));
+    emitUnsafeResizeReceipt(args, "blocked-by-unsafe-operation", "Refusing to reuse a running session for sandboxed Notes mutation. Use a fresh session name or stop it first.", { beforeStatus });
     return;
   }
 
@@ -666,7 +680,7 @@ async function runResizeCompare(args: Args) {
       autoSizingStayedEnabled;
 
     result = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       tool: "script-kit-devtools.notes",
       command: "notes.resize-compare",
       classification: fixed ? "ok" : "reproduced",
@@ -726,12 +740,13 @@ async function runResizeCompare(args: Args) {
         { name: "auto sizing stayed enabled", pass: autoSizingStayedEnabled },
         { name: "raw note content redacted", pass: true },
       ],
-      missingPrimitives: fixed ? [
+      missingPrimitives: fixed ? [] : ["auto-resize before/after compare"],
+      roadmapMissingPrimitives: [
         "preview scroll handle populated content bounds under mounted markdown preview",
         "Agent Chat embedded origin receipts",
         "portal session provenance",
         "remaining Notes shortcut activation parity receipts beyond Cmd+Shift+P",
-      ] : ["auto-resize before/after compare"],
+      ],
       receipts: redactNestedReceipt(receipts),
       cleanup: null,
     };
@@ -741,7 +756,7 @@ async function runResizeCompare(args: Args) {
     }
     if (result) {
       result.cleanup = cleanupReceipt;
-      console.log(JSON.stringify(result, null, 2));
+      emitValidatedReceipt("devtools.notes.resizeCompare", result);
     }
   }
 }
@@ -820,15 +835,15 @@ async function runInspect(args: Args) {
     ].filter(Boolean)),
   ];
 
-  console.log(JSON.stringify({
-    schemaVersion: 1,
+  emitValidatedReceipt("devtools.notes.inspect", {
+    schemaVersion: 2,
     tool: "script-kit-devtools.notes",
     command: "notes.inspect",
     classification: classify(target, elements, requiredMissing),
     session: args.session,
-    openReceipt,
-    openActionsReceipt,
-    shortcutActivation,
+    openReceipt: diagnostic(openReceipt),
+    openActionsReceipt: diagnostic(openActionsReceipt),
+    shortcutActivation: diagnostic(shortcutActivation),
     availableActions: {
       togglePreview: {
         channel: "protocol.batch.togglePreview",
@@ -845,16 +860,16 @@ async function runInspect(args: Args) {
     target: target.resolvedTarget ?? null,
     requestedTarget: target.requestedTarget ?? { selector: { type: "kind", kind: "notes" } },
     notesState: state,
-    runtimeState,
+    runtimeState: diagnostic(runtimeState),
     coverage,
-    receipts: {
+    receipts: diagnostic({
       target,
       elements,
       focus,
       text,
       layout,
       state: stateEnvelope,
-    },
+    }),
     missingPrimitives: requiredMissing,
     roadmapMissingPrimitives: roadmapMissing,
     warnings: [
@@ -864,8 +879,10 @@ async function runInspect(args: Args) {
       requiredMissing.length > 0 ? `Notes inspection remains fail-closed until required primitives are available: ${requiredMissing.join(", ")}.` : "",
       roadmapMissing.length > 0 ? `Notes inspection roadmap primitives still missing: ${roadmapMissing.join(", ")}.` : "",
     ].filter(Boolean),
-    errors: [target, elements, focus, text].filter((receipt) => receipt.status === "error"),
-  }, null, 2));
+    errors: diagnostic(
+      [target, elements, focus, text].filter((receipt) => receipt.status === "error"),
+    ),
+  });
 }
 
 async function main() {

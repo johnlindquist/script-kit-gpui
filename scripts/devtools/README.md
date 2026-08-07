@@ -43,11 +43,14 @@ bash scripts/agentic/session.sh stop my-probe
 
 ## Receipts
 
-All migrated CLIs share one envelope (see `lib/client.ts` `finishReceipt`):
-`schemaVersion`, `tool`, `command`, `session`, `startedAt`, `endedAt`,
-`durationMs`, `binary` (path/size/mtime fingerprint of the session's app
-binary), then tool-specific fields plus `classification`, `warnings`,
-`errors`. The classification vocabulary lives in `schema.ts` — notable values:
+All migrated CLIs build through `lib/client.ts` `finishReceipt`, then must
+emit through `lib/receipt-schema.ts` `emitValidatedReceipt`. The latter is the
+only public print boundary and produces `ReceiptEnvelopeV2`: stable primitive,
+run/task, repository/producer, binary, fixture/transaction, recursive privacy,
+evidence-layer, assertion, interference, cleanup, disposition, and producer
+validation fields around each tool-specific body. Only `EVALUABLE_PASS` exits
+zero; blocked receipts exit 3 and invalid receipts exit 4. The classification
+vocabulary lives in `schema.ts` — notable values:
 
 - `ok` / `reproduced` / `fixed` / `not-reproduced` — proof outcomes
 - `blocked-by-session-lifecycle` — session/forwarder/app process is gone;

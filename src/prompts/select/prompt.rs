@@ -46,6 +46,7 @@ pub(crate) fn collect_select_prompt_elements(
             element_type: crate::protocol::ElementType::Choice,
             text: Some(choice.name.clone()),
             value: Some(choice.value.clone()),
+            content: None,
             selected: Some(is_selected),
             focused: Some(is_focused),
             index: Some(display_idx),

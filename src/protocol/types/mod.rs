@@ -69,8 +69,9 @@ pub use batch_wait::{
 };
 pub use chat::{ChatMessagePosition, ChatMessageRole, ChatPromptConfig, ChatPromptMessage};
 pub use elements_actions_scriptlets::{
-    ConversationSemanticAction, ConversationSemanticRole, ElementEditorRuntimeInfo, ElementInfo,
-    ElementStyleInfo, ElementType, ProtocolAction, ScriptletData, ScriptletMetadataData,
+    ConversationSemanticAction, ConversationSemanticRole, ElementContentDescriptor,
+    ElementContentKind, ElementEditorRuntimeInfo, ElementInfo, ElementStyleInfo, ElementType,
+    ProtocolAction, RedactedElementContent, ScriptletData, ScriptletMetadataData,
 };
 pub use grid_layout::{
     AppKitFidelityColor, AppKitFidelityImage, AppKitFidelityLayer, AppKitFidelityNode,

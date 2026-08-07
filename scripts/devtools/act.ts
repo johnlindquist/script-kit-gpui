@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
 
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic, userContent } from "./lib/privacy.ts";
+
 type JsonObject = Record<string, unknown>;
 
 type ActionKind =
@@ -1377,8 +1380,8 @@ async function main() {
     postIntentTargetProof,
   );
 
-  console.log(JSON.stringify({
-    schemaVersion: 1,
+  emitValidatedReceipt("devtools.act", {
+    schemaVersion: 2,
     tool: "script-kit-devtools.act",
     command: `act.${args.actionKind}`,
     classification,
@@ -1394,7 +1397,7 @@ async function main() {
     requestedTarget: targetReceipt.requestedTarget ?? { selector },
     targetBefore: before.target ?? targetReceipt.resolvedTarget ?? null,
     input: {
-      text: args.actionKind === "set-input" ? args.text : null,
+      text: userContent(args.actionKind === "set-input" ? args.text : null),
       semanticId: args.actionKind === "select" ? args.semanticId : null,
       control: args.actionKind === "set-theme-control" ? args.control : null,
       value: args.actionKind === "set-theme-control" ? args.value : null,
@@ -1402,9 +1405,9 @@ async function main() {
       modifiers: args.actionKind === "key" ? args.modifiers : [],
     },
     safety: guardWithPreflight,
-    submitLifecycle,
-    postActionLifecycle,
-    dismissLifecycle: isDismissLike(args) ? postActionLifecycle : null,
+    submitLifecycle: diagnostic(submitLifecycle),
+    postActionLifecycle: diagnostic(postActionLifecycle),
+    dismissLifecycle: diagnostic(isDismissLike(args) ? postActionLifecycle : null),
     expected: {
       protocolResponse: expectedResponseForTarget(args, targetReceipt),
       submitAllowed: args.allowSubmit,
@@ -1412,7 +1415,8 @@ async function main() {
       prePostReceipts: ["focus.inspect", "focus.inspect.submitDiagnostics", "scroll.inspect"],
       postIntentTarget: expectedPostTargetForIntent(args),
     },
-    actionReceipt,
+    actionReceipt: diagnostic(actionReceipt),
+    result: diagnostic(actionReceipt),
     actionTiming: {
       dispatchElapsedMs,
       appReportedElapsedMs:
@@ -1422,25 +1426,25 @@ async function main() {
     },
     postIntentTargetProof,
     targetAfter: after.target ?? null,
-    submitDiagnostics: {
+    submitDiagnostics: diagnostic({
       before: before.submitDiagnostics ?? null,
       after: after.submitDiagnostics ?? null,
-    },
+    }),
     visibleResult: visibleResult(before, after, beforeScroll, afterScroll),
-    before: { focus: before, scroll: beforeScroll },
-    after: { focus: after, scroll: afterScroll },
+    before: diagnostic({ focus: before, scroll: beforeScroll }),
+    after: diagnostic({ focus: after, scroll: afterScroll }),
     warnings: [
       ...guardWithPreflight.warnings,
       ...(Array.isArray(before.warnings) ? before.warnings : []),
       ...(Array.isArray(after.warnings) ? after.warnings : []),
     ],
-    errors: [
+    errors: diagnostic([
       ...guardWithPreflight.errors.map((error) => ({ error })),
       targetReceipt.classification !== "ok" ? targetReceipt : null,
       actionFailed(actionReceipt) ? actionReceipt : null,
       postIntentTargetProof && postIntentTargetProof.classification !== "ok" ? postIntentTargetProof : null,
-    ].filter(Boolean),
-  }, null, 2));
+    ].filter(Boolean)),
+  });
 }
 
 await main();

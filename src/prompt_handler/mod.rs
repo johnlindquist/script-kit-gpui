@@ -3838,7 +3838,10 @@ impl ScriptListApp {
                                     .cloned()
                                     .unwrap_or_else(|| "highlight".to_string());
                                 let mut chip = serde_json::json!({
-                                    "text": chip_text,
+                                    "content": crate::protocol::RedactedElementContent::new(
+                                        crate::protocol::ElementContentKind::UserContent,
+                                        &chip_text,
+                                    ),
                                     "range": [range.start, range.end],
                                     "role": role,
                                 });
@@ -3847,10 +3850,25 @@ impl ScriptListApp {
                                         object_refs_by_range.get(&(range.start, range.end))
                                     {
                                         chip["kind"] = serde_json::json!(object_ref.kind.as_str());
-                                        chip["id"] = serde_json::json!(object_ref.id);
-                                        chip["label"] = serde_json::json!(object_ref.label);
+                                        chip["idContent"] = serde_json::json!(
+                                            crate::protocol::RedactedElementContent::new(
+                                                crate::protocol::ElementContentKind::ExternalContent,
+                                                &object_ref.id,
+                                            )
+                                        );
+                                        chip["labelContent"] = serde_json::json!(
+                                            crate::protocol::RedactedElementContent::new(
+                                                crate::protocol::ElementContentKind::ExternalContent,
+                                                &object_ref.label,
+                                            )
+                                        );
                                         if let Some(deeplink) = object_ref.deeplink.as_ref() {
-                                            chip["deeplink"] = serde_json::json!(deeplink);
+                                            chip["deeplinkContent"] = serde_json::json!(
+                                                crate::protocol::RedactedElementContent::new(
+                                                    crate::protocol::ElementContentKind::FilePath,
+                                                    deeplink,
+                                                )
+                                            );
                                         }
                                     }
                                 }
@@ -3896,7 +3914,10 @@ impl ScriptListApp {
                         .collect();
                     }
                     Some(serde_json::json!({
-                        "text": text,
+                        "content": crate::protocol::RedactedElementContent::new(
+                            crate::protocol::ElementContentKind::UserContent,
+                            &text,
+                        ),
                         "chips": chips,
                     }))
                 };

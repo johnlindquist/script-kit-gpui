@@ -7,12 +7,13 @@ import {
   classifyEnvelopes,
   finishReceipt,
   parseTargetArgs,
-  printReceipt,
   requestId,
   responseOf,
   rpc,
   startClock,
 } from "./lib/client.ts";
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
 function usage() {
@@ -40,7 +41,8 @@ function textRows(nodes: JsonObject[]) {
       return {
         semanticId: node.semanticId ?? null,
         role: node.role ?? node.type ?? null,
-        text,
+        contentKind: "UserContent",
+        redacted: true,
         textLength: text.length,
         lineCount: text.length ? text.split(/\r\n|\r|\n/).length : 0,
         selected: node.selected ?? null,
@@ -113,17 +115,17 @@ async function main() {
   }));
   const classification = classify(targetReceipt, stateEnvelope, elementsEnvelope, rows);
 
-  printReceipt(finishReceipt(
+  emitValidatedReceipt("devtools.text.measure", finishReceipt(
     { tool: "script-kit-devtools.text", command: "text.measure", session: args.session, clock },
     {
       classification,
       requestedTarget: targetReceipt.requestedTarget ?? { selector },
       target: targetReceipt.resolvedTarget ?? null,
       textSummary: {
-        inputValue,
+        contentKind: "UserContent",
+        rawContentReturned: false,
         inputLength: inputValue.length,
         inputFingerprint: fingerprint(inputValue),
-        selectedValue,
         selectedLength: selectedValue.length,
         selectedFingerprint: fingerprint(selectedValue),
         textNodeCount: rows.length,
@@ -143,10 +145,10 @@ async function main() {
         ...argWarnings,
         "Text bounds are not exposed by getElements yet; pair this with devtools.layout.measure for geometry.",
       ],
-      errors: [
+      errors: diagnostic([
         ...((targetReceipt.errors as JsonObject[]) ?? []),
         ...[stateEnvelope, elementsEnvelope].filter((value) => value.status === "error"),
-      ],
+      ]),
     },
   ));
 }

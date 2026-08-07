@@ -7,7 +7,6 @@ import {
   classifyEnvelopeError,
   finishReceipt,
   parseTargetArgs,
-  printReceipt,
   requestId,
   responseOf,
   rpc,
@@ -15,6 +14,8 @@ import {
   serializeTargetFlags,
   startClock,
 } from "./lib/client.ts";
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
 type Rect = {
@@ -386,7 +387,7 @@ async function main() {
     requireNativeListContract,
   );
 
-  printReceipt(finishReceipt(
+  emitValidatedReceipt("devtools.scroll.inspect", finishReceipt(
     { tool: "script-kit-devtools.scroll", command: "scroll.inspect", session: args.session, clock },
     {
       classification,
@@ -471,11 +472,10 @@ async function main() {
         ...(requireNativeListContract ? nativeContractInspection.missingFields : []),
       ].filter(Boolean),
       warnings: argWarnings,
-      errors: [
+      errors: diagnostic([
         ...((targetReceipt.errors as JsonObject[]) ?? []),
         ...[stateEnvelope].filter((value) => value.status === "error"),
-      ],
-      state,
+      ]),
     },
   ));
 }

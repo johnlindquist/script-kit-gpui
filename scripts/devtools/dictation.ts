@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
 
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic } from "./lib/privacy.ts";
+
 type JsonObject = Record<string, unknown>;
 
 type Args = {
@@ -383,8 +386,8 @@ async function deliverFixture(args: Args) {
         ? "ok"
         : "blocked-by-missing-primitive";
 
-  console.log(JSON.stringify({
-    schemaVersion: 1,
+  emitValidatedReceipt("devtools.dictation.deliverFixture", {
+    schemaVersion: 2,
     tool: "script-kit-devtools.dictation",
     command: "dictation.deliverFixture",
     classification,
@@ -434,8 +437,10 @@ async function deliverFixture(args: Args) {
       "Add cursor insertion range for Notes/Agent Chat/frontmost destinations.",
       "Add wrong-target refusal receipts for stale or incompatible dictation targets.",
     ],
-    errors: [sendReceipt].filter((receipt) => receipt.status === "error"),
-  }, null, 2));
+    errors: diagnostic(
+      [sendReceipt].filter((receipt) => receipt.status === "error"),
+    ),
+  });
 }
 
 async function main() {
@@ -501,8 +506,8 @@ async function main() {
     ].filter(Boolean)),
   ];
 
-  console.log(JSON.stringify({
-    schemaVersion: 1,
+  emitValidatedReceipt("devtools.dictation.inspect", {
+    schemaVersion: 2,
     tool: "script-kit-devtools.dictation",
     command: "dictation.inspect",
     classification: classify(media, sourceEvidence, provider, runtimeState),
@@ -529,11 +534,11 @@ async function main() {
       supportedNow: dictationSurface.supportedNow ?? [],
       missingRuntimePrimitives: dictationSurface.missingRuntimePrimitives ?? [],
     },
-    mediaReceipt: media,
-    runtimeState: runtimeState?.dictation ?? null,
+    mediaReceipt: diagnostic(media),
+    runtimeState: diagnostic(runtimeState?.dictation ?? null),
     deliveryReceiptAvailable,
-    runtimeStateReceipt: stateEnvelope,
-    providerResource: provider,
+    runtimeStateReceipt: diagnostic(stateEnvelope),
+    providerResource: diagnostic(provider),
     sourceEvidence,
     deliveryTargets: sourceEvidence.targets,
     sessionPhases: sourceEvidence.phases,
@@ -549,8 +554,10 @@ async function main() {
       "Dictation inspection is intentionally passive; use pushDictationResult only in a separate explicit delivery test.",
       missing.length > 0 ? "Dictation remains fail-closed until passive runtime state and delivery receipts exist." : "",
     ].filter(Boolean),
-    errors: [media].filter((receipt) => receipt.status === "error"),
-  }, null, 2));
+    errors: diagnostic(
+      [media].filter((receipt) => receipt.status === "error"),
+    ),
+  });
 }
 
 await main();

@@ -9,8 +9,9 @@
  * "blocked-by-timeout". This module is the single home for that logic.
  */
 
+import { createHash } from "node:crypto";
 import { statSync, readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { classifyTransportError } from "./transport-errors.ts";
 
 export type JsonObject = Record<string, unknown>;
@@ -241,9 +242,28 @@ export function primaryParsedError(errors: JsonObject[]) {
 
 export interface BinaryFingerprint {
   path: string;
+  sha256: string;
   sizeBytes: number;
   modifiedAt: string;
+  sourceCommit: string | null;
   pinned: boolean;
+}
+
+function currentGitCommit(): string | null {
+  const result = Bun.spawnSync(["git", "rev-parse", "HEAD"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return result.exitCode === 0
+    ? new TextDecoder().decode(result.stdout).trim()
+    : null;
+}
+
+function receiptSafeBinaryPath(path: string): string {
+  const repoRelative = relative(process.cwd(), path);
+  return !repoRelative.startsWith("..") && !repoRelative.startsWith("/")
+    ? repoRelative
+    : `external-sha256:${createHash("sha256").update(path).digest("hex").slice(0, 24)}`;
 }
 
 /**
@@ -259,9 +279,11 @@ export function binaryFingerprint(session: string): BinaryFingerprint | null {
     const path = readFileSync(recorded, "utf8").trim();
     const stat = statSync(path);
     return {
-      path,
+      path: receiptSafeBinaryPath(path),
+      sha256: createHash("sha256").update(readFileSync(path)).digest("hex"),
       sizeBytes: stat.size,
       modifiedAt: new Date(stat.mtimeMs).toISOString(),
+      sourceCommit: currentGitCommit(),
       pinned: Boolean(process.env.SCRIPT_KIT_GPUI_BINARY),
     };
   } catch {
@@ -292,7 +314,7 @@ export function finishReceipt(
 ): JsonObject {
   const endedAt = new Date().toISOString();
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     tool: meta.tool,
     command: meta.command,
     session: meta.session,
@@ -302,10 +324,6 @@ export function finishReceipt(
     binary: binaryFingerprint(meta.session),
     ...body,
   };
-}
-
-export function printReceipt(receipt: JsonObject): void {
-  console.log(JSON.stringify(receipt, null, 2));
 }
 
 // --- shared target-selector args ----------------------------------------------

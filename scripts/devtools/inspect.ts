@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic, externalContent, userContent } from "./lib/privacy.ts";
 import { classifyTransportError } from "./lib/transport-errors.ts";
 
 type JsonObject = Record<string, unknown>;
@@ -390,7 +392,11 @@ function primitiveStack(entries: Array<{ name: string; command: string; envelope
     status: entry.envelope.status === "error" ? "blocked" : "ok",
     classification: entry.classification ?? classifyTransportError(entry.envelope),
     receiptId: (entry.envelope.response as JsonObject | undefined)?.requestId ?? null,
-    error: entry.envelope.status === "error" ? String(entry.envelope.error ?? entry.envelope.stderr ?? "error") : null,
+    error: diagnostic(
+      entry.envelope.status === "error"
+        ? String(entry.envelope.error ?? entry.envelope.stderr ?? "error")
+        : null,
+    ),
   }));
 }
 
@@ -529,16 +535,16 @@ async function main() {
   ]);
   const targetKind = inspectTargetKind(inspect);
 
-  console.log(JSON.stringify({
-    schemaVersion: 1,
+  emitValidatedReceipt("devtools.inspect.orchestrate", {
+    schemaVersion: 2,
     tool: "script-kit-devtools.inspect",
     command: "inspect.orchestrate",
     session: args.session,
     sessionId: args.session,
     bug: {
-      text: args.bug ?? null,
+      text: userContent(args.bug ?? null),
       suspectedSurface: args.surface ?? null,
-      hints: [args.bug, args.surface].filter(Boolean),
+      hints: [userContent(args.bug ?? null), args.surface].filter(Boolean),
     },
     requestedTarget: target,
     resolvedTarget: {
@@ -562,12 +568,12 @@ async function main() {
     primitiveStack: stack,
     status: errors.length === 0 ? (missing.length === 0 ? "ok" : "partial") : "blocked",
     classification: classificationValue,
-    errors,
-    windows,
+    errors: diagnostic(errors),
+    windows: diagnostic(windows),
     target: {
       windowId: inspect.windowId ?? null,
       windowKind: inspect.windowKind ?? null,
-      title: inspect.title ?? null,
+      title: externalContent(inspect.title ?? null),
       resolvedBounds: inspect.resolvedBounds ?? null,
       semanticQuality: inspect.semanticQuality ?? null,
       targetBoundsInScreenshot: inspect.targetBoundsInScreenshot ?? null,
@@ -587,17 +593,17 @@ async function main() {
       command: args.start ? `scripts/agentic/session.sh stop ${args.session}` : null,
       statusCommand: `scripts/agentic/session.sh status ${args.session}`,
     },
-    warnings: warningsFrom(inspect, elements, layout, state),
-    state,
-    elements,
-    layout,
+    warnings: diagnostic(warningsFrom(inspect, elements, layout, state)),
+    state: diagnostic(state),
+    elements: diagnostic(elements),
+    layout: diagnostic(layout),
     screenshot: {
       width: screenshotWidth,
       height: screenshotHeight,
       osWindowId: inspect.osWindowId ?? null,
       pixelProbes,
     },
-  }, null, 2));
+  });
 }
 
 await main();

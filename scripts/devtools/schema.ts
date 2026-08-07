@@ -1,5 +1,10 @@
 #!/usr/bin/env bun
 
+import {
+  receiptRegistryReport,
+  validateReceiptFile,
+} from "./lib/receipt-schema.ts";
+
 const classifications = [
   "ok",
   "reproduced",
@@ -34,22 +39,32 @@ const classifications = [
 
 const receiptEnvelopeFields = [
   "schemaVersion",
+  "primitiveId",
   "tool",
   "command",
-  "invocationId",
-  "sessionId",
-  "repo",
+  "receiptId",
+  "runId",
+  "taskIds",
   "startedAt",
   "endedAt",
   "durationMs",
-  "target",
-  "preconditions",
-  "result",
+  "repository",
+  "binary",
+  "fixture",
+  "transaction",
+  "privacy",
+  "evidence",
+  "requiredPrimitives",
+  "missingPrimitives",
   "assertions",
-  "classification",
-  "warnings",
+  "negativeControls",
+  "interference",
+  "cleanup",
+  "disposition",
+  "pass",
   "errors",
-  "redaction",
+  "warnings",
+  "producerValidation",
 ];
 
 const targetIdentityFields = [
@@ -171,7 +186,9 @@ const primitiveSchemas = [
       "semanticSurfaceVersion",
       "nodes[].semanticId",
       "nodes[].role",
-      "nodes[].label",
+      "nodes[].content.contentKind",
+      "nodes[].content.length",
+      "nodes[].content.fingerprint",
       "nodes[].actions",
       "nodes[].owner",
       "nodes[].bounds",
@@ -245,13 +262,16 @@ const primitiveSchemas = [
   {
     primitive: "devtools.text.measure",
     requiredResultFields: [
-      "textSummary.inputValue",
+      "textSummary.contentKind",
+      "textSummary.rawContentReturned",
+      "textSummary.inputLength",
       "textSummary.inputFingerprint",
-      "textSummary.selectedValue",
+      "textSummary.selectedLength",
       "textSummary.selectedFingerprint",
       "textSummary.textNodeCount",
       "rows[].semanticId",
-      "rows[].text",
+      "rows[].contentKind",
+      "rows[].redacted",
       "rows[].textLength",
       "rows[].fingerprint",
       "footerTexts[].key",
@@ -516,14 +536,21 @@ const acceptanceBar = [
 ];
 
 function parseArgs(argv: string[]) {
+  const valueAfter = (flag: string) => {
+    const index = argv.indexOf(flag);
+    return index >= 0 ? argv[index + 1] ?? "" : "";
+  };
   return {
+    command: argv[0] && !argv[0].startsWith("-") ? argv[0] : "report",
     markdown: argv.includes("--markdown"),
+    primitiveId: valueAfter("--primitive"),
+    receiptPath: valueAfter("--receipt"),
   };
 }
 
 function report() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     tool: "script-kit-devtools.schema",
     generatedAt: new Date().toISOString(),
     source: ".agents/skills/script-kit-devtools/references/devtools-oracle-buildout-plan.md",
@@ -532,6 +559,7 @@ function report() {
     classifications,
     targetIdentityFields,
     primitiveSchemas,
+    executableReceiptRegistry: receiptRegistryReport(),
     acceptanceBar,
   };
 }
@@ -564,9 +592,22 @@ function markdown(data: ReturnType<typeof report>) {
   ].join("\n");
 }
 
-const data = report();
-if (parseArgs(Bun.argv.slice(2)).markdown) {
-  console.log(markdown(data));
+const args = parseArgs(Bun.argv.slice(2));
+if (args.command === "registry") {
+  console.log(JSON.stringify({ schemaVersion: 2, registry: receiptRegistryReport() }, null, 2));
+} else if (args.command === "validate") {
+  if (!args.primitiveId || !args.receiptPath) {
+    console.error("Usage: bun scripts/devtools/schema.ts validate --primitive <id> --receipt <path>");
+    process.exit(2);
+  }
+  const prepared = validateReceiptFile(args.primitiveId, args.receiptPath);
+  console.log(JSON.stringify(prepared.receipt, null, 2));
+  if (prepared.exitCode !== 0) process.exitCode = prepared.exitCode;
 } else {
-  console.log(JSON.stringify(data, null, 2));
+  const data = report();
+  if (args.markdown) {
+    console.log(markdown(data));
+  } else {
+    console.log(JSON.stringify(data, null, 2));
+  }
 }

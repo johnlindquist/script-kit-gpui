@@ -7,12 +7,13 @@ import {
   classifyEnvelopeError,
   finishReceipt,
   parseTargetArgs,
-  printReceipt,
   requestId,
   responseOf,
   rpc,
   startClock,
 } from "./lib/client.ts";
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
 function usage() {
@@ -122,7 +123,7 @@ async function main() {
   const duplicates = duplicateKeys(bindings);
   const classification = classify(targetReceipt, stateEnvelope, bindings);
 
-  printReceipt(finishReceipt(
+  emitValidatedReceipt("devtools.keyboard.inspect", finishReceipt(
     { tool: "script-kit-devtools.keyboard", command: "keyboard.inspect", session: args.session, clock },
     {
       classification,
@@ -147,6 +148,12 @@ async function main() {
       actionsDialogShortcutParity,
       bindings,
       duplicateKeys: duplicates,
+      routingPriorityResolved: duplicates.length === 0 || activePopup != null,
+      routingPriority: activePopup ? "activePopupFirst" : null,
+      activationProof: {
+        proven: false,
+        nextSafeCommand: "bun scripts/devtools/act.ts key --target-id <id> --strict",
+      },
       missingPrimitives: [
         bindings.length === 0 ? "keyboardBindings" : "",
         stateEnvelope.status === "error" ? "stateResult" : "",
@@ -158,11 +165,10 @@ async function main() {
         duplicates.length > 0 ? `duplicate shortcut keys: ${duplicates.join(", ")}` : "",
         activePopup ? "popup contract is active; popup-first keyboard routing should be verified with devtools.act" : "",
       ].filter(Boolean),
-      errors: [
+      errors: diagnostic([
         ...((targetReceipt.errors as JsonObject[]) ?? []),
         ...[stateEnvelope].filter((value) => value.status === "error"),
-      ],
-      state,
+      ]),
     },
   ));
 }

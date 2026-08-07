@@ -25,11 +25,12 @@ export function summarizeText(value: string, previewBytes: number) {
   const previewLength = byteLength(preview);
   return {
     bytes,
-    preview,
+    preview: null,
     previewBytes: previewLength,
     omittedBytes: Math.max(0, bytes - previewLength),
     truncated: bytes > previewLength,
     fingerprint: fingerprint(value),
+    rawContentReturned: false,
   };
 }
 
@@ -62,6 +63,13 @@ export async function outputSummary(
   stderr: string,
   policy: OutputPolicy,
 ) {
+  const cleartextAllowed = policy.inlineFullOutput
+    && process.env.SCRIPT_KIT_TEST_STATUS === "1"
+    && process.env.SCRIPT_KIT_RECEIPT_SANDBOX === "1"
+    && process.env.SCRIPT_KIT_RECEIPT_ALLOW_FIXTURE_CLEARTEXT === "1";
+  const cleartextDenied = policy.inlineFullOutput && !cleartextAllowed;
+  const stdoutSummary = summarizeText(stdout, policy.previewBytes);
+  const stderrSummary = summarizeText(stderr, policy.previewBytes);
   let artifactPath: string | null = null;
   if (policy.outputPath) {
     artifactPath = policy.outputPath;
@@ -71,8 +79,12 @@ export async function outputSummary(
         {
           schemaVersion: 1,
           label,
-          stdout,
-          stderr,
+          inlineFullOutput: cleartextAllowed,
+          cleartextDenied,
+          stdout: cleartextAllowed ? stdout : null,
+          stderr: cleartextAllowed ? stderr : null,
+          stdoutSummary,
+          stderrSummary,
           stdoutJson: tryParseJson(stdout),
           stderrJson: tryParseJson(stderr),
         },
@@ -85,11 +97,12 @@ export async function outputSummary(
   return {
     label,
     artifactPath,
-    inlineFullOutput: policy.inlineFullOutput,
-    stdout: policy.inlineFullOutput ? stdout : null,
-    stderr: policy.inlineFullOutput ? stderr : null,
-    stdoutSummary: summarizeText(stdout, policy.previewBytes),
-    stderrSummary: summarizeText(stderr, policy.previewBytes),
+    inlineFullOutput: cleartextAllowed,
+    cleartextDenied,
+    stdout: cleartextAllowed ? stdout : null,
+    stderr: cleartextAllowed ? stderr : null,
+    stdoutSummary,
+    stderrSummary,
     stdoutJson: tryParseJson(stdout),
     stderrJson: tryParseJson(stderr),
   };

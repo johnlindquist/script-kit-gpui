@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::protocol::{generate_semantic_id, generate_semantic_id_named};
 
@@ -134,10 +135,54 @@ impl ConversationSemanticAction {
     }
 }
 
-/// Information about a UI element returned by getElements
+/// Privacy classification for authored or runtime-derived element content.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ElementContentKind {
+    UserContent,
+    ExternalContent,
+    FilePath,
+    Secret,
+    Diagnostic,
+}
+
+/// A typed measurement that proves content was observed without returning it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RedactedElementContent {
+    pub content_kind: ElementContentKind,
+    pub char_length: usize,
+    pub byte_length: usize,
+    pub fingerprint: String,
+    pub raw_content_returned: bool,
+}
+
+impl RedactedElementContent {
+    pub fn new(content_kind: ElementContentKind, value: &str) -> Self {
+        Self {
+            content_kind,
+            char_length: value.chars().count(),
+            byte_length: value.len(),
+            fingerprint: format!("sha256:{:x}", Sha256::digest(value.as_bytes())),
+            raw_content_returned: false,
+        }
+    }
+}
+
+/// Typed privacy-safe replacements for an element's authored text and value.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ElementContentDescriptor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<RedactedElementContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<RedactedElementContent>,
+}
+
+/// Information about a UI element returned by getElements.
 ///
-/// Contains semantic ID, type, text content, and state information
-/// for AI-driven UX targeting.
+/// Product-authored labels may remain in `text`/`value`. User, external, path,
+/// secret, and diagnostic bytes are replaced with a typed `content` descriptor.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ElementInfo {
@@ -149,9 +194,12 @@ pub struct ElementInfo {
     /// Display text of the element
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// Value (for choices/inputs)
+    /// Value (for choices/inputs). Only product-static values remain here.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// Typed measurements replacing non-product text/value bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ElementContentDescriptor>,
     /// Whether this element is currently selected
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected: Option<bool>,
@@ -188,13 +236,45 @@ pub struct ElementInfo {
 }
 
 impl ElementInfo {
-    /// Create a new ElementInfo for a choice element
-    pub fn choice(index: usize, name: &str, value: &str, selected: bool) -> Self {
+    /// Replace authored/runtime text with a typed, privacy-safe measurement.
+    pub fn redact_text(mut self, content_kind: ElementContentKind) -> Self {
+        let text = self
+            .text
+            .take()
+            .map(|value| RedactedElementContent::new(content_kind, &value));
+        self.content
+            .get_or_insert_with(ElementContentDescriptor::default)
+            .text = text;
+        self
+    }
+
+    /// Replace an authored/runtime value with a typed, privacy-safe measurement.
+    pub fn redact_value(mut self, content_kind: ElementContentKind) -> Self {
+        let value = self
+            .value
+            .take()
+            .map(|value| RedactedElementContent::new(content_kind, &value));
+        self.content
+            .get_or_insert_with(ElementContentDescriptor::default)
+            .value = value;
+        self
+    }
+
+    /// Replace both text and value with typed, privacy-safe measurements.
+    pub fn redact_content(self, content_kind: ElementContentKind) -> Self {
+        self.redact_text(content_kind).redact_value(content_kind)
+    }
+
+    /// Create a choice whose label and value are product-authored static copy.
+    /// User, external, path, secret, or diagnostic choices must use
+    /// `redacted_choice` so their bytes cannot enter `getElements`.
+    pub fn product_static_choice(index: usize, name: &str, value: &str, selected: bool) -> Self {
         ElementInfo {
             semantic_id: generate_semantic_id("choice", index, value),
             element_type: ElementType::Choice,
             text: Some(name.to_string()),
             value: Some(value.to_string()),
+            content: None,
             selected: Some(selected),
             focused: None,
             index: Some(index),
@@ -209,6 +289,36 @@ impl ElementInfo {
         }
     }
 
+    /// Create a privacy-safe choice when both label and value are non-product content.
+    pub fn redacted_choice(
+        index: usize,
+        name: &str,
+        value: &str,
+        selected: bool,
+        content_kind: ElementContentKind,
+    ) -> Self {
+        let digest = format!("{:x}", Sha256::digest(value.as_bytes()));
+        ElementInfo {
+            semantic_id: format!("choice:{index}:sha256-{}", &digest[..16]),
+            element_type: ElementType::Choice,
+            text: Some(name.to_string()),
+            value: Some(value.to_string()),
+            content: None,
+            selected: Some(selected),
+            focused: None,
+            index: Some(index),
+            role: None,
+            kind: None,
+            source: None,
+            source_name: None,
+            selectable: None,
+            status_kind: None,
+            action_disabled: None,
+            style: None,
+        }
+        .redact_content(content_kind)
+    }
+
     /// Create a new ElementInfo for an input element
     pub fn input(name: &str, value: Option<&str>, focused: bool) -> Self {
         ElementInfo {
@@ -216,6 +326,7 @@ impl ElementInfo {
             element_type: ElementType::Input,
             text: None,
             value: value.map(|s| s.to_string()),
+            content: None,
             selected: None,
             focused: Some(focused),
             index: None,
@@ -228,6 +339,7 @@ impl ElementInfo {
             action_disabled: None,
             style: None,
         }
+        .redact_value(ElementContentKind::UserContent)
     }
 
     /// Create a new ElementInfo for a button element
@@ -237,6 +349,7 @@ impl ElementInfo {
             element_type: ElementType::Button,
             text: Some(label.to_string()),
             value: None,
+            content: None,
             selected: None,
             focused: None,
             index: Some(index),
@@ -258,6 +371,7 @@ impl ElementInfo {
             element_type: ElementType::Panel,
             text: None,
             value: None,
+            content: None,
             selected: None,
             focused: None,
             index: None,
@@ -279,6 +393,7 @@ impl ElementInfo {
             element_type: ElementType::List,
             text: Some(format!("{} items", item_count)),
             value: None,
+            content: None,
             selected: None,
             focused: None,
             index: None,

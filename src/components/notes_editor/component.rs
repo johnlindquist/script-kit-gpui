@@ -303,7 +303,10 @@ impl NotesEditor {
                     });
                     Some(serde_json::json!({
                         "range": [range.start, range.end],
-                        "text": range_text,
+                        "content": crate::protocol::RedactedElementContent::new(
+                            crate::protocol::ElementContentKind::UserContent,
+                            range_text,
+                        ),
                         "role": roles
                             .get(index)
                             .cloned()
@@ -313,10 +316,16 @@ impl NotesEditor {
                 })
                 .collect::<Vec<_>>();
             let hovered = state.hovered_highlight_range().map(|(range, role)| {
+                let href = activation_href_at_cursor_in_text(&text, range.start);
                 serde_json::json!({
                     "range": [range.start, range.end],
                     "role": role,
-                    "href": activation_href_at_cursor_in_text(&text, range.start),
+                    "hrefContent": href.as_deref().map(|href| {
+                        crate::protocol::RedactedElementContent::new(
+                            crate::protocol::ElementContentKind::FilePath,
+                            href,
+                        )
+                    }),
                 })
             });
             serde_json::json!({

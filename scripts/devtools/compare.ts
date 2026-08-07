@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
 
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { filePath } from "./lib/privacy.ts";
+
 type JsonObject = Record<string, unknown>;
 
 type Args = {
@@ -167,13 +170,13 @@ async function main() {
     metricNamesComparable: sameStringArray(redMetrics, greenMetrics),
   };
 
-  console.log(JSON.stringify({
-    schemaVersion: 1,
+  emitValidatedReceipt("devtools.compare.redgreen", {
+    schemaVersion: 2,
     tool: "script-kit-devtools.compare",
     command: "compare.redgreen",
     classification: classify(assertions, args, red, green),
-    redReceiptIds: [args.red],
-    greenReceiptIds: [args.green],
+    redReceiptIds: [filePath(args.red)],
+    greenReceiptIds: [filePath(args.green)],
     samePrimitiveStack: assertions.samePrimitiveStack,
     sameUserPath: assertions.sameUserPath,
     sameTargetSelector: assertions.sameTargetSelector,
@@ -193,7 +196,7 @@ async function main() {
       assertions.metricNamesComparable ? "" : "red and green receipts expose different metric names",
     ].filter(Boolean),
     errors: [],
-  }, null, 2));
+  });
 }
 
 await main();

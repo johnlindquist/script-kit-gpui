@@ -191,6 +191,7 @@ fn element(
         element_type,
         text,
         value,
+        content: None,
         selected,
         focused,
         index,
@@ -278,6 +279,7 @@ fn semantic_chip_action_element(
         }),
         value: (!trailing && !chip.shortcut_tokens.is_empty())
             .then(|| chip.shortcut_tokens.join("")),
+        content: None,
         selected: None,
         focused: None,
         index: None,
@@ -325,6 +327,7 @@ pub(crate) fn collect_conversation_command_elements<Handler>(
             element_type: ElementType::Button,
             text: Some(command.descriptor.label.to_string()),
             value: command.descriptor.shortcut.map(str::to_string),
+            content: None,
             selected: Some(false),
             focused: Some(false),
             index: None,
@@ -368,6 +371,7 @@ fn project_agent_chat_conversation_elements(
             element_type: ElementType::Panel,
             text: Some(status.to_string()),
             value: None,
+            content: None,
             selected: Some(false),
             focused: Some(false),
             index: None,
@@ -391,6 +395,7 @@ fn project_agent_chat_conversation_elements(
             element_type: ElementType::Button,
             text: Some("Copy Response".to_string()),
             value: None,
+            content: None,
             selected: Some(false),
             focused: Some(false),
             index: None,
@@ -416,6 +421,7 @@ fn project_agent_chat_conversation_elements(
             element_type: ElementType::Panel,
             text: Some(text.to_string()),
             value: None,
+            content: None,
             selected: Some(false),
             focused: Some(false),
             index: None,
@@ -656,7 +662,8 @@ fn collect_notes_snapshot(
         None,
         Some(true),
         None,
-    );
+    )
+    .redact_content(crate::protocol::ElementContentKind::UserContent);
     editor.style = Some(ElementStyleInfo {
         owner: editor_surface.owner.to_string(),
         input_render_path: Some(editor_surface.input_render_path.to_string()),
@@ -775,7 +782,8 @@ pub(crate) fn collect_agent_chat_detached_elements(
             None,
             Some(true),
             None,
-        ),
+        )
+        .redact_content(crate::protocol::ElementContentKind::UserContent),
         element(
             "list:agent_chat-messages",
             ElementType::List,

@@ -80,6 +80,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Panel,
                     text: Some(status.to_string()),
                     value: None,
+                    content: None,
                     selected: None,
                     focused: None,
                     index: None,
@@ -110,11 +111,13 @@ impl ScriptListApp {
             } else {
                 format!("{sender}: {}", Self::preview_value(content, 180))
             };
-            let mut message_element = Self::choice_element(
+            let preview = Self::preview_value(content, 180);
+            let mut message_element = protocol::ElementInfo::redacted_choice(
                 index,
-                text,
-                Self::preview_value(content, 180),
+                &text,
+                &preview,
                 index + 1 == chat_prompt.messages.len(),
+                protocol::ElementContentKind::UserContent,
             );
             if let Some(message_id) = message.id.as_deref() {
                 if let Some(sk_protocol::ai_reliability::AiOutcome::Cancelled { kind, .. }) =
@@ -157,6 +160,7 @@ impl ScriptListApp {
                         element_type: protocol::ElementType::Button,
                         text: Some(descriptor.label.to_string()),
                         value: Some(target_id),
+                        content: None,
                         selected: Some(false),
                         focused: Some(false),
                         index: Some(index),

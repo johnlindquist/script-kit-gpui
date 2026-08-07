@@ -282,6 +282,7 @@ mod tests {
                 element_type: ElementType::Panel,
                 text: None,
                 value: None,
+                content: None,
                 selected: None,
                 focused: None,
                 index: None,

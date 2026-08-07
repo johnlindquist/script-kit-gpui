@@ -6,12 +6,13 @@ import {
   classifyEnvelopeError,
   finishReceipt,
   parseTargetArgs,
-  printReceipt,
   requestId,
   responseOf,
   rpc,
   startClock,
 } from "./lib/client.ts";
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic, userContent } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
 type SurfaceContract = {
@@ -221,7 +222,7 @@ async function main() {
   const classification = classify(targetReceipt, stateEnvelope, contract);
   const runtime = enrichedRuntimeSurface(targetReceipt, state);
 
-  printReceipt(finishReceipt(
+  emitValidatedReceipt("devtools.surface.inspect", finishReceipt(
     { tool: "script-kit-devtools.surface", command: "surface.inspect", session: args.session, clock },
     {
       classification,
@@ -229,7 +230,11 @@ async function main() {
       target: targetReceipt.resolvedTarget ?? null,
       requestedTarget: targetReceipt.requestedTarget ?? null,
       contract,
-      runtime,
+      runtime: {
+        ...runtime,
+        filterText: userContent(runtime.filterText),
+        selectedValue: userContent(runtime.selectedValue),
+      },
       missingPrimitives: [
         ...(contract ? [] : ["surfaceContract"]),
         ...runtime.missingPrimitives,
@@ -239,12 +244,10 @@ async function main() {
         ...argWarnings,
         contract ? "" : `no contract entry for surfaceKind '${surfaceKind}' in docs/ai/contracts/surface-contracts.json`,
       ].filter(Boolean),
-      errors: [
+      errors: diagnostic([
         ...((targetReceipt.errors as JsonObject[]) ?? []),
         ...[stateEnvelope].filter((value) => value.status === "error"),
-      ],
-      state,
-      targetReceipt,
+      ]),
     },
   ));
 }

@@ -15,12 +15,13 @@ import {
   primaryLifecycleDetails,
   primaryParsedError,
   primarySessionLifecycle,
-  printReceipt,
   requestId,
   responseOf,
   rpc,
   startClock,
 } from "./lib/client.ts";
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic } from "./lib/privacy.ts";
 import { maybeStartAndShow, pickWindows, resolveTargetReceipt } from "./lib/target-identity.ts";
 
 function usage() {
@@ -55,7 +56,8 @@ async function main() {
     );
     const windows = responseOf(windowsEnvelope);
     const errors = [windowsEnvelope].filter((value) => value.status === "error");
-    printReceipt(
+    emitValidatedReceipt(
+      "devtools.targets.list",
       finishReceipt(
         { tool: "script-kit-devtools.targets", command: "targets.list", session: args.session, clock },
         {
@@ -63,13 +65,13 @@ async function main() {
             ? "blocked-by-session-lifecycle"
             : classifyEnvelopes(errors),
           lifecycleCodes: lifecycleCodes(errors),
-          lifecycleDetails: primaryLifecycleDetails(errors),
+          lifecycleDetails: diagnostic(primaryLifecycleDetails(errors)),
           sessionLifecycle: primarySessionLifecycle(errors),
-          parsedError: primaryParsedError(errors),
+          parsedError: diagnostic(primaryParsedError(errors)),
           targetCount: pickWindows(windows).length,
           targets: pickWindows(windows),
           warnings,
-          errors,
+          errors: diagnostic(errors),
         },
       ),
     );
@@ -80,10 +82,18 @@ async function main() {
     tool: "targets",
     hiDpi: Boolean(extras["--hi-dpi"]),
   });
-  printReceipt(
+  emitValidatedReceipt(
+    "devtools.targets.inspect",
     finishReceipt(
       { tool: "script-kit-devtools.targets", command: "targets.inspect", session: args.session, clock },
-      { ...receipt, warnings },
+      {
+        ...receipt,
+        lifecycleDetails: diagnostic(receipt.lifecycleDetails),
+        parsedError: diagnostic(receipt.parsedError),
+        rawInspect: diagnostic(receipt.rawInspect),
+        errors: diagnostic(receipt.errors),
+        warnings,
+      },
     ),
   );
 }

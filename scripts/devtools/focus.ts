@@ -7,12 +7,13 @@ import {
   classifyEnvelopes,
   finishReceipt,
   parseTargetArgs,
-  printReceipt,
   requestId,
   responseOf,
   rpc,
   startClock,
 } from "./lib/client.ts";
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
 function usage() {
@@ -22,6 +23,30 @@ function usage() {
 function focusedNode(nodes: JsonObject[], focusedSemanticId: unknown) {
   const id = String(focusedSemanticId ?? "");
   return nodes.find((node) => node.semanticId === id || node.focused === true) ?? null;
+}
+
+function safeNode(node: JsonObject | null) {
+  if (!node) return null;
+  const content = String(node.text ?? node.value ?? "");
+  let hash = 2166136261;
+  for (const char of content) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return {
+    semanticId: node.semanticId ?? null,
+    role: node.role ?? node.type ?? null,
+    type: node.type ?? null,
+    selected: node.selected ?? null,
+    focused: node.focused ?? null,
+    index: node.index ?? null,
+    content: {
+      contentKind: "UserContent",
+      redacted: true,
+      length: content.length,
+      fingerprint: (hash >>> 0).toString(16).padStart(8, "0"),
+    },
+  };
 }
 
 function nativeFooterSnapshot(state: JsonObject) {
@@ -93,7 +118,7 @@ async function main() {
   const classification = classify(targetReceipt, stateEnvelope, elementsEnvelope, focused);
   const nativeFooter = nativeFooterSnapshot(state);
 
-  printReceipt(finishReceipt(
+  emitValidatedReceipt("devtools.focus.inspect", finishReceipt(
     { tool: "script-kit-devtools.focus", command: "focus.inspect", session: args.session, clock },
     {
       classification,
@@ -103,18 +128,21 @@ async function main() {
       windowVisible: state.windowVisible ?? null,
       focusedSemanticId,
       selectedSemanticId,
-      focusedNode: focused,
-      selectedNode: nodes.find((node) => node.semanticId === selectedSemanticId) ?? null,
+      focusedNode: safeNode(focused),
+      selectedNode: safeNode(nodes.find((node) => node.semanticId === selectedSemanticId) ?? null),
       activeFooter: state.activeFooter ?? null,
       nativeFooter,
-      submitDiagnostics: state.submitDiagnostics ?? null,
+      submitDiagnostics: diagnostic(state.submitDiagnostics ?? null),
       receipts: {
-        target: targetReceipt,
-        state: stateEnvelope,
-        elements: elementsEnvelope,
+        target: { classification: targetReceipt.classification ?? null },
+        state: { status: stateEnvelope.status ?? "ok" },
+        elements: { status: elementsEnvelope.status ?? "ok" },
       },
       keyboardOwner: {
-        inputValue: state.inputValue ?? null,
+        inputLength: typeof state.inputValue === "string" ? state.inputValue.length : 0,
+        inputFingerprint: typeof state.inputValue === "string"
+          ? safeNode({ value: state.inputValue })?.content
+          : null,
         promptType: state.promptType ?? null,
         surfaceKind: (state.surfaceContract as JsonObject | undefined)?.surfaceKind ?? null,
         inputOwnership: (state.surfaceContract as JsonObject | undefined)?.inputOwnership ?? null,
@@ -132,10 +160,10 @@ async function main() {
         state.isFocused === false ? "window is visible but not focused" : "",
         focusedSemanticId == null ? "focused semantic id missing" : "",
       ].filter(Boolean),
-      errors: [
+      errors: diagnostic([
         ...((targetReceipt.errors as JsonObject[]) ?? []),
         ...[stateEnvelope, elementsEnvelope].filter((value) => value.status === "error"),
-      ],
+      ]),
     },
   ));
 }

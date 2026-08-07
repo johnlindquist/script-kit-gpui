@@ -106,7 +106,7 @@ describe("finishReceipt", () => {
       { tool: "script-kit-devtools.test", command: "test.run", session: "unit-test-session", clock },
       { classification: "ok", custom: 42 },
     );
-    expect(receipt.schemaVersion).toBe(1);
+    expect(receipt.schemaVersion).toBe(2);
     expect(receipt.tool).toBe("script-kit-devtools.test");
     expect(receipt.command).toBe("test.run");
     expect(receipt.session).toBe("unit-test-session");

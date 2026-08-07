@@ -3030,7 +3030,7 @@ mod tests {
             input_text: Some("Slack".to_string()),
             focused_semantic_id: Some("input:filter".to_string()),
             selected_semantic_id: Some("choice:0:slack".to_string()),
-            visible_elements: vec![crate::protocol::ElementInfo::choice(
+            visible_elements: vec![crate::protocol::ElementInfo::product_static_choice(
                 0, "Slack", "slack", true,
             )],
         };
@@ -3117,9 +3117,9 @@ mod tests {
             selected_semantic_id: Some("choice:2:item".to_string()),
             visible_elements: vec![
                 crate::protocol::ElementInfo::input("filter", Some("search term"), true),
-                crate::protocol::ElementInfo::choice(0, "Item A", "a", false),
-                crate::protocol::ElementInfo::choice(1, "Item B", "b", false),
-                crate::protocol::ElementInfo::choice(2, "Item C", "item", true),
+                crate::protocol::ElementInfo::product_static_choice(0, "Item A", "a", false),
+                crate::protocol::ElementInfo::product_static_choice(1, "Item B", "b", false),
+                crate::protocol::ElementInfo::product_static_choice(2, "Item C", "item", true),
             ],
         };
         let desktop = crate::context_snapshot::AiContextSnapshot {

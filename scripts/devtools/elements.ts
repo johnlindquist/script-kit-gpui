@@ -7,12 +7,13 @@ import {
   classifyEnvelopeError,
   finishReceipt,
   parseTargetArgs,
-  printReceipt,
   requestId,
   responseOf,
   rpc,
   startClock,
 } from "./lib/client.ts";
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
 function usage() {
@@ -26,6 +27,22 @@ function usage() {
 
 function nodeLabel(node: JsonObject) {
   return node.text ?? node.value ?? node.semanticId ?? null;
+}
+
+function contentMeasurement(value: unknown) {
+  const text = typeof value === "string" ? value : value == null ? "" : String(value);
+  let hash = 2166136261;
+  for (const char of text) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return {
+    contentKind: "UserContent",
+    redacted: true,
+    length: text.length,
+    lineCount: text.length ? text.split(/\r\n|\r|\n/).length : 0,
+    fingerprint: (hash >>> 0).toString(16).padStart(8, "0"),
+  };
 }
 
 function snapshot(nodes: JsonObject[]) {
@@ -44,17 +61,14 @@ function snapshot(nodes: JsonObject[]) {
       semanticId: node.semanticId ?? null,
       role: node.role ?? node.type ?? null,
       type: node.type ?? null,
-      label: nodeLabel(node),
-      text: node.text ?? null,
-      value: node.value ?? null,
+      content: contentMeasurement(nodeLabel(node)),
       selected: node.selected ?? null,
       focused: node.focused ?? null,
       index: node.index ?? null,
-      owner: node.sourceName ?? node.source ?? null,
+      owner: node.source ?? null,
       style: node.style ?? null,
       actions: [],
       bounds: node.bounds ?? null,
-      raw: node,
     })),
     duplicateSemanticIds: [...new Set(duplicateSemanticIds)],
     missingSemanticIdCount: nodes.length - ids.length,
@@ -108,7 +122,7 @@ async function main() {
   const elementSnapshot = snapshot(nodes);
   const classification = classify(targetReceipt, elementsEnvelope, elementSnapshot);
 
-  printReceipt(finishReceipt(
+  emitValidatedReceipt("devtools.elements.snapshot", finishReceipt(
     { tool: "script-kit-devtools.elements", command: "elements.snapshot", session: args.session, clock },
     {
       classification,
@@ -136,8 +150,10 @@ async function main() {
         ...(Array.isArray(elements.warnings) ? elements.warnings : []),
         elementSnapshot.missingBoundsCount > 0 ? "getElements does not expose bounds yet; use devtools.layout.measure for geometry." : "",
       ].filter(Boolean),
-      errors: [...((targetReceipt.errors as JsonObject[]) ?? []), elementsEnvelope].filter(
-        (value) => value.status === "error",
+      errors: diagnostic(
+        [...((targetReceipt.errors as JsonObject[]) ?? []), elementsEnvelope].filter(
+          (value) => value.status === "error",
+        ),
       ),
     },
   ));

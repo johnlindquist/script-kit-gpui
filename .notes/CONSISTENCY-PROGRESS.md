@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 48 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 50 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -19,7 +19,7 @@
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
 | Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C14 complete; local lane audit PASS on one stable artifact |
-| Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
+| Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01–C02 complete; C03 next |
 
 ## How to view the baseline proposal explorer
 
@@ -54,6 +54,92 @@
   4. Run `bun scripts/devtools/coverage.ts > /tmp/script-kit-coverage.json` and inspect `inventoryNamespaces.statusCounts`; expect 1 supported, 9 partial, and 1 planned.
   5. Open `.notes/CONSISTENCY.md`; each `F-###` finding now has an explicit evidence status and the score is labeled qualitative.
 - **Intentional differences preserved:** Inventory classes remain separate; an orientation alias is never upgraded into direct runtime coverage, and generated/source projection remains distinct from rendered proof.
+
+### PF-001 — Validate executable receipts at the producer boundary
+
+- **Stage:** 1
+- **Status:** Complete
+- **Findings/guidelines addressed:** Every named DevTools producer must validate its own complete receipt before printing; a downstream checker cannot turn malformed evidence into proof.
+- **User-facing expectation:** DevTools output now has one executable `ReceiptEnvelopeV2` contract. Only `EVALUABLE_PASS` exits zero; an evaluable failure exits 2, a typed block exits 3, an invalid receipt exits 4, and usage errors remain 64/CLI-owned. Keyboard inspection explicitly declares that it is not activation proof.
+- **Prior red or bounded blocker:** The old descriptive schema advertised raw `nodes[].label`, `textSummary.inputValue`, and `rows[].text`; producers could print through an unvalidated helper; the first fail-closed matrix found unclassified nested diagnostics in 13 producers, and the initial V2 correction exposed four direct producers still constructing schema version 1.
+- **Behavior/tooling changed:** Added an importable 17-primitive registry with required/non-null paths, dispositions, privacy and identity policies; added `schema.ts registry` and `schema.ts validate`; made `emitValidatedReceipt` the only public JSON print boundary; atomically writes optional receipt files; migrated all 15 requested producer entry points; aligned descriptive schemas with redacted measurements; and added detailed disposition/pass/exit invariants plus a safe minimal invalid envelope.
+- **Owners:** DevTools receipt schema, one-shot client envelope builder, producer CLIs, and the C02 proof generator.
+- **Files and symbols:**
+  - `scripts/devtools/lib/receipt-schema.ts::{receiptSchemaRegistry,validateReceipt,prepareValidatedReceipt,emitValidatedReceipt,validateReceiptFile}`
+  - `scripts/devtools/lib/client.ts::{finishReceipt,binaryFingerprint}`
+  - `scripts/devtools/schema.ts`
+  - `scripts/devtools/{targets,surface,elements,layout,scroll,focus,text,keyboard,actions,act,compare,notes,dictation,inspect}.ts`
+  - `scripts/agentic/cons-proof-gov/schema-registry-proof.ts`
+- **Intended contract:** Producer sequence is gather → classify → construct → recursively sanitize → validate schema/cross-field invariants → print/atomically write → exit from disposition. `pass` is derived and cannot contradict the disposition.
+- **Model truth:** Registry version 1 contains 17 stable primitive IDs and full V2 metadata. The durable matrix contains 15 representative producer commands; all report `producerValidation.valid: true`, zero unclassified sensitive paths, and no `INVALID_*` output.
+- **Rendered/paint truth:** Not applicable: PF-001 changes the agent-facing receipt boundary, not product pixels.
+- **Native AX truth:** Not applicable: no AX claim is made. The keyboard registry has `activationProof: false`.
+- **User interaction outcome:** The exact positive layout validation exits 0 as `EVALUABLE_PASS`; deleting `target.bounds` exits 4 as `INVALID_SCHEMA`. Required nulls, failed assertions labeled pass, required missing primitives, duplicate semantic IDs, and unresolved duplicate keyboard keys all fail closed.
+- **Remaining uncertainty:** Transaction/generation identity is intentionally deferred to PF-002; this step does not upgrade a blocked producer run into runtime success.
+- **Protected/out-of-scope values:** No glass source, fixture, motion envelope, visual token, or generated design value changed.
+- **Positive receipts:** `.artifacts/consistency/PF-001/schema-registry.json`, `.artifacts/consistency/PF-001/positive-layout-validation.json`.
+- **Negative-control receipts:** `.artifacts/consistency/PF-001/negative-missing-bounds-validation.json` plus the six named `negativeControls` in `schema-registry.json`.
+- **Verification commands:** `bun test scripts/devtools/schema.test.ts scripts/devtools/surface.test.ts scripts/devtools/scroll.test.ts scripts/devtools/driver-lifecycle.test.ts scripts/devtools/receipt-schema.test.ts scripts/devtools/privacy.test.ts scripts/devtools/receipt-output.test.ts scripts/devtools/__tests__/client-lib.test.ts` → 59 passed, 0 failed; `bun scripts/agentic/cons-proof-gov/schema-registry-proof.ts` → `classification: PASS`; `RUST_MIN_STACK=268435456 ./scripts/agentic/agent-cargo.sh check --lib` → PASS.
+- **Verified commit:** C02 commit containing this section; exact hash is reported by `git log -1 --oneline` after the boundary is created.
+- **Binary SHA:** `095f9f788d6f3368b54c906124ab7d16447cab4a23612339a6b80b0fb8ba86dc` for the runtime artifact reused by PF-003.
+- **Fixture SHA:** Not applicable to the producer matrix; positive and negative fixture bytes are preserved under `.artifacts/consistency/PF-001/`.
+- **Privacy:** Every producer passes through the PF-003 recursive sanitizer before validation/output. Raw stdout/stderr requires every explicit test/sandbox/fixture-cleartext gate.
+- **Interference:** Not applicable to the blocked-session producer matrix; no focus/native input/screenshot claim is made.
+- **Cleanup:** The producer matrix owns no app runtime. Its temporary red/green comparison fixtures are removed in `finally`.
+- **Generated projections:** Registry and validation artifacts are generated from the executable TypeScript registry, not hand-maintained copies.
+- **Commit boundary:** C02 — PF-001 + PF-003.
+- **Intentional differences preserved:** `classification` remains useful producer vocabulary while `disposition` is the final machine gate; blocked session lifecycle, target ambiguity, and timeout remain distinct rather than being normalized into success.
+- **User test/view:**
+  1. Run `bun scripts/agentic/cons-proof-gov/schema-registry-proof.ts`; expect `classification: "PASS"`, `registryCount: 17`, and `producerCount: 15`.
+  2. Open `.artifacts/consistency/PF-001/schema-registry.json`; confirm every producer has `validationPassed: true`, `unclassifiedSensitivePaths: 0`, and no `INVALID_*` disposition.
+  3. Run `bun scripts/devtools/schema.ts validate --primitive devtools.layout.measure --receipt .artifacts/consistency/PF-001/positive-layout-input.json`; expect exit 0, `schemaVersion: 2`, `disposition: "EVALUABLE_PASS"`, and `producerValidation.valid: true`.
+  4. Run `bun scripts/devtools/schema.ts validate --primitive devtools.layout.measure --receipt .artifacts/consistency/PF-001/negative-missing-bounds-input.json`; expect a nonzero exit (4) and `disposition: "INVALID_SCHEMA"`.
+  5. Run `bun scripts/devtools/schema.ts registry`; confirm keyboard inspection has `activationProof: false` and every entry has version, non-null paths, allowed dispositions, privacy policy, and identity policy.
+
+### PF-003 — Redact private content recursively in receipts and semantic projections
+
+- **Stage:** 1
+- **Status:** Complete
+- **Findings/guidelines addressed:** Receipts and `getElements` must not expose user-authored content, external titles, file paths, secrets, provider diagnostics, stdout, or stderr anywhere in nested objects or arrays.
+- **User-facing expectation:** Agents can identify and compare private UI content by type, character/byte length, and fingerprint without receiving the authored bytes. Product-static labels remain readable.
+- **Prior red or bounded blocker:** Generic semantic `text`/`value`, launcher choice slugs, Notes editor content, Agent Chat composer text, Markdown hrefs, filter decorations, nested diagnostics, and output previews could carry raw bytes. An early canary run also found launcher fallback semantic IDs and `filterInputDecorations` containing the raw query.
+- **Behavior/tooling changed:** Added explicit `ProductStatic`, `UserContent`, `ExternalContent`, `FilePath`, `Secret`, and `Diagnostic` wrappers; recursive object/array sanitization; run-scoped HMAC-SHA-256 for live receipts; fixture-keyed redaction; fail-closed fixture-cleartext policy; fingerprint-only path descriptors; environment-secret detection; typed Rust `ElementContentKind`, `RedactedElementContent`, and `ElementContentDescriptor`; fingerprinted non-keyed choice identities; and privacy-safe Notes, launcher, Agent Chat, Markdown-link, and decoration projections.
+- **Owners:** Receipt privacy boundary, protocol semantic types, semantic collectors, Notes/Agent Chat automation surfaces, and the PF-003 real-runtime probe.
+- **Files and symbols:**
+  - `scripts/devtools/lib/privacy.ts::{classifyReceiptContent,sanitizeReceipt,assertNoCleartextCanaries}`
+  - `scripts/devtools/lib/receipt-output.ts::{summarizeText,outputSummary}`
+  - `src/protocol/types/elements_actions_scriptlets.rs::{ElementContentKind,RedactedElementContent,ElementContentDescriptor,ElementInfo::redacted_choice}`
+  - `src/protocol/types/primitives.rs::{redacted_choice_semantic_id,Choice::generate_id}`
+  - `src/app_layout/{collect_elements.rs,prompt_and_script_list_collectors.rs}`
+  - `src/windows/automation_surface_collector.rs`
+  - `src/components/notes_editor/component.rs`
+  - `src/prompt_handler/mod.rs`
+  - `scripts/agentic/cons-proof-gov/privacy-canary-probe.ts`
+- **Intended contract:** Live receipts use run-scoped HMAC-SHA-256 and never persist the key. Fixture cleartext requires sandbox home, a fixture manifest opt-in, a caller opt-in, and zero native/live-data involvement; otherwise the request is invalid privacy evidence.
+- **Model truth:** Rust serialization tests prove raw input and choice canaries are absent while kind, lengths, fingerprint, and `rawContentReturned: false` remain. Non-keyed choice IDs contain a bounded fingerprint, not the user value.
+- **Rendered/paint truth:** Not applicable: the user-visible labels and content remain rendered in the product; only the automation/receipt projection changes.
+- **Native AX truth:** Not applicable in C02; PF-007 will independently prove AX parity without substituting semantic content for AX data.
+- **User interaction outcome:** A real pinned binary exposed redacted descriptors for main filter, Clipboard History filter, Notes editor, and Agent Chat composer. The complete protocol response stream contained zero canary matches.
+- **Remaining uncertainty:** The private app diagnostic log contained three canary matches because it records user-entered diagnostic data; that log is explicitly not a receipt stream. The durable receipt records only the count, never the bytes. Diagnostic-vault policy beyond the receipt boundary is not reclassified here.
+- **Protected/out-of-scope values:** Clipboard contents were not read or mutated; `clipboardTouched: false`. No real home data, credentials, TCC state, visual tokens, or glass calibration values changed.
+- **Positive receipts:** `.artifacts/consistency/PF-003/privacy-canary.json` → `RUNTIME-CONFIRMED` against the pinned artifact.
+- **Negative-control receipts:** Privacy tests cover nested raw/diagnostic content, clipboard/composer/transcript, full paths, environment secrets, downstream mutation, and denied fixture cleartext without all sandbox gates.
+- **Verification commands:** `bun test scripts/devtools/privacy.test.ts scripts/devtools/receipt-output.test.ts scripts/devtools/receipt-schema.test.ts` (included in the 59-test C02 gate); `RUST_MIN_STACK=268435456 ./scripts/agentic/agent-cargo.sh test --lib protocol::types::tests::get_elements` → 22 passed; `RUST_MIN_STACK=268435456 ./scripts/agentic/agent-cargo.sh test --lib prompts::select::tests` → 32 passed; `SCRIPT_KIT_GPUI_BINARY=target-agent/artifacts/cons-proof-c02/script-kit-gpui bun scripts/agentic/cons-proof-gov/privacy-canary-probe.ts` → `RUNTIME-CONFIRMED`.
+- **Verified commit:** C02 commit containing this section; exact hash is reported by `git log -1 --oneline` after the boundary is created.
+- **Binary SHA:** `095f9f788d6f3368b54c906124ab7d16447cab4a23612339a6b80b0fb8ba86dc`.
+- **Fixture SHA:** Canary families are deterministic and named in the probe; their raw bytes never enter the committed progress file or durable receipt.
+- **Privacy:** `canariesRedacted: 6`, `canaryMatches: 0`, `protocolResponseCanaryMatches: 0`, and `rawContentReturned: false`.
+- **Interference:** Hidden protocol proof used a sandbox home and no native pointer, screenshot, microphone, clipboard, or system-settings mutation.
+- **Cleanup:** `processExited: true`, `streamsDrained: true`, `logWriterClosed: true`, `ownedProcessCount: 0`, `closeError: null`.
+- **Generated projections:** No generated design files changed. Protocol re-exports were updated with their owning typed Rust definitions.
+- **Commit boundary:** C02 — PF-001 + PF-003.
+- **Intentional differences preserved:** Product-static copy remains readable; user/external content is redacted. Private diagnostic logs and public receipt streams remain separate boundaries. Semantic evidence does not claim AX or activation proof.
+- **User test/view:**
+  1. Run `SCRIPT_KIT_GPUI_BINARY=target-agent/artifacts/cons-proof-c02/script-kit-gpui bun scripts/agentic/cons-proof-gov/privacy-canary-probe.ts`; expect `classification: "RUNTIME-CONFIRMED"`.
+  2. Open `.artifacts/consistency/PF-003/privacy-canary.json`; confirm `typedCanaryFixture.canaryMatches: 0`, `streamScan.protocolResponseCanaryMatches: 0`, and four runtime surface records.
+  3. Confirm each runtime surface has `rawContentReturned: false`, a content kind, character/byte lengths, and `fingerprintAvailable: true` but no authored text.
+  4. Confirm cleanup says `processExited`, `streamsDrained`, and `logWriterClosed` are true, `ownedProcessCount` is 0, and `clipboardTouched` is false.
+  5. Run `bun test scripts/devtools/privacy.test.ts scripts/devtools/receipt-output.test.ts`; expect all tests to pass, including the denied fixture-cleartext negative control.
 
 ### UX-002 — Establish one canonical shortcut token stream
 

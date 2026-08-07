@@ -441,8 +441,9 @@ fn test_select_prompt_get_elements_uses_stable_key_semantic_id() {
 
     // Keyed choice uses choice:key format
     assert_eq!(elements[2].semantic_id, "choice:fruit-apple");
-    // Non-keyed choice uses choice:index:value format
-    assert_eq!(elements[3].semantic_id, "choice:1:banana");
+    // Non-keyed choice uses an index plus a privacy-safe value fingerprint.
+    assert_eq!(elements[3].semantic_id, choices[1].generate_id(1));
+    assert!(!elements[3].semantic_id.contains("banana"));
 }
 
 #[test]
@@ -470,8 +471,10 @@ fn test_select_prompt_get_elements_uses_source_index_after_filter_order_changes(
 
     let (elements, _) = collect_select_prompt_elements("", &choices, &filtered, &selected, 0, 50);
 
-    assert_eq!(elements[2].semantic_id, "choice:2:cherry");
-    assert_eq!(elements[3].semantic_id, "choice:0:apple");
+    assert_eq!(elements[2].semantic_id, choices[2].generate_id(2));
+    assert_eq!(elements[3].semantic_id, choices[0].generate_id(0));
+    assert!(!elements[2].semantic_id.contains("cherry"));
+    assert!(!elements[3].semantic_id.contains("apple"));
 }
 
 #[test]

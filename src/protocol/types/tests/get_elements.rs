@@ -47,8 +47,8 @@ fn test_elements_result_contains_expected_semantic_ids() {
     let elements = vec![
         ElementInfo::input("filter", Some("app"), true),
         ElementInfo::list("choices", 2),
-        ElementInfo::choice(0, "Apple", "apple", true),
-        ElementInfo::choice(1, "Banana", "banana", false),
+        ElementInfo::product_static_choice(0, "Apple", "apple", true),
+        ElementInfo::product_static_choice(1, "Banana", "banana", false),
     ];
 
     let response = crate::protocol::Message::elements_result(
@@ -123,7 +123,13 @@ fn test_elements_result_serializes_editor_runtime_metadata() {
                 "count": 1,
                 "ranges": [{
                     "range": [0, 9],
-                    "text": "# Heading",
+                    "content": {
+                        "contentKind": "userContent",
+                        "charLength": 9,
+                        "byteLength": 9,
+                        "fingerprint": "sha256:fixture",
+                        "rawContentReturned": false
+                    },
                     "role": "markdownLink"
                 }],
             })),
@@ -162,7 +168,7 @@ fn test_elements_result_roundtrip_preserves_structure() {
     let elements = vec![
         ElementInfo::input("filter", Some("test"), true),
         ElementInfo::list("results", 1),
-        ElementInfo::choice(0, "Item One", "item-one", true),
+        ElementInfo::product_static_choice(0, "Item One", "item-one", true),
     ];
 
     let original = crate::protocol::Message::elements_result(
@@ -198,8 +204,17 @@ fn test_elements_result_roundtrip_preserves_structure() {
             // Verify input element
             assert_eq!(parsed_elements[0].semantic_id, "input:filter");
             assert_eq!(parsed_elements[0].element_type, ElementType::Input);
-            assert_eq!(parsed_elements[0].value, Some("test".to_string()));
+            assert_eq!(parsed_elements[0].value, None);
+            let value = parsed_elements[0]
+                .content
+                .as_ref()
+                .and_then(|content| content.value.as_ref())
+                .expect("input value is represented by a redacted descriptor");
+            assert_eq!(value.content_kind, ElementContentKind::UserContent);
+            assert_eq!(value.char_length, 4);
+            assert!(!value.raw_content_returned);
             assert_eq!(parsed_elements[0].focused, Some(true));
+            assert!(!json.contains("\"value\":\"test\""));
 
             // Verify list element
             assert_eq!(parsed_elements[1].semantic_id, "list:results");
@@ -223,7 +238,7 @@ fn test_elements_result_roundtrip_preserves_structure() {
 
 #[test]
 fn test_element_info_choice_semantic_id_format() {
-    let el = ElementInfo::choice(0, "Apple", "apple", true);
+    let el = ElementInfo::product_static_choice(0, "Apple", "apple", true);
     assert_eq!(el.semantic_id, "choice:0:apple");
     assert_eq!(el.element_type, ElementType::Choice);
     assert_eq!(el.text, Some("Apple".to_string()));
@@ -234,11 +249,43 @@ fn test_element_info_choice_semantic_id_format() {
 }
 
 #[test]
+fn redacted_choice_uses_fingerprinted_identity_and_returns_no_cleartext() {
+    let canary = "PRIVATE-CHOICE-CANARY";
+    let element =
+        ElementInfo::redacted_choice(3, canary, canary, true, ElementContentKind::ExternalContent);
+    let json = serde_json::to_string(&element).expect("redacted choice serializes");
+
+    assert!(element.semantic_id.starts_with("choice:3:sha256-"));
+    assert_eq!(element.text, None);
+    assert_eq!(element.value, None);
+    assert!(!json.contains(canary));
+    let content = element.content.expect("redacted descriptor");
+    assert_eq!(
+        content.text.expect("text descriptor").content_kind,
+        ElementContentKind::ExternalContent
+    );
+    assert_eq!(
+        content.value.expect("value descriptor").content_kind,
+        ElementContentKind::ExternalContent
+    );
+}
+
+#[test]
 fn test_element_info_input_semantic_id_format() {
     let el = ElementInfo::input("filter", Some("search text"), false);
     assert_eq!(el.semantic_id, "input:filter");
     assert_eq!(el.element_type, ElementType::Input);
-    assert_eq!(el.value, Some("search text".to_string()));
+    assert_eq!(el.value, None);
+    let value = el
+        .content
+        .as_ref()
+        .and_then(|content| content.value.as_ref())
+        .expect("input value is represented by a redacted descriptor");
+    assert_eq!(value.content_kind, ElementContentKind::UserContent);
+    assert_eq!(value.char_length, 11);
+    assert_eq!(value.byte_length, 11);
+    assert!(value.fingerprint.starts_with("sha256:"));
+    assert!(!value.raw_content_returned);
     assert_eq!(el.focused, Some(false));
     assert_eq!(el.selected, None);
     assert_eq!(el.index, None);
@@ -293,8 +340,8 @@ fn test_simulated_choice_prompt_elements_structure() {
     let elements = vec![
         ElementInfo::input("filter", Some("app"), true),
         ElementInfo::list("choices", 2),
-        ElementInfo::choice(0, "Apple", "apple", true),
-        ElementInfo::choice(1, "Application", "application", false),
+        ElementInfo::product_static_choice(0, "Apple", "apple", true),
+        ElementInfo::product_static_choice(1, "Application", "application", false),
     ];
 
     let total_count = elements.len();
@@ -421,12 +468,16 @@ fn test_choice_generate_id_prefers_stable_key() {
 }
 
 #[test]
-fn test_choice_generate_id_falls_back_to_index_value() {
+fn test_choice_generate_id_falls_back_to_index_and_private_fingerprint() {
     use crate::protocol::types::Choice;
     let choice = Choice::new("Banana".to_string(), "banana".to_string());
 
-    assert_eq!(choice.generate_id(0), "choice:0:banana");
-    assert_eq!(choice.generate_id(5), "choice:5:banana");
+    let first = choice.generate_id(0);
+    let moved = choice.generate_id(5);
+    assert!(first.starts_with("choice:0:sha256-"));
+    assert!(moved.starts_with("choice:5:sha256-"));
+    assert_eq!(first.split("sha256-").nth(1), moved.split("sha256-").nth(1));
+    assert!(!first.contains("banana"));
 }
 
 #[test]
@@ -452,8 +503,8 @@ fn test_select_prompt_scenario_elements_result_structure() {
     let elements = vec![
         ElementInfo::input("select-filter", Some("app"), true),
         ElementInfo::list("select-choices", 2),
-        ElementInfo::choice(0, "Apple", "apple", false),
-        ElementInfo::choice(1, "Application", "application", false),
+        ElementInfo::product_static_choice(0, "Apple", "apple", false),
+        ElementInfo::product_static_choice(1, "Application", "application", false),
     ];
 
     let total_count = elements.len();
@@ -530,7 +581,7 @@ fn test_elements_result_includes_observation_receipt_fields() {
     let elements = vec![
         ElementInfo::input("filter", Some("app"), true),
         ElementInfo::list("choices", 100),
-        ElementInfo::choice(0, "Apple", "apple", true),
+        ElementInfo::product_static_choice(0, "Apple", "apple", true),
     ];
 
     let response = crate::protocol::Message::elements_result(
@@ -567,7 +618,7 @@ fn test_elements_result_roundtrip_preserves_observation_receipt() {
     let elements = vec![
         ElementInfo::input("filter", Some("test"), true),
         ElementInfo::list("results", 1),
-        ElementInfo::choice(0, "Item One", "item-one", true),
+        ElementInfo::product_static_choice(0, "Item One", "item-one", true),
     ];
 
     let original = crate::protocol::Message::elements_result(

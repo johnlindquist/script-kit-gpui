@@ -24,6 +24,7 @@ import {
   rpc,
   run,
 } from "./client.ts";
+import { externalContent } from "./privacy.ts";
 
 export function stableWindowKind(value: unknown) {
   if (value === "actionsDialog") return "ActionsDialog";
@@ -43,7 +44,7 @@ export function pickWindows(windows: JsonObject) {
     index,
     automationId: window.id ?? window.windowId ?? window.automationId ?? null,
     windowKind: stableWindowKind(window.kind ?? window.windowKind),
-    title: window.title ?? null,
+    title: externalContent(window.title ?? null),
     visible: window.visible ?? null,
     focused: window.focused ?? null,
     bounds: window.bounds ?? window.resolvedBounds ?? null,

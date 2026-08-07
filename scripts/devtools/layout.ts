@@ -9,12 +9,13 @@ import {
   classifyEnvelopeError,
   finishReceipt,
   parseTargetArgs,
-  printReceipt,
   requestId,
   responseOf,
   rpc,
   startClock,
 } from "./lib/client.ts";
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
 type Rect = { x: number; y: number; width: number; height: number };
@@ -623,7 +624,8 @@ async function main() {
   const analysis = analyzeLayout(layout, targetReceipt);
   const classification = classify(targetReceipt, layoutEnvelope, analysis);
 
-  printReceipt(
+  emitValidatedReceipt(
+    "devtools.layout.measure",
     finishReceipt(
       { tool: "script-kit-devtools.layout", command: "layout.measure", session: args.session, clock },
       {
@@ -694,7 +696,10 @@ async function main() {
         viewportRect: analysis.viewportRect,
         windowRect: analysis.windowRect,
         regions: analysis.regions,
-        nodes: analysis.nodes,
+        nodes: analysis.nodes.map((node) => ({
+          ...node,
+          raw: diagnostic(node.raw),
+        })),
         overlaps: analysis.overlaps,
         resizePressure: analysis.resizePressure,
         visualAudit: analysis.visualAudit,
@@ -716,11 +721,10 @@ async function main() {
             ? "layout components overlap"
             : "",
         ].filter(Boolean),
-        errors: [
+        errors: diagnostic([
           ...((targetReceipt.errors as JsonObject[]) ?? []),
           ...[layoutEnvelope].filter((value) => value.status === "error"),
-        ],
-        rawLayout: layout,
+        ]),
       },
     ),
   );

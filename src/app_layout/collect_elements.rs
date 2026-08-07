@@ -80,6 +80,7 @@ impl ScriptListApp {
             element_type: protocol::ElementType::Choice,
             text: Some(choice.name.clone()),
             value: Some(choice.value.clone()),
+            content: None,
             selected: Some(selected),
             focused: None,
             index: Some(display_index),
@@ -92,6 +93,7 @@ impl ScriptListApp {
             action_disabled: None,
             style: None,
         }
+        .redact_content(protocol::ElementContentKind::ExternalContent)
     }
 
     /// S12: project the SHARED AI recovery card into driver-visible elements.
@@ -119,6 +121,7 @@ impl ScriptListApp {
                     },
                     text: None,
                     value: None,
+                    content: None,
                     selected: None,
                     focused: None,
                     index: None,
@@ -182,6 +185,7 @@ impl ScriptListApp {
                 element_type: protocol::ElementType::Panel,
                 text: Some(cue.cue_text.clone()),
                 value: cue.canonical_shortcut.clone(),
+                content: None,
                 selected: Some(false),
                 focused: Some(false),
                 index: Some(index),
@@ -230,6 +234,7 @@ impl ScriptListApp {
                 element_type: protocol::ElementType::Panel,
                 text: Some(syntax),
                 value: None,
+                content: None,
                 selected: Some(false),
                 focused: Some(false),
                 index: Some(index),
@@ -384,7 +389,7 @@ impl ScriptListApp {
 
                 for (index, kind) in kinds.iter().enumerate() {
                     let status = crate::permissions_wizard::detect_permission(*kind);
-                    let mut row = protocol::ElementInfo::choice(
+                    let mut row = protocol::ElementInfo::product_static_choice(
                         index,
                         kind.name(),
                         kind.name(),
@@ -599,6 +604,7 @@ impl ScriptListApp {
                             element_type: protocol::ElementType::Panel,
                             text: Some("Dictation History could not be loaded".to_string()),
                             value: None,
+                            content: None,
                             selected: Some(false),
                             focused: Some(false),
                             index: None,
@@ -623,6 +629,7 @@ impl ScriptListApp {
                             element_type: protocol::ElementType::Button,
                             text: Some("Load More".to_string()),
                             value: None,
+                            content: None,
                             selected: Some(false),
                             focused: Some(false),
                             index: None,
@@ -712,6 +719,7 @@ impl ScriptListApp {
                         element_type: protocol::ElementType::Panel,
                         text: Some(desk_state.automation_label().to_string()),
                         value: None,
+                        content: None,
                         selected: None,
                         focused: None,
                         index: None,
@@ -739,6 +747,7 @@ impl ScriptListApp {
                         element_type: protocol::ElementType::Choice,
                         text: Some(descriptor.title),
                         value: Some(descriptor.detail),
+                        content: None,
                         selected: Some(index == *selected_index),
                         focused: None,
                         index: Some(index),
@@ -992,6 +1001,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Toggle,
                     text: Some("Panel Mode".to_string()),
                     value: Some(self.theme_chooser_panel_mode.as_str().to_string()),
+                    content: None,
                     selected: Some(matches!(
                         self.theme_chooser_panel_mode,
                         ThemeChooserPanelMode::Customize
@@ -1013,6 +1023,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Panel,
                     text: Some(management.status_label.clone()),
                     value: Some(management.status_value.clone()),
+                    content: None,
                     selected: Some(management.is_dirty),
                     focused: None,
                     index: None,
@@ -1030,6 +1041,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Input,
                     text: Some("Theme Name".to_string()),
                     value: Some(management.resolved_save_name.clone()),
+                    content: None,
                     selected: None,
                     focused: None,
                     index: None,
@@ -1048,6 +1060,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Button,
                     text: Some("Save Copy".to_string()),
                     value: Some("theme_chooser_save_as_user_theme".to_string()),
+                    content: None,
                     selected: None,
                     focused: None,
                     index: None,
@@ -1065,6 +1078,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Button,
                     text: Some("Edit Theme as Text".to_string()),
                     value: Some("theme_chooser_edit_theme_as_text".to_string()),
+                    content: None,
                     selected: None,
                     focused: None,
                     index: None,
@@ -1082,6 +1096,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Button,
                     text: Some("Update".to_string()),
                     value: Some("theme_chooser_update_user_theme".to_string()),
+                    content: None,
                     selected: Some(management.can_update),
                     focused: None,
                     index: None,
@@ -1099,6 +1114,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Button,
                     text: Some("Delete".to_string()),
                     value: Some("theme_chooser_delete_user_theme".to_string()),
+                    content: None,
                     selected: None,
                     focused: None,
                     index: None,
@@ -1116,6 +1132,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Button,
                     text: Some("Restore".to_string()),
                     value: Some("theme_chooser_restore_deleted_user_theme".to_string()),
+                    content: None,
                     selected: None,
                     focused: None,
                     index: None,
@@ -1133,6 +1150,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Button,
                     text: Some("Gradient".to_string()),
                     value: Some("theme_chooser_gradient_cycle".to_string()),
+                    content: None,
                     selected: self
                         .theme
                         .active_background_gradient()
@@ -1160,6 +1178,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Button,
                     text: Some("Add Layer".to_string()),
                     value: Some("theme_chooser_gradient_layer_add".to_string()),
+                    content: None,
                     selected: None,
                     focused: None,
                     index: None,
@@ -1177,6 +1196,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Button,
                     text: Some("Remove Layer".to_string()),
                     value: Some("theme_chooser_gradient_layer_remove".to_string()),
+                    content: None,
                     selected: None,
                     focused: None,
                     index: None,
@@ -1211,6 +1231,7 @@ impl ScriptListApp {
                             element_type,
                             text: Some(text.to_string()),
                             value: Some(value),
+                            content: None,
                             selected: None,
                             focused: None,
                             index: None,
@@ -1462,6 +1483,7 @@ impl ScriptListApp {
                         element_type: protocol::ElementType::Choice,
                         text: Some(entry.name.clone()),
                         value: Some(value),
+                        content: None,
                         selected: Some(visible_index == *selected_index),
                         focused: None,
                         index: Some(visible_index),
@@ -1502,11 +1524,12 @@ impl ScriptListApp {
                     for (filter_pos, &action_idx) in dialog.filtered_actions.iter().enumerate() {
                         if let Some(action) = dialog.actions.get(action_idx) {
                             let is_selected = selected_action_idx == Some(action_idx);
-                            elements.push(protocol::ElementInfo::choice(
+                            elements.push(protocol::ElementInfo::redacted_choice(
                                 filter_pos,
                                 &action.title,
                                 &action.id,
                                 is_selected,
+                                protocol::ElementContentKind::ExternalContent,
                             ));
                         }
                     }
@@ -1692,6 +1715,7 @@ impl ScriptListApp {
                         element_type,
                         text,
                         value,
+                        content: None,
                         selected: None,
                         focused: None,
                         index: None,
@@ -1811,6 +1835,7 @@ impl ScriptListApp {
                         element_type: protocol::ElementType::Button,
                         text: Some(label.to_string()),
                         value: None,
+                        content: None,
                         selected: None,
                         focused: None,
                         index: Some(index),
@@ -2206,6 +2231,7 @@ impl ScriptListApp {
             element_type: protocol::ElementType::Panel,
             text: Some(footer.owner.clone()),
             value: footer.expected_surface.clone(),
+            content: None,
             selected: None,
             focused: None,
             index: None,
@@ -2243,6 +2269,7 @@ impl ScriptListApp {
                 element_type: protocol::ElementType::Button,
                 text: Some(text),
                 value: Some(button.action.clone()),
+                content: None,
                 selected: Some(button.selected),
                 focused: None,
                 index: Some(index),
@@ -2338,6 +2365,7 @@ impl ScriptListApp {
                     _ => "Notes ready".to_string(),
                 }),
                 value: Some(search.state.generation().to_string()),
+                content: None,
                 selected: None,
                 focused: None,
                 index: None,
@@ -2359,6 +2387,7 @@ impl ScriptListApp {
                 element_type: protocol::ElementType::Button,
                 text: Some(search.destination.primary_verb().to_string()),
                 value: search.selected_id.map(|id| id.stable_id()),
+                content: None,
                 selected: None,
                 focused: None,
                 index: None,
@@ -2380,23 +2409,27 @@ impl ScriptListApp {
             if elements.len() >= limit {
                 break;
             }
-            elements.push(protocol::ElementInfo {
-                semantic_id: row.semantic_id(),
-                element_type: protocol::ElementType::Choice,
-                text: Some(row.title.clone()),
-                value: Some(row.stable_id()),
-                selected: Some(search.selected_id == Some(row.id)),
-                focused: None,
-                index: Some(index),
-                role: Some("result".to_string()),
-                kind: Some(row.kind.as_str().to_string()),
-                source: Some("notes".to_string()),
-                source_name: Some(search.destination.primary_verb().to_string()),
-                selectable: Some(true),
-                status_kind: None,
-                action_disabled: None,
-                style: None,
-            });
+            elements.push(
+                protocol::ElementInfo {
+                    semantic_id: row.semantic_id(),
+                    element_type: protocol::ElementType::Choice,
+                    text: Some(row.title.clone()),
+                    value: Some(row.stable_id()),
+                    content: None,
+                    selected: Some(search.selected_id == Some(row.id)),
+                    focused: None,
+                    index: Some(index),
+                    role: Some("result".to_string()),
+                    kind: Some(row.kind.as_str().to_string()),
+                    source: Some("notes".to_string()),
+                    source_name: Some(search.destination.primary_verb().to_string()),
+                    selectable: Some(true),
+                    status_kind: None,
+                    action_disabled: None,
+                    style: None,
+                }
+                .redact_text(protocol::ElementContentKind::UserContent),
+            );
             Self::push_limited_element(
                 &mut elements,
                 limit,
@@ -2405,18 +2438,20 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Panel,
                     text: Some(row.preview.clone()),
                     value: Some(row.automation_metadata()),
+                    content: None,
                     selected: None,
                     focused: None,
                     index: Some(index),
                     role: Some("resultMetadata".to_string()),
                     kind: Some(row.kind.as_str().to_string()),
                     source: Some("notes".to_string()),
-                    source_name: Some(row.title.clone()),
+                    source_name: None,
                     selectable: Some(false),
                     status_kind: None,
                     action_disabled: None,
                     style: None,
-                },
+                }
+                .redact_content(protocol::ElementContentKind::UserContent),
             );
         }
 
@@ -2452,27 +2487,38 @@ impl ScriptListApp {
             protocol::ElementInfo::list(list_name, rows.len()),
         );
 
+        let content_kind = match list_name {
+            "clipboard-history" | "agent_chat-history" | "dictation-history" => {
+                Some(protocol::ElementContentKind::UserContent)
+            }
+            "windows" | "browser-tabs" | "browser-history" | "processes"
+            | "kit-results" | "installed-kits" => {
+                Some(protocol::ElementContentKind::ExternalContent)
+            }
+            "file-results" | "migrate-v1-results" => {
+                Some(protocol::ElementContentKind::FilePath)
+            }
+            "apps" | "settings" | "menu-commands" | "sdk-functions" | "tips"
+            | "script-templates" | "emoji-results" => None,
+            _ => Some(protocol::ElementContentKind::ExternalContent),
+        };
+
         for (index, row) in rows.iter().enumerate() {
             if elements.len() >= limit {
                 break;
             }
-            elements.push(protocol::ElementInfo {
-                semantic_id: protocol::generate_semantic_id("choice", index, row),
-                element_type: protocol::ElementType::Choice,
-                text: Some(row.clone()),
-                value: Some(row.clone()),
-                selected: Some(index == selected_index),
-                focused: None,
-                index: Some(index),
-                role: None,
-                kind: None,
-                source: None,
-                source_name: None,
-                selectable: None,
-                status_kind: None,
-                action_disabled: None,
-                style: None,
-            });
+            let element = if let Some(content_kind) = content_kind {
+                protocol::ElementInfo::redacted_choice(
+                    index,
+                    row,
+                    row,
+                    index == selected_index,
+                    content_kind,
+                )
+            } else {
+                protocol::ElementInfo::product_static_choice(index, row, row, index == selected_index)
+            };
+            elements.push(element);
         }
 
         (elements, total_count)
@@ -2511,6 +2557,7 @@ impl ScriptListApp {
                 element_type: protocol::ElementType::Input,
                 text: Some("Search profiles".to_string()),
                 value: Some(filter.to_string()),
+                content: None,
                 selected: None,
                 focused: Some(matches!(self.focused_input, FocusedInput::MainFilter)),
                 index: None,
@@ -2533,6 +2580,7 @@ impl ScriptListApp {
                 element_type: protocol::ElementType::List,
                 text: Some("Profile Search Results".to_string()),
                 value: Some(results.len().to_string()),
+                content: None,
                 selected: None,
                 focused: None,
                 index: None,
@@ -2556,6 +2604,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Panel,
                     text: Some(current.profile.name.clone()),
                     value: Some(current.profile.id.clone()),
+                    content: None,
                     selected: None,
                     focused: None,
                     index: None,
@@ -2580,6 +2629,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Choice,
                     text: Some(result.profile.name.clone()),
                     value: Some(result.profile.id.clone()),
+                    content: None,
                     selected: Some(index == selected_index),
                     focused: None,
                     index: Some(index),
@@ -2721,6 +2771,7 @@ impl ScriptListApp {
                         element_type,
                         text,
                         value,
+                        content: None,
                         selected: None,
                         focused: None,
                         index: None,
@@ -2748,6 +2799,7 @@ impl ScriptListApp {
                         "No matching profiles".to_string()
                     }),
                     value: Some(filter.to_string()),
+                    content: None,
                     selected: None,
                     focused: None,
                     index: None,
@@ -2831,6 +2883,7 @@ impl ScriptListApp {
                 element_type: protocol::ElementType::Choice,
                 text: Some(row.clone()),
                 value: Some(row.clone()),
+                content: None,
                 selected: Some(index == selected_index),
                 focused: None,
                 index: Some(index),
@@ -2906,6 +2959,7 @@ impl ScriptListApp {
             element_type: protocol::ElementType::Input,
             text: Some(label.into()),
             value,
+            content: None,
             selected: None,
             focused: Some(focused),
             index,
@@ -2918,6 +2972,7 @@ impl ScriptListApp {
             action_disabled: None,
             style: None,
         }
+        .redact_value(protocol::ElementContentKind::UserContent)
     }
 
     fn choice_element(
@@ -2931,6 +2986,7 @@ impl ScriptListApp {
             element_type: protocol::ElementType::Choice,
             text: Some(text),
             value: Some(value),
+            content: None,
             selected: Some(selected),
             focused: None,
             index: Some(index),
@@ -3007,6 +3063,7 @@ impl ScriptListApp {
                         element_type: protocol::ElementType::Choice,
                         text: Some(field_label),
                         value: Some(value),
+                        content: None,
                         selected: Some(checkbox.is_checked()),
                         focused: Some(focused),
                         index: Some(index),
@@ -3167,6 +3224,7 @@ impl ScriptListApp {
                 element_type: protocol::ElementType::Panel,
                 text: Some(path_prompt.visible_status_message()),
                 value: Some(path_prompt.automation_state()["status"].to_string()),
+                content: None,
                 selected: None,
                 focused: None,
                 index: Some(2),
@@ -3276,6 +3334,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Choice,
                     text: Some("Stored Secret".to_string()),
                     value: Some("present".to_string()),
+                    content: None,
                     selected: Some(true),
                     focused: None,
                     index: Some(2),
@@ -3303,6 +3362,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Panel,
                     text: Some("Secret Store Error".to_string()),
                     value: Some(error.kind_str().to_string()),
+                    content: None,
                     selected: None,
                     focused: None,
                     index: Some(total_count - 1),
@@ -3351,6 +3411,7 @@ impl ScriptListApp {
                 element_type: protocol::ElementType::Choice,
                 text: Some(file.name.clone()),
                 value: Some(file.automation_metadata(index).to_string()),
+                content: None,
                 selected: Some(false),
                 focused: None,
                 index: Some(index),
@@ -3588,6 +3649,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Choice,
                     text: Some(row.title.clone()),
                     value: Some(row.token.clone().unwrap_or_else(|| row.id.clone())),
+                    content: None,
                     selected: Some(selected_row_id == Some(row.id.as_str())),
                     focused: None,
                     index: Some(index),
@@ -3632,6 +3694,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Panel,
                     text: Some(section_label.to_string()),
                     value: None,
+                    content: None,
                     selected: Some(false),
                     focused: None,
                     index: None,
@@ -3655,6 +3718,7 @@ impl ScriptListApp {
                     element_type: protocol::ElementType::Choice,
                     text: Some(row.title.clone()),
                     value: Some(row.token.clone().unwrap_or_else(|| row.id.clone())),
+                    content: None,
                     selected: Some(
                         self.menu_syntax_trigger_picker_state
                             .selected_row_id
@@ -3713,6 +3777,7 @@ impl ScriptListApp {
                     element_type,
                     text: Some(field.label.clone()),
                     value: Some(field.value.clone()),
+                    content: None,
                     selected: Some(false),
                     focused: Some(
                         shell_spec.focused
@@ -3785,6 +3850,7 @@ impl ScriptListApp {
                             element_type: protocol::ElementType::Panel,
                             text: Some(presentation.display_label.to_string()),
                             value: Some(presentation.semantic_label.to_string()),
+                            content: None,
                             selected: Some(false),
                             focused: None,
                             index: None,
@@ -3816,28 +3882,55 @@ impl ScriptListApp {
                             d.to_string()
                         }
                     });
-                    let mut element = protocol::ElementInfo {
-                        semantic_id: protocol::generate_semantic_id("choice", row_index, &label),
-                        element_type: protocol::ElementType::Choice,
-                        text: Some(label.clone()),
-                        value: subtitle.or(Some(label)),
-                        selected: Some(Some(grouped_index) == selected_grouped_index),
-                        focused: None,
-                        index: Some(row_index),
-                        role: Some("row".to_string()),
-                        kind: Some(result.type_label().to_ascii_lowercase()),
-                        source: source.map(|source| source.receipt_label().to_string()),
-                        source_name: result.source_name().map(str::to_string),
-                        selectable: Some(true),
-                        status_kind: None,
-                        action_disabled: None,
-                        style: None,
+                    let (value, content_kind) = match result {
+                        scripts::SearchResult::BuiltIn(_) => (subtitle.unwrap_or_else(|| label.clone()), None),
+                        scripts::SearchResult::File(file_match) => (
+                            file_match.file.path.clone(),
+                            Some(protocol::ElementContentKind::FilePath),
+                        ),
+                        scripts::SearchResult::Fallback(_)
+                        | scripts::SearchResult::Note(_)
+                        | scripts::SearchResult::BrainHit(_)
+                        | scripts::SearchResult::BrainInboxItem(_)
+                        | scripts::SearchResult::Todo(_)
+                        | scripts::SearchResult::AgentChatHistory(_)
+                        | scripts::SearchResult::ClipboardHistory(_)
+                        | scripts::SearchResult::DictationHistory(_) => (
+                            subtitle.unwrap_or_else(|| label.clone()),
+                            Some(protocol::ElementContentKind::UserContent),
+                        ),
+                        _ => (
+                            subtitle.unwrap_or_else(|| label.clone()),
+                            Some(protocol::ElementContentKind::ExternalContent),
+                        ),
                     };
+                    let mut element = if let Some(content_kind) = content_kind {
+                        protocol::ElementInfo::redacted_choice(
+                            row_index,
+                            &label,
+                            &value,
+                            Some(grouped_index) == selected_grouped_index,
+                            content_kind,
+                        )
+                    } else {
+                        protocol::ElementInfo::product_static_choice(
+                            row_index,
+                            &label,
+                            &value,
+                            Some(grouped_index) == selected_grouped_index,
+                        )
+                    };
+                    element.role = Some("row".to_string());
+                    element.kind = Some(result.type_label().to_ascii_lowercase());
+                    element.source = source.map(|source| source.receipt_label().to_string());
+                    element.source_name = content_kind
+                        .is_none()
+                        .then(|| result.source_name().map(str::to_string))
+                        .flatten();
+                    element.selectable = Some(true);
                     if let scripts::SearchResult::File(file_match) = result {
                         element.kind =
                             Some(root_file_semantic_kind(file_match.file.file_type).to_string());
-                        // Semantic identity stays exact even though the rendered subtitle is shortened.
-                        element.value = Some(file_match.file.path.clone());
                     }
                     elements.push(element);
                     row_index += 1;
@@ -3852,6 +3945,7 @@ impl ScriptListApp {
                         element_type: protocol::ElementType::Panel,
                         text: Some(status.label.clone()),
                         value: Some(status.label.clone()),
+                        content: None,
                         selected: Some(false),
                         focused: None,
                         index: Some(row_index),
@@ -3882,6 +3976,7 @@ impl ScriptListApp {
                 element_type: protocol::ElementType::Panel,
                 text: Some(status.label.clone()),
                 value: Some(status.label.clone()),
+                content: None,
                 selected: Some(false),
                 focused: None,
                 index: None,

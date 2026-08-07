@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { diagnostic, userContent } from "./lib/privacy.ts";
 import { classifyTransportError } from "./lib/transport-errors.ts";
 
 type JsonObject = Record<string, unknown>;
@@ -1904,8 +1906,8 @@ async function main() {
     escapeCloseCleanupProof?.classification,
   ]);
 
-  console.log(JSON.stringify({
-    schemaVersion: 1,
+  emitValidatedReceipt("devtools.actions.inspect", {
+    schemaVersion: 2,
     tool: "script-kit-devtools.actions",
     command: "actions.inspect",
     classification: finalClassification,
@@ -1913,14 +1915,14 @@ async function main() {
     requestedTarget: targetReceipt.requestedTarget ?? { selector },
     target,
     parentTarget: parent,
-    startReceipt,
-    parentOpenReceipt,
-    openReceipt,
+    startReceipt: diagnostic(startReceipt),
+    parentOpenReceipt: diagnostic(parentOpenReceipt),
+    openReceipt: diagnostic(openReceipt),
     targetReadiness,
     popupState: {
       open: Boolean(actionsDialog),
       host: actionsDialog?.host ?? null,
-      contextTitle: actionsDialog?.contextTitle ?? null,
+      contextTitle: userContent(actionsDialog?.contextTitle ?? null),
       contextStableKey: actionsDialog?.contextStableKey ?? null,
       contextSource: actionsDialog?.contextSource ?? null,
       selectedActionId: ((actionsDialog?.selection as JsonObject | undefined)?.actionId ?? actionsDialog?.selectedActionId) ?? null,
@@ -1989,13 +1991,13 @@ async function main() {
       measurementSource: runtimeShortcutLayout?.measurementSource ?? null,
       stopReason: runtimeShortcutLayout?.stopReason ?? (shortcutBoundsAvailable ? null : "runtime shortcut layout unavailable"),
     },
-    receipts: {
+    receipts: diagnostic({
       target: targetReceipt,
       state: stateEnvelope,
       elements,
       layout,
       keyboard,
-    },
+    }),
     missingPrimitives: missing,
     recommendedNext: [
       disabledReasonBoundsRequired && !disabledReasonBoundsAvailable
@@ -2012,8 +2014,12 @@ async function main() {
       missing.length > 0 ? "Actions popup inspection is fail-closed until anchor/section/shortcut geometry is first-class." : "",
       clipping.available && (clipping.top || clipping.right || clipping.bottom || clipping.left) ? "popup rect clips outside parent rect" : "",
     ].filter(Boolean),
-    errors: [targetReceipt, stateEnvelope, elements, layout, keyboard].filter((receipt) => receipt.status === "error"),
-  }, null, 2));
+    errors: diagnostic(
+      [targetReceipt, stateEnvelope, elements, layout, keyboard].filter(
+        (receipt) => receipt.status === "error",
+      ),
+    ),
+  });
 }
 
 await main();

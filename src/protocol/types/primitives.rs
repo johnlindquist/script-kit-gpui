@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
-use crate::protocol::{generate_semantic_id, generate_semantic_id_named};
+use crate::protocol::generate_semantic_id_named;
 
 // ============================================================
 // SUBMIT VALUE TYPE
@@ -125,11 +126,16 @@ pub struct Choice {
     pub key: Option<String>,
     /// Semantic ID for AI targeting.
     /// - With key: `choice:{key}`
-    /// - Without key: `choice:{index}:{value_slug}`
+    /// - Without key: `choice:{index}:sha256-{fingerprint}`
     ///
     /// This field is typically generated at render time, not provided by scripts.
     #[serde(skip_serializing_if = "Option::is_none", rename = "semanticId")]
     pub semantic_id: Option<String>,
+}
+
+fn redacted_choice_semantic_id(index: usize, value: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(value.as_bytes()));
+    format!("choice:{index}:sha256-{}", &digest[..16])
 }
 
 impl Choice {
@@ -163,20 +169,15 @@ impl Choice {
     /// Generate and set the semantic ID for this choice.
     ///
     /// If `key` is set, generates: `choice:{key}`
-    /// Otherwise, generates: `choice:{index}:{value_slug}`
-    ///
-    /// The value_slug (when used) is created by:
-    /// - Converting to lowercase
-    /// - Replacing spaces and underscores with hyphens
-    /// - Removing non-alphanumeric characters (except hyphens)
-    /// - Truncating to 20 characters
+    /// Otherwise, generates a bounded SHA-256 fingerprint identity. Raw choice
+    /// values never become protocol-visible semantic IDs.
     pub fn with_semantic_id(mut self, index: usize) -> Self {
         self.semantic_id = Some(if let Some(ref key) = self.key {
             // Stable key takes precedence - use named ID format
             generate_semantic_id_named("choice", key)
         } else {
             // Fallback to index-based ID
-            generate_semantic_id("choice", index, &self.value)
+            redacted_choice_semantic_id(index, &self.value)
         });
         self
     }
@@ -193,7 +194,7 @@ impl Choice {
         if let Some(ref key) = self.key {
             generate_semantic_id_named("choice", key)
         } else {
-            generate_semantic_id("choice", index, &self.value)
+            redacted_choice_semantic_id(index, &self.value)
         }
     }
 }
