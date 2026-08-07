@@ -446,28 +446,6 @@ fn test_note_switcher_selection_can_replace_active_note_mention() {
 }
 
 #[test]
-fn test_note_switcher_preview_includes_metadata_summary() {
-    const INIT_SOURCE: &str = include_str!("init.rs");
-    const PANELS_SOURCE: &str = include_str!("panels.rs");
-    const NAVIGATION_SOURCE: &str = include_str!("navigation.rs");
-    assert!(
-        INIT_SOURCE.contains("preview: Self::note_switcher_preview(n),"),
-        "Initial note switcher rows should use the metadata-aware preview helper"
-    );
-    assert!(
-        PANELS_SOURCE.contains("preview: Self::note_switcher_preview(n),"),
-        "Reopened note switcher rows should use the metadata-aware preview helper"
-    );
-    assert!(
-        NAVIGATION_SOURCE.contains("storage::get_note_tags(note.id)")
-            && NAVIGATION_SOURCE.contains("storage::get_note_aliases(note.id)")
-            && NAVIGATION_SOURCE.contains("storage::get_note_backlink_count(note.id)")
-            && NAVIGATION_SOURCE.contains("storage::get_note_outbound_link_count(note.id)"),
-        "Notes navigation metadata paths should include tags, aliases, links, and backlinks"
-    );
-}
-
-#[test]
 fn test_notes_automation_state_includes_alias_metadata() {
     const NAVIGATION_SOURCE: &str = include_str!("navigation.rs");
     assert!(
@@ -475,23 +453,6 @@ fn test_notes_automation_state_includes_alias_metadata() {
             .contains("\"aliases\": aliases.iter().take(8).cloned().collect::<Vec<_>>()")
             && NAVIGATION_SOURCE.contains("\"aliasCount\": aliases.len()"),
         "Notes automation selectedNote metadata should expose aliases for agent organization proof"
-    );
-}
-
-#[test]
-fn test_note_switcher_preview_metadata_summary_format() {
-    let tags = vec![
-        "planning".to_string(),
-        "projects/script-kit".to_string(),
-        "daily".to_string(),
-        "overflow".to_string(),
-    ];
-
-    let preview = NotesApp::note_switcher_preview_from_metadata("Project body", &tags, 2, 1);
-
-    assert_eq!(
-        preview,
-        "#planning · #projects/script-kit · #daily · +1 tags · 2 links · 1 backlink · Project body"
     );
 }
 

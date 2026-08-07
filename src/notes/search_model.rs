@@ -473,14 +473,58 @@ fn note_search_default_order(left: &NoteSearchRow, right: &NoteSearchRow) -> Ord
 }
 
 fn note_search_row(note: Note) -> NoteSearchRow {
+    let preview = note_search_preview(&note.content);
+    let tags = super::storage::get_note_tags(note.id).unwrap_or_default();
+    let outbound_link_count =
+        super::storage::get_note_outbound_link_count(note.id).unwrap_or_default();
+    let backlink_count = super::storage::get_note_backlink_count(note.id).unwrap_or_default();
+
     NoteSearchRow {
         id: NoteSearchDocumentId::Note(note.id),
         title: note_search_title(&note),
-        preview: note_search_preview(&note.content),
+        preview: format_note_search_preview_metadata(
+            &preview,
+            &tags,
+            outbound_link_count,
+            backlink_count,
+        ),
         updated_at: note.updated_at,
         char_count: note.char_count(),
         pinned: note.is_pinned,
         kind: NoteSearchDocumentKind::Note,
+    }
+}
+
+pub(crate) fn format_note_search_preview_metadata(
+    preview: &str,
+    tags: &[String],
+    outbound_link_count: usize,
+    backlink_count: usize,
+) -> String {
+    let mut metadata_parts = Vec::new();
+    metadata_parts.extend(tags.iter().take(3).map(|tag| format!("#{tag}")));
+    if tags.len() > 3 {
+        metadata_parts.push(format!("+{} tags", tags.len() - 3));
+    }
+    if outbound_link_count > 0 {
+        metadata_parts.push(format!(
+            "{} link{}",
+            outbound_link_count,
+            if outbound_link_count == 1 { "" } else { "s" }
+        ));
+    }
+    if backlink_count > 0 {
+        metadata_parts.push(format!(
+            "{} backlink{}",
+            backlink_count,
+            if backlink_count == 1 { "" } else { "s" }
+        ));
+    }
+
+    match (metadata_parts.is_empty(), preview.is_empty()) {
+        (true, _) => preview.to_string(),
+        (false, true) => metadata_parts.join(" · "),
+        (false, false) => format!("{} · {preview}", metadata_parts.join(" · ")),
     }
 }
 
@@ -546,6 +590,20 @@ mod tests {
             format!("notes-search:{}", row.stable_id())
         );
         assert_eq!(row.action_id(), format!("note_{}", row.stable_id()));
+    }
+
+    #[test]
+    fn canonical_preview_formats_tags_links_and_backlinks_once_for_every_host() {
+        let tags = vec![
+            "planning".to_string(),
+            "projects/script-kit".to_string(),
+            "daily".to_string(),
+            "overflow".to_string(),
+        ];
+        assert_eq!(
+            format_note_search_preview_metadata("Project body", &tags, 2, 1),
+            "#planning · #projects/script-kit · #daily · +1 tags · 2 links · 1 backlink · Project body"
+        );
     }
 
     #[test]
