@@ -4931,10 +4931,20 @@ impl ScriptListApp {
                         Ok(resolved)
                             if resolved.kind == crate::protocol::AutomationWindowKind::Notes =>
                         {
-                            if let Some((entity, _handle)) =
+                            if let Some((entity, handle)) =
                                 crate::notes::get_notes_app_entity_and_handle()
                             {
-                                let layout_info = entity.read(cx).automation_layout_info(&resolved);
+                                let mut layout_info = entity.read(cx).automation_layout_info(&resolved);
+                                if let Err(error) = handle.update(cx, |_root, window, _cx| {
+                                    Self::append_paint_measurements(&mut layout_info, window);
+                                }) {
+                                    tracing::warn!(
+                                        target: "script_kit::automation",
+                                        request_id = %request_id,
+                                        error = %error,
+                                        "getLayoutInfo: Notes paint measurement window update failed"
+                                    );
+                                }
                                 let response =
                                     Message::layout_info_result(request_id.clone(), layout_info);
                                 if let Some(ref sender) = self.response_sender {

@@ -1504,6 +1504,8 @@ impl Element for TextElement {
         let selected_range = self.state.read(cx).selected_range;
         let visible_range = &prepaint.last_layout.visible_range;
         let text_align = prepaint.last_layout.text_align;
+        #[cfg(feature = "fidelity")]
+        let fidelity_scope = self.state.read(cx).fidelity_scope.clone();
 
         window.handle_input(
             &focus_handle,
@@ -1640,8 +1642,96 @@ impl Element for TextElement {
                 origin.y + offset_y,
             );
 
-            // Paint the actual line
-            _ = line.paint(
+            // Paint the actual line. When a shared editor opts into fidelity
+            // capture, record each shaped/wrapped line as its own scope so the
+            // receiver gets an exact line box plus the union of real glyph paint
+            // atoms. Selection/caret paint happens outside these scopes and cannot
+            // inflate glyph bounds.
+            #[cfg(feature = "fidelity")]
+            if let Some(base_scope) = fidelity_scope.as_ref() {
+                for (wrapped_index, shaped_line) in line.wrapped_lines.iter().enumerate() {
+                    let line_origin = p + point(px(0.), wrapped_index * line_height);
+                    let line_box = Bounds::new(
+                        line_origin,
+                        size(prepaint.last_layout.content_width, line_height),
+                    );
+                    let scope_id = format!("{base_scope}.line.{row}.{wrapped_index}");
+                    let text_hash = Window::fidelity_text_hash(shaped_line.text.as_str());
+                    let font_fingerprint_input = shaped_line
+                        .runs
+                        .iter()
+                        .map(|run| format!("{:?}", run.font_id))
+                        .collect::<Vec<_>>()
+                        .join(":");
+                    let font_family_fingerprint =
+                        Window::fidelity_text_hash(&font_fingerprint_input);
+                    let layout_hash = Window::fidelity_text_hash(&format!(
+                        "{}:{}:{}:{}:{}:{}",
+                        shaped_line.font_size.as_f32(),
+                        shaped_line.ascent.as_f32(),
+                        shaped_line.descent.as_f32(),
+                        shaped_line.width.as_f32(),
+                        line_height.as_f32(),
+                        window.scale_factor(),
+                    ));
+                    let grapheme_count = unicode_segmentation::UnicodeSegmentation::graphemes(
+                        shaped_line.text.as_str(),
+                        true,
+                    )
+                    .count();
+                    let metadata = serde_json::json!({
+                        "schemaVersion": 1,
+                        "measurementId": format!("text:{base_scope}:line:{row}:{wrapped_index}"),
+                        "semanticId": format!("input:{base_scope}"),
+                        "role": "textLineBox",
+                        "fontFamilyFingerprint": font_family_fingerprint,
+                        "fontSize": shaped_line.font_size.as_f32(),
+                        "fontWeight": "mixedOrRendererOwned",
+                        "lineHeight": line_height.as_f32(),
+                        "ascent": shaped_line.ascent.as_f32(),
+                        "descent": shaped_line.descent.as_f32(),
+                        "backingScaleFactor": window.scale_factor(),
+                        "fontsReady": true,
+                        "wrappingPolicy": if line.wrapped_lines.len() > 1 { "softWrap" } else { "none" },
+                        "truncationPolicy": "fullDisplay",
+                        "contentKind": "userContent",
+                        "graphemeCount": grapheme_count,
+                        "lineCount": 1,
+                        "rawContentReturned": false,
+                    });
+                    window.with_fidelity_scope(
+                        scope_id,
+                        gpui::FidelityNodeKind::TextLine,
+                        line_box,
+                        |window| {
+                            _ = shaped_line.paint(
+                                line_origin,
+                                line_height,
+                                text_align,
+                                Some(prepaint.last_layout.content_width),
+                                window,
+                                cx,
+                            );
+                            window.annotate_current_fidelity_scope(
+                                Some(text_hash),
+                                Some(layout_hash),
+                                Some(metadata),
+                            );
+                        },
+                    );
+                }
+            } else {
+                line.paint(
+                    p,
+                    line_height,
+                    text_align,
+                    Some(prepaint.last_layout.content_width),
+                    window,
+                    cx,
+                );
+            }
+            #[cfg(not(feature = "fidelity"))]
+            line.paint(
                 p,
                 line_height,
                 text_align,

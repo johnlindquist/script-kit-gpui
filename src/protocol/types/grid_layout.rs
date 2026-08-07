@@ -391,6 +391,109 @@ pub enum LayoutComponentType {
     Unknown,
 }
 
+/// Semantic geometry roles used to decide whether two measurements are comparable.
+///
+/// Related roles may have containment or spacing contracts without sharing one
+/// numeric rectangle. DevTools must never join unlike roles merely because their
+/// names look similar.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum GeometryRole {
+    WindowBackdrop,
+    MainHeaderChrome,
+    ContextZone,
+    InputControl,
+    ContentViewport,
+    RowSlot,
+    SectionSlot,
+    FooterNativeHost,
+    FooterRail,
+    FooterActionRow,
+    FooterActionSlot,
+    KeycapInnerFrame,
+    PopupShell,
+    PopupAnchor,
+    TextLineBox,
+    GlyphBounds,
+    FocusRing,
+    #[default]
+    Other,
+}
+
+fn canonical_measurement_slug(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut previous_was_separator = true;
+    let mut previous_was_lower_or_digit = false;
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            if character.is_ascii_uppercase()
+                && previous_was_lower_or_digit
+                && !previous_was_separator
+            {
+                slug.push('-');
+            }
+            slug.push(character.to_ascii_lowercase());
+            previous_was_separator = false;
+            previous_was_lower_or_digit =
+                character.is_ascii_lowercase() || character.is_ascii_digit();
+        } else {
+            if !previous_was_separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            previous_was_separator = true;
+            previous_was_lower_or_digit = false;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+fn geometry_role_for_slug(slug: &str) -> GeometryRole {
+    if slug == "window" || slug.ends_with("window-backdrop") {
+        GeometryRole::WindowBackdrop
+    } else if slug.contains("main-view-header") || slug == "main-header" {
+        GeometryRole::MainHeaderChrome
+    } else if slug.contains("context-zone") {
+        GeometryRole::ContextZone
+    } else if slug.contains("input") || slug.contains("editor") || slug.contains("composer") {
+        GeometryRole::InputControl
+    } else if slug.contains("footer-native-host") || slug == "native-main-window-footer-spacer" {
+        GeometryRole::FooterNativeHost
+    } else if slug.contains("footer-rail") {
+        GeometryRole::FooterRail
+    } else if slug.contains("footer-action-row") {
+        GeometryRole::FooterActionRow
+    } else if slug.contains("footer-action-slot") || slug.contains("footer-button") {
+        GeometryRole::FooterActionSlot
+    } else if slug.contains("keycap") && slug.contains("glyph") {
+        GeometryRole::KeycapInnerFrame
+    } else if slug.contains("popup-anchor") {
+        GeometryRole::PopupAnchor
+    } else if slug.contains("popup") || slug.contains("panel") || slug.contains("dialog") {
+        GeometryRole::PopupShell
+    } else if slug.contains("section") || slug.contains("separator") {
+        GeometryRole::SectionSlot
+    } else if slug.contains("line-box") || slug.contains("text-line") || slug.contains("-line-") {
+        GeometryRole::TextLineBox
+    } else if slug.contains("glyph") || slug.contains("text-run") {
+        GeometryRole::GlyphBounds
+    } else if slug.contains("focus-ring") {
+        GeometryRole::FocusRing
+    } else if slug.contains("row") || slug.contains("list-item") {
+        GeometryRole::RowSlot
+    } else if slug.contains("viewport")
+        || slug.contains("content")
+        || slug.contains("main-view-main")
+        || slug.contains("script-list")
+    {
+        GeometryRole::ContentViewport
+    } else {
+        GeometryRole::Other
+    }
+}
+
 /// Information about a single component in the layout tree
 ///
 /// This is the core data structure for `getLayoutInfo()`.
@@ -404,6 +507,15 @@ pub struct LayoutComponentInfo {
     /// Component type for categorization
     #[serde(rename = "type")]
     pub component_type: LayoutComponentType,
+    /// Optional semantic peer when this geometry belongs to an interactive node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_id: Option<String>,
+    /// Stable cross-layer identity used to join intended, model, and rendered facts.
+    #[serde(default)]
+    pub measurement_id: String,
+    /// Typed role that must match before two rectangles are compared.
+    #[serde(default)]
+    pub geometry_role: GeometryRole,
     /// Bounding rectangle (absolute position and size)
     pub bounds: LayoutBounds,
     /// Computed box model (padding, margin, gap)
@@ -706,9 +818,14 @@ pub struct FidelityLayoutSnapshot {
 
 impl LayoutComponentInfo {
     pub fn new(name: impl Into<String>, component_type: LayoutComponentType) -> Self {
+        let name = name.into();
+        let measurement_slug = canonical_measurement_slug(&name);
         Self {
-            name: name.into(),
+            name,
             component_type,
+            semantic_id: None,
+            measurement_id: format!("layout:{measurement_slug}"),
+            geometry_role: geometry_role_for_slug(&measurement_slug),
             bounds: LayoutBounds::default(),
             box_model: None,
             flex: None,
@@ -717,12 +834,24 @@ impl LayoutComponentInfo {
             children: Vec::new(),
             explanation: None,
             visual_style: None,
-            measurement_provenance: None,
-            coordinate_space: None,
+            measurement_provenance: Some("model".to_string()),
+            coordinate_space: Some("window".to_string()),
             visible_bounds: None,
             clip_bounds: None,
             measurement_frame_generation: None,
         }
+    }
+
+    pub fn with_geometry_identity(
+        mut self,
+        measurement_id: impl Into<String>,
+        semantic_id: Option<String>,
+        role: GeometryRole,
+    ) -> Self {
+        self.measurement_id = measurement_id.into();
+        self.semantic_id = semantic_id;
+        self.geometry_role = role;
+        self
     }
 
     pub fn with_measurement(
@@ -964,8 +1093,34 @@ mod tests {
     use super::{
         AppKitFidelityNode, AppKitFidelitySnapshot, FidelityCaptureStatus, FidelityLayoutNode,
         FidelityLayoutSnapshot, FidelityPaintTargetSnapshot, FidelityUnscopedPaintSummary,
-        LayoutBounds, LayoutComponentInfo, LayoutComponentType, LayoutInfo,
+        GeometryRole, LayoutBounds, LayoutComponentInfo, LayoutComponentType, LayoutInfo,
     };
+
+    #[test]
+    fn model_and_paint_names_share_stable_measurement_identity() {
+        let model = LayoutComponentInfo::new("MainViewHeader", LayoutComponentType::Header);
+        let paint = LayoutComponentInfo::new("main-view-header", LayoutComponentType::Header)
+            .with_measurement("paint-time", "window");
+
+        assert_eq!(model.measurement_id, "layout:main-view-header");
+        assert_eq!(paint.measurement_id, model.measurement_id);
+        assert_eq!(model.geometry_role, GeometryRole::MainHeaderChrome);
+        assert_eq!(paint.geometry_role, model.geometry_role);
+        assert_eq!(model.measurement_provenance.as_deref(), Some("model"));
+    }
+
+    #[test]
+    fn distinct_footer_roles_are_not_collapsed() {
+        let host = LayoutComponentInfo::new(
+            "native-main-window-footer-spacer",
+            LayoutComponentType::Panel,
+        );
+        let action_row =
+            LayoutComponentInfo::new("footer-action-row", LayoutComponentType::Container);
+        assert_eq!(host.geometry_role, GeometryRole::FooterNativeHost);
+        assert_eq!(action_row.geometry_role, GeometryRole::FooterActionRow);
+        assert_ne!(host.geometry_role, action_row.geometry_role);
+    }
 
     #[test]
     fn visual_style_serializes_for_devtools_receipts() {

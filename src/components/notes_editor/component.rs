@@ -54,10 +54,12 @@ impl NotesEditor {
         let editor_config = config.editor;
         let placeholder = editor_config.placeholder.clone();
         let initial_content = editor_config.initial_content.clone();
+        let measurement_surface = editor_config.measurement_surface.clone();
         let sizing = config.sizing;
         let input_state = cx.new(|cx| {
             let state = InputState::new(window, cx)
                 .code_editor("markdown")
+                .fidelity_scope(measurement_surface)
                 .code_editor_dynamic_bottom_margin(false)
                 .line_number(false)
                 .searchable(true)

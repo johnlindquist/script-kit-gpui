@@ -97,6 +97,7 @@ impl DayPageView {
             cx,
             NotesEditorMarkdownConfig::new("")
                 .placeholder("Today...")
+                .measurement_surface("day-page-editor")
                 .layout(NotesEditorLayout::new(
                     metrics.editor_padding_x,
                     metrics.editor_padding_y,

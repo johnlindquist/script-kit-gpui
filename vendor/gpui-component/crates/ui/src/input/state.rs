@@ -321,6 +321,9 @@ pub struct InputState {
     pub(crate) scroll_size: gpui::Size<Pixels>,
     pub(crate) code_editor_dynamic_bottom_margin: bool,
     pub(super) text_align: TextAlign,
+    /// Optional stable capture-only identity for shaped text measurements.
+    /// Raw text is never retained by the fidelity frame.
+    pub(super) fidelity_scope: Option<SharedString>,
     pub(super) highlight_ranges: Vec<(Range<usize>, Hsla)>,
     pub(super) highlight_range_roles: Vec<String>,
     pub(super) hovered_highlight_range: Option<(Range<usize>, String)>,
@@ -520,6 +523,7 @@ impl InputState {
             placeholder: SharedString::default(),
             mask_pattern: MaskPattern::default(),
             text_align: TextAlign::Left,
+            fidelity_scope: None,
             highlight_ranges: Vec::new(),
             highlight_range_roles: Vec::new(),
             hovered_highlight_range: None,
@@ -541,6 +545,15 @@ impl InputState {
             tab_navigation_space_as_tab: false,
             submit_on_enter: false,
         }
+    }
+
+    /// Attach a stable capture-only identity to this input's shaped text.
+    ///
+    /// The fidelity layer records line boxes, glyph paint unions, counts, and
+    /// hashes only while capture is enabled; it never stores the source text.
+    pub fn fidelity_scope(mut self, scope: impl Into<SharedString>) -> Self {
+        self.fidelity_scope = Some(scope.into());
+        self
     }
 
     /// Show inline completion ghost text even when this input does not hold GPUI focus.

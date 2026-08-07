@@ -185,9 +185,49 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
     primitiveId: "devtools.layout.measure",
     tool: "script-kit-devtools.layout",
     commands: ["layout.measure"],
-    requiredPaths: [...commonTargetFields, "target.bounds", "window", "regions", "resizePressure", "pressure"],
+    requiredPaths: [
+      ...commonTargetFields,
+      "target.bounds",
+      "proofMode",
+      "window",
+      "regions",
+      "resizePressure",
+      "pressure",
+      "truthLayers.model",
+      "truthLayers.rendered",
+      "truthLayers.joins",
+    ],
     forbidMissingPrimitivesOnPass: true,
-    description: "Measure target-scoped model and layout geometry.",
+    predicates: [{
+      id: "join-proof-keeps-model-and-rendered-truth-independent",
+      validate(receipt, disposition) {
+        if (receipt.proofMode !== "join" || disposition !== "EVALUABLE_PASS") return [];
+        const truth = receipt.truthLayers && typeof receipt.truthLayers === "object"
+          ? receipt.truthLayers as JsonObject
+          : {};
+        const model = truth.model && typeof truth.model === "object"
+          ? truth.model as JsonObject
+          : {};
+        const rendered = truth.rendered && typeof truth.rendered === "object"
+          ? truth.rendered as JsonObject
+          : {};
+        const joins = Array.isArray(truth.joins) ? truth.joins : [];
+        const comparableJoinCount = Number(truth.comparableJoinCount ?? 0);
+        const joinedGeometryAgrees = joins.every((value) => {
+          const join = value && typeof value === "object" ? value as JsonObject : {};
+          return join.comparability !== "Comparable" || join.classification === "Match";
+        });
+        return comparableJoinCount > 0 &&
+            Number(model.clippedNodeCount ?? 0) === 0 &&
+            Number(model.overlapCount ?? 0) === 0 &&
+            Number(rendered.clippedNodeCount ?? 0) === 0 &&
+            Number(rendered.overlapCount ?? 0) === 0 &&
+            joinedGeometryAgrees
+          ? []
+          : ["join proof requires matching same-frame joins plus unclipped non-overlapping model and rendered evidence"];
+      },
+    }],
+    description: "Measure target-scoped intended/model/rendered geometry without collapsing truth layers.",
   }),
   schema({
     primitiveId: "devtools.scroll.inspect",
@@ -228,9 +268,32 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
     primitiveId: "devtools.text.measure",
     tool: "script-kit-devtools.text",
     commands: ["text.measure"],
-    requiredPaths: [...commonTargetFields, "textSummary.inputLength", "textSummary.inputFingerprint", "rows[].textLength", "rows[].fingerprint"],
+    requiredPaths: [
+      ...commonTargetFields,
+      "proofMode",
+      "textSummary.inputLength",
+      "textSummary.inputFingerprint",
+      "rows[].textLength",
+      "rows[].fingerprint",
+    ],
     forbidMissingPrimitivesOnPass: true,
-    description: "Measure text using lengths and fingerprints, never authored bytes.",
+    predicates: [{
+      id: "fit-proof-requires-same-frame-unoccluded-glyphs",
+      validate(receipt, disposition) {
+        if (receipt.proofMode !== "fit" || disposition !== "EVALUABLE_PASS") return [];
+        const fits = Array.isArray(receipt.textFits) ? receipt.textFits : [];
+        return fits.length > 0 && fits.every((fit) => {
+          const measurement = fit && typeof fit === "object" ? fit as JsonObject : {};
+          return measurement.fullDisplayPass === true &&
+            measurement.rawContentReturned !== true &&
+            measurement.frameMatches === true &&
+            measurement.backingScaleMatches === true;
+        })
+          ? []
+          : ["fit proof requires same-frame, font-ready, unoccluded full glyph display without raw content"];
+      },
+    }],
+    description: "Measure redacted text metadata and optional completed-frame glyph fit.",
   }),
   schema({
     primitiveId: "devtools.keyboard.inspect",

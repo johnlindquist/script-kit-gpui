@@ -31,6 +31,8 @@ async function sha256File(path: string) {
 async function layoutSourceFingerprint() {
   const paths = [
     "src/app_layout/build_layout_info.rs",
+    "src/app_layout/paint_measurements.rs",
+    "src/protocol/types/grid_layout.rs",
     "scripts/devtools/layout.ts",
     "src/ui/chrome/tokens.rs",
   ];
@@ -49,7 +51,7 @@ async function layoutSourceFingerprint() {
 function usage() {
   return [
     "Usage:",
-    "  bun scripts/devtools/layout.ts measure [target args] [--include nodes,regions,scroll,anchors,resize,overlaps] [--limit <n>]",
+    "  bun scripts/devtools/layout.ts measure [target args] [--include nodes,regions,scroll,anchors,resize,overlaps] [--proof-mode inspection|join] [--limit <n>]",
     "",
     "Target args match scripts/devtools/targets.ts inspect, e.g. --session <name> --main --strict --surface ScriptList --start --show.",
   ].join("\n");
@@ -283,7 +285,177 @@ function ensureRootWindowBackdropNode(
   ];
 }
 
-function analyzeLayout(layout: JsonObject, targetReceipt: JsonObject) {
+export type GeometryRole =
+  | "windowBackdrop"
+  | "mainHeaderChrome"
+  | "contextZone"
+  | "inputControl"
+  | "contentViewport"
+  | "rowSlot"
+  | "sectionSlot"
+  | "footerNativeHost"
+  | "footerRail"
+  | "footerActionRow"
+  | "footerActionSlot"
+  | "keycapInnerFrame"
+  | "popupShell"
+  | "popupAnchor"
+  | "textLineBox"
+  | "glyphBounds"
+  | "focusRing"
+  | "other";
+
+export type MeasurementJoin = {
+  measurementId: string;
+  semanticId: string | null;
+  role: GeometryRole;
+  coordinateSpace: string;
+  intended: {
+    contractId: string;
+    sourcePath: string;
+    sourceSymbol: string;
+    relation: string;
+  } | null;
+  model: { bounds: Rect; generation: number } | null;
+  rendered: {
+    bounds: Rect;
+    visibleBounds: Rect;
+    clipBounds: Rect;
+    frameGeneration: number;
+    source: "paint-time" | "appkit" | "browser";
+  } | null;
+  comparability:
+    | "Comparable"
+    | "RoleMismatch"
+    | "CoordinateSpaceMismatch"
+    | "StaleGeneration"
+    | "ModelOnly"
+    | "RenderedOnly";
+  delta: Rect | null;
+  tolerance: Rect | null;
+  classification:
+    | "Match"
+    | "Clipped"
+    | "OutOfTolerance"
+    | "ModelOverlap"
+    | "RenderedOverlap"
+    | "NotComparable";
+};
+
+function intendedGeometry(role: GeometryRole) {
+  if (role === "other") return null;
+  return {
+    contractId: `geometry-role:${role}`,
+    sourcePath: "src/protocol/types/grid_layout.rs",
+    sourceSymbol: "GeometryRole",
+    relation: "Compare equal roles in one coordinate space and capture generation; preserve containment between distinct roles.",
+  };
+}
+
+function rectDelta(model: Rect, rendered: Rect): Rect {
+  return {
+    x: rendered.x - model.x,
+    y: rendered.y - model.y,
+    width: rendered.width - model.width,
+    height: rendered.height - model.height,
+  };
+}
+
+function rectVisibleRatio(bounds: Rect, visible: Rect): number {
+  const width = Math.max(0, Math.min(right(bounds), right(visible)) - Math.max(bounds.x, visible.x));
+  const height = Math.max(0, Math.min(bottom(bounds), bottom(visible)) - Math.max(bounds.y, visible.y));
+  const area = Math.max(0, bounds.width) * Math.max(0, bounds.height);
+  return area > 0 ? (width * height) / area : 1;
+}
+
+function layerOverlaps(nodes: Array<{ name: unknown; measurementId: string; role: GeometryRole; bounds: Rect; depth: unknown; parent: unknown; hitMetrics: ReturnType<typeof hitMetrics> }>) {
+  const overlaps: Array<{ a: unknown; b: unknown; aMeasurementId: string; bMeasurementId: string }> = [];
+  for (let left = 0; left < nodes.length; left += 1) {
+    for (let rightIndex = left + 1; rightIndex < nodes.length; rightIndex += 1) {
+      const a = nodes[left];
+      const b = nodes[rightIndex];
+      const sameSiblingBand = a.depth != null && b.depth != null &&
+        a.parent != null && b.parent != null &&
+        a.depth === b.depth && a.parent === b.parent;
+      const floatingOverlayPair =
+        a.hitMetrics?.exception === "floatingFooterOverlay" ||
+        b.hitMetrics?.exception === "floatingFooterOverlay";
+      if (sameSiblingBand && !floatingOverlayPair && a.name && b.name && intersects(a.bounds, b.bounds)) {
+        overlaps.push({ a: a.name, b: b.name, aMeasurementId: a.measurementId, bMeasurementId: b.measurementId });
+      }
+    }
+  }
+  return overlaps;
+}
+
+export function buildMeasurementJoins(nodes: Array<{
+  measurementId: string;
+  semanticId: string | null;
+  role: GeometryRole;
+  bounds: Rect;
+  visibleBounds: Rect | null;
+  clipBounds: Rect | null;
+  measurementProvenance: unknown;
+  coordinateSpace: unknown;
+  measurementFrameGeneration: unknown;
+}>): MeasurementJoin[] {
+  const groups = new Map<string, typeof nodes>();
+  for (const node of nodes) {
+    const group = groups.get(node.measurementId) ?? [];
+    group.push(node);
+    groups.set(node.measurementId, group);
+  }
+  return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([measurementId, group]) => {
+    const modelNode = group.find((node) => node.measurementProvenance !== "paint-time") ?? null;
+    const renderedNode = group.find((node) => node.measurementProvenance === "paint-time") ?? null;
+    const role = (modelNode?.role ?? renderedNode?.role ?? "other") as GeometryRole;
+    const modelGeneration = asNumber(modelNode?.measurementFrameGeneration, -1);
+    const renderedGeneration = asNumber(renderedNode?.measurementFrameGeneration, -1);
+    const modelSpace = String(modelNode?.coordinateSpace ?? "unknown");
+    const renderedSpace = String(renderedNode?.coordinateSpace ?? "unknown");
+    let comparability: MeasurementJoin["comparability"];
+    if (!modelNode) comparability = "RenderedOnly";
+    else if (!renderedNode) comparability = "ModelOnly";
+    else if (modelNode.role !== renderedNode.role) comparability = "RoleMismatch";
+    else if (modelSpace !== renderedSpace) comparability = "CoordinateSpaceMismatch";
+    else if (modelGeneration < 0 || renderedGeneration < 0 || modelGeneration !== renderedGeneration) comparability = "StaleGeneration";
+    else comparability = "Comparable";
+    const delta = modelNode && renderedNode ? rectDelta(modelNode.bounds, renderedNode.bounds) : null;
+    const tolerance = { x: 1, y: 1, width: 1, height: 1 };
+    const outsideTolerance = delta != null && Object.entries(delta).some(([key, value]) => Math.abs(value) > tolerance[key as keyof Rect]);
+    const renderedVisibleRatio = renderedNode
+      ? rectVisibleRatio(renderedNode.bounds, renderedNode.visibleBounds ?? renderedNode.bounds)
+      : 1;
+    const classification: MeasurementJoin["classification"] = comparability !== "Comparable"
+      ? "NotComparable"
+      : renderedVisibleRatio < 0.999
+      ? "Clipped"
+      : outsideTolerance
+      ? "OutOfTolerance"
+      : "Match";
+    return {
+      measurementId,
+      semanticId: modelNode?.semanticId ?? renderedNode?.semanticId ?? null,
+      role,
+      coordinateSpace: modelNode ? modelSpace : renderedSpace,
+      intended: intendedGeometry(role),
+      model: modelNode ? { bounds: modelNode.bounds, generation: modelGeneration } : null,
+      rendered: renderedNode ? {
+        bounds: renderedNode.bounds,
+        visibleBounds: renderedNode.visibleBounds ?? renderedNode.bounds,
+        clipBounds: renderedNode.clipBounds ?? renderedNode.bounds,
+        frameGeneration: renderedGeneration,
+        source: "paint-time",
+      } : null,
+      comparability,
+      delta,
+      tolerance,
+      classification,
+    };
+  });
+}
+
+export function analyzeLayout(layout: JsonObject, targetReceipt: JsonObject) {
   const info = (layout.info as JsonObject | undefined) ?? layout;
   const rawComponents = asArray(info.components);
   const targetBounds = rectFrom(
@@ -295,12 +467,46 @@ function analyzeLayout(layout: JsonObject, targetReceipt: JsonObject) {
     width: asNumber(info.windowWidth, targetBounds.width),
     height: asNumber(info.windowHeight, targetBounds.height),
   };
-  const components = ensureRootWindowBackdropNode(rawComponents, targetBounds, viewportRect);
+  const fidelity = asObject(info.fidelity);
+  const fidelityNodes = asArray(fidelity.nodes).map((node) => {
+    const metadata = asObject(node.metadata);
+    return {
+      name: node.id,
+      type: node.kind,
+      semanticId: metadata.semanticId ?? null,
+      measurementId: metadata.measurementId ?? `paint:${String(node.id ?? "unknown")}`,
+      geometryRole: metadata.role ?? (node.kind === "textLine" ? "textLineBox" : "other"),
+      bounds: node.bounds,
+      visibleBounds: node.visibleBounds,
+      clipBounds: node.clipBounds,
+      measurementProvenance: node.measurementProvenance ?? "paint-time",
+      coordinateSpace: node.coordinateSpace ?? "window",
+      measurementFrameGeneration: node.measurementFrameGeneration ?? fidelity.frameGeneration,
+      depth: null,
+      parent: node.parentId ?? null,
+      children: [],
+      fidelityMetadata: metadata,
+      unionPaintBounds: node.unionPaintBounds,
+      primitiveCount: node.primitiveCount,
+      paintOrder: node.paintOrder,
+      textHash: node.textHash,
+      textLayoutHash: node.textLayoutHash,
+    } as JsonObject;
+  });
+  const components = [
+    ...ensureRootWindowBackdropNode(rawComponents, targetBounds, viewportRect),
+    ...fidelityNodes,
+  ];
   const nodes = components.map((component) => {
     const bounds = rectFrom(component.bounds);
     return {
       name: component.name ?? null,
       type: component.type ?? null,
+      semanticId: typeof component.semanticId === "string" ? component.semanticId : null,
+      measurementId: typeof component.measurementId === "string"
+        ? component.measurementId
+        : `layout:${String(component.name ?? "unknown")}`,
+      role: String(component.geometryRole ?? "other") as GeometryRole,
       bounds,
       depth: component.depth ?? null,
       parent: component.parent ?? null,
@@ -317,47 +523,32 @@ function analyzeLayout(layout: JsonObject, targetReceipt: JsonObject) {
       raw: component,
     };
   });
-  const auditNodes = nodes.filter(
+  const modelNodes = nodes.filter(
     (node) => node.measurementProvenance !== "paint-time",
   );
-  const overlaps = [];
-  for (let left = 0; left < auditNodes.length; left += 1) {
-    for (
-      let rightIndex = left + 1;
-      rightIndex < auditNodes.length;
-      rightIndex += 1
-    ) {
-      const a = auditNodes[left];
-      const b = auditNodes[rightIndex];
-      const sameSiblingBand = a.depth === b.depth && a.parent === b.parent;
-      // A floating overlay (e.g. the hint-strip footer) intentionally floats over
-      // content with safe-area/scroll-edge insets — the list viewport is reduced by
-      // the footer height, so the geometric intersection is by design, not a clip.
-      // (Oracle review tahoe-guideline-review-remaining; render_script_list reduces
-      // safe_viewport_height by the footer overlay height.)
-      const floatingOverlayPair =
-        a.hitMetrics?.exception === "floatingFooterOverlay" ||
-        b.hitMetrics?.exception === "floatingFooterOverlay";
-      if (
-        sameSiblingBand &&
-        !floatingOverlayPair &&
-        a.name &&
-        b.name &&
-        intersects(a.bounds, b.bounds)
-      ) {
-        overlaps.push({ a: a.name, b: b.name });
-      }
-    }
-  }
-  const maxBottom = auditNodes.reduce(
+  const renderedNodes = nodes.filter(
+    (node) => node.measurementProvenance === "paint-time",
+  );
+  // Model and completed-frame paint are audited independently. A passing model
+  // can no longer hide clipped paint, and a passing paint layer cannot erase a
+  // stale or contradictory model.
+  const modelOverlaps = layerOverlaps(modelNodes);
+  const renderedOverlaps = layerOverlaps(renderedNodes);
+  const overlaps = modelOverlaps;
+  const joins = buildMeasurementJoins(nodes);
+  const maxBottom = modelNodes.reduce(
     (current, node) => Math.max(current, bottom(node.bounds)),
     0,
   );
-  const clippedNodeCount = auditNodes.filter((node) => node.clipped).length;
-  const overlapCount = overlaps.length;
+  const clippedNodeCount = modelNodes.filter((node) => node.clipped).length;
+  const renderedClippedNodeCount = renderedNodes.filter((node) =>
+    rectVisibleRatio(node.bounds, node.visibleBounds ?? node.bounds) < 0.999
+  ).length;
+  const overlapCount = modelOverlaps.length;
+  const renderedOverlapCount = renderedOverlaps.length;
   const overflowY = maxBottom > viewportRect.height;
-  const nodesWithVisualStyle = auditNodes.filter((node) => node.visualStyle != null);
-  const controlsWithHitFailures = auditNodes.filter((node) => {
+  const nodesWithVisualStyle = modelNodes.filter((node) => node.visualStyle != null);
+  const controlsWithHitFailures = modelNodes.filter((node) => {
     const type = String(node.type ?? "");
     return (
       ["button", "input"].includes(type) &&
@@ -383,7 +574,7 @@ function analyzeLayout(layout: JsonObject, targetReceipt: JsonObject) {
     chromeLayer: (node.visualStyle as JsonObject).chromeLayer ?? null,
     materialSource: (node.visualStyle as JsonObject).materialSource ?? null,
   }));
-  const buttonCenterDistance = buttonCenterDistanceAssertions(auditNodes);
+  const buttonCenterDistance = buttonCenterDistanceAssertions(modelNodes);
   const hardcodedColorNodes = nodesWithVisualStyle.filter((node) => {
     const style = node.visualStyle as JsonObject;
     return style.usesSemanticThemeToken === false || style.colorSource === "hardcoded";
@@ -400,7 +591,7 @@ function analyzeLayout(layout: JsonObject, targetReceipt: JsonObject) {
   const backingScaleFactor =
     typeof info.backingScaleFactor === "number" ? info.backingScaleFactor : null;
   const appleConformance = appleGuidelineConformance(
-    auditNodes as unknown as NodeLike[],
+    modelNodes as unknown as NodeLike[],
     backingScaleFactor,
   );
   return {
@@ -415,6 +606,25 @@ function analyzeLayout(layout: JsonObject, targetReceipt: JsonObject) {
     })),
     nodes,
     overlaps,
+    truthLayers: {
+      model: {
+        nodeCount: modelNodes.length,
+        clippedNodeCount,
+        overlapCount,
+        overlaps: modelOverlaps,
+      },
+      rendered: {
+        nodeCount: renderedNodes.length,
+        clippedNodeCount: renderedClippedNodeCount,
+        overlapCount: renderedOverlapCount,
+        overlaps: renderedOverlaps,
+      },
+      joins,
+      comparableJoinCount: joins.filter((join) => join.comparability === "Comparable").length,
+      unjoinedMeasurementIds: joins
+        .filter((join) => join.comparability === "ModelOnly" || join.comparability === "RenderedOnly")
+        .map((join) => join.measurementId),
+    },
     resizePressure: {
       windowCanGrow: null,
       overflowY,
@@ -425,10 +635,10 @@ function analyzeLayout(layout: JsonObject, targetReceipt: JsonObject) {
       pressureScore: clippedNodeCount + overlapCount + (overflowY ? 1 : 0),
     },
     visualAudit: {
-      nodeCount: auditNodes.length,
-      paintMeasurementNodeCount: nodes.length - auditNodes.length,
+      nodeCount: modelNodes.length,
+      paintMeasurementNodeCount: nodes.length - modelNodes.length,
       styledNodeCount: nodesWithVisualStyle.length,
-      unstyledNodeCount: auditNodes.length - nodesWithVisualStyle.length,
+      unstyledNodeCount: modelNodes.length - nodesWithVisualStyle.length,
       controlsWithHitFailures: controlsWithHitFailures.map((node) => ({
         name: node.name,
         type: node.type,
@@ -437,7 +647,7 @@ function analyzeLayout(layout: JsonObject, targetReceipt: JsonObject) {
       contentGlassNodes: contentNativeMaterialNodes.map((node) => node.name),
       contentNativeMaterialNodes: contentNativeMaterialNodes.map((node) => node.name),
       glassLayerViolations,
-      missingStyleNodeNames: auditNodes
+      missingStyleNodeNames: modelNodes
         .filter((node) => node.visualStyle == null)
         .map((node) => node.name),
       chromeLayers: Object.fromEntries(
@@ -564,6 +774,7 @@ function classify(
   targetReceipt: JsonObject,
   layoutEnvelope: JsonObject,
   analysis: ReturnType<typeof analyzeLayout>,
+  proofMode: "inspection" | "join",
 ) {
   if (targetReceipt.classification !== "ok") {
     return targetReceipt.classification ?? "blocked-by-target-ambiguity";
@@ -574,6 +785,23 @@ function classify(
   }
   if (analysis.nodes.length === 0) {
     return "blocked-by-missing-primitive";
+  }
+  if (proofMode === "join") {
+    if (analysis.truthLayers.rendered.nodeCount === 0 || analysis.truthLayers.comparableJoinCount === 0) {
+      return "blocked-by-missing-primitive";
+    }
+    const comparableJoinsAgree = analysis.truthLayers.joins
+      .filter((join) => join.comparability === "Comparable")
+      .every((join) => join.classification === "Match");
+    if (
+      analysis.truthLayers.model.clippedNodeCount > 0 ||
+      analysis.truthLayers.model.overlapCount > 0 ||
+      analysis.truthLayers.rendered.clippedNodeCount > 0 ||
+      analysis.truthLayers.rendered.overlapCount > 0 ||
+      !comparableJoinsAgree
+    ) {
+      return "not-ok";
+    }
   }
   return "ok";
 }
@@ -589,7 +817,7 @@ async function main() {
     process.exit(2);
   }
   const { args, extras, warnings: argWarnings } = parseTargetArgs(argv.slice(1), {
-    extras: { "--include": "string", "--limit": "number" },
+    extras: { "--include": "string", "--limit": "number", "--proof-mode": "string" },
   });
   if (args.help) {
     console.log(usage());
@@ -599,6 +827,7 @@ async function main() {
     ? String(extras["--include"]).split(",").map((part) => part.trim()).filter(Boolean)
     : ["nodes", "regions", "scroll", "anchors", "resize", "overlaps"];
   const limit = extras["--limit"] ?? 200;
+  const proofMode = extras["--proof-mode"] === "join" ? "join" : "inspection";
 
   const clock = startClock();
   await maybeStartAndShow(args);
@@ -622,7 +851,7 @@ async function main() {
   );
   const layout = responseOf(layoutEnvelope);
   const analysis = analyzeLayout(layout, targetReceipt);
-  const classification = classify(targetReceipt, layoutEnvelope, analysis);
+  const classification = classify(targetReceipt, layoutEnvelope, analysis, proofMode);
 
   emitValidatedReceipt(
     "devtools.layout.measure",
@@ -630,6 +859,7 @@ async function main() {
       { tool: "script-kit-devtools.layout", command: "layout.measure", session: args.session, clock },
       {
         classification,
+        proofMode,
         include,
         limit,
         requestedTarget: targetReceipt.requestedTarget ?? { selector },
@@ -702,6 +932,7 @@ async function main() {
           raw: diagnostic(node.raw),
         })),
         overlaps: analysis.overlaps,
+        truthLayers: analysis.truthLayers,
         resizePressure: analysis.resizePressure,
         visualAudit: analysis.visualAudit,
         handlerForm:
@@ -710,6 +941,12 @@ async function main() {
           null,
         missingPrimitives: [
           analysis.nodes.length === 0 ? "layoutComponents" : "",
+          proofMode === "join" && analysis.truthLayers.rendered.nodeCount === 0
+            ? "renderedMeasurements"
+            : "",
+          proofMode === "join" && analysis.truthLayers.comparableJoinCount === 0
+            ? "comparableMeasurementJoin"
+            : "",
           layoutEnvelope.status === "error" ? "layoutInfoResult" : "",
           targetReceipt.classification !== "ok" ? "strictTargetIdentity" : "",
         ].filter(Boolean),
@@ -731,4 +968,4 @@ async function main() {
   );
 }
 
-await main();
+if (import.meta.main) await main();

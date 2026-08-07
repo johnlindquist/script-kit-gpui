@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 52 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 54 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -19,7 +19,7 @@
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
 | Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C14 complete; local lane audit PASS on one stable artifact |
-| Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01–C04 complete; C05 next |
+| Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01–C05 complete; C06 next (PF-007/PF-008) |
 
 ## How to view the baseline proposal explorer
 
@@ -233,6 +233,81 @@
   4. Run `bun test scripts/devtools/elements.test.ts scripts/devtools/receipt-schema.test.ts`; confirm incomplete projections require typed reasons, partial action proof blocks, and a false pass on a partial projection is invalid schema.
   5. Run `RUST_MIN_STACK=268435456 ./scripts/agentic/agent-cargo.sh test --bin script-kit-gpui app_layout_projection_tests`; expect 3 passed and 0 failed, including the no-fabricated-completeness model test.
   6. Confirm the runtime receipt cleanup has all three lifecycle booleans true and `ownedProcessCount: 0`; `ps` should show no process whose executable path exactly equals the pinned C04 artifact.
+
+### PF-005 — Join intended, model, and completed-frame geometry without collapsing truth layers
+
+- **Stage:** 3
+- **Status:** Complete
+- **Findings/guidelines addressed:** Formula geometry, debug-grid geometry, and completed paint previously had different owners and could hide one another. Equal-looking rectangles also lacked typed roles, so unrelated footer, row, and shell metrics could be compared as if they represented the same thing.
+- **User-facing expectation:** Agents now receive independent intended/model/rendered geometry, joined only by a stable measurement ID, equal typed role, one coordinate space, and one completed-frame generation. A clean formula cannot hide clipped paint, clean paint cannot hide overlapping formula siblings, and role or frame mismatches cannot become a comparison.
+- **Prior red or bounded blocker:** `build_component_bounds.rs` duplicated 695 lines of AppView geometry; `layout.ts` explicitly removed paint-time nodes before clipping/overlap analysis; Notes-target layout returned before completed-frame paint was appended; and model nodes had no stable measurement identity, role, or shared frame generation.
+- **Behavior/tooling changed:** `build_layout_info` is now the canonical model and the debug grid is a small adapter over it; protocol components carry canonicalized `measurementId`, optional `semanticId`, typed `GeometryRole`, provenance, coordinate space, and frame generation; model nodes are stamped with the same completed-frame generation before paint nodes are appended; Notes layout captures through its actual window; and `layout.ts` emits independent model/rendered audits plus typed joins, deltas, tolerances, comparability, and classifications. Join-mode schema validation now requires matching comparable joins and clean model and rendered layers.
+- **Owners and symbols:**
+  - `src/protocol/types/grid_layout.rs::{GeometryRole,LayoutComponentInfo::new,LayoutComponentInfo::with_geometry_identity}`
+  - `src/app_layout/build_layout_info.rs::ScriptListApp::build_layout_info`
+  - `src/app_layout/build_component_bounds.rs::ScriptListApp::build_component_bounds`
+  - `src/app_layout/paint_measurements.rs::ScriptListApp::append_paint_measurements`
+  - `src/prompt_handler/mod.rs` Notes `GetLayoutInfo` branch
+  - `scripts/devtools/layout.ts::{buildMeasurementJoins,analyzeLayout,classify}`
+  - `scripts/devtools/lib/receipt-schema.ts` `devtools.layout.measure` predicates
+  - `scripts/agentic/cons-proof-gov/layout-text-proof.ts`
+- **Intended contract:** Typed roles are the comparison boundary. `FooterNativeHost` is not `FooterActionRow`, `RowSlot` is not `SectionSlot`, and a stale generation is never numerically compared. Intended constraints, formula/model bounds, and rendered bounds remain separate fields.
+- **Model truth:** Nine Rust protocol tests pass. Canonical slugging maps `MainViewHeader` and `main-view-header` to `layout:main-view-header`; distinct footer roles remain distinct. The debug grid no longer owns an AppView geometry table.
+- **Rendered/paint truth:** `.artifacts/consistency/PF-005/layout-join.json` is `RUNTIME-CONFIRMED` against a real Settings frame. It records 13 model nodes, 18 rendered nodes, three same-frame comparable joins, and zero rendered clipping. The receipt deliberately preserves three `OutOfTolerance` findings: formula geometry still models the outer 750×480 window/context outset while completed GPUI paint is inset by the 1 px shell border and excludes the 40 px native footer. `modelPaintAgreement: false` is evidence that the new proof boundary did not manufacture a pass; later geometry remediation owns those product deltas.
+- **Native AX truth:** Not claimed. Native footer geometry is a separate role and PF-007 owns semantic↔AX parity.
+- **User interaction outcome:** A hidden sandboxed Settings run can now explain exactly which geometry layer disagrees, while Notes-target layout includes real paint instead of model-only output.
+- **Negative controls:** One-point rendered clipping is detected; clean rendered geometry cannot hide one overlapping model sibling pair; role mismatch is `NotComparable`; stale frame is `NotComparable`; and a rendered-only measurement remains explicitly unjoined. Receipt-schema tests also reject an `EVALUABLE_PASS` when model overlap or model/paint drift is present.
+- **Positive receipt:** `.artifacts/consistency/PF-005/layout-join.json` → `RUNTIME-CONFIRMED`.
+- **Verification:** Focused C05 DevTools suite 41 passed, 0 failed, 140 expectations; typed geometry protocol tests 9/9; final `check --lib` PASS; stable artifact build PASS.
+- **Binary SHA:** `e3fc993a0cc6d5a40400ce30ba90dcdc4b5ec0ad6ab1f0cf079716d88f27051f` at `target-agent/artifacts/cons-proof-c05/script-kit-gpui`.
+- **Privacy/interference:** Geometry receipts contain product-static IDs and numbers only. The runtime used a sandbox home and hidden protocol interactions; no pointer, native key event, screenshot, microphone, clipboard, permission, or live user-data path was used.
+- **Cleanup:** `processExited: true`, `streamsDrained: true`, `logWriterClosed: true`, `ownedProcessCount: 0`, `closeError: null`, `clipboardTouched: false`.
+- **Governance:** PF-001 producer compatibility remains `PASS`; PF-003 on the exact C05 SHA remains `RUNTIME-CONFIRMED` with zero protocol-response canary matches. Source-audit inventory has 2,814 reader sites and no guarded additions relative to `main`; scanner tests 34/34; source-audit ratchet 1/1; hardcoded visual inventory has no additions; glass anti-drift 40/40 and calibration fixture 1/1.
+- **Protected/out-of-scope values:** No protected glass source, fixture, threshold, motion value, design token, generated token, credential, or `.hitl-align` content changed. Existing Settings model/paint deltas were recorded, not “fixed” with a tolerance expansion.
+- **Commit boundary:** C05 — PF-005 + PF-006.
+- **User test/view:**
+  1. Run `SCRIPT_KIT_GPUI_BINARY=target-agent/artifacts/cons-proof-c05/script-kit-gpui bun scripts/agentic/cons-proof-gov/layout-text-proof.ts`; expect both printed classifications to be `RUNTIME-CONFIRMED`.
+  2. Open `.artifacts/consistency/PF-005/layout-join.json`; confirm `settings.comparableJoinCount: 3`, `settings.renderedClippedNodeCount: 0`, and each comparable join has intended, model, rendered, role, coordinate-space, generation, delta, tolerance, and classification fields.
+  3. Confirm the current disagreement remains explicit: `settings.modelPaintAgreement: false`, `settings.outOfToleranceJoinCount: 3`, header delta `{x:1,y:1,width:-2,height:0}`, and main-content height delta `-42`.
+  4. Confirm all five negative controls are true, especially `modelSiblingOverlapNotHiddenByCleanPaint`, `roleMismatchNotComparable`, and `staleFrameNotComparable`.
+  5. Run `bun test scripts/devtools/layout.test.ts scripts/devtools/receipt-schema.test.ts`; confirm the clean-model/clipped-paint, clean-paint/overlapping-model, stale-frame, unlike-role, and false-pass cases pass.
+  6. Confirm cleanup has all three lifecycle booleans true and `ownedProcessCount: 0`; an exact executable scan should find no C05 process.
+
+### PF-006 — Measure shaped text fit, glyph paint, clipping, and occlusion without returning authored text
+
+- **Stage:** 3
+- **Status:** Complete
+- **Findings/guidelines addressed:** Formula line boxes cannot prove that shaped heading glyphs fit. Notes and Today shared one editor but exposed no same-frame glyph union, clip, font readiness, scale, occlusion, or privacy-safe content identity.
+- **User-facing expectation:** Notes and Today now expose each shaped/wrapped editor line as a capture-only fidelity measurement with a line box, exact glyph-paint union, visible and clip bounds, font fingerprint and metrics, backing scale, frame generation, wrapping/truncation policy, grapheme count, and content fingerprint. The user’s text is never returned.
+- **Prior red or bounded blocker:** `getLayoutInfo` exposed model rectangles but not shaped glyph bounds. A line could look valid in source while a heading cap/descender clipped in paint; a footer or later paint could cover it; stale fonts/frame/scale could still be treated as proof.
+- **Behavior/tooling changed:** The vendored shared input accepts an optional fidelity scope and records each shaped line around the actual `ShapedLine::paint` call; NotesEditor owns a configurable measurement surface; Notes uses `notes-editor` and Day Page uses `day-page-editor`; selection/caret paint stays outside the line scope so it cannot inflate glyph bounds; and `text.ts` produces privacy-safe `textFitMeasurements` with strict full-display classification.
+- **Owners and symbols:**
+  - `vendor/gpui-component/crates/ui/src/input/state.rs::InputState::fidelity_scope`
+  - `vendor/gpui-component/crates/ui/src/input/element.rs` shaped-line paint loop
+  - `src/components/notes_editor/types.rs::{NotesEditorConfig::measurement_surface,NotesEditorMarkdownConfig::measurement_surface}`
+  - `src/components/notes_editor/component.rs::NotesEditor::new`
+  - `src/main_sections/day_page_view.rs::DayPageView::new`
+  - `scripts/devtools/text.ts::{textRows,textFitMeasurements,classifyTextProof}`
+  - `scripts/devtools/lib/receipt-schema.ts` `devtools.text.measure` predicates
+  - `scripts/agentic/cons-proof-gov/layout-text-proof.ts`
+- **Intended contract:** `fullDisplayPass` requires declared `fullDisplay` truncation, visible ratio at least 0.999, no later intersecting paint, fonts ready, capture frame equal to line frame, expected backing scale matched, and no raw content. Intentional ellipsis must declare a different policy instead of pretending to be full display.
+- **Model truth:** Focused tests prove positive full display and fail closed on a one-point glyph clip, later footer occlusion, fonts-not-ready, stale frame, backing-scale mismatch, or raw text.
+- **Rendered/paint truth:** `.artifacts/consistency/PF-006/text-fit.json` is `RUNTIME-CONFIRMED`. Real Notes and Day Page each expose two shaped lines. Both have minimum visible ratio `1`, font-ready/same-frame/scale-present truth, zero occluders, and `fullDisplayPass: true`. Notes line/capture generation is 8; Day Page records its own completed generation; both report backing scale 2.
+- **Native AX truth:** Not claimed. This is renderer-owned shaped-text paint evidence, not AppKit raster or AX geometry.
+- **User interaction outcome:** A deterministic heading and body line remain fully visible in both Notes and Today through the shared editor owner, with separate semantic IDs proving which host produced the evidence.
+- **Negative controls:** One-point glyph clipping, footer occlusion, fonts-not-ready, and backing-scale mismatch all force `fullDisplayPass: false`; receipt validation refuses a false fit pass.
+- **Positive receipt:** `.artifacts/consistency/PF-006/text-fit.json` → `RUNTIME-CONFIRMED`.
+- **Privacy:** `rawContentReturned: false`, `fixtureCanaryMatches: 0`, HMAC/fingerprint-only authored content, and PF-003 compatibility remains green on the same binary.
+- **Interference/cleanup:** Hidden sandboxed proof; no native input or clipboard. Cleanup is `processExited: true`, `streamsDrained: true`, `logWriterClosed: true`, `ownedProcessCount: 0`, `closeError: null`, `clipboardTouched: false`.
+- **Protected/out-of-scope values:** No typography, heading size, line height, glass motion, footer geometry, or theme token was retuned. GEO-005 owns any future heading-typography repair if native evidence turns red.
+- **Commit boundary:** C05 — PF-005 + PF-006.
+- **User test/view:**
+  1. Run `SCRIPT_KIT_GPUI_BINARY=target-agent/artifacts/cons-proof-c05/script-kit-gpui bun scripts/agentic/cons-proof-gov/layout-text-proof.ts`; expect `text.classification: "RUNTIME-CONFIRMED"`.
+  2. Open `.artifacts/consistency/PF-006/text-fit.json`; confirm Notes has semantic ID `input:notes-editor` and Today has `input:day-page-editor`, each with two measurement IDs.
+  3. Confirm both host summaries have `minimumVisibleRatio: 1`, `fontsReady: true`, `frameMatches: true`, `backingScalePresent: true`, `occluderCount: 0`, `rawContentReturned: false`, and `fullDisplayPass: true`.
+  4. Confirm all four negative controls are true and `privacy.fixtureCanaryMatches` is 0.
+  5. Run `bun test scripts/devtools/text.test.ts scripts/devtools/receipt-schema.test.ts`; confirm one-point clipping, footer occlusion, fonts-not-ready, stale frame, scale mismatch, and false schema pass all fail closed.
+  6. Confirm receipt cleanup has all lifecycle booleans true and `ownedProcessCount: 0`; no C05 runtime should remain in the menu bar.
 
 ### UX-002 — Establish one canonical shortcut token stream
 

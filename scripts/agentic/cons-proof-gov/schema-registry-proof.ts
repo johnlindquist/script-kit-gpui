@@ -80,6 +80,7 @@ function layoutReceipt(extra: Obj = {}): Obj {
     tool: "script-kit-devtools.layout",
     command: "layout.measure",
     classification: "ok",
+    proofMode: "inspection",
     requestedTarget: { selector: { type: "main" } },
     target: {
       automationId: "main",
@@ -89,6 +90,13 @@ function layoutReceipt(extra: Obj = {}): Obj {
     regions: [],
     resizePressure: { windowCanGrow: true },
     pressure: { pressureScore: 0 },
+    truthLayers: {
+      model: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+      rendered: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+      joins: [],
+      comparableJoinCount: 1,
+      unjoinedMeasurementIds: [],
+    },
     transaction: proofTransaction(),
     missingPrimitives: [],
     warnings: [],

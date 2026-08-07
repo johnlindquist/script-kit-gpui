@@ -50,12 +50,20 @@ function baseReceipt(extra: Record<string, unknown> = {}) {
     tool: "script-kit-devtools.layout",
     command: "layout.measure",
     classification: "ok",
+    proofMode: "inspection",
     requestedTarget: { selector: { type: "main" } },
     target: { automationId: "main", bounds: { x: 0, y: 0, width: 800, height: 600 } },
     window: { rect: { x: 0, y: 0, width: 800, height: 600 } },
     regions: [],
     resizePressure: { windowCanGrow: true },
     pressure: { pressureScore: 0 },
+    truthLayers: {
+      model: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+      rendered: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+      joins: [],
+      comparableJoinCount: 1,
+      unjoinedMeasurementIds: [],
+    },
     transaction: proofTransaction(),
     missingPrimitives: [],
     warnings: [],
@@ -311,5 +319,84 @@ describe("executable receipt registry", () => {
     expect(prepared.receipt.disposition).toBe("EVALUABLE_FAIL");
     expect(prepared.receipt.pass).toBe(false);
     expect(prepared.exitCode).toBe(2);
+  });
+
+  test("join proof cannot hide rendered clipping behind a clean model", () => {
+    const prepared = prepareValidatedReceipt("devtools.layout.measure", baseReceipt({
+      proofMode: "join",
+      truthLayers: {
+        model: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+        rendered: { nodeCount: 1, clippedNodeCount: 1, overlapCount: 0 },
+        joins: [{ comparability: "Comparable", classification: "Clipped" }],
+        comparableJoinCount: 1,
+        unjoinedMeasurementIds: [],
+      },
+    }));
+    expect(prepared.receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(prepared.exitCode).toBe(4);
+  });
+
+  test("join proof cannot hide model overlap or model-paint drift behind clean paint", () => {
+    const modelOverlap = prepareValidatedReceipt("devtools.layout.measure", baseReceipt({
+      proofMode: "join",
+      truthLayers: {
+        model: { nodeCount: 2, clippedNodeCount: 0, overlapCount: 1 },
+        rendered: { nodeCount: 2, clippedNodeCount: 0, overlapCount: 0 },
+        joins: [{ comparability: "Comparable", classification: "Match" }],
+        comparableJoinCount: 1,
+        unjoinedMeasurementIds: [],
+      },
+    }));
+    const drift = prepareValidatedReceipt("devtools.layout.measure", baseReceipt({
+      proofMode: "join",
+      truthLayers: {
+        model: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+        rendered: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+        joins: [{ comparability: "Comparable", classification: "OutOfTolerance" }],
+        comparableJoinCount: 1,
+        unjoinedMeasurementIds: [],
+      },
+    }));
+    expect(modelOverlap.receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(drift.receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(modelOverlap.exitCode).toBe(4);
+    expect(drift.exitCode).toBe(4);
+  });
+
+  test("fit proof requires font-ready same-frame unoccluded glyphs", () => {
+    const candidate = {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.text",
+      command: "text.measure",
+      classification: "ok",
+      proofMode: "fit",
+      requestedTarget: { selector: { type: "main" } },
+      target: { automationId: "main", bounds: { x: 0, y: 0, width: 800, height: 600 } },
+      transaction: proofTransaction(),
+      textSummary: { inputLength: 7, inputFingerprint: "fixture" },
+      rows: [{ semanticId: "input:notes-editor", textLength: 7, fingerprint: "fixture" }],
+      textFits: [{
+        fullDisplayPass: true,
+        rawContentReturned: false,
+        frameMatches: true,
+        backingScaleMatches: true,
+      }],
+      missingPrimitives: [],
+      warnings: [],
+      errors: [],
+    };
+    const valid = prepareValidatedReceipt("devtools.text.measure", candidate);
+    expect(valid.receipt.disposition).toBe("EVALUABLE_PASS");
+
+    const invalid = prepareValidatedReceipt("devtools.text.measure", {
+      ...candidate,
+      textFits: [{
+        fullDisplayPass: false,
+        rawContentReturned: false,
+        frameMatches: false,
+      }],
+    });
+    expect(invalid.receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(invalid.exitCode).toBe(4);
   });
 });

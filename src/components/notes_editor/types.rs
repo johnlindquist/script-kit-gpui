@@ -27,6 +27,8 @@ pub struct NotesEditorConfig {
     pub placeholder: String,
     pub initial_content: String,
     pub layout: NotesEditorLayout,
+    /// Stable host-specific identity for capture-only shaped text evidence.
+    pub measurement_surface: String,
 }
 
 impl NotesEditorConfig {
@@ -35,6 +37,7 @@ impl NotesEditorConfig {
             placeholder: "Start typing your note...".to_string(),
             initial_content: initial_content.into(),
             layout: NotesEditorLayout::new(16.0, 12.0),
+            measurement_surface: "notes-editor".to_string(),
         }
     }
 
@@ -45,6 +48,11 @@ impl NotesEditorConfig {
 
     pub fn layout(mut self, layout: NotesEditorLayout) -> Self {
         self.layout = layout;
+        self
+    }
+
+    pub fn measurement_surface(mut self, surface: impl Into<String>) -> Self {
+        self.measurement_surface = surface.into();
         self
     }
 }
@@ -76,6 +84,11 @@ impl NotesEditorMarkdownConfig {
 
     pub fn layout(mut self, layout: NotesEditorLayout) -> Self {
         self.editor = self.editor.layout(layout);
+        self
+    }
+
+    pub fn measurement_surface(mut self, surface: impl Into<String>) -> Self {
+        self.editor = self.editor.measurement_surface(surface);
         self
     }
 

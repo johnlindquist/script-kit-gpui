@@ -777,7 +777,7 @@ impl Render for ScriptListApp {
         // P0 FIX: Only compute bounds when grid overlay is actually enabled
         // Previously this was computed unconditionally on every frame
         let component_bounds = if grid_config.is_some() {
-            self.build_component_bounds(main_content_size, &*cx)
+            self.build_component_bounds(main_content_size, cx)
         } else {
             Vec::new()
         };

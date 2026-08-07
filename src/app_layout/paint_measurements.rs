@@ -55,6 +55,15 @@ impl ScriptListApp {
         measurements.sort_by(|left, right| left.selector.cmp(&right.selector));
         let frame_generation = window.rendered_frame_generation();
 
+        // Bind every formula/model component and every completed-frame paint
+        // component to one capture generation. The model remains independently
+        // authored, but DevTools can now reject stale cross-frame joins.
+        for component in &mut layout.components {
+            if component.measurement_frame_generation.is_none() {
+                component.measurement_frame_generation = Some(frame_generation);
+            }
+        }
+
         for measurement in measurements {
             let component_type = paint_measurement_component_type(measurement.selector.as_str());
             let bounds = measurement.bounds;

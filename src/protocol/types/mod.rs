@@ -79,7 +79,7 @@ pub use grid_layout::{
     AppKitFidelitySnapshot, AppKitFidelityText, AppKitFooterLeftAllocation, BoxModelSides,
     ComputedBoxModel, ComputedFlexStyle, FidelityCaptureStatus, FidelityLayoutNode,
     FidelityLayoutSnapshot, FidelityPaintTargetSnapshot, FidelityUnscopedPaintSummary,
-    GridColorScheme, GridDepthOption, GridOptions, LayoutBounds, LayoutComponentInfo,
+    GeometryRole, GridColorScheme, GridDepthOption, GridOptions, LayoutBounds, LayoutComponentInfo,
     LayoutComponentType, LayoutInfo, ScriptErrorData,
 };
 pub use input::{ExecOptions, MouseData};
