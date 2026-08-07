@@ -3,7 +3,7 @@
   "taskId": "SAFE-001",
   "classification": "RUNTIME-CONFIRMED",
   "binaryArtifact": "cons-flow-safe001",
-  "binarySha256": "c11299fd6d0a1e2c887eb028ca52b7635046ebc683ed765c07ffa1f3e1765745",
+  "binarySha256": "f963363692f0b6d04a5c51a00bd02b981ba1270290df5ee7ebfbeceedc5b13a7",
   "agentChatFixtureOpened": true,
   "accepted": {
     "decision": "ready",

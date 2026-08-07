@@ -257,6 +257,16 @@ case "restore":
     return item
   }
   if !items.isEmpty { _ = board.writeObjects(items) }
+  // AppKit may sanitize a generic NSPasteboardItem and drop types such as
+  // public.file-url. For a single-item clipboard, restore any dropped bytes
+  // directly on the board before comparing the exact private snapshot.
+  if decoded.items.count == 1 {
+    for key in decoded.items[0].values.keys.sorted() {
+      if let encoded = decoded.items[0].values[key], let value = Data(base64Encoded: encoded) {
+        board.setData(value, forType: NSPasteboard.PasteboardType(key))
+      }
+    }
+  }
 case "write":
   board.clearContents()
   board.setString(String(data: Data(base64Encoded: args[2])!, encoding: .utf8)!, forType: .string)

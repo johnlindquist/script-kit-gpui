@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "verdict": "PASS",
+  "productCommit": "493769e03208b411790f2b5639222179d8bd7eff",
+  "oracleConsultCount": 1,
+  "binary": {
+    "path": "target-agent/artifacts/cons-flow-ux/script-kit-gpui",
+    "sha256": "f963363692f0b6d04a5c51a00bd02b981ba1270290df5ee7ebfbeceedc5b13a7"
+  },
+  "taskCoverage": {
+    "expected": 28,
+    "passed": 28,
+    "taskIds": [
+      "SAFE-001",
+      "SAFE-002",
+      "SAFE-003",
+      "SAFE-004",
+      "WF-001",
+      "WF-002",
+      "WF-003",
+      "WF-004",
+      "WF-005",
+      "WF-006",
+      "WF-007",
+      "WF-008",
+      "WF-009",
+      "WF-010",
+      "WF-011",
+      "WF-012",
+      "WF-013",
+      "WF-014",
+      "WF-015",
+      "WF-016",
+      "WF-017",
+      "WF-018",
+      "WF-019",
+      "WF-020",
+      "WF-021",
+      "WF-022",
+      "WF-023",
+      "WF-024"
+    ]
+  },
+  "focusedMatrix": {
+    "ai::message_parts": {
+      "passed": 40,
+      "failed": 0
+    },
+    "ai::agent_chat": {
+      "passed": 625,
+      "failed": 0
+    },
+    "components::conversation_actions": {
+      "passed": 14,
+      "failed": 0
+    },
+    "flows::": {
+      "passed": 141,
+      "failed": 0,
+      "ignored": 1
+    },
+    "prompts::chat": {
+      "passed": 78,
+      "failed": 0
+    },
+    "notes::": {
+      "passed": 245,
+      "failed": 0
+    },
+    "day_page": {
+      "passed": 58,
+      "failed": 0
+    },
+    "dictation::": {
+      "passed": 290,
+      "failed": 0
+    },
+    "sk-protocol": {
+      "passed": 27,
+      "failed": 0
+    },
+    "check --lib": {
+      "passed": 1,
+      "failed": 0
+    }
+  },
+  "runtimeProbeCount": 17,
+  "progressCoverage": {
+    "sections": 28,
+    "failures": []
+  },
+  "privacyCanaries": {
+    "checkedClasses": 8,
+    "matches": 0
+  },
+  "governance": {
+    "sourceAudit": "PASS",
+    "hardcodedVisualTests": {
+      "passed": 16,
+      "failed": 0
+    },
+    "hardcodedVisualAdditions": 0,
+    "protectedGlassContracts": {
+      "passed": 40,
+      "failed": 0
+    },
+    "productionGlassFixture": {
+      "passed": 1,
+      "failed": 0
+    },
+    "protectedChangedPaths": [],
+    "diffCheck": "PASS"
+  },
+  "cleanup": {
+    "processExited": true,
+    "streamsDrained": true,
+    "logWriterClosed": true,
+    "ownedProcessCount": 0,
+    "ownedPids": []
+  },
+  "lifecycle": {
+    "push": false,
+    "deploy": false,
+    "tag": false,
+    "publish": false
+  }
+}

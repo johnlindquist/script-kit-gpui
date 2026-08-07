@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "classification": "RUNTIME-CONFIRMED",
   "binaryArtifact": "cons-flow-c03",
-  "binarySha256": "9cfcf16b580b3fca23e2965e2e0ec5e3df260291f51f2c00e317ed9a734f5777",
+  "binarySha256": "f963363692f0b6d04a5c51a00bd02b981ba1270290df5ee7ebfbeceedc5b13a7",
   "scenarios": [
     {
       "name": "open-draft",

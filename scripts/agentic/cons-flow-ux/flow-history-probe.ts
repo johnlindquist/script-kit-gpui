@@ -224,7 +224,16 @@ async function sendMessage(driver: Driver, text: string, expectedTurns: number):
 }
 
 async function openActions(driver: Driver): Promise<Json> {
-  await pressMain(driver, "k", ["cmd"]);
+  const result = await driver.request(
+    {
+      type: "batch",
+      target: { type: "main" },
+      commands: [{ type: "openActions" }],
+      options: { stopOnError: true, rollbackOnError: false, timeout: 8_000 },
+    },
+    { expect: "batchResult", timeoutMs: 10_000 },
+  ) as Json;
+  assert(result.success === true, "failed to open Flow Actions", result);
   return waitForState(driver, (state) => Boolean(state.actionsDialog), "Flow Actions");
 }
 

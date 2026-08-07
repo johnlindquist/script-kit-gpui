@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SAFE-003",
+  "verdict": "PASS",
+  "productCommit": "493769e03208b411790f2b5639222179d8bd7eff",
+  "oracleConsultCount": 1,
+  "binary": {
+    "path": "target-agent/artifacts/cons-flow-ux/script-kit-gpui",
+    "sha256": "f963363692f0b6d04a5c51a00bd02b981ba1270290df5ee7ebfbeceedc5b13a7"
+  },
+  "focusedMatrix": "../lane-receipt.json#focusedMatrix",
+  "runtime": {
+    "receipt": ".test-output/cons-flow-ux-final/flow-history/flow-history-receipt.json",
+    "receiptSha256": "62ec87a7340cb5af9d0a81cdd1d564c4c867bf2aee2a0ebbe79c29ee585e8fcb",
+    "pass": true,
+    "finalArtifactBound": true
+  },
+  "progress": {
+    "sectionCount": 1,
+    "contractComplete": true
+  },
+  "negativeControls": "PASS",
+  "privacyCanaries": "PASS",
+  "cleanup": {
+    "processExited": true,
+    "streamsDrained": true,
+    "logWriterClosed": true,
+    "ownedProcessCount": 0
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "taskId": "WF-008",
+  "verdict": "PASS",
+  "productCommit": "493769e03208b411790f2b5639222179d8bd7eff",
+  "oracleConsultCount": 1,
+  "binary": {
+    "path": "target-agent/artifacts/cons-flow-ux/script-kit-gpui",
+    "sha256": "f963363692f0b6d04a5c51a00bd02b981ba1270290df5ee7ebfbeceedc5b13a7"
+  },
+  "focusedMatrix": "../lane-receipt.json#focusedMatrix",
+  "runtime": {
+    "receipt": ".artifacts/consistency/cons-flow-ux/c03-entry-verbs-v1/WF-008/receipt.json",
+    "receiptSha256": "356e394de417b2dc51a28a62e58945a433bd74ea8ce6677f3c4210e9ccdc5df2",
+    "pass": true,
+    "finalArtifactBound": true
+  },
+  "progress": {
+    "sectionCount": 1,
+    "contractComplete": true
+  },
+  "negativeControls": "PASS",
+  "privacyCanaries": "PASS",
+  "cleanup": {
+    "processExited": true,
+    "streamsDrained": true,
+    "logWriterClosed": true,
+    "ownedProcessCount": 0
+  }
+}
