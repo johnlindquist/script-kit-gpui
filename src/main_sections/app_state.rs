@@ -1111,6 +1111,8 @@ pub(crate) struct ScriptListApp {
     browser_history_scroll_handle: ScrollHandle,
     // Scroll handle for dictation history list
     dictation_history_scroll_handle: ScrollHandle,
+    // Last good page retained while a refresh/load fails.
+    dictation_history_previous_page: Option<crate::dictation::DictationHistoryPage>,
     // Scroll handle for notes browse portal list
     notes_browse_scroll_handle: ScrollHandle,
     // Stable selection and measured viewport anchors for dynamic natural-height built-in lists.

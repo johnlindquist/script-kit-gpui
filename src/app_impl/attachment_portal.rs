@@ -507,6 +507,7 @@ impl ScriptListApp {
                     AppView::DictationHistoryView {
                         filter: portal_query.clone(),
                         selected_index: 0,
+                        visible_limit: crate::dictation::DICTATION_HISTORY_PAGE_SIZE,
                     },
                     &portal_query,
                     "Search dictation history...",

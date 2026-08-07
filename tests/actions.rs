@@ -1375,7 +1375,7 @@ fn dictation_history_handler_uses_named_action_states() {
     assert!(
         content.contains("enum DictationHistoryHandlerAction")
             && content.contains("Paste")
-            && content.contains("AttachToAi")
+            && content.contains("AddToAgentChat")
             && content.contains("SaveNote")
             && content.contains("Copy")
             && content.contains("Delete"),

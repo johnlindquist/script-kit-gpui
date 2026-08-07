@@ -1,7 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DictationHistoryHandlerAction {
     Paste,
-    AttachToAi,
+    AddToAgentChat,
     SaveNote,
     Copy,
     Delete,
@@ -11,7 +11,7 @@ impl DictationHistoryHandlerAction {
     fn from_action_id(action_id: &str) -> Option<Self> {
         match action_id {
             "dictation_history_paste" => Some(Self::Paste),
-            "dictation_history_attach_to_ai" => Some(Self::AttachToAi),
+            "dictation_history_add_to_agent_chat" => Some(Self::AddToAgentChat),
             "dictation_history_save_note" => Some(Self::SaveNote),
             "dictation_history_copy" => Some(Self::Copy),
             "dictation_history_delete" => Some(Self::Delete),
@@ -21,7 +21,7 @@ impl DictationHistoryHandlerAction {
 
     fn selection_required_message(self) -> &'static str {
         match self {
-            Self::Paste | Self::AttachToAi | Self::SaveNote | Self::Copy | Self::Delete => {
+            Self::Paste | Self::AddToAgentChat | Self::SaveNote | Self::Copy | Self::Delete => {
                 "No dictation selected"
             }
         }
@@ -30,7 +30,7 @@ impl DictationHistoryHandlerAction {
     fn user_message(self) -> Option<&'static str> {
         match self {
             Self::Paste => Some("Pasting to frontmost app…"),
-            Self::AttachToAi => Some("Opening Agent Chat..."),
+            Self::AddToAgentChat => Some("Opening Agent Chat..."),
             Self::SaveNote | Self::Copy | Self::Delete => None,
         }
     }
@@ -40,7 +40,7 @@ impl DictationHistoryHandlerAction {
             Self::SaveNote => Some("Saved dictation as note"),
             Self::Copy => Some("Copied dictation to clipboard"),
             Self::Delete => Some("Deleted dictation"),
-            Self::Paste | Self::AttachToAi => None,
+            Self::Paste | Self::AddToAgentChat => None,
         }
     }
 
@@ -48,7 +48,7 @@ impl DictationHistoryHandlerAction {
         match self {
             Self::SaveNote => Some("Failed to save note"),
             Self::Delete => Some("Failed to delete dictation"),
-            Self::Paste | Self::AttachToAi | Self::Copy => None,
+            Self::Paste | Self::AddToAgentChat | Self::Copy => None,
         }
     }
 
@@ -65,9 +65,12 @@ impl ScriptListApp {
         if let AppView::DictationHistoryView {
             filter,
             selected_index,
+            visible_limit,
         } = &mut self.current_view
         {
-            let filtered_len = crate::dictation::search_history(filter, 100).len();
+            let filtered_len = crate::dictation::search_history_page(filter, 0, *visible_limit)
+                .map(|page| page.rows.len())
+                .unwrap_or(0);
 
             if filtered_len > 0 {
                 *selected_index = (*selected_index).min(filtered_len.saturating_sub(1));
@@ -79,11 +82,64 @@ impl ScriptListApp {
         }
     }
 
+    pub(crate) fn dictation_history_attachment_is_pending(
+        &self,
+        entry_id: &str,
+        cx: &Context<Self>,
+    ) -> bool {
+        let uri = format!("kit://dictation-history?id={entry_id}");
+        let entity = match &self.current_view {
+            AppView::AgentChatView { entity } => Some(entity.clone()),
+            _ => self
+                .attachment_portal_return_view
+                .as_ref()
+                .and_then(|view| match view {
+                    AppView::AgentChatView { entity } => Some(entity.clone()),
+                    _ => None,
+                })
+                .or_else(crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity),
+        };
+        let Some(entity) = entity else {
+            return false;
+        };
+        let thread = entity.read(cx).live_thread().clone();
+        thread
+            .read(cx)
+            .pending_context_parts_cloned()
+            .iter()
+            .any(|part| matches!(
+                part,
+                crate::ai::AiContextPart::ResourceUri { uri: pending_uri, .. }
+                    if pending_uri == &uri
+            ))
+    }
+
+    pub(crate) fn delete_dictation_history_entry_confirmed(
+        &mut self,
+        entry_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = crate::dictation::delete_history_entry(entry_id) {
+            tracing::warn!(
+                category = "DICTATION",
+                entry_id,
+                error_fingerprint = %crate::dictation::redacted_transcript_fingerprint(&error.to_string()),
+                "Failed to delete Dictation History entry",
+            );
+            self.show_error_toast("Failed to delete dictation", cx);
+            return;
+        }
+        self.refresh_dictation_history_selection_after_delete();
+        self.show_hud("Deleted dictation".to_string(), Some(HUD_MEDIUM_MS), cx);
+        cx.notify();
+    }
+
     fn handle_dictation_history_action(
         &mut self,
         action_id: &str,
         selected_entry: Option<crate::dictation::DictationHistoryEntry>,
-        dctx: &DispatchContext,
+        _dctx: &DispatchContext,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> DispatchOutcome {
         match action_id {
@@ -111,7 +167,7 @@ impl ScriptListApp {
                 outcome.user_message = history_action.user_message().map(String::from);
                 outcome
             }
-            "dictation_history_attach_to_ai" => {
+            "dictation_history_add_to_agent_chat" => {
                 let Some(history_action) = DictationHistoryHandlerAction::from_action_id(action_id)
                 else {
                     return DispatchOutcome::not_handled();
@@ -121,13 +177,12 @@ impl ScriptListApp {
                     return DispatchOutcome::success();
                 };
 
-                self.open_agent_chat_after_main_hide(
-                    action_id,
-                    &dctx.trace_id,
-                    DeferredAgentChatAction::SetInput {
-                        text: entry.transcript,
-                        submit: false,
+                self.open_tab_ai_agent_chat_with_context_part(
+                    crate::ai::AiContextPart::ResourceUri {
+                        uri: entry.resource_uri(),
+                        label: format!("Dictation: {}", entry.preview),
                     },
+                    "dictation_history_add",
                     cx,
                 );
 
@@ -187,18 +242,30 @@ impl ScriptListApp {
                     return DispatchOutcome::success();
                 };
 
-                if let Err(error) = crate::dictation::delete_history_entry(&entry.id) {
-                    return DispatchOutcome::error(
-                        crate::action_helpers::ERROR_ACTION_FAILED,
-                        history_action.failure_message(error),
-                    );
-                }
-
-                self.refresh_dictation_history_selection_after_delete();
-                if let Some(message) = history_action.success_hud() {
-                    self.show_hud(message.to_string(), Some(HUD_MEDIUM_MS), cx);
-                }
-                cx.notify();
+                let pending = self.dictation_history_attachment_is_pending(&entry.id, cx);
+                let body = crate::dictation::delete_history_confirmation_body(pending);
+                let entry_id = entry.id.clone();
+                let owner = cx.entity().downgrade();
+                let owner_for_confirm = owner.clone();
+                self.was_window_focused = true;
+                crate::confirm::open_parent_confirm_dialog_for_entity(
+                    window,
+                    cx,
+                    owner,
+                    crate::confirm::ParentConfirmOptions::destructive(
+                        "Delete Dictation?",
+                        body,
+                        "Delete",
+                    ),
+                    move |_window, cx| {
+                        if let Some(entity) = owner_for_confirm.upgrade() {
+                            entity.update(cx, |this, cx| {
+                                this.delete_dictation_history_entry_confirmed(&entry_id, cx);
+                            });
+                        }
+                    },
+                    |_window, _cx| {},
+                );
                 DispatchOutcome::success()
             }
             _ => DispatchOutcome::not_handled(),

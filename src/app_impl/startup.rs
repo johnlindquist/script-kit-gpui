@@ -844,6 +844,7 @@ impl ScriptListApp {
             agent_chat_history_scroll_handle: ScrollHandle::new(),
             browser_history_scroll_handle: ScrollHandle::new(),
             dictation_history_scroll_handle: ScrollHandle::new(),
+            dictation_history_previous_page: None,
             notes_browse_scroll_handle: ScrollHandle::new(),
             tracked_builtin_list_states: std::collections::HashMap::new(),
             file_search_scroll_handle: UniformListScrollHandle::new(),
@@ -2239,9 +2240,20 @@ impl ScriptListApp {
                                 AppView::DictationHistoryView {
                                     selected_index,
                                     filter,
+                                    visible_limit,
                                 } => {
-                                    let filtered_len =
-                                        crate::dictation::search_history(filter, 100).len();
+                                    let retained_len = this
+                                        .dictation_history_previous_page
+                                        .as_ref()
+                                        .map(|page| page.rows.len())
+                                        .unwrap_or(0);
+                                    let filtered_len = crate::dictation::search_history_page(
+                                        filter,
+                                        0,
+                                        *visible_limit,
+                                    )
+                                    .map(|page| page.rows.len())
+                                    .unwrap_or(retained_len);
                                     if is_up && *selected_index > 0 {
                                         *selected_index -= 1;
                                         this.dictation_history_scroll_handle

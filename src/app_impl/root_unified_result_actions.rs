@@ -587,7 +587,7 @@ pub(crate) fn root_unified_actions_for_subject(subject: &RootUnifiedActionSubjec
             ),
             action(
                 RootUnifiedResultAction::DictationAttachToAi,
-                "Attach to Agent Chat",
+                "Add to Agent Chat",
                 "Share",
             ),
             action(
@@ -947,9 +947,12 @@ pub(crate) fn execute_root_unified_result_action(
             RootUnifiedActionSubject::Dictation { id, .. },
         ) => {
             if let Some(entry) = crate::dictation::get_history_entry(id) {
-                app.submit_to_current_or_new_tab_ai_harness_from_text(
-                    entry.transcript,
-                    crate::ai::TabAiQuickSubmitSource::Dictation,
+                app.open_tab_ai_agent_chat_with_context_part(
+                    crate::ai::AiContextPart::ResourceUri {
+                        uri: entry.resource_uri(),
+                        label: format!("Dictation: {}", entry.preview),
+                    },
+                    "root_dictation_history_add",
                     cx,
                 );
             }
@@ -974,13 +977,30 @@ pub(crate) fn execute_root_unified_result_action(
             RootUnifiedResultAction::DictationDelete,
             RootUnifiedActionSubject::Dictation { id, .. },
         ) => {
-            if let Err(error) = crate::dictation::delete_history_entry(id) {
-                app.show_hud(
-                    format!("Failed to delete dictation: {error}"),
-                    Some(crate::HUD_MEDIUM_MS),
-                    cx,
-                );
-            }
+            let pending = app.dictation_history_attachment_is_pending(id, cx);
+            let body = crate::dictation::delete_history_confirmation_body(pending);
+            let entry_id = id.clone();
+            let owner = cx.entity().downgrade();
+            let owner_for_confirm = owner.clone();
+            app.was_window_focused = true;
+            crate::confirm::open_parent_confirm_dialog_for_entity(
+                window,
+                cx,
+                owner,
+                crate::confirm::ParentConfirmOptions::destructive(
+                    "Delete Dictation?",
+                    body,
+                    "Delete",
+                ),
+                move |_window, cx| {
+                    if let Some(entity) = owner_for_confirm.upgrade() {
+                        entity.update(cx, |app, cx| {
+                            app.delete_dictation_history_entry_confirmed(&entry_id, cx);
+                        });
+                    }
+                },
+                |_window, _cx| {},
+            );
             true
         }
         (RootUnifiedResultAction::AppLaunch, RootUnifiedActionSubject::App(app_info)) => {
@@ -1234,6 +1254,33 @@ mod tests {
                 "root_note_copy_id"
             ]
         );
+    }
+
+    #[test]
+    fn dictation_actions_offer_composer_add_and_confirmed_delete_verbs() {
+        let subject = RootUnifiedActionSubject::Dictation {
+            id: "dictation-id".to_string(),
+            preview: "Dictation preview".to_string(),
+        };
+        let actions = root_unified_actions_for_subject(&subject);
+        let action_ids = actions.iter().map(|action| action.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(
+            action_ids,
+            vec![
+                "root_dictation_paste",
+                "root_dictation_copy_transcript",
+                "root_dictation_attach_to_ai",
+                "root_dictation_create_note",
+                "root_dictation_delete",
+            ]
+        );
+        let add = actions
+            .iter()
+            .find(|action| action.id == "root_dictation_attach_to_ai")
+            .expect("Dictation Agent Chat action");
+        assert_eq!(add.title, "Add to Agent Chat");
+        assert!(actions.iter().all(|action| !action.title.contains("Ask")));
+        assert!(actions.iter().all(|action| !action.title.contains("Send")));
     }
 
     #[test]

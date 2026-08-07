@@ -125,26 +125,49 @@ impl ScriptListApp {
     pub(crate) fn dictation_history_visible_rows(
         filter: &str,
     ) -> Vec<crate::dictation::DictationHistoryEntry> {
-        crate::dictation::search_history(filter, 100)
-            .into_iter()
-            .map(|hit| hit.entry)
-            .collect()
+        Self::dictation_history_visible_rows_with_limit(
+            filter,
+            crate::dictation::DICTATION_HISTORY_PAGE_SIZE,
+        )
+    }
+
+    pub(crate) fn dictation_history_visible_rows_with_limit(
+        filter: &str,
+        visible_limit: usize,
+    ) -> Vec<crate::dictation::DictationHistoryEntry> {
+        crate::dictation::search_history_page(filter, 0, visible_limit)
+            .map(|page| page.rows)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn dictation_history_current_or_previous_page(
+        &self,
+        filter: &str,
+        visible_limit: usize,
+    ) -> Option<crate::dictation::DictationHistoryPage> {
+        crate::dictation::search_history_page(filter, 0, visible_limit)
+            .ok()
+            .or_else(|| self.dictation_history_previous_page.clone())
     }
 
     fn dictation_history_selected_visible_row(
+        &self,
         filter: &str,
         selected_index: usize,
+        visible_limit: usize,
     ) -> Option<crate::dictation::DictationHistoryEntry> {
-        Self::dictation_history_visible_rows(filter)
-            .get(selected_index)
-            .cloned()
+        self.dictation_history_current_or_previous_page(filter, visible_limit)
+            .and_then(|page| page.rows.into_iter().nth(selected_index))
     }
 
-    fn dictation_history_dataset_and_visible_counts(filter: &str) -> (usize, usize) {
-        (
-            crate::dictation::load_history().len(),
-            Self::dictation_history_visible_rows(filter).len(),
-        )
+    fn dictation_history_dataset_and_visible_counts(
+        &self,
+        filter: &str,
+        visible_limit: usize,
+    ) -> (usize, usize) {
+        self.dictation_history_current_or_previous_page(filter, visible_limit)
+            .map(|page| (page.total_matches, page.visible_count))
+            .unwrap_or((0, 0))
     }
 
     pub(crate) fn dictation_history_visible_row_labels(filter: &str) -> Vec<String> {
@@ -157,7 +180,7 @@ impl ScriptListApp {
     fn dictation_history_meta(entry: &crate::dictation::DictationHistoryEntry) -> String {
         format!(
             "{} · {} · {}",
-            entry.target,
+            entry.display_target_label(),
             crate::dictation::format_history_duration_ms(entry.audio_duration_ms),
             crate::dictation::format_history_timestamp(&entry.timestamp)
         )
@@ -167,7 +190,7 @@ impl ScriptListApp {
         entry: &crate::dictation::DictationHistoryEntry,
     ) -> crate::ai::message_parts::AiContextPart {
         crate::ai::message_parts::AiContextPart::ResourceUri {
-            uri: format!("kit://dictation-history?id={}", entry.id),
+            uri: entry.resource_uri(),
             label: format!("Dictation: {}", entry.preview),
         }
     }
@@ -177,6 +200,7 @@ impl ScriptListApp {
         &mut self,
         filter: String,
         selected_index: usize,
+        visible_limit: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use gpui_component::scroll::ScrollableElement as _;
@@ -189,13 +213,25 @@ impl ScriptListApp {
         let design_spacing = tokens.spacing();
         let design_typography = tokens.typography();
 
-        let all_entries = crate::dictation::load_history();
         let text_primary = self.theme.colors.text.primary;
         let text_muted = self.theme.colors.text.muted;
 
-        let hits = crate::dictation::search_history(&filter, 100);
-        let filtered_entries: Vec<crate::dictation::DictationHistoryEntry> =
-            hits.into_iter().map(|hit| hit.entry).collect();
+        let history_state = crate::dictation::dictation_history_view_state(
+            &filter,
+            visible_limit.max(crate::dictation::DICTATION_HISTORY_PAGE_SIZE),
+            self.dictation_history_previous_page.clone(),
+        );
+        if let crate::dictation::DictationHistoryViewState::Ready(page) = &history_state {
+            self.dictation_history_previous_page = Some(page.clone());
+        }
+        let page = history_state.page().cloned().unwrap_or(crate::dictation::DictationHistoryPage {
+            total_matches: 0,
+            visible_count: 0,
+            offset: 0,
+            rows: Vec::new(),
+            has_more: false,
+        });
+        let filtered_entries = page.rows.clone();
         let filtered_len = filtered_entries.len();
         let row_keys: Vec<String> = filtered_entries
             .iter()
@@ -284,20 +320,25 @@ impl ScriptListApp {
                 let view_state = if let AppView::DictationHistoryView {
                     filter,
                     selected_index,
+                    visible_limit,
                 } = &this.current_view
                 {
-                    Some((filter.clone(), *selected_index))
+                    Some((filter.clone(), *selected_index, *visible_limit))
                 } else {
                     None
                 };
 
-                let Some((current_filter, current_selected)) = view_state else {
+                let Some((current_filter, current_selected, current_visible_limit)) = view_state else {
                     return;
                 };
 
-                let hits = crate::dictation::search_history(&current_filter, 100);
-                let filtered: Vec<crate::dictation::DictationHistoryEntry> =
-                    hits.into_iter().map(|hit| hit.entry).collect();
+                let filtered = this
+                    .dictation_history_current_or_previous_page(
+                        &current_filter,
+                        current_visible_limit,
+                    )
+                    .map(|page| page.rows)
+                    .unwrap_or_default();
                 let current_filtered_len = filtered.len();
                 let selected_entry = filtered.get(current_selected).cloned();
 
@@ -356,7 +397,7 @@ impl ScriptListApp {
                 } else if modifiers.control && has_cmd && key.eq_ignore_ascii_case("a") {
                     if selected_entry.is_some() {
                         this.handle_action(
-                            "dictation_history_attach_to_ai".to_string(),
+                            "dictation_history_add_to_agent_chat".to_string(),
                             window,
                             cx,
                         );
@@ -385,10 +426,26 @@ impl ScriptListApp {
             chrome_edge_inset,
         );
         let list_element: AnyElement = if filtered_len == 0 {
-            let state = DictationHistoryEmptyState::from_filter(&filter);
+            let message = match &history_state {
+                crate::dictation::DictationHistoryViewState::Loading { .. } => {
+                    "Loading Dictation History…"
+                }
+                crate::dictation::DictationHistoryViewState::Failed { .. } => {
+                    "Dictation History could not be loaded"
+                }
+                crate::dictation::DictationHistoryViewState::NoSavedDictation => {
+                    "No saved dictation yet"
+                }
+                crate::dictation::DictationHistoryViewState::NoFilteredMatches => {
+                    "No dictations match your filter"
+                }
+                crate::dictation::DictationHistoryViewState::Ready(_) => {
+                    "No saved dictation yet"
+                }
+            };
             crate::components::render_simple_empty_state(
                 "dictation-history-empty",
-                state.message(),
+                message,
                 "message-circle",
                 None,
                 &self.theme,
@@ -500,6 +557,15 @@ impl ScriptListApp {
                 .into_any_element(),
         };
 
+        let history_status_message = match &history_state {
+            crate::dictation::DictationHistoryViewState::Failed { message, .. } => {
+                Some(message.clone())
+            }
+            crate::dictation::DictationHistoryViewState::Loading { .. } => {
+                Some("Refreshing Dictation History…".to_string())
+            }
+            _ => None,
+        };
         let list_pane = div()
             .relative()
             .w_full()
@@ -530,6 +596,16 @@ impl ScriptListApp {
                     chrome_edge_inset,
                 ),
             )
+            .when_some(history_status_message, |pane, message| {
+                pane.child(
+                    div()
+                        .px(px(design_spacing.padding_md))
+                        .py(px(design_spacing.padding_xs))
+                        .text_xs()
+                        .text_color(rgb(text_muted))
+                        .child(message),
+                )
+            })
             .child(div().relative().flex_1().min_h(px(0.)).child(list_element));
 
         let hints = if in_portal {
@@ -543,7 +619,7 @@ impl ScriptListApp {
             vec![
                 "↵ Paste".into(),
                 "⌘↵ Copy".into(),
-                "⌃⌘A AI".into(),
+                "⌃⌘A Add to Agent Chat".into(),
                 "⌘K Actions".into(),
                 "⌘⌫ Delete".into(),
                 "Esc Back".into(),
@@ -555,11 +631,35 @@ impl ScriptListApp {
         let footer = self.main_window_footer_slot(gpui_footer);
         let menu_def = self.current_main_menu_theme.def();
         let shell = menu_def.shell;
-        let count_label = format!(
-            "{} dictation{}",
-            all_entries.len(),
-            if all_entries.len() == 1 { "" } else { "s" }
-        );
+        let count_label = page.count_label();
+        let mut header_trailing = vec![self.render_builtin_main_input_count_label(count_label)];
+        if page.has_more {
+            let entity = cx.entity().downgrade();
+            header_trailing.push(
+                crate::components::Button::new(
+                    "dictation-history:load-more",
+                    "Load More",
+                    crate::components::ButtonColors::from_theme(&self.theme),
+                )
+                .variant(crate::components::ButtonVariant::Ghost)
+                .on_click(Box::new(move |_event, _window, cx| {
+                    cx.stop_propagation();
+                    if let Some(app) = entity.upgrade() {
+                        app.update(cx, |this, cx| {
+                            if let AppView::DictationHistoryView { visible_limit, .. } =
+                                &mut this.current_view
+                            {
+                                *visible_limit = visible_limit.saturating_add(
+                                    crate::dictation::DICTATION_HISTORY_PAGE_SIZE,
+                                );
+                                cx.notify();
+                            }
+                        });
+                    }
+                }))
+                .into_any_element(),
+            );
+        }
         let main =
             self.render_builtin_split_main_content(list_pane.into_any_element(), preview_panel);
 
@@ -573,10 +673,7 @@ impl ScriptListApp {
             &self.theme,
             menu_def,
             crate::components::main_view_chrome::MainViewChrome {
-                header: self.render_builtin_main_input_header(
-                    vec![self.render_builtin_main_input_count_label(count_label)],
-                    cx,
-                ),
+                header: self.render_builtin_main_input_header(header_trailing, cx),
                 divider: crate::components::main_view_chrome::MainViewDividerChrome {
                     margin_x: shell.divider_margin_x,
                     height: shell.divider_height,
@@ -645,11 +742,13 @@ mod dictation_history_paint_tests {
             _cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             let entry = crate::dictation::DictationHistoryEntry {
+                version: crate::dictation::DICTATION_HISTORY_ENTRY_VERSION,
                 id: TEST_ENTRY_ID.to_string(),
                 timestamp: "2026-07-18T12:00:00Z".to_string(),
                 transcript: "A rendered dictation history row".to_string(),
                 preview: "A rendered dictation history row".to_string(),
-                target: "Agent Chat".to_string(),
+                target_id: crate::dictation::DictationTarget::TabAiHarness.sticky_label().to_string(),
+                target_label_snapshot: "Agent Chat".to_string(),
                 audio_duration_ms: 1_250,
             };
             let colors = ListItemColors::from_theme(&crate::theme::Theme::default());
@@ -677,11 +776,13 @@ mod dictation_history_paint_tests {
             _cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             let entry = crate::dictation::DictationHistoryEntry {
+                version: crate::dictation::DICTATION_HISTORY_ENTRY_VERSION,
                 id: TEST_ENTRY_ID.to_string(),
                 timestamp: "2026-07-18T12:00:00Z".to_string(),
                 transcript: "A rendered dictation history row".to_string(),
                 preview: "A rendered dictation history row".to_string(),
-                target: "Agent Chat".to_string(),
+                target_id: crate::dictation::DictationTarget::TabAiHarness.sticky_label().to_string(),
+                target_label_snapshot: "Agent Chat".to_string(),
                 audio_duration_ms: 1_250,
             };
             let colors = ListItemColors::from_theme(&crate::theme::Theme::default());

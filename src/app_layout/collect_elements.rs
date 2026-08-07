@@ -564,17 +564,80 @@ impl ScriptListApp {
             AppView::DictationHistoryView {
                 filter,
                 selected_index,
+                visible_limit,
             } => {
-                let rows = Self::dictation_history_visible_row_labels(filter);
-                self.collect_named_rows(
+                let page_result =
+                    crate::dictation::search_history_page(filter, 0, *visible_limit);
+                let load_failed = page_result.is_err();
+                let page = page_result
+                    .ok()
+                    .or_else(|| self.dictation_history_previous_page.clone());
+                let rows = page
+                    .as_ref()
+                    .map(|page| {
+                        page.rows
+                            .iter()
+                            .map(|entry| entry.preview.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let (mut elements, mut total_count) = self.collect_named_rows(
                     "dictation-history-filter",
                     filter.clone(),
                     "dictation-history",
                     &rows,
                     *selected_index,
                     limit,
-                )
-                .into()
+                );
+                if load_failed {
+                    total_count += 1;
+                    Self::push_limited_element(
+                        &mut elements,
+                        limit,
+                        protocol::ElementInfo {
+                            semantic_id: "status:dictation-history-load-failed".to_string(),
+                            element_type: protocol::ElementType::Panel,
+                            text: Some("Dictation History could not be loaded".to_string()),
+                            value: None,
+                            selected: Some(false),
+                            focused: Some(false),
+                            index: None,
+                            role: Some("status".to_string()),
+                            kind: Some("failed".to_string()),
+                            source: Some("dictationHistory".to_string()),
+                            source_name: None,
+                            selectable: Some(false),
+                            status_kind: Some("loadFailed".to_string()),
+                            action_disabled: Some("Retry after the History file becomes available".to_string()),
+                            style: None,
+                        },
+                    );
+                }
+                if page.as_ref().is_some_and(|page| page.has_more) {
+                    total_count += 1;
+                    Self::push_limited_element(
+                        &mut elements,
+                        limit,
+                        protocol::ElementInfo {
+                            semantic_id: "button:dictation-history-load-more".to_string(),
+                            element_type: protocol::ElementType::Button,
+                            text: Some("Load More".to_string()),
+                            value: None,
+                            selected: Some(false),
+                            focused: Some(false),
+                            index: None,
+                            role: Some("action".to_string()),
+                            kind: Some("loadMore".to_string()),
+                            source: Some("dictationHistory".to_string()),
+                            source_name: None,
+                            selectable: Some(true),
+                            status_kind: None,
+                            action_disabled: None,
+                            style: None,
+                        },
+                    );
+                }
+                (elements, total_count).into()
             }
 
             AppView::NotesBrowseView { search } => {

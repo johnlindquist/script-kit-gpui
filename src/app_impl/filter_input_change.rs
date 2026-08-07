@@ -543,9 +543,11 @@ impl ScriptListApp {
             AppView::DictationHistoryView {
                 filter,
                 selected_index,
+                visible_limit,
             } => {
                 self.filter_text = new_text.clone();
                 if Self::sync_builtin_query_state(filter, selected_index, &new_text) {
+                    *visible_limit = crate::dictation::DICTATION_HISTORY_PAGE_SIZE;
                     self.dictation_history_scroll_handle
                         .scroll_to_top_of_item(0);
                     self.begin_list_viewport_scroll(

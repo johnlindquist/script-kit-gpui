@@ -36,29 +36,38 @@ impl ScriptListApp {
         }
     }
 
-    fn dictation_history_actions_for_dialog() -> Vec<crate::actions::Action> {
+    fn dictation_history_actions_for_dialog(
+        in_portal: bool,
+    ) -> Vec<crate::actions::Action> {
         use crate::actions::{Action, ActionCategory};
         use crate::designs::icon_variations::IconName;
 
-        vec![
-            Action::new(
-                "dictation_history_paste",
-                "Paste to Frontmost App",
-                Some("Hide Script Kit and paste this transcript into the active app".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("↵")
-            .with_section("Reuse")
-            .with_icon(IconName::ArrowRight),
-            Action::new(
-                "dictation_history_attach_to_ai",
-                "Attach to Agent Chat",
-                Some("Open Agent Chat and stage this transcript in the composer".to_string()),
-                ActionCategory::ScriptContext,
-            )
-            .with_shortcut("⌃⌘A")
-            .with_section("Reuse")
-            .with_icon(IconName::MessageCircle),
+        let mut actions = Vec::new();
+        if !in_portal {
+            actions.push(
+                Action::new(
+                    "dictation_history_paste",
+                    "Paste to Frontmost App",
+                    Some("Hide Script Kit and paste this transcript into the active app".to_string()),
+                    ActionCategory::ScriptContext,
+                )
+                .with_shortcut("↵")
+                .with_section("Reuse")
+                .with_icon(IconName::ArrowRight),
+            );
+            actions.push(
+                Action::new(
+                    "dictation_history_add_to_agent_chat",
+                    "Add to Agent Chat",
+                    Some("Stage this transcript as context without sending a turn".to_string()),
+                    ActionCategory::ScriptContext,
+                )
+                .with_shortcut("⌃⌘A")
+                .with_section("Reuse")
+                .with_icon(IconName::MessageCircle),
+            );
+        }
+        actions.extend([
             Action::new(
                 "dictation_history_save_note",
                 "Save as Note",
@@ -73,19 +82,20 @@ impl ScriptListApp {
                 Some("Copy this transcript to the clipboard".to_string()),
                 ActionCategory::ScriptContext,
             )
-            .with_shortcut("⌘C")
+            .with_shortcut("⌘↵")
             .with_section("Reuse")
             .with_icon(IconName::Copy),
             Action::new(
                 "dictation_history_delete",
                 "Delete from History",
-                Some("Remove this saved transcript from dictation history".to_string()),
+                Some("Confirm removal of this saved transcript".to_string()),
                 ActionCategory::ScriptContext,
             )
             .with_shortcut("⌘⌫")
             .with_section("Manage")
             .with_icon(IconName::Trash),
-        ]
+        ]);
+        actions
     }
 
     fn favorites_actions_for_dialog() -> Vec<crate::actions::Action> {
@@ -512,7 +522,7 @@ impl ScriptListApp {
 
         let theme_arc = std::sync::Arc::clone(&self.theme);
         let placeholder = entry.preview.clone();
-        let actions = Self::dictation_history_actions_for_dialog();
+        let actions = Self::dictation_history_actions_for_dialog(self.is_in_attachment_portal());
         let dialog = cx.new(move |cx| {
             let focus_handle = cx.focus_handle();
             let mut dialog = ActionsDialog::with_config(
@@ -1718,6 +1728,35 @@ impl ScriptListApp {
                 }
             })
             .ok();
+    }
+}
+
+#[cfg(test)]
+mod dictation_history_action_model_tests {
+    use super::ScriptListApp;
+
+    #[test]
+    fn standalone_and_portal_actions_advertise_only_performable_verbs() {
+        let standalone = ScriptListApp::dictation_history_actions_for_dialog(false);
+        let standalone_ids = standalone
+            .iter()
+            .map(|action| action.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(standalone_ids.contains(&"dictation_history_paste"));
+        assert!(standalone_ids.contains(&"dictation_history_add_to_agent_chat"));
+        assert!(!standalone.iter().any(|action| {
+            action.title.contains("Ask") || action.title.contains("Send")
+        }));
+
+        let portal = ScriptListApp::dictation_history_actions_for_dialog(true);
+        let portal_ids = portal
+            .iter()
+            .map(|action| action.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(!portal_ids.contains(&"dictation_history_paste"));
+        assert!(!portal_ids.contains(&"dictation_history_add_to_agent_chat"));
+        assert!(portal_ids.contains(&"dictation_history_copy"));
+        assert!(portal_ids.contains(&"dictation_history_delete"));
     }
 }
 

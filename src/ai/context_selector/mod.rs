@@ -1215,7 +1215,10 @@ fn collect_dictation_inline_items(query: &str, items: &mut Vec<ContextSelectorRo
         items.push(ContextSelectorRow {
             id: SharedString::from(format!("portal-result:dictation:{}", hit.entry.id)),
             label: SharedString::from(label.clone()),
-            description: SharedString::from(format!("Dictation to {}", hit.entry.target)),
+            description: SharedString::from(format!(
+                "Dictation to {}",
+                hit.entry.display_target_label()
+            )),
             meta: SharedString::from(format!("@dictation:{}", hit.entry.id)),
             kind: ContextSelectorRowKind::PortalResult(InlinePortalResultPayload {
                 portal_kind: ContextPortalKind::DictationHistory,

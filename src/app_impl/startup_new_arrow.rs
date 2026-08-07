@@ -525,9 +525,20 @@
                                 AppView::DictationHistoryView {
                                     selected_index,
                                     filter,
+                                    visible_limit,
                                 } => {
-                                    let filtered_len =
-                                        crate::dictation::search_history(filter, 100).len();
+                                    let retained_len = this
+                                        .dictation_history_previous_page
+                                        .as_ref()
+                                        .map(|page| page.rows.len())
+                                        .unwrap_or(0);
+                                    let filtered_len = crate::dictation::search_history_page(
+                                        filter,
+                                        0,
+                                        *visible_limit,
+                                    )
+                                    .map(|page| page.rows.len())
+                                    .unwrap_or(retained_len);
 
                                     if filtered_len == 0 {
                                         *selected_index = 0;

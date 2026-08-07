@@ -1210,8 +1210,12 @@ impl ScriptListApp {
             AppView::DictationHistoryView {
                 filter,
                 selected_index,
+                visible_limit,
             } => {
-                let ids = Self::dictation_history_visible_rows(filter)
+                let ids = self
+                    .dictation_history_current_or_previous_page(filter, *visible_limit)
+                    .map(|page| page.rows)
+                    .unwrap_or_default()
                     .into_iter()
                     .map(|entry| format!("dictation-history:{}", entry.id))
                     .collect();

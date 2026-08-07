@@ -8,6 +8,13 @@ use std::time::Duration;
 
 const HISTORY_COMPACT_LIMIT: usize = 200;
 const RESOURCE_ITEMS_LIMIT: usize = 10;
+pub const DICTATION_HISTORY_ENTRY_VERSION: u32 = 2;
+pub const DICTATION_HISTORY_PAGE_SIZE: usize = 100;
+pub const DICTATION_HISTORY_LEGACY_UNKNOWN_TARGET_ID: &str = "legacy-unknown";
+
+fn dictation_history_entry_version() -> u32 {
+    DICTATION_HISTORY_ENTRY_VERSION
+}
 
 type HistoryFileSignature = Option<(std::path::PathBuf, std::time::SystemTime, u64)>;
 
@@ -39,12 +46,90 @@ fn invalidate_history_cache() {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DictationHistoryEntry {
+    #[serde(default = "dictation_history_entry_version")]
+    pub version: u32,
     pub id: String,
     pub timestamp: String,
     pub transcript: String,
     pub preview: String,
-    pub target: String,
+    #[serde(default)]
+    pub target_id: String,
+    #[serde(default, alias = "target")]
+    pub target_label_snapshot: String,
     pub audio_duration_ms: u64,
+}
+
+pub fn delete_history_confirmation_body(pending_in_agent_chat: bool) -> &'static str {
+    if pending_in_agent_chat {
+        "This transcript is staged in Agent Chat. Deleting it will make that pending attachment unavailable. Sent-turn receipts are preserved."
+    } else {
+        "Delete this saved transcript from Dictation History? Sent-turn receipts are preserved."
+    }
+}
+
+impl DictationHistoryEntry {
+    pub fn canonical_target(&self) -> Option<DictationTarget> {
+        crate::dictation::parse_dictation_target_label(&self.target_id)
+    }
+
+    pub fn display_target_label(&self) -> String {
+        if let Some(target) = self.canonical_target() {
+            if target == DictationTarget::ExternalApp
+                && !self.target_label_snapshot.trim().is_empty()
+            {
+                return self.target_label_snapshot.clone();
+            }
+            return target.descriptor().selector_label.to_string();
+        }
+        if self.target_label_snapshot.trim().is_empty() {
+            "Unknown destination".to_string()
+        } else {
+            self.target_label_snapshot.clone()
+        }
+    }
+
+    pub fn resource_uri(&self) -> String {
+        format!("kit://dictation-history?id={}", self.id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictationHistoryPage {
+    pub total_matches: usize,
+    pub visible_count: usize,
+    pub offset: usize,
+    pub rows: Vec<DictationHistoryEntry>,
+    pub has_more: bool,
+}
+
+impl DictationHistoryPage {
+    pub fn count_label(&self) -> String {
+        format!("Showing {} of {}", self.visible_count, self.total_matches)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DictationHistoryViewState {
+    Loading {
+        previous: Option<DictationHistoryPage>,
+    },
+    Failed {
+        message: String,
+        previous: Option<DictationHistoryPage>,
+    },
+    NoSavedDictation,
+    NoFilteredMatches,
+    Ready(DictationHistoryPage),
+}
+
+impl DictationHistoryViewState {
+    pub fn page(&self) -> Option<&DictationHistoryPage> {
+        match self {
+            Self::Loading { previous } | Self::Failed { previous, .. } => previous.as_ref(),
+            Self::Ready(page) => Some(page),
+            Self::NoSavedDictation | Self::NoFilteredMatches => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,11 +268,13 @@ pub fn build_history_entry(
     );
 
     DictationHistoryEntry {
+        version: DICTATION_HISTORY_ENTRY_VERSION,
         id,
         timestamp,
         preview: truncate_chars(&normalized, 120),
         transcript: transcript.trim().to_string(),
-        target: target_label(target),
+        target_id: target.sticky_label().to_string(),
+        target_label_snapshot: target_label(target),
         audio_duration_ms: audio_duration.as_millis() as u64,
     }
 }
@@ -241,20 +328,33 @@ fn save_history_entry(entry: &DictationHistoryEntry) {
     }
 }
 
-pub fn load_history() -> Vec<DictationHistoryEntry> {
+pub fn load_history_result() -> std::io::Result<Vec<DictationHistoryEntry>> {
+    if std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() == Some("1")
+        && std::env::var("SCRIPT_KIT_TEST_DICTATION_HISTORY_LOAD_FAILURE")
+            .ok()
+            .as_deref()
+            == Some("1")
+    {
+        return Err(std::io::Error::other(
+            "deterministic Dictation History load failure",
+        ));
+    }
+
     let path = history_path();
     let signature = history_file_signature(&path);
     if let Ok(guard) = dictation_history_index_cache().lock() {
         if let Some(cache) = guard.as_ref() {
             if cache.signature == signature {
-                return cache.entries.clone();
+                return Ok(cache.entries.clone());
             }
         }
     }
 
-    let entries = std::fs::read_to_string(&path)
-        .map(|content| parse_history_entries(&content))
-        .unwrap_or_default();
+    let entries = match std::fs::read_to_string(&path) {
+        Ok(content) => parse_history_entries(&content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
+    };
 
     if let Ok(mut guard) = dictation_history_index_cache().lock() {
         *guard = Some(DictationHistoryIndexCache {
@@ -263,7 +363,11 @@ pub fn load_history() -> Vec<DictationHistoryEntry> {
         });
     }
 
-    entries
+    Ok(entries)
+}
+
+pub fn load_history() -> Vec<DictationHistoryEntry> {
+    load_history_result().unwrap_or_default()
 }
 
 fn history_file_signature(path: &std::path::Path) -> HistoryFileSignature {
@@ -278,10 +382,29 @@ fn history_file_signature(path: &std::path::Path) -> HistoryFileSignature {
     })
 }
 
+fn migrate_history_entry(mut entry: DictationHistoryEntry) -> DictationHistoryEntry {
+    let parsed = (!entry.target_id.trim().is_empty())
+        .then(|| crate::dictation::parse_dictation_target_label(&entry.target_id))
+        .flatten()
+        .or_else(|| crate::dictation::parse_dictation_target_label(&entry.target_label_snapshot));
+
+    if let Some(target) = parsed {
+        entry.target_id = target.sticky_label().to_string();
+        if target != DictationTarget::ExternalApp || entry.target_label_snapshot.trim().is_empty() {
+            entry.target_label_snapshot = target.descriptor().selector_label.to_string();
+        }
+    } else {
+        entry.target_id = DICTATION_HISTORY_LEGACY_UNKNOWN_TARGET_ID.to_string();
+    }
+    entry.version = DICTATION_HISTORY_ENTRY_VERSION;
+    entry
+}
+
 fn parse_history_entries(content: &str) -> Vec<DictationHistoryEntry> {
     let mut entries: Vec<DictationHistoryEntry> = content
         .lines()
         .filter_map(|line| serde_json::from_str::<DictationHistoryEntry>(line).ok())
+        .map(migrate_history_entry)
         .collect();
     entries.reverse();
     entries
@@ -344,7 +467,7 @@ fn rank_history_entries(
             },
             LongTextField {
                 id: LongTextFieldId::Target,
-                text: entry.target.as_str(),
+                text: entry.target_label_snapshot.as_str(),
                 class: FieldClass::NaturalText,
                 visibility: FieldVisibility::Visible(RenderSlot::Subtitle),
                 weight: 3,
@@ -406,11 +529,54 @@ pub fn search_history(query: &str, limit: usize) -> Vec<DictationHistorySearchHi
     tracing::info!(
         category = "DICTATION",
         event = "dictation_history_search_executed",
-        query = %query,
+        query_len = query.trim().chars().count(),
         limit,
         hit_count = hits.len(),
     );
     hits
+}
+
+pub fn search_history_page(
+    query: &str,
+    offset: usize,
+    visible_limit: usize,
+) -> std::io::Result<DictationHistoryPage> {
+    let entries = load_history_result()?;
+    let hits = rank_history_entries(entries, query, usize::MAX);
+    let total_matches = hits.len();
+    let end = offset.saturating_add(visible_limit).min(total_matches);
+    let rows = if offset >= total_matches {
+        Vec::new()
+    } else {
+        hits[offset..end]
+            .iter()
+            .map(|hit| hit.entry.clone())
+            .collect()
+    };
+    let visible_count = offset.saturating_add(rows.len()).min(total_matches);
+    Ok(DictationHistoryPage {
+        total_matches,
+        visible_count,
+        offset,
+        rows,
+        has_more: end < total_matches,
+    })
+}
+
+pub fn dictation_history_view_state(
+    query: &str,
+    visible_limit: usize,
+    previous: Option<DictationHistoryPage>,
+) -> DictationHistoryViewState {
+    match search_history_page(query, 0, visible_limit) {
+        Ok(page) if page.total_matches > 0 => DictationHistoryViewState::Ready(page),
+        Ok(_) if query.trim().is_empty() => DictationHistoryViewState::NoSavedDictation,
+        Ok(_) => DictationHistoryViewState::NoFilteredMatches,
+        Err(error) => DictationHistoryViewState::Failed {
+            message: format!("Dictation History could not be loaded: {error}"),
+            previous,
+        },
+    }
 }
 
 fn cached_history_entries_if_fresh() -> Option<Vec<DictationHistoryEntry>> {
@@ -468,15 +634,18 @@ pub fn search_root_dictation_history(
         .collect::<Vec<_>>();
     let hits = rank_history_entries(entries, query, options.max_results)
         .into_iter()
-        .map(|hit| RootDictationHistorySearchHit {
-            id: hit.entry.id,
-            preview: hit.entry.preview,
-            target: hit.entry.target,
-            timestamp: hit.entry.timestamp,
-            audio_duration_ms: hit.entry.audio_duration_ms,
-            score: hit.score,
-            matched_field: hit.matched_field,
-            evidence: hit.evidence,
+        .map(|hit| {
+            let target = hit.entry.display_target_label();
+            RootDictationHistorySearchHit {
+                id: hit.entry.id,
+                preview: hit.entry.preview,
+                target,
+                timestamp: hit.entry.timestamp,
+                audio_duration_ms: hit.entry.audio_duration_ms,
+                score: hit.score,
+                matched_field: hit.matched_field,
+                evidence: hit.evidence,
+            }
         })
         .collect::<Vec<_>>();
     tracing::info!(
@@ -527,15 +696,18 @@ pub fn search_root_dictation_history_cached(
         options.max_results,
     )
     .into_iter()
-    .map(|hit| RootDictationHistorySearchHit {
-        id: hit.entry.id,
-        preview: hit.entry.preview,
-        target: hit.entry.target,
-        timestamp: hit.entry.timestamp,
-        audio_duration_ms: hit.entry.audio_duration_ms,
-        score: hit.score,
-        matched_field: hit.matched_field,
-        evidence: hit.evidence,
+    .map(|hit| {
+        let target = hit.entry.display_target_label();
+        RootDictationHistorySearchHit {
+            id: hit.entry.id,
+            preview: hit.entry.preview,
+            target,
+            timestamp: hit.entry.timestamp,
+            audio_duration_ms: hit.entry.audio_duration_ms,
+            score: hit.score,
+            matched_field: hit.matched_field,
+            evidence: hit.evidence,
+        }
     })
     .collect::<Vec<_>>();
     if crate::logging::filter_perf_trace_enabled() {
@@ -575,7 +747,8 @@ fn resource_payload(entries: &[DictationHistoryEntry]) -> String {
                 "displayTimestamp": format_history_timestamp(&entry.timestamp),
                 "text": entry.transcript,
                 "preview": entry.preview,
-                "target": entry.target,
+                "target": entry.display_target_label(),
+                "targetId": entry.target_id,
                 "audioDurationMs": entry.audio_duration_ms,
                 "displayDuration": format_history_duration_ms(entry.audio_duration_ms),
             })
@@ -622,7 +795,7 @@ pub fn record_dictation_history(
         category = "DICTATION",
         event = "dictation_history_entry_saved",
         entry_id = %entry.id,
-        target = %entry.target,
+        target_id = %entry.target_id,
         transcript_len = entry.transcript.len(),
         audio_duration_ms = entry.audio_duration_ms,
     );
@@ -699,8 +872,20 @@ mod tests {
             DictationTarget::AiChatComposer,
         );
         assert_eq!(entry.preview, "hello from dictation");
-        assert_eq!(entry.target, "Agent Chat");
+        assert_eq!(entry.display_target_label(), "Agent Chat");
         assert_eq!(entry.audio_duration_ms, 2_000);
+    }
+
+    #[test]
+    fn deletion_confirmation_distinguishes_pending_context_without_claiming_sent_turn_loss() {
+        let ordinary = delete_history_confirmation_body(false);
+        assert!(ordinary.contains("Sent-turn receipts are preserved"));
+        assert!(!ordinary.contains("staged in Agent Chat"));
+
+        let pending = delete_history_confirmation_body(true);
+        assert!(pending.contains("staged in Agent Chat"));
+        assert!(pending.contains("pending attachment unavailable"));
+        assert!(pending.contains("Sent-turn receipts are preserved"));
     }
 
     #[test]
@@ -754,11 +939,11 @@ mod tests {
 
         let notes_hits = search_history("notes", 10);
         assert_eq!(notes_hits.len(), 1);
-        assert_eq!(notes_hits[0].entry.target, "Notes");
+        assert_eq!(notes_hits[0].entry.display_target_label(), "Notes");
 
         let duration_hits = search_history("agent 2 sec", 10);
         assert_eq!(duration_hits.len(), 1);
-        assert_eq!(duration_hits[0].entry.target, "Agent Chat");
+        assert_eq!(duration_hits[0].entry.display_target_label(), "Agent Chat");
     }
 
     /// Screenshot regression (2026-07-11): sentence queries must not match
@@ -848,6 +1033,96 @@ mod tests {
         let loaded = load_history();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, keep.id);
+    }
+
+    #[test]
+    fn history_pages_report_visible_and_total_counts_without_reordering() {
+        let _env = TestEnv::new();
+        let entries = (0..125)
+            .map(|index| {
+                build_history_entry(
+                    &format!("history page transcript {index:03}"),
+                    Duration::from_secs(1),
+                    DictationTarget::NotesEditor,
+                )
+            })
+            .collect::<Vec<_>>();
+        write_history(&entries).expect("seed 125 rows");
+
+        let first = search_history_page("", 0, DICTATION_HISTORY_PAGE_SIZE).expect("first page");
+        assert_eq!(first.total_matches, 125);
+        assert_eq!(first.visible_count, 100);
+        assert_eq!(first.rows.len(), 100);
+        assert!(first.has_more);
+        assert_eq!(first.count_label(), "Showing 100 of 125");
+        let selected_id = first.rows[63].id.clone();
+
+        let expanded = search_history_page("", 0, 200).expect("expanded page");
+        assert_eq!(expanded.total_matches, 125);
+        assert_eq!(expanded.visible_count, 125);
+        assert_eq!(expanded.rows.len(), 125);
+        assert!(!expanded.has_more);
+        assert_eq!(expanded.count_label(), "Showing 125 of 125");
+        assert_eq!(expanded.rows[63].id, selected_id);
+
+        let tail = search_history_page("", 100, 100).expect("tail page");
+        assert_eq!(tail.offset, 100);
+        assert_eq!(tail.rows.len(), 25);
+        assert_eq!(tail.visible_count, 125);
+    }
+
+    #[test]
+    fn legacy_targets_migrate_to_canonical_ids_without_guessing_unknown_labels() {
+        let legacy = r#"{"id":"legacy-ai","timestamp":"2026-07-01T00:00:00Z","transcript":"one","preview":"one","target":"AI Chat","audio_duration_ms":1000}
+{"id":"legacy-unknown","timestamp":"2026-07-02T00:00:00Z","transcript":"two","preview":"two","target":"Studio Console","audio_duration_ms":1000}"#;
+        let entries = parse_history_entries(legacy);
+        let unknown = entries
+            .iter()
+            .find(|entry| entry.id == "legacy-unknown")
+            .expect("unknown entry");
+        assert_eq!(unknown.version, DICTATION_HISTORY_ENTRY_VERSION);
+        assert_eq!(
+            unknown.target_id,
+            DICTATION_HISTORY_LEGACY_UNKNOWN_TARGET_ID
+        );
+        assert_eq!(unknown.display_target_label(), "Studio Console");
+
+        let ai = entries
+            .iter()
+            .find(|entry| entry.id == "legacy-ai")
+            .expect("legacy AI entry");
+        assert_eq!(ai.target_id, DictationTarget::TabAiHarness.sticky_label());
+        assert_eq!(ai.display_target_label(), "Agent Chat");
+    }
+
+    #[test]
+    fn view_state_distinguishes_empty_no_match_and_failure_with_prior_rows() {
+        let _env = TestEnv::new();
+        assert!(matches!(
+            dictation_history_view_state("", 100, None),
+            DictationHistoryViewState::NoSavedDictation
+        ));
+        assert!(matches!(
+            dictation_history_view_state("missing", 100, None),
+            DictationHistoryViewState::NoFilteredMatches
+        ));
+
+        let prior = DictationHistoryPage {
+            total_matches: 1,
+            visible_count: 1,
+            offset: 0,
+            rows: vec![build_history_entry(
+                "retained row",
+                Duration::from_secs(1),
+                DictationTarget::MainWindowPrompt,
+            )],
+            has_more: false,
+        };
+        std::fs::create_dir_all(history_path()).expect("make history path unreadable as a file");
+        invalidate_history_cache();
+        let failed = dictation_history_view_state("", 100, Some(prior.clone()));
+        assert!(matches!(failed, DictationHistoryViewState::Failed { .. }));
+        assert_eq!(failed.page(), Some(&prior));
     }
 
     #[test]

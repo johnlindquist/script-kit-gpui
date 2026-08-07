@@ -1743,9 +1743,15 @@ impl ScriptListApp {
             const PORTAL_ROW_HEIGHT: f32 = LIST_ITEM_HEIGHT;
 
             let (variant, list_count) = match &self.current_view {
-                AppView::DictationHistoryView { filter, .. } => (
+                AppView::DictationHistoryView {
+                    filter,
+                    visible_limit,
+                    ..
+                } => (
                     "dictationHistory",
-                    Self::dictation_history_visible_row_labels(filter).len(),
+                    self.dictation_history_current_or_previous_page(filter, *visible_limit)
+                        .map(|page| page.rows.len())
+                        .unwrap_or(0),
                 ),
                 AppView::NotesBrowseView { search } => (
                     "notesBrowse",

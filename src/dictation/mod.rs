@@ -45,12 +45,16 @@ pub use device::{
     DictationDeviceSelectionAction, DICTATION_SYSTEM_DEFAULT_DEVICE_VALUE,
 };
 pub use history::{
-    build_history_entry, delete_history_entry, format_history_duration_ms,
-    format_history_timestamp, get_history_entry, hydrate_dictation_resource_from_history,
-    load_history, record_dictation_history, root_dictation_history_query_is_eligible,
-    search_history, search_root_dictation_history, search_root_dictation_history_cached,
-    search_root_dictation_history_direct, DictationHistoryEntry, DictationHistorySearchField,
-    DictationHistorySearchHit, RootDictationHistorySearchHit, RootDictationHistorySectionOptions,
+    build_history_entry, delete_history_confirmation_body, delete_history_entry,
+    dictation_history_view_state, format_history_duration_ms, format_history_timestamp,
+    get_history_entry, hydrate_dictation_resource_from_history, load_history, load_history_result,
+    record_dictation_history, root_dictation_history_query_is_eligible, search_history,
+    search_history_page, search_root_dictation_history, search_root_dictation_history_cached,
+    search_root_dictation_history_direct, DictationHistoryEntry, DictationHistoryPage,
+    DictationHistorySearchField, DictationHistorySearchHit, DictationHistoryViewState,
+    RootDictationHistorySearchHit, RootDictationHistorySectionOptions,
+    DICTATION_HISTORY_ENTRY_VERSION, DICTATION_HISTORY_LEGACY_UNKNOWN_TARGET_ID,
+    DICTATION_HISTORY_PAGE_SIZE,
 };
 // The batch_select_* automation hooks are consumed by the binary crate
 // (prompt_handler), which compiles this module separately — the library

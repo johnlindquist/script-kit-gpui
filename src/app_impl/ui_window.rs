@@ -272,14 +272,14 @@ fn has_selected_dictation_history_entry(app: &ScriptListApp) -> bool {
     let AppView::DictationHistoryView {
         filter,
         selected_index,
+        visible_limit,
     } = &app.current_view
     else {
         return false;
     };
 
-    crate::dictation::search_history(filter, 100)
-        .get(*selected_index)
-        .is_some()
+    app.dictation_history_current_or_previous_page(filter, *visible_limit)
+        .is_some_and(|page| page.rows.get(*selected_index).is_some())
 }
 
 impl ScriptListApp {
@@ -302,10 +302,12 @@ impl ScriptListApp {
                 };
             }
             AppView::DictationHistoryView { .. } => {
-                return if has_selected_dictation_history_entry(self) {
-                    paste_into_frontmost_app_label(frontmost_app_name.as_deref())
-                } else {
+                return if !has_selected_dictation_history_entry(self) {
                     "Run".to_string()
+                } else if self.is_in_attachment_portal() {
+                    "Attach Transcript".to_string()
+                } else {
+                    paste_into_frontmost_app_label(frontmost_app_name.as_deref())
                 };
             }
             AppView::ThemeChooserView { .. } => {
@@ -2749,9 +2751,15 @@ impl ScriptListApp {
                 )
                 .len(),
             )),
-            AppView::DictationHistoryView { filter, .. } => Some((
+            AppView::DictationHistoryView {
+                filter,
+                visible_limit,
+                ..
+            } => Some((
                 ViewType::MainWindow,
-                crate::dictation::search_history(filter, 100).len(),
+                self.dictation_history_current_or_previous_page(filter, *visible_limit)
+                    .map(|page| page.visible_count)
+                    .unwrap_or(0),
             )),
             AppView::NotesBrowseView { search } => {
                 Some((ViewType::MainWindow, search.state.rows().len()))

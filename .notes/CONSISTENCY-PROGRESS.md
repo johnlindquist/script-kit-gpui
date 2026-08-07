@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 47 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 48 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -18,7 +18,7 @@
 | Lane | Scope | Tasks | Status |
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
-| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C13 complete; WF-022 and WF-023 verified |
+| Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C14 complete; WF-024 verified; final lane audit pending |
 | Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01 complete; C02 starting |
 
 ## How to view the baseline proposal explorer
@@ -1006,6 +1006,27 @@
   4. Open the Dictation microphone picker, press Escape, and type a Dictation shortcut/key. Verify the picker closes and the overlay remains the focused semantic panel.
   5. Replace/close the original Prompt, Note, or external window before cancel. Verify Dictation does not focus another instance with the same app/type.
 - **Intentional differences preserved:** Today can focus its editor only while the captured Day Page entity remains available. Native external focus uses exact CGWindow identity; internal surfaces use their owning GPUI focus targets.
+
+### WF-024 — Make Dictation History paging, portal actions, and deletion truthful
+
+- **Status:** Complete. Dictation History now has versioned canonical rows, truthful visible/total counts, stable incremental paging, host-specific action grammar, composer-only Agent Chat staging, typed loading failures, and confirmed deletion that preserves sent-turn receipts.
+- **Commit boundary:** Workflow Safety C14 — `fix(dictation-history): make portal actions counts and deletion truthful [WF-024]`.
+- **Changed behavior:** New History rows persist schema version 2, a canonical target ID, and a display-only external target label snapshot. Legacy **AI Chat** migrates to **Agent Chat**; unknown labels remain `legacy-unknown` rather than being guessed. The retained dataset remains capped at 200 rows. The first view renders 100 rows and says **Showing 100 of 125**; **Load More** expands to 125 while preserving selected index/ID, preview, query, scroll anchor, and portal return snapshot. Standalone Enter pastes, Command+Enter copies, Actions includes **Add to Agent Chat**, and Delete confirms. Portal Enter says **Attach Transcript**, Command+Enter copies, Escape cancels/restores, and portal Actions expose neither Paste nor redundant Add. Add/Attach stage `kit://dictation-history?id=<entry-id>` and submit zero turns. A pending staged URI gets the stronger deletion warning; confirmation deletes only that row, while immutable sent-turn messages remain unchanged.
+- **Exact owners:** `src/dictation/history.rs::{DictationHistoryEntry,DictationHistoryPage,DictationHistoryViewState,search_history_page,delete_history_confirmation_body}`; `src/render_builtins/dictation_history.rs`; `src/render_builtins/actions.rs::dictation_history_actions_for_dialog`; `src/app_actions/handle_action/dictation_history.rs`; `src/app_impl/root_unified_result_actions.rs`; paging state under `src/main_sections/app_view_state.rs`/`app_state.rs`; automation projections in `src/app_layout/collect_elements.rs`, `src/prompt_handler/mod.rs`, and `src/app_impl/ui_window.rs`; runtime proof `scripts/agentic/cons-flow-ux/dictation-history-probe.ts`.
+- **Focused proof:** History model tests PASS 14/14, including 125-row paging, legacy migration, typed empty/no-match/failure-with-prior, confirmed row deletion, canonical labels, and shared pending-warning copy. Binary History UI/action tests PASS 5/5. Root Dictation action descriptor test PASS 1/1. Full Dictation regression suite PASS 290/290. Library and binary checks/build PASS.
+- **Runtime receipt:** `.test-output/cons-flow-c14/dictation-history-receipt.json` → PASS against `target-agent/artifacts/cons-flow-c14/script-kit-gpui`, SHA-256 `ed7fd679bd12cb8f8fc8327417ba0c2cc303bf6f1a9bf47683870593580f79fe`. It proves 100/125 → 125/125 without selection drift; fingerprint-only Copy with clipboard restoration; standalone versus portal actions; intended ResourceUri Add and Attach with no submitted turn; exact portal Cancel restoration; stronger pending warning; cancel preservation; confirmed row removal; 2 sent messages before and after deletion; typed load failure; and no raw transcript in the receipt.
+- **Negative controls:** Unknown legacy target labels never gain a guessed canonical target. Load/search failure cannot render as ordinary empty. Portal Actions cannot advertise Paste/Add, and no History action advertises Ask/Send. Add/Attach cannot submit. Delete cannot mutate before confirmation. Pending-context detection compares the exact canonical URI. Deleting History cannot clear Agent Chat sent-turn receipts. Receipt text excludes transcript, clipboard content, and external-app labels.
+- **Build/governance:** Stable artifact fingerprint above. Every Driver reports `processExited:true`, `streamsDrained:true`, and `logWriterClosed:true`; `exactArtifactOwnedProcessCount:0`. `git diff --check` PASS. Source-audit inventory is current at 2,814 sites with no guarded additions relative to C13 HEAD. Hardcoded-visual tests PASS 16/16 with no additions. Protected glass contracts PASS 40/40 and production calibration fixture PASS 1/1; no locked motion/material/geometry owner changed.
+- **User test/view:**
+  1. Seed or retain more than 100 Dictation History rows, open **Dictation History**, and verify the footer says **Showing 100 of 125** rather than implying every row is rendered.
+  2. Move selection away from the first row, choose **Load More**, and verify the count becomes **Showing 125 of 125** without changing the selected transcript or jumping the list.
+  3. In standalone History, press Enter to paste and Command+Enter to copy. Open Command+K and verify **Add to Agent Chat**, **Copy Transcript**, and **Delete from History** are present with no Ask/Send verb.
+  4. Choose **Add to Agent Chat**. Verify the transcript appears as pending Dictation context in the composer and no user/assistant turn is created.
+  5. From the Agent Chat composer, open `@dictation`, select a row, and press Enter. Verify **Attach Transcript** returns to the same draft/context; reopen and press Escape to verify exact cancel restoration.
+  6. Attempt to delete a transcript currently staged in Agent Chat. Verify the confirmation warns that the pending attachment will become unavailable. Cancel once and verify the row remains; confirm once and verify only that row disappears.
+  7. Repeat after a completed Agent Chat turn. Verify History deletion does not remove or rewrite that sent turn.
+  8. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c14/script-kit-gpui" bun scripts/agentic/cons-flow-ux/dictation-history-probe.ts`; expect both scenarios to pass and `exactArtifactOwnedProcessCount:0`.
+- **Intentional differences preserved:** Standalone History may paste to the frontmost app; attachment-portal History never offers Paste and returns to Agent Chat. The C14 matrix verifies the standalone Paste descriptor/Enter route but deliberately does not inject text into an uncontrolled user app; the exact frozen external paste actor remains covered by C12 model/integration proof and the manual step above. Standing instruction-note context can coexist with the newly staged Dictation URI, so context-chip count is not assumed to be exactly one; the proof identifies the intended Dictation resource and asserts zero submitted turns.
 
 ## Verification ledger
 

@@ -70,11 +70,15 @@ pub fn dictation_part_token(id: &str) -> Option<String> {
 #[doc(hidden)]
 pub fn production_dictation_part(id: &str, preview: &str) -> AiContextPart {
     let entry = crate::dictation::DictationHistoryEntry {
+        version: crate::dictation::DICTATION_HISTORY_ENTRY_VERSION,
         id: id.to_string(),
         timestamp: "2026-04-16T00:00:00Z".to_string(),
         transcript: preview.to_string(),
         preview: preview.to_string(),
-        target: String::new(),
+        target_id: crate::dictation::DictationTarget::TabAiHarness
+            .sticky_label()
+            .to_string(),
+        target_label_snapshot: "Agent Chat".to_string(),
         audio_duration_ms: 0,
     };
     crate::ai::context_mentions::dictation_history_part_for_entry(&entry)

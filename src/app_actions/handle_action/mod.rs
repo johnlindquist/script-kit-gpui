@@ -1011,15 +1011,14 @@ impl ScriptListApp {
         let AppView::DictationHistoryView {
             filter,
             selected_index,
+            visible_limit,
         } = &self.current_view
         else {
             return None;
         };
 
-        crate::dictation::search_history(filter, 100)
-            .into_iter()
-            .nth(*selected_index)
-            .map(|hit| hit.entry)
+        self.dictation_history_current_or_previous_page(filter, *visible_limit)
+            .and_then(|page| page.rows.into_iter().nth(*selected_index))
     }
 
     /// Return true when the current view has any available actions.
@@ -2466,6 +2465,7 @@ impl ScriptListApp {
             &action_id_stripped,
             selected_dictation_entry,
             &dctx,
+            window,
             cx,
         );
         if dictation_outcome.was_handled() {

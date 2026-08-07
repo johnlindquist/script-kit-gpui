@@ -128,6 +128,7 @@
             agent_chat_history_scroll_handle: ScrollHandle::new(),
             browser_history_scroll_handle: ScrollHandle::new(),
             dictation_history_scroll_handle: ScrollHandle::new(),
+            dictation_history_previous_page: None,
             notes_browse_scroll_handle: ScrollHandle::new(),
             tracked_builtin_list_states: std::collections::HashMap::new(),
             file_search_scroll_handle: UniformListScrollHandle::new(),

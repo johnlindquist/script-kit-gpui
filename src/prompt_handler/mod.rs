@@ -3215,12 +3215,16 @@ impl ScriptListApp {
                     AppView::DictationHistoryView {
                         filter,
                         selected_index,
+                        visible_limit,
                     } => {
                         let (dataset_count, visible_count) =
-                            Self::dictation_history_dataset_and_visible_counts(filter);
-                        let selected_value =
-                            Self::dictation_history_selected_visible_row(filter, *selected_index)
-                                .map(|entry| entry.preview);
+                            self.dictation_history_dataset_and_visible_counts(filter, *visible_limit);
+                        let selected_value = self.dictation_history_selected_visible_row(
+                            filter,
+                            *selected_index,
+                            *visible_limit,
+                        )
+                        .map(|entry| entry.preview);
                         (
                             "dictationHistory".to_string(),
                             None,
@@ -9692,6 +9696,18 @@ impl ScriptListApp {
         submit: bool,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<String> {
+        if semantic_id == "button:dictation-history-load-more" {
+            let AppView::DictationHistoryView { visible_limit, .. } = &mut self.current_view else {
+                anyhow::bail!("Dictation History Load More is not visible");
+            };
+            if submit {
+                *visible_limit = visible_limit
+                    .saturating_add(crate::dictation::DICTATION_HISTORY_PAGE_SIZE);
+                cx.notify();
+            }
+            return Ok(semantic_id.to_string());
+        }
+
         if semantic_id == "footer:native:close"
             && matches!(self.current_view, AppView::QuickTerminalView { .. })
         {

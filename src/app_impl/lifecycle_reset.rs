@@ -884,8 +884,11 @@ impl ScriptListApp {
             AppView::DictationHistoryView {
                 filter,
                 selected_index,
+                visible_limit,
             } => {
                 Self::clear_builtin_query_state(filter, selected_index);
+                *visible_limit = crate::dictation::DICTATION_HISTORY_PAGE_SIZE;
+                self.dictation_history_previous_page = None;
                 self.dictation_history_scroll_handle
                     .scroll_to_top_of_item(0);
             }

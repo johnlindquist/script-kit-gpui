@@ -364,6 +364,7 @@ enum AppView {
     DictationHistoryView {
         filter: String,
         selected_index: usize,
+        visible_limit: usize,
     },
     /// Browsing the canonical Notes search corpus standalone or as an Agent Chat portal.
     NotesBrowseView {

@@ -727,8 +727,9 @@ impl Render for ScriptListApp {
             AppView::DictationHistoryView {
                 filter,
                 selected_index,
+                visible_limit,
             } => self
-                .render_dictation_history(filter, selected_index, cx)
+                .render_dictation_history(filter, selected_index, visible_limit, cx)
                 .into_any_element(),
             AppView::NotesBrowseView { search } => self
                 .render_notes_browse_portal(search, cx)

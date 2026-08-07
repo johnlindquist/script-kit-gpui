@@ -4351,6 +4351,7 @@ impl ScriptListApp {
                     AppView::DictationHistoryView {
                         filter: String::new(),
                         selected_index: 0,
+                        visible_limit: crate::dictation::DICTATION_HISTORY_PAGE_SIZE,
                     },
                     "Search dictation history...",
                     true,
@@ -6993,6 +6994,7 @@ impl ScriptListApp {
                     AppView::DictationHistoryView {
                         filter: String::new(),
                         selected_index: 0,
+                        visible_limit: crate::dictation::DICTATION_HISTORY_PAGE_SIZE,
                     },
                     "Search dictation history...",
                     true,
@@ -7166,7 +7168,7 @@ impl ScriptListApp {
                                 category = "DICTATION",
                                 event = "dictation_history_recorded_before_delivery",
                                 entry_id = %history_entry.id,
-                                target = %history_entry.target,
+                                target_id = %history_entry.target_id,
                             );
                             history_entry.id
                         } else {
