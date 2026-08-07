@@ -134,7 +134,15 @@ function assertCleanup(value: unknown, path: string[] = []): void {
 
 assert(existsSync(binary), `missing final artifact: ${binary}`);
 const binarySha256 = sha256(readFileSync(binary));
-const productCommit = run(["git", "rev-parse", "HEAD"]);
+const productCommit = run([
+  "git",
+  "log",
+  "-1",
+  "--format=%H",
+  "--",
+  "src",
+  "crates",
+]);
 const progress = readFileSync(progressPath, "utf8");
 const plan = readFileSync(planPath, "utf8");
 assert(plan.includes("Consult count: 1 / 1"), "Oracle consult count is not exactly 1 / 1");
