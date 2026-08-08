@@ -320,22 +320,88 @@ pub fn defer_hide_main_window_with_geometry_trace(cx: &mut gpui::App, cycle_id: 
     .detach();
 }
 
+/// Defer the calibrated Main glass entry until the alpha-zero native owner has
+/// been ordered and registered by WindowServer.
+#[cfg(target_os = "macos")]
+unsafe fn schedule_main_window_glass_entry(window: id, cycle_id: Option<u64>) {
+    use std::ffi::c_void;
+
+    #[link(name = "System", kind = "dylib")]
+    extern "C" {
+        #[link_name = "_dispatch_main_q"]
+        static DISPATCH_MAIN_QUEUE: c_void;
+        fn dispatch_async_f(
+            queue: *const c_void,
+            context: *mut c_void,
+            work: extern "C" fn(*mut c_void),
+        );
+    }
+
+    struct EntryContext {
+        window: usize,
+        visibility_generation: u64,
+        cycle_id: Option<u64>,
+    }
+
+    extern "C" fn arm(context: *mut c_void) {
+        // SAFETY: `context` is the Box allocated below, consumed once on the
+        // main queue. The retained NSWindow is released after the unwind guard.
+        unsafe {
+            let context = Box::from_raw(context as *mut EntryContext);
+            let window = context.window as id;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let is_current_owner = window_manager::get_main_window() == Some(window);
+                let generation_is_current = crate::main_window_visibility_generation()
+                    == context.visibility_generation;
+                let is_visible: bool = msg_send![window, isVisible];
+
+                if is_current_owner && generation_is_current && is_visible {
+                    animate_tahoe_glass_main_appearance(window, "PANEL", "Main window");
+                    crate::platform::host_clock::log_entry_timeline_event("main_morph_armed");
+                    trace_main_window_native_geometry(
+                        "after_morph_arm",
+                        context.cycle_id.unwrap_or_default(),
+                        None,
+                        Some("deferred_until_ordered_owner"),
+                    );
+                } else {
+                    logging::log(
+                        "PANEL",
+                        &format!(
+                            "event=glass_morph_gate_skip window=Main window reason=stale_deferred_entry owner_current={} generation_current={} visible={}",
+                            is_current_owner, generation_is_current, is_visible,
+                        ),
+                    );
+                }
+            }));
+            if result.is_err() {
+                logging::log(
+                    "PANEL",
+                    "event=glass_morph_gate_skip window=Main window reason=deferred_entry_panic",
+                );
+            }
+            let _: () = msg_send![window, release];
+        }
+    }
+
+    let _: id = msg_send![window, retain];
+    let context = Box::into_raw(Box::new(EntryContext {
+        window: window as usize,
+        visibility_generation: crate::main_window_visibility_generation(),
+        cycle_id,
+    }));
+    dispatch_async_f(
+        &DISPATCH_MAIN_QUEUE as *const c_void,
+        context as *mut c_void,
+        arm,
+    );
+}
+
 /// Show the main window WITHOUT activating the application.
 ///
-/// This is critical for floating panel behavior - the window should appear
-/// and be able to receive keyboard input, but the previously focused app
-/// should remain the "active" app at the OS level. This allows features like
-/// "copy selected text from previous app" to still work.
-///
-/// # macOS Behavior
-///
-/// For PopUp windows (NSPanel with NonactivatingPanel style), uses
-/// `orderFrontRegardless` + `makeKeyWindow` to show the window and give it
-/// keyboard focus without activating the application.
-///
-/// # Other Platforms
-///
-/// No-op on non-macOS platforms.
+/// For a nonactivating PopUp panel, `orderFrontRegardless` makes the native
+/// owner visible and `makeKeyWindow` gives it keyboard focus without activating
+/// the application. Glass entry is armed on the following main-queue turn.
 #[cfg(target_os = "macos")]
 fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
     if require_main_thread("show_main_window_without_activation") {
@@ -378,23 +444,13 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
             "main_native_composition_prepared",
         );
 
-        // Glass mode: set the morph start state (alpha 0, larger frame) and
-        // begin animating BEFORE ordering front — ordering front first
-        // flashed one full-size frame before the morph hid it (flicker).
-        if tahoe_native_glass_composition_available()
-            && crate::theme::get_cached_theme().is_vibrancy_enabled()
-        {
-            animate_tahoe_glass_main_appearance(window, "PANEL", "Main window");
-            crate::platform::host_clock::log_entry_timeline_event("main_morph_armed");
-        } else {
-            // Instrumentation only: a silently un-morphed show made the
-            // runtime contract's missing enter line undiagnosable.
-            logging::log(
-                "PANEL",
-                "event=glass_morph_gate_skip window=Main window reason=composition_or_vibrancy_unavailable",
-            );
-        }
+        let glass_entry_enabled = tahoe_native_glass_composition_available()
+            && crate::theme::get_cached_theme().is_vibrancy_enabled();
 
+        // The hidden glass panel is parked at alpha zero. Order that invisible
+        // owner first, then arm the existing calibrated morph on the next main
+        // queue turn so WindowServer can register it before the onset clock starts.
+        // This changes only the lifecycle handoff, never the locked motion values.
         // orderFrontRegardless brings window to front without activating the app
         let _: () = msg_send![window, orderFrontRegardless];
         crate::platform::host_clock::log_entry_timeline_event("main_order_front_returned");
@@ -411,6 +467,17 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
 
         if let Some(cycle_id) = cycle_id {
             trace_main_window_native_geometry("after_make_key", cycle_id, None, None);
+        }
+
+        if glass_entry_enabled {
+            schedule_main_window_glass_entry(window, cycle_id);
+        } else {
+            // Instrumentation only: a silently un-morphed show made the
+            // runtime contract's missing enter line undiagnosable.
+            logging::log(
+                "PANEL",
+                "event=glass_morph_gate_skip window=Main window reason=composition_or_vibrancy_unavailable",
+            );
         }
 
         let _ = assert_main_panel_invariants(
@@ -495,12 +562,17 @@ pub fn show_main_window_background() {
             "main_native_composition_prepared",
         );
 
-        // Glass mode: morph the glass backdrop into place on background shows too.
-        if tahoe_native_glass_composition_available()
-            && crate::theme::get_cached_theme().is_vibrancy_enabled()
-        {
-            animate_tahoe_glass_main_appearance(window, "PANEL", "Main window");
-            crate::platform::host_clock::log_entry_timeline_event("main_morph_armed");
+        let glass_entry_enabled = tahoe_native_glass_composition_available()
+            && crate::theme::get_cached_theme().is_vibrancy_enabled();
+
+        // orderFrontRegardless brings the alpha-zero window to front without activating the app.
+        // Crucially, we do NOT call makeKeyWindow so keyboard focus stays with
+        // whatever surface currently owns it.
+        let _: () = msg_send![window, orderFrontRegardless];
+        crate::platform::host_clock::log_entry_timeline_event("main_order_front_returned");
+
+        if glass_entry_enabled {
+            schedule_main_window_glass_entry(window, None);
         } else {
             // Instrumentation only: see the foreground show path.
             logging::log(
@@ -508,12 +580,6 @@ pub fn show_main_window_background() {
                 "event=glass_morph_gate_skip window=Main window reason=composition_or_vibrancy_unavailable",
             );
         }
-
-        // orderFrontRegardless brings the window to front without activating the app.
-        // Crucially, we do NOT call makeKeyWindow so keyboard focus stays with
-        // whatever surface currently owns it.
-        let _: () = msg_send![window, orderFrontRegardless];
-        crate::platform::host_clock::log_entry_timeline_event("main_order_front_returned");
 
         logging::log(
             "PANEL",

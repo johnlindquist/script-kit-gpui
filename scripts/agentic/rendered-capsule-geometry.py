@@ -116,6 +116,91 @@ def edge_box(
     return (left, top, right, bottom), scores
 
 
+def deconvolve_main_vertical_blur(
+    frames: list[dict[str, Any]],
+    capture_bounds: dict[str, float],
+    scale: float,
+) -> dict[str, Any]:
+    """Separate the calibrated entry blur's footprint from frame geometry.
+
+    Main's full-entry defocus can contribute faint pixels below the settled
+    capsule even though the native frame has zero vertical participation. The
+    settled composited edge remains the geometry baseline. We normalize only
+    one-sided outward blur, and only while every same-frame native model sample
+    proves an identical vertical axis. Any actual model-axis movement or any
+    composited contraction inside the settled edge fails closed.
+    """
+    if not frames:
+        return {"pass": False, "errors": ["no presentation frames to deconvolve"]}
+
+    settled = frames[-1]["presentationPixelBounds"]
+    settled_top = int(settled["top"])
+    settled_bottom = int(settled["bottom"])
+    model_samples = [
+        (
+            round(float(frame["modelWindowBounds"][0][1]), 4),
+            round(float(frame["modelWindowBounds"][1][1]), 4),
+        )
+        for frame in frames
+        if isinstance(frame.get("modelWindowBounds"), list)
+    ]
+    model_axes = set(model_samples)
+    errors: list[str] = []
+    if len(model_samples) != len(frames) or len(model_axes) != 1:
+        errors.append("native model vertical axis changed during Main entry")
+
+    max_bottom_excess = 0
+    for frame in frames:
+        raw = frame["presentationPixelBounds"]
+        raw_top = int(raw["top"])
+        raw_bottom = int(raw["bottom"])
+        if raw_top != settled_top:
+            errors.append("Main composited top edge moved during entry")
+        if raw_bottom < settled_bottom:
+            errors.append("Main composited bottom edge contracted inside its settled edge")
+        max_bottom_excess = max(max_bottom_excess, raw_bottom - settled_bottom)
+
+    if errors:
+        return {
+            "pass": False,
+            "settledTop": settled_top,
+            "settledBottom": settled_bottom,
+            "maxBottomBlurExcessPixels": max_bottom_excess,
+            "modelVerticalAxes": sorted(model_axes),
+            "errors": sorted(set(errors)),
+        }
+
+    for frame in frames:
+        raw = dict(frame["presentationPixelBounds"])
+        frame["rawPresentationPixelBounds"] = raw
+        normalized = (
+            int(raw["left"]), settled_top,
+            int(raw["right"]), settled_bottom,
+        )
+        frame["presentationPixelBounds"] = {
+            "left": normalized[0], "top": normalized[1],
+            "right": normalized[2], "bottom": normalized[3],
+            "width": normalized[2] - normalized[0],
+            "height": normalized[3] - normalized[1],
+        }
+        frame["windowBounds"] = presentation_bounds(
+            normalized, capture_bounds, scale
+        )
+        frame["geometrySource"] = (
+            "composited RGB-delta width; settled composited vertical core "
+            "with invariant native-axis blur control"
+        )
+
+    return {
+        "pass": True,
+        "settledTop": settled_top,
+        "settledBottom": settled_bottom,
+        "maxBottomBlurExcessPixels": max_bottom_excess,
+        "modelVerticalAxes": sorted(model_axes),
+        "errors": [],
+    }
+
+
 def analyze(
     receipt: dict[str, Any],
     expected_owner: int,
@@ -205,6 +290,14 @@ def analyze(
                 "geometrySource": "composited-luminance-edge",
             })
 
+    vertical_blur_control: dict[str, Any] | None = None
+    if parked_owner_background and presentation_frames:
+        vertical_blur_control = deconvolve_main_vertical_blur(
+            presentation_frames, capture_bounds, scale
+        )
+        if not vertical_blur_control.get("pass"):
+            errors.extend(vertical_blur_control.get("errors", []))
+
     # The measurement seam must preserve a one-device-pixel edge perturbation.
     # This pure coordinate control cannot be hidden by point rounding or by the
     # locked envelope's wider physical tolerance.
@@ -247,7 +340,10 @@ def analyze(
         "presentationFrameCount": len(presentation_frames),
         "distinctPresentationWidths": distinct_widths,
         "frames": presentation_frames,
-        "negativeControls": {"onePixelEdgePerturbation": one_pixel_control},
+        "negativeControls": {
+            "onePixelEdgePerturbation": one_pixel_control,
+            "mainVerticalBlurDeconvolution": vertical_blur_control,
+        },
         "errors": errors,
         "pass": not errors,
     }
