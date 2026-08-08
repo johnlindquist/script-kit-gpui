@@ -940,11 +940,13 @@ function classifyMainSurface(
     (entry: any) => entry?.name === "main-entry",
   );
   const envelope = scenario?.motionEnvelope ?? null;
-  const frames = scenario?.filmstrip?.receipt?.frames ?? [];
+  const frames = scenario?.presentationGeometry?.receipt?.frames ?? [];
   const exactWindowID = Number(scenario?.exactWindowID);
   const input: GlassObservationInput = {
     captureHealthPass: scenario?.filmstrip?.receipt?.captureHealthPass === true
-      && scenario?.filmstrip?.capturePass === true,
+      && scenario?.filmstrip?.capturePass === true
+      && scenario?.presentationGeometry?.exitCode === 0
+      && scenario?.presentationGeometry?.receipt?.pass === true,
     helperErrors: [...shared.helperErrors],
     fixtureErrors: [...shared.fixtureErrors],
     identityErrors: [
@@ -1012,7 +1014,9 @@ function classifyNotesSurface(
   const productErrors = (phaseEvaluation?.productErrors ?? []) as string[];
   const input: GlassObservationInput = {
     captureHealthPass: scenario?.filmstrip?.receipt?.captureHealthPass === true
-      && scenario?.filmstrip?.capturePass === true,
+      && scenario?.filmstrip?.capturePass === true
+      && scenario?.presentationGeometry?.exitCode === 0
+      && scenario?.presentationGeometry?.receipt?.pass === true,
     helperErrors: [...shared.helperErrors],
     fixtureErrors: [...shared.fixtureErrors],
     identityErrors: [
@@ -1056,11 +1060,13 @@ function classifyActionsSurface(
 ): { classified: ClassifiedGlassObservation; sourceDiagnostics: unknown } {
   const envelope = actionsReceipt?.motion?.renderedEnvelope ?? null;
   const ownerId = Number(actionsReceipt?.owner?.windowId);
-  const frames = actionsReceipt?.capture?.receipt?.frames ?? [];
+  const frames = actionsReceipt?.capture?.presentationGeometry?.receipt?.frames ?? [];
   const input: GlassObservationInput = {
     captureHealthPass:
       actionsReceipt?.capture?.receipt?.captureHealthPass === true
-      && actionsReceipt?.capture?.exitCode === 0,
+      && actionsReceipt?.capture?.exitCode === 0
+      && actionsReceipt?.capture?.presentationGeometry?.commandExitCode === 0
+      && actionsReceipt?.capture?.presentationGeometry?.receipt?.pass === true,
     helperErrors: [...shared.helperErrors],
     fixtureErrors: [...shared.fixtureErrors],
     identityErrors: [

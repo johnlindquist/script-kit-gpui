@@ -366,6 +366,9 @@ function startFilmstrip(
     title?: string;
     displayStream?: boolean;
     bounds?: { x: number; y: number; width: number; height: number };
+    regionArmed?: boolean;
+    ownerClass?: "Notes" | "Actions";
+    excludedWindowIds?: number[];
   },
 ) {
   const durationMs = SCENARIO_CAPTURE_DURATIONS_MS[name];
@@ -383,6 +386,12 @@ function startFilmstrip(
         ...(selector.title ? ["--title", selector.title] : []),
       ]),
     ...(selector.displayStream !== false ? ["--display-stream"] : []),
+    ...(selector.regionArmed ? ["--region-armed"] : []),
+    ...(selector.ownerClass ? ["--owner-class", selector.ownerClass] : []),
+    ...(selector.excludedWindowIds ?? []).flatMap((windowId) => [
+      "--exclude-window-id",
+      String(windowId),
+    ]),
     ...(selector.bounds
       ? [
         "--bounds",
@@ -540,6 +549,35 @@ async function finishFilmstrip(
       totalMs: finishedMs - started.observerStartedMs,
     },
     pass: verdict.pass,
+  };
+}
+
+async function analyzePresentationGeometry(
+  directory: string,
+  expectedOwner: number,
+  anchorBounds: { x: number; y: number; width: number; height: number },
+) {
+  const path = join(directory, "presentation-geometry.json");
+  const result = await run([
+    "python3",
+    resolve(import.meta.dir, "../agentic/rendered-capsule-geometry.py"),
+    "--receipt",
+    join(directory, "receipt.json"),
+    "--expected-owner",
+    String(expectedOwner),
+    "--anchor-bounds",
+    String(anchorBounds.x),
+    String(anchorBounds.y),
+    String(anchorBounds.width),
+    String(anchorBounds.height),
+    "--out",
+    path,
+  ]);
+  return {
+    path,
+    exitCode: result.exitCode,
+    stderr: result.stderr.trim().slice(-1_000),
+    receipt: existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : null,
   };
 }
 
@@ -761,9 +799,20 @@ try {
     mainWindowID,
     { captureBounds: mainCaptureBounds },
   );
+  const mainPresentationGeometry = await analyzePresentationGeometry(
+    mainEntry.directory,
+    mainWindowID,
+    {
+      x: Number(mainBounds.x),
+      y: Number(mainBounds.y),
+      width: Number(mainBounds.width),
+      height: Number(mainBounds.height),
+    },
+  );
+  const mainPresentationFrames = mainPresentationGeometry.receipt?.frames ?? [];
   const mainEntryMotionEnvelope = analyzeEntryMotionEnvelope(
-    mainEntryFilmstrip.receipt?.frames ?? [],
-    settledCaptures[0]?.windowBounds,
+    mainPresentationFrames,
+    mainPresentationFrames.at(-1)?.windowBounds ?? null,
     MAIN_GLASS_ENTRY_EXPECTATION,
   );
   // C08 strict observation classification. The LOCKED evaluator is unchanged;
@@ -774,7 +823,9 @@ try {
   // Interference and cleanup dominate at run level in the finally block.
   const mainEntryObservation = classifyGlassObservation({
     captureHealthPass: mainEntryFilmstrip.receipt?.captureHealthPass === true
-      && mainEntryFilmstrip.capturePass === true,
+      && mainEntryFilmstrip.capturePass === true
+      && mainPresentationGeometry.exitCode === 0
+      && mainPresentationGeometry.receipt?.pass === true,
     helperErrors: [],
     fixtureErrors: [],
     identityErrors: [
@@ -813,6 +864,7 @@ try {
     settledCaptures,
     settledCapturesPass,
     motionEnvelope: mainEntryMotionEnvelope,
+    presentationGeometry: mainPresentationGeometry,
     observation: mainEntryObservation,
     pointerPreparation: {
       command: ["cliclick", "m:2,2"],
@@ -844,9 +896,22 @@ try {
   // delta, and pair runtime host timestamps with actual rendered frames into
   // the four required named phase records.
   const notesBeforeInventory = await nativeWindowIds(pid);
+  const notesCaptureBounds = {
+    x: Number(mainBounds.x) + Number(mainBounds.width) - 80,
+    y: Math.max(0, Number(mainBounds.y) - 180),
+    width: 520,
+    height: 500,
+  };
   const notesEntry = startFilmstrip(
     "notes-entry",
-    { pid, title: "Notes" },
+    {
+      pid,
+      displayStream: true,
+      regionArmed: true,
+      ownerClass: "Notes",
+      bounds: notesCaptureBounds,
+      excludedWindowIds: notesBeforeInventory.completeWindowIds,
+    },
   );
   const pollSamples: Json[] = [];
   let pollStopRequested = false;
@@ -889,26 +954,21 @@ try {
       await Bun.sleep(8);
     }
   })();
-  // Short helper-arm lead (~25–30ms) so the poll and filmstrip precede the
-  // open command; preMask must be OBSERVED, never inferred from source logs.
-  await Bun.sleep(28);
+  // The display stream is authoritatively ready before the first Notes owner is
+  // created. Its initial frames are the same-stream background reference.
+  const notesEntryReady = await awaitObserverReady(notesEntry);
+  if (
+    Number(notesEntryReady.windowID) !== 0
+    || notesEntryReady.captureMode !== "display-region-armed-before-owner"
+  ) {
+    throw new Error("Notes observer was not ready before owner creation");
+  }
   const openRequestedAtMs = Number(
     (performance.now() - pollStartedMs).toFixed(2),
   );
   driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-open" });
-  const notesEntryReady = await awaitObserverReady(notesEntry);
-  const notesEntryID = Number(notesEntryReady.windowID);
+  await waitForWindowCount(driver, "notes", 1, 3_000);
   const notesReadyState = await notesState();
-  // Window discovery necessarily begins after the first Notes instance exists.
-  // Phase-align the proof deterministically only after ScreenCaptureKit has
-  // pinned that exact owner: begin its bounded native exit, then cancel/reopen
-  // the same window. Notes restarts an incomplete entry reveal on that exact
-  // CGWindowID, so preMask and body reveal are observed rather than inferred.
-  // This does not change production timing or calibration values.
-  driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-prime-close" });
-  await Bun.sleep(25);
-  driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-prime-reopen" });
-  const notesEntryPrimedByCancelReopen = true;
   // Keep polling until after the native settle deadline (the capture itself
   // runs 800ms from observer start).
   await Bun.sleep(900);
@@ -941,18 +1001,33 @@ try {
         notesEntryOwnerDelta.candidateIds.join(", ") || "none"
       })`,
     );
-  } else if (notesEntryOwnerDelta.candidateIds[0] !== notesEntryID) {
-    notesOwnerErrors.push(
-      `filmstrip pinned CGWindowID ${notesEntryID} but the unique owner delta is ${
-        notesEntryOwnerDelta.candidateIds[0]
-      }`,
-    );
+  }
+  const notesEntryID = notesEntryOwnerDelta.pass
+    ? Number(notesEntryOwnerDelta.candidateIds[0])
+    : 0;
+  const notesSettledOwner = notesAfterInventory.completeWindows.find(
+    (window: Json) => Number(window?.windowId) === notesEntryID,
+  );
+  if (!notesSettledOwner?.bounds) {
+    notesOwnerErrors.push("settled Notes owner bounds are missing");
   }
   const notesEntryFilmstrip = await finishFilmstrip(notesEntry, notesEntryID, {
     bodyBounds: notesBodyBounds,
     hiddenHostTimeNs: preliminaryFinalReveal?.firstFrameAtMonotonicNs,
     visibleHostTimeNs: preliminaryFinalReveal?.visibleAtMonotonicNs,
   });
+  const notesPresentationGeometry = notesSettledOwner?.bounds
+    ? await analyzePresentationGeometry(
+      notesEntry.directory,
+      notesEntryID,
+      {
+        x: Number(notesSettledOwner.bounds.x),
+        y: Number(notesSettledOwner.bounds.y),
+        width: Number(notesSettledOwner.bounds.width),
+        height: Number(notesSettledOwner.bounds.height),
+      },
+    )
+    : { path: null, exitCode: 1, stderr: "settled owner missing", receipt: null };
   const configuredState = pollReveals.find(
     (sample) => sample?.entryReveal?.nativeConfigured === true,
   )?.entryReveal;
@@ -995,15 +1070,17 @@ try {
     ? finalReveal
     : notesReadyState?.entryReveal;
   const morphConfiguredNs = Number(morphReveal?.configuredAtMonotonicNs);
-  const morphVisibleNs = Number(morphReveal?.visibleAtMonotonicNs);
+  const morphRevealStartedNs = Number(
+    morphReveal?.revealRequestedAtMonotonicNs,
+  );
   const morphSettleDurationMs = Number(morphReveal?.settleDurationMs);
   const morphRevealDelayMs = Number(morphReveal?.revealDelayMs);
   const phaseOneEndNs = morphConfiguredNs + morphSettleDurationMs * 500_000;
   const revealBeganBeforeRebound = morphReveal?.morphStarted === true
     && morphRevealDelayMs > 0
     && morphRevealDelayMs < morphSettleDurationMs / 2
-    && Number.isFinite(morphVisibleNs)
-    && morphVisibleNs < phaseOneEndNs;
+    && Number.isFinite(morphRevealStartedNs)
+    && morphRevealStartedNs < phaseOneEndNs;
   const framesBeforeVisible = (
     notesEntryFilmstrip.receipt?.frames ?? []
   ).filter((frame: Json) =>
@@ -1031,7 +1108,7 @@ try {
   // unpaired frame is an OBSERVER failure, never inferred from source logs.
   const settleDeadlineNs = notesTimes.configured
     + Number(configuredState?.settleDurationMs ?? Number.NaN) * 1_000_000;
-  const phaseFrames = [...(notesEntryFilmstrip.receipt?.frames ?? [])].sort(
+  const phaseFrames = [...(notesPresentationGeometry.receipt?.frames ?? [])].sort(
     (left: Json, right: Json) =>
       Number(left?.displayTimeNs ?? 0) - Number(right?.displayTimeNs ?? 0),
   );
@@ -1162,7 +1239,9 @@ try {
   };
   const notesEntryObservation = classifyGlassObservation({
     captureHealthPass: notesEntryFilmstrip.receipt?.captureHealthPass === true
-      && notesEntryFilmstrip.capturePass === true,
+      && notesEntryFilmstrip.capturePass === true
+      && notesPresentationGeometry.exitCode === 0
+      && notesPresentationGeometry.receipt?.pass === true,
     helperErrors: [],
     fixtureErrors: [],
     identityErrors: notesEntryFilmstrip.errors as string[],
@@ -1187,6 +1266,8 @@ try {
     name: "notes-entry",
     exactWindowID: notesEntryID,
     ownerDelta: notesEntryOwnerDelta,
+    captureBounds: notesCaptureBounds,
+    streamReady: notesEntryReady,
     openRequestedAtMs,
     pollSampleCount: pollSamples.length,
     pollSamples,
@@ -1210,7 +1291,7 @@ try {
         visibleWithinBounds: notesVisibleWithinBounds,
         morph: {
           configuredAtMonotonicNs: morphConfiguredNs,
-          visibleAtMonotonicNs: morphVisibleNs,
+          revealRequestedAtMonotonicNs: morphRevealStartedNs,
           settleDurationMs: morphSettleDurationMs,
           settledCrossingDelayMs: morphRevealDelayMs,
           phaseOneEndNs,
@@ -1220,7 +1301,8 @@ try {
     },
     notesLayout,
     nativeConfiguration: configuredState ?? null,
-    observerPrimedByExactOwnerCancelReopen: notesEntryPrimedByCancelReopen,
+    observerPreArmedBeforeOwnerCreation: true,
+    presentationGeometry: notesPresentationGeometry,
     filmstrip: notesEntryFilmstrip,
     structuralPass: notesEntryFilmstrip.capturePass && notesEntryStructuralPass,
     pass: notesEntryPass,

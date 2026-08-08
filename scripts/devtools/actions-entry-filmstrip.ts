@@ -258,6 +258,15 @@ async function completeNativeInventory(pid: number): Promise<{
   };
 }
 
+function expandBounds(bounds: { x?: number; y?: number; width?: number; height?: number }, padding = 80) {
+  return {
+    x: Number(bounds.x) - padding,
+    y: Number(bounds.y) - padding,
+    width: Number(bounds.width) + padding * 2,
+    height: Number(bounds.height) + padding * 2,
+  };
+}
+
 function pinMainWindowId(windows: NativeWindowRow[]): number {
   return Number(
     windows
@@ -309,18 +318,24 @@ try {
     "120 Hz exact-window filmstrip; 98.8% -> 101.3% -> 100% grow-in must remain inside the golden envelope",
   );
 
-  // Complete same-PID inventory BEFORE the Actions open — the owner is the
-  // unique delta, never a sorted candidate.
+  // Arm over the already-known main region. Actions is constrained inside that
+  // region, so no warm popup is needed and no prior transient owner can leak
+  // pixels or identity into the evidence run.
   const beforeInventory = await completeNativeInventory(Number(driver.pid));
   if (beforeInventory.error) {
     observerErrors.push(`pre-open native inventory failed: ${beforeInventory.error}`);
   }
   const mainWindowId = pinMainWindowId(beforeInventory.windows);
-  if (!mainWindowId) {
-    observerErrors.push("main native window could not be pinned before open");
+  const mainWindow = beforeInventory.windows.find(
+    (window) => Number(window.windowId) === mainWindowId,
+  );
+  if (!mainWindowId || !mainWindow?.bounds) {
+    throw new Error("main native window and bounds could not be pinned before open");
   }
+  const captureBounds = expandBounds(mainWindow.bounds, 0);
   receipt.preOpenInventory = beforeInventory;
   receipt.mainWindowId = mainWindowId;
+  receipt.captureBounds = captureBounds;
 
   const framesDir = join(outDir, "frames");
   mkdirSync(framesDir, { recursive: true });
@@ -329,9 +344,19 @@ try {
     helper,
     "--pid",
     String(driver.pid),
-    "--max-width",
-    "500",
     "--display-stream",
+    "--region-armed",
+    "--owner-class",
+    "Actions",
+    "--bounds",
+    String(captureBounds.x),
+    String(captureBounds.y),
+    String(captureBounds.width),
+    String(captureBounds.height),
+    ...beforeInventory.windows.flatMap((window) => [
+      "--exclude-window-id",
+      String(window.windowId),
+    ]),
     "--out",
     framesDir,
     "--ready",
@@ -347,10 +372,8 @@ try {
     "--binary-sha256",
     String(receipt.binarySha256),
   ];
-  // The filmstrip helper starts BEFORE the key dispatch so the very first
-  // rendered frame of the grow-in is owned evidence.
   const capture = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
-  await Bun.sleep(30);
+  const ready = await waitForFile(readyPath);
   const dispatch = await driver.simulateGpuiKeyDown("k", {
     modifiers: ["cmd"],
     target: { type: "id", id: "main" },
@@ -359,7 +382,6 @@ try {
   if (dispatch?.success !== true) {
     observerErrors.push("Cmd+K dispatch was not acknowledged by the app");
   }
-  const ready = await waitForFile(readyPath);
   const opened = await waitForActions(driver, 1, 3_000);
   if (opened.pass !== true || opened.count !== 1) {
     ownerErrors.push(
@@ -368,7 +390,7 @@ try {
   }
   await driver.waitForSettle({ timeoutMs: 3_000 });
 
-  // Complete post-open inventory → ONE Actions owner via the delta.
+  // Complete post-open inventory → ONE fresh Actions owner via the delta.
   const afterInventory = await completeNativeInventory(Number(driver.pid));
   if (afterInventory.error) {
     observerErrors.push(`post-open native inventory failed: ${afterInventory.error}`);
@@ -389,10 +411,8 @@ try {
     );
   }
   const ownerId = ownerDelta.pass ? ownerDelta.candidateIds[0]! : null;
-  if (ownerId != null && Number(ready?.windowID) !== ownerId) {
-    ownerErrors.push(
-      `filmstrip ready.windowID ${ready?.windowID} does not match the unique Actions owner ${ownerId}`,
-    );
+  if (Number(ready?.windowID) !== 0 || ready?.captureMode !== "display-region-armed-before-owner") {
+    ownerErrors.push("filmstrip was not ready in pre-owner region-armed mode");
   }
   // Settled native sample must bind to the same owner.
   const settledInventory = await completeNativeInventory(Number(driver.pid));
@@ -423,6 +443,27 @@ try {
   const filmstrip = existsSync(filmstripPath)
     ? JSON.parse(readFileSync(filmstripPath, "utf8"))
     : null;
+  const presentationPath = join(framesDir, "presentation-geometry.json");
+  const presentationRun = ownerId != null && filmstrip
+    ? await run([
+      "python3",
+      resolve(import.meta.dir, "../agentic/rendered-capsule-geometry.py"),
+      "--receipt",
+      filmstripPath,
+      "--expected-owner",
+      String(ownerId),
+      "--anchor-bounds",
+      String(settledOwner?.bounds?.x),
+      String(settledOwner?.bounds?.y),
+      String(settledOwner?.bounds?.width),
+      String(settledOwner?.bounds?.height),
+      "--out",
+      presentationPath,
+    ])
+    : { exitCode: 1, stdout: "", stderr: "owner unresolved" };
+  const presentation = existsSync(presentationPath)
+    ? JSON.parse(readFileSync(presentationPath, "utf8"))
+    : null;
   const filmstripIdentityErrors = filmstrip && ownerId != null
     ? validateFilmstripCapture(filmstrip, {
       runId: String(receipt.runId),
@@ -434,11 +475,19 @@ try {
     : ["filmstrip receipt missing or owner unresolved"];
   identityErrors.push(...filmstripIdentityErrors);
   captureHealthPass = captureExitCode === 0
-    && filmstrip?.captureHealthPass !== false;
+    && filmstrip?.captureHealthPass === true
+    && presentationRun.exitCode === 0
+    && presentation?.pass === true;
   if (ownerId != null) {
     ownerErrors.push(
-      ...validateOwnedRenderedFrames(filmstrip?.frames ?? [], ownerId),
+      ...validateOwnedRenderedFrames(
+        (filmstrip?.frames ?? []).filter((frame: Json) => frame?.actualWindowID != null),
+        ownerId,
+      ),
     );
+  }
+  if (presentation?.pass !== true) {
+    observerErrors.push(...(presentation?.errors ?? ["presentation geometry analysis missing"]));
   }
 
   const appLog = await Bun.file(driver.logPath).text();
@@ -457,19 +506,11 @@ try {
     motionLog,
     ACTIONS_GLASS_ENTRY_EXPECTATION,
   );
-  const settledActionsBounds = settledOwner?.bounds;
-  const settledBounds: NativeWindowBounds = settledActionsBounds
-    ? [
-      [Number(settledActionsBounds.x), Number(settledActionsBounds.y)],
-      [
-        Number(settledActionsBounds.width),
-        Number(settledActionsBounds.height),
-      ],
-    ]
-    : null;
-  // LOCKED evaluator, unchanged: the rendered envelope is the gate.
+  const presentationFrames = presentation?.frames ?? [];
+  const settledBounds: NativeWindowBounds = presentationFrames.at(-1)?.windowBounds ?? null;
+  // LOCKED evaluator, unchanged: composited-pixel geometry is the rendered gate.
   const renderedEnvelope = analyzeEntryMotionEnvelope(
-    filmstrip?.frames ?? [],
+    presentationFrames,
     settledBounds,
     ACTIONS_GLASS_ENTRY_EXPECTATION,
   );
@@ -494,6 +535,12 @@ try {
     receiptPath: filmstripPath,
     receipt: filmstrip,
     identityErrors: filmstripIdentityErrors,
+    presentationGeometry: {
+      commandExitCode: presentationRun.exitCode,
+      stderr: presentationRun.stderr.trim().slice(-1_000),
+      receiptPath: presentationPath,
+      receipt: presentation,
+    },
   };
   receipt.dispatch = dispatch;
   receipt.opened = opened;

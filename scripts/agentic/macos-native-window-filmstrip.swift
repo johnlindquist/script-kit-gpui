@@ -17,7 +17,10 @@ private struct Arguments {
     var durationMs = 250
     var frameRate = 120
     var displayStream = false
+    var regionArmed = false
     var pinnedBounds: CGRect?
+    var excludedWindowIDs: [CGWindowID] = []
+    var ownerClass: String?
     var runID: String?
     var gitCommit: String?
     var binarySHA256: String?
@@ -71,6 +74,20 @@ private func parseArguments() -> Arguments {
             }
         case "--display-stream":
             result.displayStream = true
+        case "--region-armed":
+            result.regionArmed = true
+        case "--exclude-window-id":
+            if index + 1 < values.count {
+                if let id = CGWindowID(values[index + 1]) {
+                    result.excludedWindowIDs.append(id)
+                }
+                index += 1
+            }
+        case "--owner-class":
+            if index + 1 < values.count {
+                result.ownerClass = values[index + 1]
+                index += 1
+            }
         case "--bounds":
             if index + 4 < values.count,
                let x = Double(values[index + 1]),
@@ -175,6 +192,62 @@ private func windowState(_ windowID: CGWindowID) -> (
     return (bounds, alpha, onscreen)
 }
 
+private struct RegionOwnerCandidate {
+    let windowID: CGWindowID
+    let bounds: CGRect
+    let alpha: Double?
+    let onscreen: Bool?
+}
+
+/// Resolve only windows created after the pre-arm inventory. This mirrors the
+/// TypeScript topology classifier but runs on every delivered display frame so
+/// the first composited pixels can be bound before the control process observes
+/// the new automation target. Ambiguity is returned rather than sorted away.
+private func regionOwnerCandidates(
+    pid: pid_t,
+    excludedWindowIDs: Set<CGWindowID>,
+    ownerClass: String?,
+    captureFrame: CGRect
+) -> [RegionOwnerCandidate] {
+    guard let info = CGWindowListCopyWindowInfo(
+        [.optionAll],
+        kCGNullWindowID
+    ) as? [[String: Any]] else { return [] }
+    return info.compactMap { row in
+        guard (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid,
+              let id = (row[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+              !excludedWindowIDs.contains(id),
+              let dictionary = row[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: dictionary),
+              bounds.width > 1,
+              bounds.height > 1,
+              bounds.intersects(captureFrame)
+        else { return nil }
+        let title = row[kCGWindowName as String] as? String ?? ""
+        let layer = (row[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+        switch ownerClass {
+        case "Notes":
+            guard title == "Notes" else { return nil }
+        case "Actions":
+            let normalizedTitle = title.lowercased()
+            guard normalizedTitle.contains("actions")
+                || normalizedTitle.contains("command palette")
+                || (title.isEmpty && layer == 101 && bounds.height > 140)
+            else { return nil }
+        case .some:
+            return nil
+        case .none:
+            break
+        }
+        return RegionOwnerCandidate(
+            windowID: id,
+            bounds: bounds,
+            alpha: (row[kCGWindowAlpha as String] as? NSNumber)?.doubleValue,
+            onscreen: (row[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue
+        )
+    }
+}
+
 private struct Receipt: Codable {
     let schemaVersion: Int
     let status: String
@@ -188,6 +261,8 @@ private struct Receipt: Codable {
     let displayID: UInt32?
     let refreshRateHz: Double
     let captureScale: Double
+    let captureBounds: [String: Double]
+    let captureMode: String
     let pixelFormat: String
     let receivedSampleCount: Int
     let accountedSampleCount: Int
@@ -269,10 +344,13 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
 
     private let lock = NSLock()
     private let outputDirectory: URL
-    private let windowID: CGWindowID
+    private var boundWindowID: CGWindowID
     private let captureFrame: CGRect
     private let captureScale: Double
     private let displayStream: Bool
+    private let regionBindingPID: pid_t?
+    private let excludedWindowIDs: Set<CGWindowID>
+    private let ownerClass: String?
     private var captured: [CapturedSample] = []
     private var errors: [String] = []
     private var receivedSampleCount = 0
@@ -281,6 +359,7 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
     private var incompleteRenderableSampleCount = 0
     private var missingDisplayTimeCount = 0
     private var receivedDisplayTimes: [UInt64] = []
+    private var bindingAmbiguityReported = false
     private let context = CIContext(options: [.cacheIntermediates: false])
 
     init(
@@ -288,13 +367,25 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
         windowID: CGWindowID,
         captureFrame: CGRect,
         captureScale: Double,
-        displayStream: Bool
+        displayStream: Bool,
+        regionBindingPID: pid_t? = nil,
+        excludedWindowIDs: Set<CGWindowID> = [],
+        ownerClass: String? = nil
     ) {
         self.outputDirectory = outputDirectory
-        self.windowID = windowID
+        self.boundWindowID = windowID
         self.captureFrame = captureFrame
         self.captureScale = captureScale
         self.displayStream = displayStream
+        self.regionBindingPID = regionBindingPID
+        self.excludedWindowIDs = excludedWindowIDs
+        self.ownerClass = ownerClass
+    }
+
+    func resolvedWindowID() -> CGWindowID {
+        lock.lock()
+        defer { lock.unlock() }
+        return boundWindowID
     }
 
     func stream(
@@ -334,7 +425,45 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
             lock.unlock()
             return
         }
-        let state = windowState(windowID)
+        let activeWindowID: CGWindowID
+        if let regionBindingPID {
+            lock.lock()
+            let alreadyBound = boundWindowID
+            lock.unlock()
+            if alreadyBound > 0 {
+                activeWindowID = alreadyBound
+            } else {
+                let candidates = regionOwnerCandidates(
+                    pid: regionBindingPID,
+                    excludedWindowIDs: excludedWindowIDs,
+                    ownerClass: ownerClass,
+                    captureFrame: captureFrame
+                )
+                if candidates.count == 1 {
+                    activeWindowID = candidates[0].windowID
+                    lock.lock()
+                    boundWindowID = activeWindowID
+                    lock.unlock()
+                } else {
+                    activeWindowID = 0
+                    if candidates.count > 1 {
+                        lock.lock()
+                        if !bindingAmbiguityReported {
+                            errors.append(
+                                "region owner binding ambiguous: \(candidates.map(\.windowID))"
+                            )
+                            bindingAmbiguityReported = true
+                        }
+                        lock.unlock()
+                    }
+                }
+            }
+        } else {
+            activeWindowID = boundWindowID
+        }
+        let state = activeWindowID > 0
+            ? windowState(activeWindowID)
+            : (bounds: nil, alpha: nil, onscreen: nil)
         let dirtyRects = (attachments?.first?[.dirtyRects] as? [CGRect])
             ?? (attachments?.first?[.dirtyRects] as? [NSValue])?.map(\.rectValue)
             ?? []
@@ -365,7 +494,7 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
             windowBounds: resolvedBounds,
             windowAlpha: state.alpha,
             windowOnscreen: state.onscreen,
-            actualWindowID: state.bounds == nil ? nil : windowID,
+            actualWindowID: state.bounds == nil ? nil : activeWindowID,
             geometrySource: renderedDamageBounds == nil
                 ? "cg-window-inventory"
                 : "screen-damage"
@@ -398,8 +527,12 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
         let incompleteRenderable = incompleteRenderableSampleCount
         let missingDisplayTime = missingDisplayTimeCount
         let allDisplayTimes = receivedDisplayTimes
+        let resolvedWindowID = boundWindowID
         var finalizeErrors = errors
         lock.unlock()
+        if regionBindingPID != nil && resolvedWindowID == 0 {
+            finalizeErrors.append("region capture never bound a unique native owner")
+        }
 
         var frames: [FrameReceipt] = []
         for (sequence, sample) in samples.enumerated() {
@@ -440,7 +573,7 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
                 windowBounds: sample.windowBounds,
                 windowAlpha: sample.windowAlpha,
                 windowOnscreen: sample.windowOnscreen,
-                expectedWindowID: windowID,
+                expectedWindowID: resolvedWindowID,
                 actualWindowID: sample.actualWindowID,
                 geometrySource: sample.geometrySource,
                 path: path,
@@ -534,6 +667,8 @@ private enum Main {
         var errors: [String] = []
         var resolvedWindowID = arguments.windowID ?? 0
         var resolvedDisplayID: CGDirectDisplayID?
+        var resolvedCaptureFrame = CGRect.zero
+        var resolvedCaptureMode = "unresolved"
         var refreshRateHz = Double(max(1, arguments.frameRate))
         let captureScale = 2.0
         do {
@@ -544,7 +679,23 @@ private enum Main {
             if arguments.displayStream {
                 let pinnedWindowID: CGWindowID
                 let pinnedBounds: CGRect
-                if let requestedWindowID = arguments.windowID {
+                if arguments.regionArmed {
+                    guard let requestedBounds = arguments.pinnedBounds,
+                          arguments.pid != nil,
+                          arguments.ownerClass != nil
+                    else {
+                        throw NSError(
+                            domain: "macos-native-window-filmstrip",
+                            code: 5,
+                            userInfo: [
+                                NSLocalizedDescriptionKey:
+                                    "region-armed capture requires --pid, --owner-class, and --bounds"
+                            ]
+                        )
+                    }
+                    pinnedWindowID = 0
+                    pinnedBounds = requestedBounds
+                } else if let requestedWindowID = arguments.windowID {
                     guard let retainedBounds =
                         arguments.pinnedBounds ?? windowState(requestedWindowID).bounds
                     else {
@@ -583,7 +734,9 @@ private enum Main {
                 }
                 windowID = pinnedWindowID
                 captureFrame = pinnedBounds
-                captureMode = "display-pinned-window-bounds"
+                captureMode = arguments.regionArmed
+                    ? "display-region-armed-before-owner"
+                    : "display-pinned-window-bounds"
                 resolvedDisplayID = display.displayID
                 filter = SCContentFilter(display: display, excludingWindows: [])
             } else {
@@ -601,6 +754,8 @@ private enum Main {
                 })?.displayID
                 filter = SCContentFilter(desktopIndependentWindow: window)
             }
+            resolvedCaptureFrame = captureFrame
+            resolvedCaptureMode = captureMode
             if let displayID = resolvedDisplayID {
                 refreshRateHz = displayRefreshRate(
                     displayID,
@@ -613,7 +768,10 @@ private enum Main {
                 windowID: windowID,
                 captureFrame: captureFrame,
                 captureScale: captureScale,
-                displayStream: arguments.displayStream
+                displayStream: arguments.displayStream,
+                regionBindingPID: arguments.regionArmed ? arguments.pid : nil,
+                excludedWindowIDs: Set(arguments.excludedWindowIDs),
+                ownerClass: arguments.ownerClass
             )
             let configuration = SCStreamConfiguration()
             configuration.width = max(1, Int(captureFrame.width * captureScale))
@@ -675,6 +833,7 @@ private enum Main {
             }
             try await Task.sleep(for: .milliseconds(arguments.durationMs))
             try await createdStream.stopCapture()
+            resolvedWindowID = receiver.resolvedWindowID()
         } catch {
             errors.append(error.localizedDescription)
             if let stream {
@@ -757,6 +916,13 @@ private enum Main {
             displayID: resolvedDisplayID,
             refreshRateHz: refreshRateHz,
             captureScale: captureScale,
+            captureBounds: [
+                "x": resolvedCaptureFrame.minX,
+                "y": resolvedCaptureFrame.minY,
+                "width": resolvedCaptureFrame.width,
+                "height": resolvedCaptureFrame.height,
+            ],
+            captureMode: resolvedCaptureMode,
             pixelFormat: "BGRA",
             receivedSampleCount: finalized.received,
             accountedSampleCount: finalized.complete + finalized.incomplete,
