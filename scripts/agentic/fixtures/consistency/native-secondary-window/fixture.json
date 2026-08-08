@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "taskId": "PF-010",
+  "familyId": "native-secondary-window",
+  "appView": "AgentChatView",
+  "host": "NotesWindow",
+  "expectedAppView": "AgentChatView",
+  "expectedHost": "NotesWindow",
+  "memberBindingIds": [
+    "alias:notes-agent_chat"
+  ],
+  "memberReceiptPaths": [
+    ".artifacts/consistency/PF-010/family-fixtures.json"
+  ],
+  "states": {
+    "defaultAppView": "AgentChatView",
+    "enabled": {
+      "actionAllowed": true,
+      "disabledReason": null
+    },
+    "disabled": {
+      "actionAllowed": false,
+      "disabledReason": "fixture-disabled"
+    },
+    "targetSwitch": {
+      "from": "NotesWindow@1",
+      "to": "NotesWindow@2",
+      "generationAdvanced": true
+    },
+    "dismiss": {
+      "policyDeclared": true,
+      "restoresOwnerFocus": true
+    },
+    "actionPolicy": {
+      "descriptorOwned": true,
+      "selectionIdentityRequired": true
+    }
+  }
+}

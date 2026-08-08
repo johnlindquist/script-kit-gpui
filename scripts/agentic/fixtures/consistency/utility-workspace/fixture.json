@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "taskId": "PF-010",
+  "familyId": "utility-workspace",
+  "appView": "EmojiPickerView",
+  "host": "MainWindow",
+  "expectedAppView": "EmojiPickerView",
+  "expectedHost": "MainWindow",
+  "memberBindingIds": [
+    "EmojiPicker::EmojiPickerView@MainWindow",
+    "FileSearchFull::FileSearchView@MainWindow",
+    "FileSearchMini::FileSearchView@MainWindow",
+    "FlowSession::FlowSessionView@MainWindow",
+    "PermissionsWizard::PermissionsWizardView@MainWindow",
+    "ThemeChooser::ThemeChooserView@MainWindow",
+    "UtilityChildContent::QuickTerminalView@MainWindow",
+    "UtilityChildContent::ScratchPadView@MainWindow"
+  ],
+  "memberReceiptPaths": [
+    ".artifacts/consistency/PF-010/family-fixtures.json"
+  ],
+  "states": {
+    "defaultAppView": "EmojiPickerView",
+    "enabled": {
+      "actionAllowed": true,
+      "disabledReason": null
+    },
+    "disabled": {
+      "actionAllowed": false,
+      "disabledReason": "fixture-disabled"
+    },
+    "targetSwitch": {
+      "from": "MainWindow@1",
+      "to": "MainWindow@2",
+      "generationAdvanced": true
+    },
+    "dismiss": {
+      "policyDeclared": true,
+      "restoresOwnerFocus": true
+    },
+    "actionPolicy": {
+      "descriptorOwned": true,
+      "selectionIdentityRequired": true
+    }
+  }
+}

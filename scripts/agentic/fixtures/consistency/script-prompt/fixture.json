@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "taskId": "PF-010",
+  "familyId": "script-prompt",
+  "appView": "CreateAiPresetView",
+  "host": "MainWindow",
+  "expectedAppView": "CreateAiPresetView",
+  "expectedHost": "MainWindow",
+  "memberBindingIds": [
+    "ExplicitPromptEntity::CreateAiPresetView@MainWindow",
+    "ExplicitPromptEntity::EnvPrompt@MainWindow",
+    "ExplicitPromptEntity::NamingPrompt@MainWindow",
+    "PromptChildContent::EditorPrompt@MainWindow",
+    "PromptChildContent::TermPrompt@MainWindow",
+    "PromptEntity::ArgPrompt@MainWindow",
+    "PromptEntity::ChatPrompt@MainWindow",
+    "PromptEntity::DivPrompt@MainWindow",
+    "PromptEntity::FormPrompt@MainWindow",
+    "PromptEntity::HotkeyPrompt@MainWindow",
+    "PromptEntity::MicroPrompt@MainWindow",
+    "PromptEntity::MiniPrompt@MainWindow",
+    "PromptEntityCancelsToScript::DropPrompt@MainWindow",
+    "PromptEntityCancelsToScript::PathPrompt@MainWindow",
+    "PromptEntityCancelsToScript::SelectPrompt@MainWindow",
+    "PromptEntityCancelsToScript::TemplatePrompt@MainWindow",
+    "Webcam::WebcamView@MainWindow"
+  ],
+  "memberReceiptPaths": [
+    ".artifacts/consistency/PF-010/family-fixtures.json"
+  ],
+  "states": {
+    "defaultAppView": "CreateAiPresetView",
+    "enabled": {
+      "actionAllowed": true,
+      "disabledReason": null
+    },
+    "disabled": {
+      "actionAllowed": false,
+      "disabledReason": "fixture-disabled"
+    },
+    "targetSwitch": {
+      "from": "MainWindow@1",
+      "to": "MainWindow@2",
+      "generationAdvanced": true
+    },
+    "dismiss": {
+      "policyDeclared": true,
+      "restoresOwnerFocus": true
+    },
+    "actionPolicy": {
+      "descriptorOwned": true,
+      "selectionIdentityRequired": true
+    }
+  }
+}

@@ -1,8 +1,27 @@
 #!/usr/bin/env bun
+/**
+ * scripts/devtools/coverage.ts — the canonical runtime coverage-profile
+ * registry (PF-009).
+ *
+ * This module is IMPORTABLE: `import { coverageProfiles } from "./coverage.ts"`
+ * produces no stdout and no side effects. The CLI report lives behind
+ * `import.meta.main`.
+ *
+ * Namespace discipline (RPT-001): runtime coverage profiles are NOT contract
+ * kinds, contract mappings, unique AppView variants, or orientation aliases.
+ * Profile counts must never be mixed into the 37/54 source census.
+ *
+ * Binding support (PF-009) is derived ONLY from the machine-readable fields
+ * `availablePrimitiveIds` and `bindingSelectors` — never from the prose
+ * fields (`supportedNow`, `missingRuntimePrimitives`, `features`,
+ * `shortcuts`), which remain human reporting.
+ */
 
-type CoverageStatus = "supported" | "partial" | "missing" | "planned";
+import { receiptSchemaRegistry } from "./lib/receipt-schema.ts";
 
-type Domain = {
+export type CoverageStatus = "supported" | "partial" | "missing" | "planned";
+
+export type Domain = {
   id: string;
   name: string;
   chromeAnalogue: string;
@@ -11,7 +30,21 @@ type Domain = {
   nextPrimitives: string[];
 };
 
-type Surface = {
+/**
+ * Typed selector joining canonical AppView→SurfaceKind mappings to this
+ * profile. Selection precedence is priority-based and ties are INVALID —
+ * never resolved by array order (see resolveCoverageProfile in surfaces.ts).
+ */
+export type CoverageProfileSelector = {
+  relation: "Direct" | "Derived";
+  priority: number;
+  contractKinds?: readonly string[];
+  appViewVariants?: readonly string[];
+  families?: readonly string[];
+  hostKinds?: readonly string[];
+};
+
+export type CoverageProfile = {
   id: string;
   name: string;
   status: CoverageStatus;
@@ -22,6 +55,10 @@ type Surface = {
   supportedNow: string[];
   missingRuntimePrimitives: string[];
   regressionRecipeRole: string;
+  /** Machine-readable primitive availability; every id must resolve in receiptSchemaRegistry. */
+  availablePrimitiveIds: readonly string[];
+  /** Machine-readable mapping selectors; empty = profile is not binding-addressable. */
+  bindingSelectors: readonly CoverageProfileSelector[];
 };
 
 const notesShortcutCoverage = [
@@ -112,7 +149,7 @@ const dictationPhaseCoverage = [
   "Failed -> Idle",
 ];
 
-const domains: Domain[] = [
+export const coverageDomains: Domain[] = [
   {
     id: "targets",
     name: "Targets and Windows",
@@ -219,7 +256,24 @@ const domains: Domain[] = [
   },
 ];
 
-const surfaces: Surface[] = [
+/**
+ * Generic target-scoped primitive set available for main-window launcher
+ * surfaces: every producer here is target-scoped and works against any
+ * main-window AppView (elements/layout/scroll/focus/text/keyboard/act).
+ */
+const mainWindowPrimitiveIds = [
+  "devtools.targets.inspect",
+  "devtools.surface.inspect",
+  "devtools.elements.snapshot",
+  "devtools.layout.measure",
+  "devtools.scroll.inspect",
+  "devtools.focus.inspect",
+  "devtools.text.measure",
+  "devtools.keyboard.inspect",
+  "devtools.act",
+] as const;
+
+export const coverageProfiles: CoverageProfile[] = [
   {
     id: "agent-chat",
     name: "Agent Chat and Quick AI reliability",
@@ -240,6 +294,10 @@ const surfaces: Surface[] = [
     ],
     missingRuntimePrimitives: ["green recovery action activation receipt"],
     regressionRecipeRole: "Use fixtures for deterministic red/green recovery proof without provider credentials.",
+    availablePrimitiveIds: [...mainWindowPrimitiveIds],
+    bindingSelectors: [
+      { relation: "Direct", priority: 100, appViewVariants: ["AgentChatView"], hostKinds: ["MainWindow"] },
+    ],
   },
   {
     id: "chat-prompt",
@@ -259,6 +317,10 @@ const surfaces: Surface[] = [
     ],
     missingRuntimePrimitives: ["green recovery action activation receipt"],
     regressionRecipeRole: "Keep ChatPrompt proof compatibility-only while primary behavior migrates to shared recovery.",
+    availablePrimitiveIds: [...mainWindowPrimitiveIds],
+    bindingSelectors: [
+      { relation: "Direct", priority: 100, appViewVariants: ["ChatPrompt"], hostKinds: ["MainWindow"] },
+    ],
   },
   {
     id: "flow-ux-view",
@@ -274,6 +336,10 @@ const surfaces: Surface[] = [
     ],
     missingRuntimePrimitives: ["green rethread action activation receipt"],
     regressionRecipeRole: "Use deterministic protocol fixtures before live mdflow smoke coverage.",
+    availablePrimitiveIds: [...mainWindowPrimitiveIds],
+    bindingSelectors: [
+      { relation: "Direct", priority: 90, contractKinds: ["FlowUx"] },
+    ],
   },
   {
     id: "flow-session-view",
@@ -286,6 +352,10 @@ const surfaces: Surface[] = [
     supportedNow: ["getAiReliabilityState(target)"],
     missingRuntimePrimitives: ["green restart and reattach action receipts"],
     regressionRecipeRole: "Use live mdflow only after deterministic state/action receipts are green.",
+    availablePrimitiveIds: [...mainWindowPrimitiveIds],
+    bindingSelectors: [
+      { relation: "Direct", priority: 90, contractKinds: ["FlowSession"] },
+    ],
   },
   {
     id: "main",
@@ -306,6 +376,13 @@ const surfaces: Surface[] = [
     ],
     missingRuntimePrimitives: ["text fit", "scroll geometry", "layout overlap pairs", "focus ring bounds"],
     regressionRecipeRole: "Use recipes only for stable launcher regressions after direct measurements isolate the bug.",
+    availablePrimitiveIds: [...mainWindowPrimitiveIds, "devtools.actions.inspect"],
+    bindingSelectors: [
+      // Host-wide Derived fallback for every ordinary Main-window mapping.
+      // Exact profiles (agent-chat, chat-prompt, flow-*, dictation-history)
+      // outrank this by priority; ties are invalid, never array-ordered.
+      { relation: "Derived", priority: 10, hostKinds: ["MainWindow"] },
+    ],
   },
   {
     id: "actions-dialog",
@@ -339,6 +416,10 @@ const surfaces: Surface[] = [
     ],
     missingRuntimePrimitives: ["disabled reason bounds for routes that render visible disabled explanations"],
     regressionRecipeRole: "Smoke actions menu invariants only after direct target-scoped popup layout receipts isolate the bug.",
+    availablePrimitiveIds: [...mainWindowPrimitiveIds, "devtools.actions.inspect"],
+    bindingSelectors: [
+      { relation: "Direct", priority: 95, contractKinds: ["ActionsDialog"], hostKinds: ["ActionsDialog"] },
+    ],
   },
   {
     id: "notes",
@@ -412,11 +493,31 @@ const surfaces: Surface[] = [
       "remaining Notes shortcut activation parity receipts beyond Cmd+Shift+P",
     ],
     regressionRecipeRole: "Keep notes recipes as regression guards for resize, Agent Chat handoff, preview sync, and origin safety after DevTools receipts exist.",
+    availablePrimitiveIds: [
+      "devtools.targets.inspect",
+      "devtools.surface.inspect",
+      "devtools.elements.snapshot",
+      "devtools.layout.measure",
+      "devtools.focus.inspect",
+      "devtools.keyboard.inspect",
+      "devtools.act",
+      "devtools.notes.inspect",
+      "devtools.notes.resizeCompare",
+    ],
+    bindingSelectors: [
+      // Host-wide fallback for Notes-hosted orientation aliases only; no
+      // canonical Main-window mapping resolves here.
+      { relation: "Derived", priority: 10, hostKinds: ["NotesWindow"] },
+    ],
   },
   {
     id: "notes-main-handoff",
     name: "Notes → main Agent Chat handoff",
-    status: "supported",
+    // Reconciled 2026-08-07 (C07): the wrong-host negative proof named in
+    // missingRuntimePrimitives is still absent from the tree
+    // (notes-main-agent-chat-handoff.ts has no wrong-host case), so this
+    // profile cannot carry an unqualified "supported" claim.
+    status: "partial",
     domains: ["targets", "elements", "input", "logs", "investigation"],
     sourceFiles: ["src/notes/window/ai_handoff.rs", "src/app_impl/agent_handoff/agent_chat_entry.rs", "src/ai/agent_chat/ui/view.rs"],
     features: ["Cmd+Enter handoff", "Ask AI titlebar command", "actions-panel Ask AI About This Note", "@note composer token", "focusedTarget note chip", "cart supplemental chips", "redacted lastAiHandoff receipt"],
@@ -429,6 +530,14 @@ const surfaces: Surface[] = [
     ],
     missingRuntimePrimitives: ["wrong-host negative proof"],
     regressionRecipeRole: "Run scripts/devtools/notes-main-agent-chat-handoff.ts after any change to the handoff payload, entry contract, or composer staging.",
+    availablePrimitiveIds: [
+      "devtools.targets.inspect",
+      "devtools.surface.inspect",
+      "devtools.elements.snapshot",
+      "devtools.act",
+      "devtools.notes.inspect",
+    ],
+    bindingSelectors: [],
   },
   {
     id: "inline-agent",
@@ -489,6 +598,10 @@ const surfaces: Surface[] = [
       "dark and light visual contrast screenshots",
     ],
     regressionRecipeRole: "Use focused-text Agent Chat recipes only after direct getAgentChatState/getElements/layout receipts isolate the behavior.",
+    availablePrimitiveIds: [...mainWindowPrimitiveIds],
+    // The focused-text mini is a ui-variant of AgentChatView, not a distinct
+    // canonical mapping; giving it a selector would tie with agent-chat.
+    bindingSelectors: [],
   },
   {
     id: "dictation",
@@ -548,6 +661,13 @@ const surfaces: Surface[] = [
       "cursor insertion range for Notes/Agent Chat/frontmost destinations",
     ],
     regressionRecipeRole: "Do not use live dictation recipes as proof until passive media receipts can avoid permission prompts and target mutations.",
+    availablePrimitiveIds: [
+      "devtools.targets.inspect",
+      "devtools.surface.inspect",
+      "devtools.dictation.inspect",
+      "devtools.dictation.deliverFixture",
+    ],
+    bindingSelectors: [],
   },
   {
     id: "dictation-history",
@@ -567,37 +687,102 @@ const surfaces: Surface[] = [
       "scroll and selection anchor metrics",
     ],
     regressionRecipeRole: "Use history recipes to prevent privacy and selection regressions once resource receipts are first-class.",
+    availablePrimitiveIds: [
+      "devtools.targets.inspect",
+      "devtools.surface.inspect",
+    ],
+    bindingSelectors: [
+      { relation: "Direct", priority: 100, appViewVariants: ["DictationHistoryView"], hostKinds: ["MainWindow"] },
+    ],
   },
 ];
 
-function parseArgs(argv: string[]) {
-  const args = {
-    surface: "",
-    domain: "",
-    markdown: false,
-  };
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--surface") {
-      args.surface = argv[++index] ?? "";
-    } else if (arg === "--domain") {
-      args.domain = argv[++index] ?? "";
-    } else if (arg === "--markdown") {
-      args.markdown = true;
-    }
-  }
-  return args;
+export function coverageProfileById(id: string): CoverageProfile | undefined {
+  return coverageProfiles.find((profile) => profile.id === id);
 }
 
-function filteredCoverage(args: ReturnType<typeof parseArgs>) {
-  const filteredDomains = args.domain ? domains.filter((domain) => domain.id === args.domain) : domains;
-  const filteredSurfaces = args.surface ? surfaces.filter((surface) => surface.id === args.surface) : surfaces;
+const coverageStatuses: readonly CoverageStatus[] = ["supported", "partial", "missing", "planned"];
+
+/**
+ * Structural validation of the typed registry. Returns human-readable errors;
+ * an empty array means the registry is usable for binding generation.
+ */
+export function validateCoverageProfiles(
+  profiles: readonly CoverageProfile[] = coverageProfiles,
+): string[] {
+  const errors: string[] = [];
+  const seenIds = new Set<string>();
+  const knownPrimitiveIds = new Set(receiptSchemaRegistry.map((entry) => entry.primitiveId));
+  const knownDomainIds = new Set(coverageDomains.map((domain) => domain.id));
+
+  for (const profile of profiles) {
+    if (seenIds.has(profile.id)) errors.push(`duplicate profile id: ${profile.id}`);
+    seenIds.add(profile.id);
+    if (!coverageStatuses.includes(profile.status)) {
+      errors.push(`profile ${profile.id} has unknown status: ${profile.status}`);
+    }
+    for (const primitiveId of profile.availablePrimitiveIds) {
+      if (!knownPrimitiveIds.has(primitiveId)) {
+        errors.push(`profile ${profile.id} references unknown primitive id: ${primitiveId}`);
+      }
+    }
+    const duplicatePrimitives = profile.availablePrimitiveIds.filter(
+      (id, index) => profile.availablePrimitiveIds.indexOf(id) !== index,
+    );
+    for (const duplicate of duplicatePrimitives) {
+      errors.push(`profile ${profile.id} lists primitive id twice: ${duplicate}`);
+    }
+    for (const selector of profile.bindingSelectors) {
+      if (selector.relation !== "Direct" && selector.relation !== "Derived") {
+        errors.push(`profile ${profile.id} selector has invalid relation`);
+      }
+      if (!Number.isFinite(selector.priority)) {
+        errors.push(`profile ${profile.id} selector priority is not a number`);
+      }
+      const dimensions = [selector.contractKinds, selector.appViewVariants, selector.families, selector.hostKinds]
+        .filter((dimension) => Array.isArray(dimension) && dimension.length > 0);
+      if (dimensions.length === 0) {
+        errors.push(`profile ${profile.id} selector matches everything (no dimensions)`);
+      }
+    }
+    // A "supported" claim must not coexist with a required missing primitive
+    // list — the prose list is human reporting, but an unqualified supported
+    // status contradicting it is exactly the drift PF-009 forbids.
+    if (profile.status === "supported" && profile.missingRuntimePrimitives.length > 0) {
+      errors.push(
+        `profile ${profile.id} is "supported" while listing missing runtime primitives; downgrade to partial or clear the list`,
+      );
+    }
+  }
+  // Non-blocking sanity: unknown domain references are structural drift too.
+  for (const profile of profiles) {
+    for (const domain of profile.domains) {
+      if (!knownDomainIds.has(domain) && domain !== "logs") {
+        errors.push(`profile ${profile.id} references unknown domain: ${domain}`);
+      }
+    }
+  }
+  return errors;
+}
+
+export interface CoverageReportArgs {
+  surface?: string;
+  domain?: string;
+}
+
+export function buildCoverageReport(args: CoverageReportArgs = {}) {
+  const filteredDomains = args.domain
+    ? coverageDomains.filter((domain) => domain.id === args.domain)
+    : coverageDomains;
+  const filteredSurfaces = args.surface
+    ? coverageProfiles.filter((surface) => surface.id === args.surface)
+    : coverageProfiles;
   const referencedDomainIds = new Set(filteredSurfaces.flatMap((surface) => surface.domains));
   const scopedDomains = args.domain
     ? filteredDomains
     : filteredDomains.filter((domain) => referencedDomainIds.has(domain.id) || !args.surface);
 
-  const statusCounts = surfaces.reduce<Record<CoverageStatus, number>>(
+  const statusCounts = coverageProfiles.reduce<Record<CoverageStatus, number>>(
     (counts, surface) => {
       counts[surface.status] += 1;
       return counts;
@@ -612,10 +797,13 @@ function filteredCoverage(args: ReturnType<typeof parseArgs>) {
     evidenceStatus: "SOURCE-CONFIRMED" as const,
     philosophy: "Chrome DevTools-style protocol and API coverage first; recipes are smoke/regression wrappers after direct primitives exist.",
     inventoryNamespaces: {
-      runtimeCoverageProfileCount: surfaces.length,
+      runtimeCoverageProfileCount: coverageProfiles.length,
       selectedRuntimeCoverageProfileCount: filteredSurfaces.length,
       statusCounts,
       note: "Runtime coverage profiles are not contract kinds, contract mappings, unique AppView variants, or orientation aliases.",
+    },
+    registryValidation: {
+      errors: validateCoverageProfiles(),
     },
     primitiveFamilies: ["devtools.inspect", "devtools.measure", "devtools.act", "devtools.compare", "devtools.investigate"],
     domains: scopedDomains,
@@ -636,7 +824,26 @@ function filteredCoverage(args: ReturnType<typeof parseArgs>) {
   };
 }
 
-function markdown(report: ReturnType<typeof filteredCoverage>) {
+function parseArgs(argv: string[]) {
+  const args = {
+    surface: "",
+    domain: "",
+    markdown: false,
+  };
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--surface") {
+      args.surface = argv[++index] ?? "";
+    } else if (arg === "--domain") {
+      args.domain = argv[++index] ?? "";
+    } else if (arg === "--markdown") {
+      args.markdown = true;
+    }
+  }
+  return args;
+}
+
+function markdown(report: ReturnType<typeof buildCoverageReport>) {
   const lines = [
     "# Script Kit DevTools Coverage",
     "",
@@ -668,10 +875,16 @@ function markdown(report: ReturnType<typeof filteredCoverage>) {
   return lines.join("\n");
 }
 
-const args = parseArgs(Bun.argv.slice(2));
-const report = filteredCoverage(args);
-if (args.markdown) {
-  console.log(markdown(report));
-} else {
-  console.log(JSON.stringify(report, null, 2));
+export function main(argv: string[] = Bun.argv.slice(2)) {
+  const args = parseArgs(argv);
+  const report = buildCoverageReport(args);
+  if (args.markdown) {
+    console.log(markdown(report));
+  } else {
+    console.log(JSON.stringify(report, null, 2));
+  }
+}
+
+if (import.meta.main) {
+  main();
 }
