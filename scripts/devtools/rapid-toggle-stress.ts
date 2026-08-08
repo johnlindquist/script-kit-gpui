@@ -348,7 +348,19 @@ try {
   receipt.sessionDir = driver.sessionDir;
   driver.send({ type: "show" });
   const mainVisible = await waitForKindCount(driver, "main", 1, 5_000);
-  const initialNativeInventory = await nativeWindowInventory(Number(driver.pid));
+  await driver.waitForSettle({ timeoutMs: 5_000 });
+  let initialNativeInventory = await nativeWindowInventory(Number(driver.pid));
+  for (
+    let retry = 0;
+    retry < 5
+    && initialNativeInventory.topology?.errors?.some((error: string) =>
+      error.includes("unknown or stale same-PID native window")
+    );
+    retry += 1
+  ) {
+    await Bun.sleep(10);
+    initialNativeInventory = await nativeWindowInventory(Number(driver.pid));
+  }
   // Preserve the complete inventory even when validation fails so an observer
   // defect remains diagnosable instead of collapsing to an error string.
   receipt.initialNativeInventory = initialNativeInventory;
@@ -362,7 +374,6 @@ try {
   }
   receipt.initialNativeInventory = initialNativeInventory;
   const activation = driver.pid ? await activatePid(driver.pid) : null;
-  await driver.waitForSettle({ timeoutMs: 5_000 });
   interferenceMonitor = startInterferenceMonitor(
     interferenceHelper,
     dirname(outPath),
