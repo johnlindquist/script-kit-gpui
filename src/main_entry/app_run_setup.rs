@@ -2626,10 +2626,19 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                 // this command to avoid flaky key simulation. When the detached
                                 // Actions dialog is live, route through its typed availability
                                 // guard instead of closing it and calling the host directly.
+                                let native_footer_activation =
+                                    (host.as_deref() == Some("nativeFooter")).then(|| {
+                                        crate::footer_popup::activate_native_main_footer_button(
+                                            window,
+                                            &action_id,
+                                        )
+                                    });
                                 let detached_window_open = crate::actions::is_actions_window_open();
-                                let actions_surface_open =
-                                    detached_window_open || view.show_actions_popup;
-                                let detached_activation = if detached_window_open {
+                                let actions_surface_open = native_footer_activation.is_none()
+                                    && (detached_window_open || view.show_actions_popup);
+                                let detached_activation = if native_footer_activation.is_none()
+                                    && detached_window_open
+                                {
                                     crate::actions::activate_detached_actions_window_action(
                                         action_id.clone(),
                                         ctx,
@@ -2637,7 +2646,9 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                 } else {
                                     None
                                 };
-                                let resolved_host = if !actions_surface_open {
+                                let resolved_host = if native_footer_activation.is_none()
+                                    && !actions_surface_open
+                                {
                                     match host.as_deref() {
                                         Some("argPrompt") => Some(ActionsDialogHost::ArgPrompt),
                                         Some("divPrompt") => Some(ActionsDialogHost::DivPrompt),
@@ -2700,7 +2711,11 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                 let mut receipt_error_code = None;
                                 let mut popup_closed = false;
 
-                                if actions_surface_open {
+                                if let Some(activation) = native_footer_activation.as_ref() {
+                                    receipt_host = Some("NativeFooter".to_string());
+                                    receipt_ok = activation.dispatched;
+                                    receipt_error_code = activation.error_code.clone();
+                                } else if actions_surface_open {
                                     receipt_host = Some("ActionsDialog".to_string());
                                     match detached_activation {
                                         Some(crate::actions::ActionsDialogActivation::Executed {
@@ -2776,6 +2791,9 @@ cx.spawn(async move |cx: &mut gpui::AsyncApp| {
                                                 receipt_ok,
                                                 popup_closed,
                                                 receipt_error_code,
+                                                native_footer_activation.as_ref().and_then(|receipt| {
+                                                    serde_json::to_value(receipt).ok()
+                                                }),
                                             ),
                                         );
                                     }

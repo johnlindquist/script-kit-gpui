@@ -1,7 +1,8 @@
 fn paint_measurement_component_type(stable_id: &str) -> protocol::LayoutComponentType {
     use protocol::LayoutComponentType;
 
-    if stable_id.contains("transcript-row-")
+    if stable_id.starts_with("list-row:")
+        || stable_id.contains("transcript-row-")
         || stable_id.starts_with("dictation-history-row-")
         || stable_id.starts_with("chat-transcript-user-")
         || stable_id.starts_with("chat-transcript-response-")

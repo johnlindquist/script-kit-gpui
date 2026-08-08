@@ -2043,6 +2043,75 @@ unsafe fn appkit_action_selector(view: id) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Default)]
+struct AppKitAccessibilityFidelity {
+    identifier: Option<String>,
+    role: Option<String>,
+    label_sha256: Option<String>,
+    label_length: Option<usize>,
+    enabled: Option<bool>,
+    focused: Option<bool>,
+    element: Option<bool>,
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn appkit_accessibility_fidelity(view: id) -> AppKitAccessibilityFidelity {
+    use objc::{class, msg_send, sel, sel_impl};
+    use sha2::{Digest, Sha256};
+
+    let string_property = |selector: objc::runtime::Sel| -> Option<String> {
+        let responds: cocoa::base::BOOL = msg_send![view, respondsToSelector: selector];
+        if responds != YES {
+            return None;
+        }
+        let value: id = msg_send![view, performSelector: selector];
+        appkit_ns_string(value)
+    };
+    let identifier = string_property(sel!(accessibilityIdentifier));
+    let role = string_property(sel!(accessibilityRole));
+    let label = string_property(sel!(accessibilityLabel));
+    let (label_sha256, label_length) = label.map_or((None, None), |label| {
+        let mut hasher = Sha256::new();
+        hasher.update(label.as_bytes());
+        (
+            Some(format!("{:x}", hasher.finalize())),
+            Some(label.chars().count()),
+        )
+    });
+    let is_button: cocoa::base::BOOL = msg_send![view, isKindOfClass: class!(NSButton)];
+    let enabled = (is_button == YES).then(|| {
+        let value: cocoa::base::BOOL = msg_send![view, isEnabled];
+        value == YES
+    });
+    let focused = {
+        let responds: cocoa::base::BOOL =
+            msg_send![view, respondsToSelector: sel!(isAccessibilityFocused)];
+        (responds == YES).then(|| {
+            let value: cocoa::base::BOOL = msg_send![view, isAccessibilityFocused];
+            value == YES
+        })
+    };
+    let element = {
+        let responds: cocoa::base::BOOL =
+            msg_send![view, respondsToSelector: sel!(isAccessibilityElement)];
+        (responds == YES).then(|| {
+            let value: cocoa::base::BOOL = msg_send![view, isAccessibilityElement];
+            value == YES
+        })
+    };
+
+    AppKitAccessibilityFidelity {
+        identifier,
+        role,
+        label_sha256,
+        label_length,
+        enabled,
+        focused,
+        element,
+    }
+}
+
+#[cfg(target_os = "macos")]
 unsafe fn collect_identified_appkit_views(
     view: id,
     content_view: id,
@@ -2071,6 +2140,7 @@ unsafe fn collect_identified_appkit_views(
             .as_ref()
             .map(|layer| layer.masks_to_bounds)
             .unwrap_or(false);
+        let accessibility = appkit_accessibility_fidelity(view);
         nodes.push(crate::protocol::AppKitFidelityNode {
             id: identifier,
             parent_id: node_parent_id,
@@ -2090,6 +2160,13 @@ unsafe fn collect_identified_appkit_views(
             text: appkit_text_fidelity(view),
             image: appkit_image_fidelity(view),
             action_selector: appkit_action_selector(view),
+            accessibility_identifier: accessibility.identifier,
+            accessibility_role: accessibility.role,
+            accessibility_label_sha256: accessibility.label_sha256,
+            accessibility_label_length: accessibility.label_length,
+            accessibility_enabled: accessibility.enabled,
+            accessibility_focused: accessibility.focused,
+            accessibility_element: accessibility.element,
         });
     }
 
@@ -2252,6 +2329,148 @@ pub(crate) fn collect_main_footer_appkit_fidelity_snapshot(
         AppKitFidelityCaptureOutcome::blocked(
             crate::protocol::FidelityCaptureStatus::UnsupportedPlatform,
         )
+    }
+}
+
+/// Capture-safe facts from a native AppKit footer activation attempt.
+///
+/// The semantic descriptor remains the authority: automation may dispatch only
+/// when the requested semantic ID resolves to the current footer config, the
+/// AppKit peer is an enabled AXButton, and its target/action selector matches
+/// that descriptor. Disabled controls refuse before `performClick:`.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NativeFooterActivationReceipt {
+    pub semantic_id: String,
+    pub surface: Option<String>,
+    pub structural_id: Option<String>,
+    pub accessibility_role: Option<String>,
+    pub action_selector: Option<String>,
+    pub expected_action_selector: Option<String>,
+    pub descriptor_enabled: Option<bool>,
+    pub appkit_enabled: Option<bool>,
+    pub accessibility_focused_before: Option<bool>,
+    pub accessibility_focused_after: Option<bool>,
+    pub refused_disabled: bool,
+    pub dispatched: bool,
+    pub error_code: Option<String>,
+}
+
+impl NativeFooterActivationReceipt {
+    fn blocked(semantic_id: &str, error_code: &str) -> Self {
+        Self {
+            semantic_id: semantic_id.to_string(),
+            surface: None,
+            structural_id: None,
+            accessibility_role: None,
+            action_selector: None,
+            expected_action_selector: None,
+            descriptor_enabled: None,
+            appkit_enabled: None,
+            accessibility_focused_before: None,
+            accessibility_focused_after: None,
+            refused_disabled: false,
+            dispatched: false,
+            error_code: Some(error_code.to_string()),
+        }
+    }
+}
+
+/// Activate the exact native footer button identified by the semantic footer
+/// descriptor. This is intentionally narrower than generic AppKit automation.
+pub(crate) fn activate_native_main_footer_button(
+    window: &Window,
+    semantic_id: &str,
+) -> NativeFooterActivationReceipt {
+    let config = MAIN_WINDOW_FOOTER_LAST_CONFIG
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
+    let Some(config) = config else {
+        return NativeFooterActivationReceipt::blocked(semantic_id, "missing_footer_config");
+    };
+    let Some(descriptor) = config
+        .buttons
+        .iter()
+        .find(|button| button.id.as_ref() == semantic_id)
+        .cloned()
+    else {
+        return NativeFooterActivationReceipt::blocked(semantic_id, "semantic_id_not_found");
+    };
+    let expected_action_selector = format!("{}FooterAction:", descriptor.action.semantic_key());
+
+    #[cfg(target_os = "macos")]
+    {
+        let Some((_, ns_window)) = window_gpui_view_and_ns_window(window) else {
+            return NativeFooterActivationReceipt::blocked(semantic_id, "missing_window");
+        };
+        // SAFETY: this runs on the GPUI/AppKit main thread against the live main
+        // window and only searches inside the installed native footer host.
+        unsafe {
+            use objc::{class, msg_send, sel, sel_impl};
+
+            let search_root = main_window_footer_search_root(ns_window);
+            let footer_view = find_subview_by_identifier(search_root, FOOTER_EFFECT_ID);
+            if footer_view == nil {
+                return NativeFooterActivationReceipt::blocked(semantic_id, "missing_footer_host");
+            }
+            let button = find_subview_by_accessibility_identifier(footer_view, semantic_id);
+            if button == nil {
+                return NativeFooterActivationReceipt::blocked(semantic_id, "missing_ax_peer");
+            }
+
+            let structural_id = appkit_view_identifier(button);
+            let accessibility = appkit_accessibility_fidelity(button);
+            let action_selector = appkit_action_selector(button);
+            let is_button: cocoa::base::BOOL = msg_send![button, isKindOfClass: class!(NSButton)];
+            let hidden: cocoa::base::BOOL = msg_send![button, isHidden];
+            let alpha: f64 = msg_send![button, alphaValue];
+            let appkit_enabled = accessibility.enabled;
+            let mut receipt = NativeFooterActivationReceipt {
+                semantic_id: semantic_id.to_string(),
+                surface: Some(config.surface.to_string()),
+                structural_id,
+                accessibility_role: accessibility.role,
+                action_selector: action_selector.clone(),
+                expected_action_selector: Some(expected_action_selector.clone()),
+                descriptor_enabled: Some(descriptor.enabled),
+                appkit_enabled,
+                accessibility_focused_before: accessibility.focused,
+                accessibility_focused_after: accessibility.focused,
+                refused_disabled: false,
+                dispatched: false,
+                error_code: None,
+            };
+
+            if is_button != YES || receipt.accessibility_role.as_deref() != Some("AXButton") {
+                receipt.error_code = Some("wrong_ax_role".to_string());
+                return receipt;
+            }
+            if hidden == YES || alpha <= 0.0 {
+                receipt.error_code = Some("hidden_control".to_string());
+                return receipt;
+            }
+            if action_selector.as_deref() != Some(expected_action_selector.as_str()) {
+                receipt.error_code = Some("wrong_action".to_string());
+                return receipt;
+            }
+            if !descriptor.enabled || appkit_enabled != Some(true) {
+                receipt.refused_disabled = true;
+                receipt.error_code = Some("action_disabled".to_string());
+                return receipt;
+            }
+
+            let _: () = msg_send![button, performClick: nil];
+            receipt.dispatched = true;
+            receipt.accessibility_focused_after = appkit_accessibility_fidelity(button).focused;
+            receipt
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, descriptor, expected_action_selector);
+        NativeFooterActivationReceipt::blocked(semantic_id, "unsupported_platform")
     }
 }
 
@@ -3768,6 +3987,44 @@ unsafe fn find_subview_by_identifier(parent: id, identifier: &str) -> id {
 }
 
 #[cfg(target_os = "macos")]
+unsafe fn find_subview_by_accessibility_identifier(parent: id, identifier: &str) -> id {
+    use objc::{msg_send, sel, sel_impl};
+
+    let ns_identifier = ns_string(identifier);
+    if parent == nil || ns_identifier == nil {
+        return nil;
+    }
+    let subviews: id = msg_send![parent, subviews];
+    if subviews == nil {
+        return nil;
+    }
+    let count: usize = msg_send![subviews, count];
+    for index in 0..count {
+        let view: id = msg_send![subviews, objectAtIndex: index];
+        if view == nil {
+            continue;
+        }
+        let responds: cocoa::base::BOOL =
+            msg_send![view, respondsToSelector: sel!(accessibilityIdentifier)];
+        if responds == YES {
+            let view_identifier: id = msg_send![view, accessibilityIdentifier];
+            if view_identifier != nil {
+                let matches: cocoa::base::BOOL =
+                    msg_send![view_identifier, isEqualToString: ns_identifier];
+                if matches == YES {
+                    return view;
+                }
+            }
+        }
+        let nested = find_subview_by_accessibility_identifier(view, identifier);
+        if nested != nil {
+            return nested;
+        }
+    }
+    nil
+}
+
+#[cfg(target_os = "macos")]
 fn footer_height() -> f64 {
     crate::components::footer_chrome::current_main_menu_footer_height() as f64
 }
@@ -4562,6 +4819,50 @@ unsafe fn set_footer_view_identifier(view: id, identifier: &str) {
         msg_send![view, respondsToSelector: sel!(setAccessibilityIdentifier:)];
     if supports_ax_identifier == YES {
         let _: () = msg_send![view, setAccessibilityIdentifier: identifier];
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn set_footer_button_accessibility(view: id, button: &FooterButtonConfig) {
+    use objc::{msg_send, sel, sel_impl};
+
+    if view == nil {
+        return;
+    }
+    let semantic_id = ns_string(button.id.as_ref());
+    let label = ns_string(button.label.as_ref());
+    if semantic_id != nil {
+        let supports: cocoa::base::BOOL =
+            msg_send![view, respondsToSelector: sel!(setAccessibilityIdentifier:)];
+        if supports == YES {
+            let _: () = msg_send![view, setAccessibilityIdentifier: semantic_id];
+        }
+    }
+    if label != nil {
+        let supports: cocoa::base::BOOL =
+            msg_send![view, respondsToSelector: sel!(setAccessibilityLabel:)];
+        if supports == YES {
+            let _: () = msg_send![view, setAccessibilityLabel: label];
+        }
+    }
+    let role = ns_string("AXButton");
+    let supports_role: cocoa::base::BOOL =
+        msg_send![view, respondsToSelector: sel!(setAccessibilityRole:)];
+    if supports_role == YES && role != nil {
+        let _: () = msg_send![view, setAccessibilityRole: role];
+    }
+    if let Some(reason) = button.disabled_reason.as_ref() {
+        let help = ns_string(reason.as_ref());
+        let supports: cocoa::base::BOOL =
+            msg_send![view, respondsToSelector: sel!(setAccessibilityHelp:)];
+        if supports == YES && help != nil {
+            let _: () = msg_send![view, setAccessibilityHelp: help];
+        }
+    }
+    let supports_element: cocoa::base::BOOL =
+        msg_send![view, respondsToSelector: sel!(setAccessibilityElement:)];
+    if supports_element == YES {
+        let _: () = msg_send![view, setAccessibilityElement: YES];
     }
 }
 
@@ -6414,6 +6715,7 @@ unsafe fn make_footer_hint_item(
             footer_action_key(button_cfg.action)
         );
         set_footer_view_identifier(button, &button_id);
+        set_footer_button_accessibility(button, button_cfg);
         let _: () = msg_send![button, setBordered: NO];
         let _: () = msg_send![button, setBezelStyle: 0usize];
         let _: () = msg_send![button, setButtonType: 0usize];

@@ -814,8 +814,13 @@ impl ScriptListApp {
         reason: &'static str,
         cx: &mut Context<Self>,
     ) {
-        const ATTEMPTS: usize = 5;
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(16);
+        // The reveal can only converge after the next render splices the
+        // list's internal item tree to the current grouping (ListState clamps
+        // scroll offsets to its own stale item count until then). Give the
+        // loop enough frames to observe a post-splice layout on long lists
+        // [PF-008].
+        const ATTEMPTS: usize = 30;
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
         self.last_scrolled_index = None;
         cx.spawn(async move |this, cx| {
@@ -838,7 +843,13 @@ impl ScriptListApp {
                             app.last_scrolled_index = None;
                             app.reveal_main_list_selection_above_footer(reason);
                             cx.notify();
-                            true
+                            // A single reveal pass can land short: the model
+                            // computes exact pixel offsets, but the applied
+                            // ListState offset only converges once the frames
+                            // in the target region are measured. Only stop
+                            // retrying when the model confirms the selection
+                            // is inside the rendered safe viewport [PF-008].
+                            app.main_list_selection_reveal_converged()
                         })
                     })
                     .unwrap_or(false);
@@ -848,6 +859,31 @@ impl ScriptListApp {
             }
         })
         .detach();
+    }
+
+    /// True when the current selection needs no further safe-viewport
+    /// adjustment under the model's exact height math (i.e. the reveal has
+    /// converged). Zero/undersized viewports report false so callers retry.
+    pub(crate) fn main_list_selection_reveal_converged(&mut self) -> bool {
+        let viewport_height = self.main_list_state.viewport_bounds().size.height;
+        if viewport_height
+            <= main_list_header_overlay_height(self.current_main_menu_theme.def())
+                + main_list_footer_overlay_total_padding()
+        {
+            return false;
+        }
+        let target = self.selected_index;
+        let current_offset = self.main_list_state.logical_scroll_top();
+        let (grouped_items, _) = self.get_grouped_results_cached();
+        main_list_safe_scroll_offset_for_item(
+            &grouped_items,
+            current_offset,
+            viewport_height,
+            main_list_header_overlay_height(self.current_main_menu_theme.def()),
+            main_list_footer_overlay_total_padding(),
+            target,
+        )
+        .is_none()
     }
 
     fn adjust_selected_item_above_footer_overlay(&mut self, target: usize) {
@@ -901,8 +937,19 @@ impl ScriptListApp {
         ) {
             self.main_list_state.scroll_to(offset);
         } else {
-            // Perform the scroll using ListState for variable-height list.
-            self.main_list_state.scroll_to_reveal_item(target);
+            // Reveal via the model-exact safe offset (theme-derived heights).
+            //
+            // `ListState::scroll_to_reveal_item` queues a deferred reveal that
+            // positions with ESTIMATED heights for unmeasured rows; on a long
+            // list (hundreds of unmeasured variable-height rows) that deferred
+            // reveal lands thousands of pixels short of the target AND clobbers
+            // any model-exact `scroll_to` issued in the same frame. The
+            // selected row then never enters the rendered safe viewport and the
+            // `last_scrolled_index` guard suppresses every retry [PF-008].
+            //
+            // The model already knows exact per-row heights, so compute the
+            // safe offset directly and only apply it when the target is
+            // outside the safe viewport (the helper returns None otherwise).
             self.adjust_selected_item_above_footer_overlay(target);
         }
         if self.main_list_state.viewport_bounds().size.height

@@ -10015,6 +10015,11 @@ impl ScriptListApp {
         self.selected_index = grouped_index;
         self.hovered_index = None;
         self.last_scrolled_index = None;
+        self.reveal_main_list_selection_above_footer("devtools main-menu selection");
+        // Deep selections on long unmeasured lists converge over a few frames;
+        // keep retrying until the model confirms safe-viewport placement
+        // [PF-008].
+        self.schedule_main_list_selection_reveal_above_footer("devtools main-menu selection", cx);
         cx.notify();
 
         if submit {

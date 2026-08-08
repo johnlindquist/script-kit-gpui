@@ -7,6 +7,7 @@ import {
   inspectNativeListContract,
   mainListScrollFromState,
   normalizeScriptListScrollMeasurement,
+  renderedSafeViewportMeasurement,
 } from "./scroll.ts";
 import { ProtocolCore, type Json } from "./driver.ts";
 
@@ -107,6 +108,59 @@ describe("activeListScroll native contract inspection", () => {
     const scroll = { ...complete, surface: "tips", viewportHeight: 0, scrollTop: 0 };
     const result = inspectNativeListContract(scroll, true);
     expect(result.classification).toBe("ok");
+  });
+});
+
+describe("rendered selected-row safe viewport", () => {
+  const scroll = { selectedSemanticId: "main-list-row:script/example" };
+  const layout = {
+    transaction: { dataGeneration: 9 },
+    nodes: [
+      {
+        name: "main-view-main",
+        measurementId: "layout:main-view-main",
+        measurementProvenance: "paint-time",
+        bounds: { x: 1, y: 59, width: 748, height: 380 },
+        visibleBounds: { x: 1, y: 59, width: 748, height: 380 },
+        measurementFrameGeneration: 12,
+      },
+      {
+        name: "list-row:main-list-row:script/example",
+        measurementId: "layout:list-row-main-list-row-script-example",
+        measurementProvenance: "paint-time",
+        bounds: { x: 1, y: 390, width: 748, height: 44 },
+        visibleBounds: { x: 1, y: 390, width: 748, height: 44 },
+        measurementFrameGeneration: 12,
+      },
+    ],
+  };
+
+  test("proves a same-frame selected row inside completed paint", () => {
+    const result = renderedSafeViewportMeasurement(scroll, layout, true);
+    expect(result.classification).toBe("ok");
+    expect(result.visibleRatio).toBe(1);
+    expect(result.withinSafeViewport).toBe(true);
+    expect(result.frameMatches).toBe(true);
+    expect(result.targetDataGeneration).toBe(9);
+  });
+
+  test("fails when the selected row is one point below the rendered safe viewport", () => {
+    const clipped = structuredClone(layout);
+    clipped.nodes[1].bounds.y = 396;
+    clipped.nodes[1].visibleBounds.y = 396;
+    const result = renderedSafeViewportMeasurement(scroll, clipped, true);
+    expect(result.classification).toBe("not-ok");
+    expect(result.visibleRatio).toBeLessThan(1);
+    expect(result.withinSafeViewport).toBe(false);
+  });
+
+  test("blocks instead of substituting formula geometry when rendered row bounds are absent", () => {
+    const result = renderedSafeViewportMeasurement(scroll, {
+      ...layout,
+      nodes: [layout.nodes[0]],
+    }, true);
+    expect(result.classification).toBe("blocked-by-missing-primitive");
+    expect(result.missingPrimitives).toContain("renderedSelectedRowBounds");
   });
 });
 

@@ -15,6 +15,12 @@ fn trigger_action_result_is_request_correlated_and_redacted() {
         true,
         false,
         None,
+        Some(serde_json::json!({
+            "semanticId": "footer-action:actions",
+            "accessibilityRole": "AXButton",
+            "actionSelector": "actionsFooterAction:",
+            "dispatched": true
+        })),
     );
 
     assert_eq!(message.request_id(), Some("act-1"));
@@ -26,6 +32,11 @@ fn trigger_action_result_is_request_correlated_and_redacted() {
     assert_eq!(json["host"], "AgentChat");
     assert_eq!(json["ok"], true);
     assert_eq!(json["popupClosed"], false);
+    assert_eq!(
+        json["nativeFooterActivation"]["actionSelector"],
+        "actionsFooterAction:"
+    );
+    assert_eq!(json["nativeFooterActivation"]["dispatched"], true);
 
     let raw = json.to_string();
     for forbidden in [

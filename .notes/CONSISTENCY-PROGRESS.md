@@ -6,7 +6,7 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 54 / 75 implemented and verified in this execution pass
+- Recommendation coverage: 56 / 75 implemented and verified in this execution pass
 - Oracle execution lanes: three plans complete through protocol v2; implementation active
 - Maximum concurrent Oracle consults: 3
 - Product push/deploy: not authorized
@@ -19,7 +19,7 @@
 |---|---|---:|---|
 | Core UX | cues, actions, context semantics, rows, inputs, popups, states, state ownership | 19 | C01–C16 complete; local lane audit PASS |
 | Workflow safety | AI preparation, conversations, Flow, Notes/Today, Dictation | 28 | C01–C14 complete; local lane audit PASS on one stable artifact |
-| Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01–C05 complete; C06 next (PF-007/PF-008) |
+| Proof and governance | report truth, evidence, accessibility, geometry, design contracts, owner maps, glass documentation | 28 | C01–C06 complete; C07 next (PF-009/PF-010) |
 
 ## How to view the baseline proposal explorer
 
@@ -308,6 +308,71 @@
   4. Confirm all four negative controls are true and `privacy.fixtureCanaryMatches` is 0.
   5. Run `bun test scripts/devtools/text.test.ts scripts/devtools/receipt-schema.test.ts`; confirm one-point clipping, footer occlusion, fonts-not-ready, stale frame, scale mismatch, and false schema pass all fail closed.
   6. Confirm receipt cleanup has all lifecycle booleans true and `ownedProcessCount: 0`; no C05 runtime should remain in the menu bar.
+
+### PF-007 — Prove semantic↔AppKit accessibility parity, focus adjacency, and native activation
+
+- **Stage:** 4
+- **Status:** Complete
+- **Findings/guidelines addressed:** A complete semantic footer projection was not native accessibility evidence. AppKit telemetry exposed structural paint IDs and selectors, but not semantic AX identity, role, privacy-safe label identity, enabled/focused state, accessibility-element state, or a way to prove that an exact native control activated or refused while disabled.
+- **User-facing expectation:** Every visible native footer action now presents the same semantic ID, action, product label, enabled state, and disabled reason as the semantic footer descriptor. An enabled Actions button opens Actions through the real `NSButton` target/action path; the same button refuses before dispatch when its descriptor is disabled.
+- **Behavior/tooling changed:** Native footer creation keeps its structural AppKit identifier for styling and separately installs the canonical descriptor ID as `accessibilityIdentifier`, the descriptor label/help, and explicit `AXButton` role/element state. `AppKitFidelityNode` projects role, label SHA/length, enabled, focused, and element state without returning raw AX labels. `focus.ts` joins semantic descriptors to native peers, rejects hidden/non-element/wrong-role/wrong-action peers, builds reciprocal focus adjacency, and validates activation receipts. `triggerAction` now accepts the narrow `nativeFooter` host, resolves only a current descriptor-owned AX peer under the installed footer host, refuses hidden, mismatched, or disabled controls, and returns capture-safe dispatch facts.
+- **Owners and symbols:**
+  - `src/footer_popup.rs::{set_footer_button_accessibility,appkit_accessibility_fidelity,activate_native_main_footer_button,NativeFooterActivationReceipt}`
+  - `src/protocol/types/grid_layout.rs::AppKitFidelityNode`
+  - `src/protocol/message/variants/system_control.rs::TriggerActionResult`
+  - `src/protocol/message/constructors/general.rs::Message::trigger_action_result`
+  - `src/main_entry/app_run_setup.rs` `ExternalCommand::TriggerAction` native-footer branch
+  - `scripts/devtools/focus.ts::{semanticAxParity,semanticFocusGraph,nativeFooterActivationProof}`
+  - `scripts/devtools/focus.test.ts`
+  - `scripts/agentic/cons-proof-gov/ax-scroll-proof.ts`
+- **Intended/model/native truth:** `FooterButtonConfig` remains the intended semantic/action owner. `getElements` supplies semantic controls and focus adjacency. AppKit is observed independently by `accessibilityIdentifier`, `AXButton`, label fingerprint/length, enabled/focused/element state, structural ID, bounds, and executable selector. No semantic completeness flag is reused as AX proof.
+- **User interaction outcome:** The final enabled run joined all three launcher footer actions to unique native peers, then activated `footer-action:actions` through `actionsFooterAction:`; `dispatched: true` and the Actions dialog changed from absent to present. The disabled fixture retained the same semantic/structural/action identity, reported semantic and native enabled state false, returned `refusedDisabled: true`/`dispatched: false`/`action_disabled`, and left the Actions dialog absent.
+- **Positive receipt:** `.artifacts/consistency/PF-007/ax-focus-activation.json` → `RUNTIME-CONFIRMED` against `target-agent/artifacts/cons-proof-c06/script-kit-gpui`, SHA-256 `065d0774724c29ccf2b36c745a31140d6f02fa6cac4c6a9813c7b631af900700`.
+- **Negative controls:** Missing or hidden AX peers, non-accessibility elements, wrong roles, wrong selectors, enabled mismatches, duplicate AX IDs, hidden focusables, duplicate semantic focus IDs, wrong activation host, missing postcondition, and disabled dispatch all fail closed. The durable receipt records `hiddenAxPeerRejected`, `wrongHostRejected`, and `disabledActivationRefused` as true.
+- **Privacy/interference:** AX labels are hashed and counted, never returned raw. The fixture is double-gated by `SCRIPT_KIT_TEST_STATUS=1` and `SCRIPT_KIT_TEST_FOOTER_DESCRIPTOR_FIXTURE=disabled`; it uses a sandbox home and no user content, clipboard, microphone, permission request, or credential.
+- **Cleanup:** Both enabled and disabled runs report `processExited: true`, `streamsDrained: true`, `logWriterClosed: true`, `ownedProcessCount: 0`, `closeError: null`, and `clipboardTouched: false`; the final exact-executable scan also returned 0.
+- **Verification:** C06 DevTools/schema suite 42/42 with 143 expectations; triggerAction protocol receipt 2/2; footer descriptor fixture 1/1; final binary check/build PASS. PF-001 remains `PASS`; PF-003 on the exact final C06 SHA is `RUNTIME-CONFIRMED` with zero protocol-response canary matches.
+- **Protected/out-of-scope values:** No footer geometry, typography, keycap offsets, glass material, motion timing, opacity, threshold, fixture, design token, credential, or `.hitl-align` content changed. Glass anti-drift remains 40/40 and the production calibration fixture remains 1/1.
+- **Commit boundary:** C06 — PF-007 + PF-008.
+- **User test/view:**
+  1. Run `SCRIPT_KIT_GPUI_BINARY=target-agent/artifacts/cons-proof-c06/script-kit-gpui bun scripts/agentic/cons-proof-gov/ax-scroll-proof.ts`; expect both PF-007 and PF-008 classifications to be `RUNTIME-CONFIRMED`.
+  2. Open `.artifacts/consistency/PF-007/ax-focus-activation.json`; under `enabled.axParity`, confirm three semantic buttons, three native peers, no duplicate AX IDs, and `complete: true`.
+  3. Inspect `enabled.activation`; confirm host-owned semantic ID `footer-action:actions`, role `AXButton`, selector and expected selector `actionsFooterAction:`, descriptor/native enabled state true, `dispatched: true`, an observed postcondition, no errors, and `complete: true`.
+  4. Inspect `disabled.activation`; confirm descriptor/native enabled state false, `refusedDisabled: true`, `dispatched: false`, `errorCode: "action_disabled"`, unchanged dialog state, and `complete: true`.
+  5. Run `bun test scripts/devtools/focus.test.ts scripts/devtools/receipt-schema.test.ts`; verify hidden peers/focusables, wrong host/action, duplicate identity, absent postcondition, and disabled dispatch are rejected.
+  6. Confirm both cleanup blocks and the aggregate cleanup have `ownedProcessCount: 0`; no pinned C06 process should remain in the menu bar.
+
+### PF-008 — Prove the selected launcher row remains inside the rendered safe viewport
+
+- **Stage:** 4
+- **Status:** Complete
+- **Findings/guidelines addressed:** `scroll.ts` previously trusted formula/list-state geometry whenever viewport height was nonzero. Main launcher rows had no completed-frame selector, so a selected row could be one point under the footer or clipped in paint while model geometry still passed. Selection, target data, and paint frames were not joined.
+- **User-facing expectation:** Selecting a far launcher row now reveals that exact row above the footer. DevTools proves the real painted row—not an estimate—is fully visible inside the completed `main-view-main` safe viewport in the same frame and stable target lifetime.
+- **Behavior/tooling changed:** The launcher’s owning uniform-list row wrapper derives a privacy-safe debug selector from the existing stable selection key and canonical `main-list-row` identity. DevTools semantic selection now invokes the same footer-safe reveal path as keyboard navigation. `paint_measurements` types `list-row:` selectors as list items. `scroll.ts` always requires completed layout for safe-viewport proof, joins the selected stable identity to its rendered row and `main-view-main`, computes visible intersection ratio, and requires a frame match plus numeric target data generation instead of substituting formula geometry. The final C06 rerun surfaced and fixed a real reveal defect this proof exists to catch: `ListState::scroll_to_reveal_item` positions in the internal estimated-height space (thousands of pixels short on ~400 unmeasured rows) and `ListState::scroll_to` clamps to the internal item count, which lags the model grouping until the next render splices the tree. `scroll_to_selected_if_needed` now reveals via the model-exact safe offset only, and `schedule_main_list_selection_reveal_above_footer` retries (30 × 50ms) until `main_list_selection_reveal_converged()` confirms the model needs no further adjustment; `apply_main_menu_selection` arms that convergence loop. The probe additionally waits for the launcher data generation to hold stable (10 consecutive samples) before capturing the footer layout or selecting, because index-based selection during the startup scan races grouping regeneration (recorded as an open product question for the geometry lane, not required for C06).
+- **Owners and symbols:**
+  - `src/render_script_list/mod.rs` launcher uniform-list row wrapper
+  - `src/app_navigation/impl_scroll.rs::{main_list_row_semantic_id,reveal_main_list_selection_above_footer,main_list_scroll_receipt,scroll_to_selected_if_needed,schedule_main_list_selection_reveal_above_footer,main_list_selection_reveal_converged}`
+  - `src/prompt_handler/mod.rs::apply_main_menu_selection`
+  - `src/app_layout/paint_measurements.rs::paint_measurement_component_type`
+  - `scripts/devtools/scroll.ts::renderedSafeViewportMeasurement`
+  - `scripts/devtools/scroll.test.ts`
+  - `scripts/devtools/lib/receipt-schema.ts`
+  - `scripts/agentic/cons-proof-gov/ax-scroll-proof.ts`
+- **Independent truth layers:** List state reports logical selection and its formula safe-viewport claim. Completed GPUI paint independently reports row bounds, visible bounds, viewport bounds, and frame generation. Target inspection independently binds automation ID `main`, window instance `main@1`, target generation 1, surface generation 1, and data generation advancement 1→2. These facts are compared but never collapsed.
+- **Rendered/user interaction outcome:** A semantic selection changed the selected stable row and advanced target data generation. The selected painted row is `{x:1,y:416,width:748,height:44}`; its visible bounds are identical; the rendered safe viewport is `{x:1,y:59,width:748,height:401}`. The row ends exactly at y=460, the viewport bottom, with visible ratio 1, `withinSafeViewport: true`, frame generation 108, and `frameMatches: true`.
+- **Positive receipt:** `.artifacts/consistency/PF-008/list-scroll.json` → `RUNTIME-CONFIRMED` on the same final C06 SHA. Raw selected semantic identity is omitted; only its SHA-256 is durable.
+- **Negative controls:** A row ending one point below the viewport is `not-ok`; a missing rendered row blocks with `blocked-by-missing-primitive`; stale frames, missing data generation, and false schema passes are rejected by focused tests.
+- **Verification:** Scroll/focus/schema suite 42/42; footer-safe-scroll model tests 2/2; runtime target/window/surface generations remained stable while data generation advanced; rendered ratio and frame checks passed. Governance reports 2,814 reader sites with no guarded additions relative to `main`, scanner tests 34/34, source-audit ratchet 1/1, and no hardcoded visual additions.
+- **Privacy/interference/cleanup:** Sandbox fixture; raw selected semantic ID is not durable; no native pointer/keyboard event, clipboard, microphone, permission, or user-data path. The enabled Driver and final exact-executable scan both report zero owned processes.
+- **Intentional differences preserved:** List-state geometry remains useful diagnostic model evidence; completed paint is required for the pass. Footer-safe reveal uses existing theme/list metrics and does not retune footer geometry or glass motion.
+- **Commit boundary:** C06 — PF-007 + PF-008.
+- **User test/view:**
+  1. Run the C06 proof command above and open `.artifacts/consistency/PF-008/list-scroll.json`.
+  2. Confirm `selectedRow.selectionChanged: true`, `listStateWithinSafeViewport: true`, and `semanticIdReturnedRaw: false`.
+  3. Under `selectedRow.rendered`, confirm `classification: "ok"`, equal row/visible bounds, visible ratio 1, `withinSafeViewport: true`, `frameMatches: true`, numeric frame/data generations, and an empty missing-primitives list.
+  4. Under `selectedRow.transaction`, confirm automation ID `main`, window instance `main@1`, stable target/surface generations, and `dataGenerationAdvanced: true` (final receipt: target data generation 3 after the settled-selection advance).
+  5. Confirm both negative controls are true: one-point overflow rejected and missing rendered row blocked.
+  6. Run `bun test scripts/devtools/scroll.test.ts scripts/devtools/receipt-schema.test.ts`; expect the rendered safe-viewport positives and all fail-closed negatives to pass.
 
 ### UX-002 — Establish one canonical shortcut token stream
 

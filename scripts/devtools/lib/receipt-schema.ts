@@ -235,7 +235,23 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
     commands: ["scroll.inspect"],
     requiredPaths: [...commonTargetFields, "scroll", "resizePressure"],
     forbidMissingPrimitivesOnPass: true,
-    description: "Measure selected-row and safe-viewport scroll state.",
+    predicates: [{
+      id: "rendered-safe-viewport-requires-same-frame-full-visibility",
+      validate(receipt, disposition) {
+        const rendered = receipt.renderedSafeViewport && typeof receipt.renderedSafeViewport === "object"
+          ? receipt.renderedSafeViewport as JsonObject
+          : {};
+        if (rendered.required !== true || disposition !== "EVALUABLE_PASS") return [];
+        return rendered.classification === "ok" &&
+            Number(rendered.visibleRatio) >= 0.999 &&
+            rendered.withinSafeViewport === true &&
+            rendered.frameMatches === true &&
+            typeof rendered.targetDataGeneration === "number"
+          ? []
+          : ["rendered safe-viewport proof requires a same-frame fully visible selected row and target data generation"];
+      },
+    }],
+    description: "Measure selected-row and safe-viewport scroll state with optional completed-frame proof.",
   }),
   schema({
     primitiveId: "devtools.focus.inspect",
@@ -261,8 +277,25 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
           ? []
           : ["focus proof requires a complete semantic projection"];
       },
+    }, {
+      id: "ax-proof-requires-reciprocal-semantic-peers",
+      validate(receipt, disposition) {
+        if (receipt.proofMode !== "ax" || disposition !== "EVALUABLE_PASS") return [];
+        const footer = receipt.nativeFooter && typeof receipt.nativeFooter === "object"
+          ? receipt.nativeFooter as JsonObject
+          : {};
+        const parity = footer.axParity && typeof footer.axParity === "object"
+          ? footer.axParity as JsonObject
+          : {};
+        const graph = receipt.focusGraph && typeof receipt.focusGraph === "object"
+          ? receipt.focusGraph as JsonObject
+          : {};
+        return parity.complete === true && graph.reciprocal === true
+          ? []
+          : ["AX proof requires complete semantic peers and a reciprocal focus graph"];
+      },
     }],
-    description: "Inspect focus and keyboard ownership without claiming activation.",
+    description: "Inspect focus ownership and optional independent semantic-to-AX parity without claiming activation.",
   }),
   schema({
     primitiveId: "devtools.text.measure",

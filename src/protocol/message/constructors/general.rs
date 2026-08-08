@@ -437,6 +437,7 @@ impl Message {
         ok: bool,
         popup_closed: bool,
         error_code: Option<String>,
+        native_footer_activation: Option<serde_json::Value>,
     ) -> Self {
         Message::TriggerActionResult {
             request_id,
@@ -445,6 +446,7 @@ impl Message {
             ok,
             popup_closed,
             error_code,
+            native_footer_activation,
         }
     }
 

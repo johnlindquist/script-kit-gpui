@@ -1451,6 +1451,15 @@ impl ScriptListApp {
                                         item_name = "<missing-result>";
                                         div().h(px(effective_list_item_height)).into_any_element()
                                     };
+                                    let row_debug_selector = flat_results_clone
+                                        .get(*result_idx)
+                                        .and_then(crate::scripts::SearchResult::stable_selection_key)
+                                        .map(|stable_key| {
+                                            format!(
+                                                "list-row:{}",
+                                                main_list_row_semantic_id(&stable_key)
+                                            )
+                                        });
                                     let design_elapsed = design_render_start.elapsed();
 
                                     // Log slow items (>1ms)
@@ -1477,6 +1486,9 @@ impl ScriptListApp {
                                         .on_mouse_down(gpui::MouseButton::Left, mouse_down_handler)
                                         .on_hover(hover_handler)
                                         .on_click(click_handler)
+                                        .when_some(row_debug_selector, |this, selector| {
+                                            this.debug_selector(move || selector)
+                                        })
                                         .child(item_element)
                                         .into_any_element()
                                 }

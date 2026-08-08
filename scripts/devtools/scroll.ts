@@ -38,8 +38,25 @@ type NormalizedScrollMeasurement = {
   selectedRowAboveFooter: unknown;
 };
 
+export type RenderedSafeViewportMeasurement = {
+  required: boolean;
+  classification: "ok" | "not-ok" | "blocked-by-missing-primitive";
+  selectedSemanticId: string | null;
+  rowMeasurementId: string | null;
+  safeViewportMeasurementId: string | null;
+  rowBounds: Rect | null;
+  rowVisibleBounds: Rect | null;
+  safeViewportBounds: Rect | null;
+  visibleRatio: number | null;
+  withinSafeViewport: boolean | null;
+  frameGeneration: number | null;
+  frameMatches: boolean | null;
+  targetDataGeneration: number | null;
+  missingPrimitives: string[];
+};
+
 function usage() {
-  return "Usage:\n  bun scripts/devtools/scroll.ts inspect [target args] [--require-affordance] [--require-native-list-contract]";
+  return "Usage:\n  bun scripts/devtools/scroll.ts inspect [target args] [--require-affordance] [--require-native-list-contract] [--require-rendered-safe-viewport]";
 }
 
 function asObject(value: unknown): JsonObject {
@@ -65,6 +82,19 @@ function rectFrom(value: unknown): Rect | null {
   return x == null || y == null || width == null || height == null
     ? null
     : { x, y, width, height };
+}
+
+function rectIntersectionRatio(bounds: Rect, clip: Rect) {
+  const width = Math.max(
+    0,
+    Math.min(bounds.x + bounds.width, clip.x + clip.width) - Math.max(bounds.x, clip.x),
+  );
+  const height = Math.max(
+    0,
+    Math.min(bounds.y + bounds.height, clip.y + clip.height) - Math.max(bounds.y, clip.y),
+  );
+  const area = Math.max(0, bounds.width) * Math.max(0, bounds.height);
+  return area > 0 ? (width * height) / area : 1;
 }
 
 export function notesScrollFromState(state: JsonObject): JsonObject {
@@ -272,6 +302,70 @@ export function normalizeScriptListScrollMeasurement(
   };
 }
 
+/** Join the selected semantic row to completed-frame paint and its rendered safe viewport. */
+export function renderedSafeViewportMeasurement(
+  scroll: JsonObject,
+  layoutReceipt: JsonObject | null,
+  required: boolean,
+): RenderedSafeViewportMeasurement {
+  const selectedSemanticId = typeof scroll.selectedSemanticId === "string"
+    ? scroll.selectedSemanticId
+    : null;
+  const nodes = nodesOf(layoutReceipt?.nodes);
+  const renderedNodes = nodes.filter((node) => node.measurementProvenance === "paint-time");
+  const row = selectedSemanticId == null
+    ? null
+    : renderedNodes.find((node) => node.name === `list-row:${selectedSemanticId}`) ?? null;
+  const safeViewport = renderedNodes.find((node) => node.name === "main-view-main") ?? null;
+  const rowBounds = rectFrom(row?.bounds);
+  const rowVisibleBounds = rectFrom(row?.visibleBounds);
+  const safeViewportBounds = rectFrom(safeViewport?.visibleBounds ?? safeViewport?.bounds);
+  const rowFrame = asNumber(row?.measurementFrameGeneration);
+  const viewportFrame = asNumber(safeViewport?.measurementFrameGeneration);
+  const frameMatches = rowFrame == null || viewportFrame == null ? null : rowFrame === viewportFrame;
+  const visibleRatio = rowBounds && rowVisibleBounds && safeViewportBounds
+    ? Math.min(
+        rectIntersectionRatio(rowBounds, rowVisibleBounds),
+        rectIntersectionRatio(rowBounds, safeViewportBounds),
+      )
+    : null;
+  const withinSafeViewport = visibleRatio == null ? null : visibleRatio >= 0.999;
+  const transaction = asObject(layoutReceipt?.transaction);
+  const targetDataGeneration = asNumber(transaction.dataGeneration);
+  const missingPrimitives = [
+    selectedSemanticId == null ? "selectedSemanticId" : "",
+    rowBounds == null ? "renderedSelectedRowBounds" : "",
+    rowVisibleBounds == null ? "renderedSelectedRowVisibleBounds" : "",
+    safeViewportBounds == null ? "renderedSafeViewportBounds" : "",
+    frameMatches == null ? "renderedFrameGeneration" : "",
+    targetDataGeneration == null ? "targetDataGeneration" : "",
+  ].filter(Boolean);
+  const classification = required && missingPrimitives.length > 0
+    ? "blocked-by-missing-primitive"
+    : required && (!withinSafeViewport || frameMatches !== true)
+    ? "not-ok"
+    : "ok";
+
+  return {
+    required,
+    classification,
+    selectedSemanticId,
+    rowMeasurementId: typeof row?.measurementId === "string" ? row.measurementId : null,
+    safeViewportMeasurementId: typeof safeViewport?.measurementId === "string"
+      ? safeViewport.measurementId
+      : null,
+    rowBounds,
+    rowVisibleBounds,
+    safeViewportBounds,
+    visibleRatio,
+    withinSafeViewport,
+    frameGeneration: rowFrame,
+    frameMatches,
+    targetDataGeneration,
+    missingPrimitives,
+  };
+}
+
 function classify(
   targetReceipt: JsonObject,
   stateEnvelope: JsonObject,
@@ -280,6 +374,7 @@ function classify(
   affordanceClassification?: string | null,
   nativeContractClassification?: string | null,
   nativeContractRequired = false,
+  renderedClassification?: string | null,
 ) {
   if (targetReceipt.classification !== "ok") {
     return targetReceipt.classification ?? "blocked-by-target-ambiguity";
@@ -296,6 +391,9 @@ function classify(
   }
   if (nativeContractClassification && nativeContractClassification !== "ok") {
     return nativeContractClassification;
+  }
+  if (renderedClassification && renderedClassification !== "ok") {
+    return renderedClassification;
   }
   if (Object.keys(scroll).length === 0
     || (!nativeContractRequired && (scroll.scrollTop == null || scroll.viewportHeight == null))) {
@@ -318,10 +416,12 @@ async function main() {
     extras: {
       "--require-affordance": "boolean",
       "--require-native-list-contract": "boolean",
+      "--require-rendered-safe-viewport": "boolean",
     },
   });
   const requireAffordance = extras["--require-affordance"] === true;
   const requireNativeListContract = extras["--require-native-list-contract"] === true;
+  const requireRenderedSafeViewport = extras["--require-rendered-safe-viewport"] === true;
   if (args.help) {
     console.log(usage());
     process.exit(0);
@@ -344,6 +444,9 @@ async function main() {
   const isNotesTarget = resolvedKind === "notes" || resolvedSurface === "notes";
   const rawScroll = isNotesTarget ? notesScrollFromState(state) : activeListScrollFromState(state);
   const isScriptList = !isNotesTarget && (rawScroll.surface == null || rawScroll.surface === "script_list");
+  const renderedLayout = !isNotesTarget && requireRenderedSafeViewport
+    ? await layoutMeasurement(args)
+    : null;
   const normalized: NormalizedScrollMeasurement = isNotesTarget || !isScriptList
     ? {
         scroll: rawScroll,
@@ -360,10 +463,15 @@ async function main() {
     : normalizeScriptListScrollMeasurement(
         rawScroll,
         asNumber(rawScroll.viewportHeight) != null && (asNumber(rawScroll.viewportHeight) ?? 0) <= 0
-          ? await layoutMeasurement(args)
+          ? renderedLayout ?? await layoutMeasurement(args)
           : null,
       );
   const scroll = normalized.scroll;
+  const renderedSafeViewport = renderedSafeViewportMeasurement(
+    scroll,
+    renderedLayout,
+    requireRenderedSafeViewport,
+  );
   const contentHeight = asNumber(scroll.contentHeight);
   const viewportHeight = asNumber(scroll.viewportHeight);
   const maxScrollTop = asNumber(scroll.maxScrollTop);
@@ -385,6 +493,7 @@ async function main() {
     affordanceInspection.classification,
     nativeContractInspection.classification,
     requireNativeListContract,
+    renderedSafeViewport.classification,
   );
 
   emitValidatedReceipt("devtools.scroll.inspect", finishReceipt(
@@ -452,6 +561,7 @@ async function main() {
         missingFields: affordanceInspection.missingFields,
       },
       nativeListContractRequirement: nativeContractInspection,
+      renderedSafeViewport,
       missingPrimitive: normalized.missingPrimitive,
       resizePressure: {
         overflowY: canScrollY,
@@ -471,6 +581,7 @@ async function main() {
         normalized.missingPrimitive ?? "",
         ...(requireAffordance ? affordanceInspection.missingFields : []),
         ...(requireNativeListContract ? nativeContractInspection.missingFields : []),
+        ...(requireRenderedSafeViewport ? renderedSafeViewport.missingPrimitives : []),
       ].filter(Boolean),
       warnings: argWarnings,
       errors: diagnostic([

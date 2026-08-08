@@ -132,6 +132,11 @@ macro_rules! protocol_message_variants_system_control {
         popup_closed: bool,
         #[serde(rename = "errorCode", skip_serializing_if = "Option::is_none")]
         error_code: Option<String>,
+        #[serde(
+            rename = "nativeFooterActivation",
+            skip_serializing_if = "Option::is_none"
+        )]
+        native_footer_activation: Option<serde_json::Value>,
     },
 
     /// Open URL in default browser

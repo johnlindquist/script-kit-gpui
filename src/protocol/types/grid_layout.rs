@@ -709,6 +709,24 @@ pub struct AppKitFidelityNode {
     pub image: Option<AppKitFidelityImage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_selector: Option<String>,
+    /// Semantic peer installed as the NSAccessibility identifier. Structural
+    /// AppKit `id` remains separate for paint/styling ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility_identifier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility_role: Option<String>,
+    /// Product-static label evidence is fingerprinted so this projection never
+    /// establishes a general raw AX text escape hatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility_label_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility_label_length: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility_focused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility_element: Option<bool>,
 }
 
 /// Runtime allocation selected for the constrained leading footer lane.
@@ -1263,6 +1281,28 @@ mod tests {
         assert_eq!(json["overlays"][0]["targetId"], "gpui-footer-overlay");
         assert_eq!(json["overlays"][0]["parentTargetId"], "main");
         assert_eq!(json["unscoped"]["primitiveCount"], 0);
+    }
+
+    #[test]
+    fn appkit_accessibility_peer_serializes_without_raw_label() {
+        let node = AppKitFidelityNode {
+            id: "script-kit-footer-button-run".to_string(),
+            accessibility_identifier: Some("footer-action:run".to_string()),
+            accessibility_role: Some("AXButton".to_string()),
+            accessibility_label_sha256: Some("abc123".to_string()),
+            accessibility_label_length: Some(3),
+            accessibility_enabled: Some(true),
+            accessibility_focused: Some(false),
+            accessibility_element: Some(true),
+            action_selector: Some("runFooterAction:".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(node).expect("serialize AppKit AX peer");
+        assert_eq!(json["accessibilityIdentifier"], "footer-action:run");
+        assert_eq!(json["accessibilityRole"], "AXButton");
+        assert_eq!(json["accessibilityLabelSha256"], "abc123");
+        assert_eq!(json["accessibilityLabelLength"], 3);
+        assert!(json.get("accessibilityLabel").is_none());
     }
 
     #[test]
