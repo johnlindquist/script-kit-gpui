@@ -1,7 +1,7 @@
-// `SettingsItem`, `SettingsAction`, the pure item census
-// (`get_settings_items_for`), the filter helpers, the count-label formatter,
-// and the layout resolver live in `settings_contract.rs` (same include
-// chain), shared verbatim with the lib-side design-token exporter.
+// `SettingsItem`, `SettingsAction`, `SettingsActionDescriptor`, the pure
+// item census (`get_settings_items_for`), the filter helpers, the count-label
+// formatter, and the layout resolver live in `settings_contract.rs` (same
+// include chain), shared verbatim with the lib-side design-token exporter.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsEmptyState {
@@ -24,6 +24,18 @@ impl SettingsEmptyState {
             Self::NoFilteredMatches => "No settings match your filter",
         }
     }
+}
+
+/// Which surface activated a Settings action (GEO-006). Every route funnels
+/// into the SAME ID-based execution boundary; the source is observability,
+/// never a behavior fork.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // NativeFooter/GpuiFallback arm land with INT-GEO-006-ACTION-PROJECTIONS
+enum SettingsActivationSource {
+    Enter,
+    Click,
+    NativeFooter,
+    GpuiFallback,
 }
 
 /// Runtime wrapper: the ONLY place the live window-state config feeds the
@@ -76,20 +88,75 @@ impl ScriptListApp {
         self.settings_selected_visible_row(filter, selected_index)
     }
 
-    /// Execute a settings action selected from the settings hub.
+    /// Real runtime prerequisites for Settings actions. The ONLY currently
+    /// honest disabled state is a missing configure-snap-mode builtin; do
+    /// not manufacture others.
+    fn settings_action_availability(&self) -> SettingsActionAvailability {
+        SettingsActionAvailability {
+            configure_snap_mode: crate::builtins::get_builtin_entries(&self.config.get_builtins())
+                .iter()
+                .any(|entry| entry.id == "builtin/configure-snap-mode"),
+        }
+    }
+
+    /// The one submission funnel both routes (and, post-integration, the
+    /// native footer bridge) call with the selected descriptor's action ID.
+    fn submit_settings_action(
+        &mut self,
+        action_id: SettingsActionId,
+        source: SettingsActivationSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_settings_action(action_id, source, window, cx);
+    }
+
+    /// Execute a settings action by its stable ID (GEO-006). The ID is the
+    /// only execution currency; the enabled state is rechecked HERE so a
+    /// stale projection can never invoke a disabled action.
     fn execute_settings_action(
         &mut self,
-        action: &SettingsAction,
+        action_id: SettingsActionId,
+        source: SettingsActivationSource,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(action) = SettingsAction::from_id(action_id) else {
+            tracing::error!(
+                action_id = action_id.as_str(),
+                source = ?source,
+                "settings.unknown_action_id"
+            );
+            return;
+        };
+        let descriptor = action.descriptor(self.settings_action_availability());
+        if !descriptor.enabled {
+            tracing::info!(
+                action_id = descriptor.action_id.as_str(),
+                reason = descriptor.disabled_reason.unwrap_or("unavailable"),
+                source = ?source,
+                "settings.action_refused"
+            );
+            // Preserve the pre-descriptor user-visible feedback for the one
+            // real refusal (missing snap-mode builtin): an error toast with
+            // the same reason the descriptor projects.
+            if let Some(reason) = descriptor.disabled_reason {
+                self.show_error_toast(reason, cx);
+            }
+            return;
+        }
+        tracing::info!(
+            correlation_id = "settings-hub",
+            action_id = descriptor.action_id.as_str(),
+            primary_verb = descriptor.primary_verb,
+            destination_surface = descriptor.destination.surface,
+            destination_operation = descriptor.destination.operation,
+            source = ?source,
+            "settings.action_executed"
+        );
+
         match action {
             SettingsAction::ChooseTheme => {
-                tracing::info!(
-                    correlation_id = "settings-hub",
-                    action = "choose_theme",
-                    "settings.action_executed"
-                );
                 self.open_theme_chooser_view(cx);
             }
             SettingsAction::DictationSetup => {
@@ -115,12 +182,6 @@ impl ScriptListApp {
                 self.execute_builtin(&entry, cx);
             }
             SettingsAction::SelectMicrophone => {
-                tracing::info!(
-                    correlation_id = "settings-hub",
-                    action = "select_microphone",
-                    "settings.action_executed"
-                );
-
                 let entry = crate::builtins::BuiltInEntry {
                     id: crate::config::canonical_builtin_command_id("builtin/select-microphone"),
                     name: "Select Microphone".to_string(),
@@ -144,12 +205,6 @@ impl ScriptListApp {
                 self.execute_builtin(&entry, cx);
             }
             SettingsAction::ClearSuggested => {
-                tracing::info!(
-                    correlation_id = "settings-hub",
-                    action = "clear_suggested",
-                    "settings.action_executed"
-                );
-
                 let entry = crate::builtins::BuiltInEntry {
                     id: crate::config::canonical_builtin_command_id("builtin/clear-suggested"),
                     name: "Clear Suggested Items".to_string(),
@@ -192,11 +247,6 @@ impl ScriptListApp {
                 self.execute_builtin(&entry, cx);
             }
             SettingsAction::SetupPermissions => {
-                tracing::info!(
-                    correlation_id = "settings-hub",
-                    action = "setup_permissions",
-                    "settings.action_executed"
-                );
                 self.open_permissions_wizard(cx);
             }
             SettingsAction::AllowAccessibility => {
@@ -297,15 +347,12 @@ impl ScriptListApp {
                 if let Some(entry) = entry {
                     self.execute_builtin(&entry, cx);
                 } else {
-                    self.show_error_toast("Configure Snap Mode is unavailable", cx);
+                    // Defensive: availability rechecked above should have
+                    // refused already; keep the exact legacy feedback.
+                    self.show_error_toast(SETTINGS_CONFIGURE_SNAP_MODE_DISABLED_REASON, cx);
                 }
             }
             SettingsAction::ResetWindowPositions => {
-                tracing::info!(
-                    correlation_id = "settings-hub",
-                    action = "reset_window_positions",
-                    "settings.action_executed"
-                );
                 self.reset_window_positions_to_default_main_menu(cx);
             }
         }
@@ -324,8 +371,11 @@ impl ScriptListApp {
 
         let tokens = get_tokens(self.current_design);
         let design_spacing = tokens.spacing();
+        // Resolve the ACTIVE main-menu theme def FIRST: it owns section
+        // geometry/typography for the shared leading separator (GEO-007).
+        let menu_def = self.current_main_menu_theme.def();
         // Shared with the design-token exporter (settings_contract.rs).
-        let hub_layout = resolved_settings_hub_layout(design_spacing);
+        let hub_layout = resolved_settings_hub_layout_for(design_spacing, menu_def);
         let _design_typography = tokens.typography();
 
         let chrome = theme::AppChromeColors::from_theme(&self.theme);
@@ -334,6 +384,11 @@ impl ScriptListApp {
         let filtered_items = filtered_settings_items(&items, &filter);
         let item_count = filtered_items.len();
         let list_colors = ListItemColors::from_theme(&self.theme);
+        let availability = self.settings_action_availability();
+        // GEO-006: the selected descriptor is the ONLY source for the footer
+        // hint (and, post-integration, the native footer + AX projections).
+        let selected_action =
+            selected_settings_action_descriptor(&items, &filter, selected_index, availability);
 
         let handle_key = cx.listener(
             move |this: &mut Self,
@@ -437,9 +492,20 @@ impl ScriptListApp {
                     }
                     cx.stop_propagation();
                 } else if is_key_enter(key) {
-                    if let Some(item) = filtered_items.get(current_selected) {
-                        let action = item.action.clone();
-                        this.execute_settings_action(&action, window, cx);
+                    // GEO-006: Enter resolves the selected descriptor and
+                    // submits its stable action ID — never the enum directly.
+                    if let Some(descriptor) = selected_settings_action_descriptor(
+                        &settings_items,
+                        &current_filter,
+                        current_selected,
+                        this.settings_action_availability(),
+                    ) {
+                        this.submit_settings_action(
+                            descriptor.action_id,
+                            SettingsActivationSource::Enter,
+                            window,
+                            cx,
+                        );
                     }
                     cx.stop_propagation();
                 } else {
@@ -457,7 +523,6 @@ impl ScriptListApp {
             .map(|(ix, item)| {
                 let is_selected = ix == selected_index;
                 let is_hovered = hovered == Some(ix);
-                let action = item.action.clone();
                 let entity_click = entity.clone();
                 let entity_hover = entity.clone();
                 let desc = item.description.to_string();
@@ -483,7 +548,32 @@ impl ScriptListApp {
                                     was_selected,
                                     click_count,
                                 ) {
-                                    this.execute_settings_action(&action, window, cx);
+                                    // GEO-006: the executing click resolves the
+                                    // SAME selected descriptor as Enter and
+                                    // submits its action ID.
+                                    let current_filter = if let AppView::SettingsView {
+                                        filter,
+                                        ..
+                                    } = &this.current_view
+                                    {
+                                        filter.clone()
+                                    } else {
+                                        String::new()
+                                    };
+                                    let settings_items = get_settings_items();
+                                    if let Some(descriptor) = selected_settings_action_descriptor(
+                                        &settings_items,
+                                        &current_filter,
+                                        ix,
+                                        this.settings_action_availability(),
+                                    ) {
+                                        this.submit_settings_action(
+                                            descriptor.action_id,
+                                            SettingsActivationSource::Click,
+                                            window,
+                                            cx,
+                                        );
+                                    }
                                 } else {
                                     cx.notify();
                                 }
@@ -511,8 +601,10 @@ impl ScriptListApp {
                         }
                     })
                     .child(
+                        // GEO-007: Settings rows are structurally iconless —
+                        // `SettingsItem` has no icon field and no parser runs.
                         ListItem::new(item.name.to_string(), list_colors)
-                            .icon_kind_opt(crate::list_item::IconKind::from_icon_hint(item.icon))
+                            .icon_kind_opt(None)
                             .description_opt(Some(desc))
                             .selected(is_selected)
                             .hovered(is_hovered),
@@ -565,15 +657,29 @@ impl ScriptListApp {
             )
             .child(div().relative().flex_1().min_h(px(0.)).child(list_element));
 
-        let footer = self.main_window_footer_slot(crate::components::render_simple_hint_strip(
-            vec![
-                gpui::SharedString::from("↵ Open"),
+        // GEO-006: the GPUI fallback footer derives its verb from the
+        // selected descriptor — "Open" is never reconstructed locally. With
+        // no selectable row the footer is honestly Back-only; a disabled
+        // descriptor shows its reason instead of an executable hint.
+        let footer_hints: Vec<gpui::SharedString> = match selected_action {
+            Some(action) if action.enabled => vec![
+                gpui::SharedString::from(format!("\u{21B5} {}", action.primary_verb)),
                 gpui::SharedString::from("Esc Back"),
             ],
-            None,
-        ));
+            Some(action) => vec![
+                gpui::SharedString::from(
+                    action.disabled_reason.unwrap_or("Unavailable").to_string(),
+                ),
+                gpui::SharedString::from("Esc Back"),
+            ],
+            None => vec![gpui::SharedString::from("Esc Back")],
+        };
+        let footer = self
+            .main_window_footer_slot(crate::components::render_simple_hint_strip(
+                footer_hints,
+                None,
+            ));
 
-        let menu_def = self.current_main_menu_theme.def();
         let shell = menu_def.shell;
 
         crate::components::main_view_chrome::render_main_view_chrome_footer_flush(

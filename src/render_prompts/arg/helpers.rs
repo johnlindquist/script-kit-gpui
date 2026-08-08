@@ -356,17 +356,24 @@ impl ScriptListApp {
         self.arg_selected_index = new_selected_idx;
 
         // Defer resize through window_ops to avoid RefCell borrow conflicts during native callbacks.
-        let (view_type, item_count) = if filtered_len == 0 {
-            if has_choices {
-                (ViewType::ArgPromptWithChoices, 0)
-            } else {
-                (ViewType::ArgPromptNoChoices, 0)
-            }
+        // GEO-002: ask the shared Arg resolver for the current target height
+        // (renderer-derived row slot, real header chrome, rendered footer
+        // reservation) instead of the retired model-only 40px formula.
+        let intended_choice_count = if filtered_len == 0 && has_choices {
+            // Choices exist but the filter matched none: keep the one-row
+            // empty-state surface the renderer paints.
+            0
         } else {
-            (ViewType::ArgPromptWithChoices, filtered_len)
+            filtered_len
         };
-        let target_height = crate::window_resize::height_for_view(view_type, item_count);
-        crate::window_ops::queue_resize(f32::from(target_height), window, &mut *cx);
+        let (_, target_height) =
+            crate::window_resize::arg_layout::current_resolved_arg_layout_for_target(
+                crate::window_resize::arg_layout::ArgPresentationMode::Full,
+                intended_choice_count.max(usize::from(has_choices)),
+                f32::from(crate::window_resize::layout::MIN_HEIGHT),
+                crate::window_resize::current_standard_height(),
+            );
+        crate::window_ops::queue_resize(target_height, window, &mut *cx);
     }
 
     #[inline]

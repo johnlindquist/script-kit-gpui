@@ -44,6 +44,7 @@
 //! a separate catalog path for non-default designs; the pipeline above covers
 //! the default theme-driven path.
 
+pub mod alpha;
 mod audit;
 mod chrome;
 mod color_resolver;
@@ -58,6 +59,9 @@ pub mod service;
 pub(crate) mod types;
 pub mod user_themes;
 pub(crate) mod validation;
+
+// Re-export the unit-safe authored alpha byte + typed packer (GOV-003)
+pub use alpha::{pack_rgb_alpha, AlphaByte};
 
 // Re-export shared chrome contract for app surfaces
 pub use chrome::MainMenuRowFillBase;

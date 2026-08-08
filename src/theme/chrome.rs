@@ -307,9 +307,11 @@ pub(crate) fn resolve_main_menu_row_state_fill(
         | K::CarbonNeon => MainMenuRowFillBase::Accent,
     };
     let hover_alpha = if matches!(row_kind, K::IconTile) {
-        ((theme_hover_opacity * 255.0) as u32)
-            .max(u32::from(row_hover_fill_alpha))
-            .min(u32::from(u8::MAX)) as u8
+        // GOV-003: the normalized theme opacity quantizes ONCE, through the
+        // named truncating constructor; the byte-domain max then stays in
+        // authored-byte space.
+        let theme_hover = crate::theme::AlphaByte::from_normalized(theme_hover_opacity);
+        crate::theme::AlphaByte::authored(theme_hover.get().max(row_hover_fill_alpha)).get()
     } else {
         row_hover_fill_alpha
     };
@@ -336,14 +338,19 @@ pub(crate) fn resolve_main_menu_row_state_palette_from_parts(
         MainMenuRowFillBase::TextPrimary => inputs.text_primary_hex,
         MainMenuRowFillBase::Accent => inputs.accent_selected_hex,
     };
-    let primary_foreground_rgba =
-        (inputs.text_primary_hex << 8) | u32::from(inputs.primary_name_alpha);
+    let primary_foreground_rgba = crate::theme::alpha::pack_rgb_alpha(
+        inputs.text_primary_hex,
+        crate::theme::AlphaByte::authored(inputs.primary_name_alpha),
+    );
     let active_foreground_hex = match inputs.row_kind {
         K::CarbonNeon => inputs.text_on_accent_hex,
         K::OperatorMonoGlass => inputs.accent_selected_hex,
         _ => inputs.text_primary_hex,
     };
-    let active_foreground_rgba = (active_foreground_hex << 8) | 0xFF;
+    let active_foreground_rgba = crate::theme::alpha::pack_rgb_alpha(
+        active_foreground_hex,
+        crate::theme::AlphaByte::authored(0xFF),
+    );
 
     let rest_foregrounds = RowForegroundColors {
         primary_rgba: primary_foreground_rgba,
@@ -359,9 +366,18 @@ pub(crate) fn resolve_main_menu_row_state_palette_from_parts(
     };
     let shared = resolve_row_state_palette(RowStateColorInputs {
         rest_background_rgba: None,
-        hover_background_rgba: Some((fill_hex << 8) | u32::from(fill.hover_alpha)),
-        selected_background_rgba: Some((fill_hex << 8) | u32::from(fill.active_alpha)),
-        active_background_rgba: Some((fill_hex << 8) | u32::from(fill.active_alpha)),
+        hover_background_rgba: Some(crate::theme::alpha::pack_rgb_alpha(
+            fill_hex,
+            crate::theme::AlphaByte::authored(fill.hover_alpha),
+        )),
+        selected_background_rgba: Some(crate::theme::alpha::pack_rgb_alpha(
+            fill_hex,
+            crate::theme::AlphaByte::authored(fill.active_alpha),
+        )),
+        active_background_rgba: Some(crate::theme::alpha::pack_rgb_alpha(
+            fill_hex,
+            crate::theme::AlphaByte::authored(fill.active_alpha),
+        )),
         rest_foregrounds,
         selected_foregrounds,
         // Main/footer compatibility consumers do not currently expose disabled
@@ -393,7 +409,7 @@ pub(crate) fn resolve_main_menu_row_state_palette(
         text_primary_hex: theme.colors.text.primary,
         accent_selected_hex: theme.colors.accent.selected,
         text_on_accent_hex: theme.colors.text.on_accent,
-        primary_name_alpha: crate::theme::types::opacity_to_alpha(opacity.text_name) as u8,
+        primary_name_alpha: crate::theme::AlphaByte::from_normalized(opacity.text_name).get(),
     })
 }
 
@@ -428,10 +444,28 @@ pub(crate) struct DangerActionColors {
 impl DangerActionColors {
     pub(crate) fn from_theme(theme: &Theme) -> Self {
         let error = theme.colors.ui.error;
+        // GOV-003: the DANGER_ACTION_* constants are authored bytes typed
+        // `u32` in a forbidden owner (`src/ui/chrome/tokens.rs`); wrap them
+        // at THIS owned packing boundary with a range assert instead of
+        // truncating silently. Typing the constants themselves is an
+        // integration request.
+        let danger_alpha = |value: u32| -> crate::theme::AlphaByte {
+            assert!(value <= 0xFF, "danger action alpha out of byte range");
+            crate::theme::AlphaByte::authored(value as u8)
+        };
         Self {
-            rest_rgba: (error << 8) | crate::ui::chrome::DANGER_ACTION_REST_ALPHA,
-            hover_rgba: (error << 8) | crate::ui::chrome::DANGER_ACTION_HOVER_ALPHA,
-            border_rgba: (error << 8) | crate::ui::chrome::DANGER_ACTION_BORDER_ALPHA,
+            rest_rgba: crate::theme::alpha::pack_rgb_alpha(
+                error,
+                danger_alpha(crate::ui::chrome::DANGER_ACTION_REST_ALPHA),
+            ),
+            hover_rgba: crate::theme::alpha::pack_rgb_alpha(
+                error,
+                danger_alpha(crate::ui::chrome::DANGER_ACTION_HOVER_ALPHA),
+            ),
+            border_rgba: crate::theme::alpha::pack_rgb_alpha(
+                error,
+                danger_alpha(crate::ui::chrome::DANGER_ACTION_BORDER_ALPHA),
+            ),
         }
     }
 }
@@ -528,10 +562,16 @@ impl AppChromeColors {
             },
             inline_dropdown_surface_rgba: if theme.is_dark_mode() {
                 // Match PromptFooter dark mode: selected_subtle @ ~12% opacity.
-                (colors.accent.selected_subtle << 8) | 0x1f
+                crate::theme::alpha::pack_rgb_alpha(
+                    colors.accent.selected_subtle,
+                    crate::theme::AlphaByte::authored(0x1f),
+                )
             } else {
                 // Match PromptFooter light mode: opaque surface.
-                (colors.background.main << 8) | 0xff
+                crate::theme::alpha::pack_rgb_alpha(
+                    colors.background.main,
+                    crate::theme::AlphaByte::authored(0xff),
+                )
             },
             log_panel_surface_rgba: hex_to_rgba_with_opacity(
                 colors.background.log_panel,

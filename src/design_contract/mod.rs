@@ -107,6 +107,30 @@ pub enum TokenValue {
     },
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContractConflictLifecycleKind {
+    IntentionalFact,
+    ModelDrift,
+    ConsumerDrift,
+    EvidencePending,
+    Compatibility,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractConflictLifecycle {
+    pub kind: ContractConflictLifecycleKind,
+    pub owner: String,
+    pub intended_contract: String,
+    pub model_measurement_id: Option<String>,
+    pub render_measurement_id: Option<String>,
+    pub task: String,
+    pub blocker: Option<String>,
+    pub removal_condition: String,
+    pub last_receipt: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContractConflict {
@@ -114,6 +138,7 @@ pub struct ContractConflict {
     pub values: BTreeMap<String, String>,
     pub severity: String,
     pub explanation: String,
+    pub lifecycle: ContractConflictLifecycle,
 }
 
 /// Format a `0xRRGGBBAA`-packed color as the exact CSS the renderer's bytes
@@ -212,6 +237,50 @@ impl BundleBuilder {
     }
 
     fn conflict(&mut self, id: &str, values: &[(&str, String)], severity: &str, explanation: &str) {
+        let task = if id.starts_with("confirm") {
+            "GEO-003"
+        } else if id.starts_with("actions") {
+            "GEO-008"
+        } else if id.starts_with("notesFooter") {
+            "GEO-004"
+        } else if id.starts_with("notesMarkdown") {
+            "GEO-005"
+        } else if id.starts_with("settings") {
+            "GEO-006"
+        } else if id.starts_with("argPrompt") {
+            "GEO-002"
+        } else if id.starts_with("rowHeight")
+            || id.starts_with("sectionHeader")
+            || id.starts_with("selectedFill")
+        {
+            "GEO-009"
+        } else {
+            "GOV-005"
+        };
+        let kind = match severity {
+            "high" => ContractConflictLifecycleKind::ConsumerDrift,
+            "warning" => ContractConflictLifecycleKind::ModelDrift,
+            _ if id.contains("Capture") || id.contains("GlyphExtents") => {
+                ContractConflictLifecycleKind::EvidencePending
+            }
+            _ if id.contains("legacy") || id.contains("Legacy") => {
+                ContractConflictLifecycleKind::Compatibility
+            }
+            _ => ContractConflictLifecycleKind::IntentionalFact,
+        };
+        let measurement_id = |needles: &[&str], fallback_index: usize| {
+            values
+                .iter()
+                .find(|(key, _)| {
+                    let key = key.to_ascii_lowercase();
+                    needles.iter().any(|needle| key.contains(needle))
+                })
+                .or_else(|| values.get(fallback_index))
+                .or_else(|| values.first())
+                .map(|(key, _)| format!("{id}:{key}"))
+        };
+        let blocker = matches!(kind, ContractConflictLifecycleKind::EvidencePending)
+            .then(|| "Fresh rendered evidence is required before reclassification.".to_string());
         self.conflicts.push(ContractConflict {
             id: id.to_string(),
             values: values
@@ -220,6 +289,22 @@ impl BundleBuilder {
                 .collect(),
             severity: severity.to_string(),
             explanation: explanation.to_string(),
+            lifecycle: ContractConflictLifecycle {
+                kind,
+                owner: format!("design-contract:{task}"),
+                intended_contract: explanation.to_string(),
+                model_measurement_id: measurement_id(&["model", "declared", "source"], 0),
+                render_measurement_id: measurement_id(
+                    &["render", "paint", "resolved", "measured"],
+                    values.len().saturating_sub(1),
+                ),
+                task: task.to_string(),
+                blocker,
+                removal_condition: format!(
+                    "Remove only when {task} proves all declared values converge or the intentional difference no longer exists."
+                ),
+                last_receipt: Some(format!(".artifacts/consistency/{task}/task.json")),
+            },
         });
     }
 }
@@ -3078,32 +3163,32 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
     );
 
     // ── Agent Chat (embedded Pi chat surface) ────────────────────────────
-    // Production contract only: `style_contract::production_agent_chat_style()`.
+    // Production contract only: `conversation_style::production_conversation_style()`.
     // Every theme-color × authored-alpha byte routes through the SAME
-    // `style_contract` resolvers `components/transcript.rs` and `view.rs`
+    // `conversation_style` resolvers `components/transcript.rs` and `view.rs`
     // paint with, so exporter and renderer literally share bytes.
-    use crate::ai::agent_chat::ui::style_contract as agent_chat_contract;
-    let chat = agent_chat_contract::production_agent_chat_style();
-    let chat_resolved = agent_chat_contract::resolved_agent_chat_transcript_colors(&chat, &theme);
-    let chat_send_disabled = agent_chat_contract::resolved_agent_chat_send_state_chrome(
+    use crate::components::conversation_style as agent_chat_contract;
+    let chat = agent_chat_contract::production_conversation_style();
+    let chat_resolved = agent_chat_contract::resolved_conversation_transcript_colors(&chat, &theme);
+    let chat_send_disabled = agent_chat_contract::resolved_conversation_send_state_chrome(
         false,
         false,
         colors.accent.selected,
         colors.text.primary,
     );
-    let chat_send_enabled = agent_chat_contract::resolved_agent_chat_send_state_chrome(
+    let chat_send_enabled = agent_chat_contract::resolved_conversation_send_state_chrome(
         false,
         true,
         colors.accent.selected,
         colors.text.primary,
     );
-    let chat_send_queue = agent_chat_contract::resolved_agent_chat_send_state_chrome(
+    let chat_send_queue = agent_chat_contract::resolved_conversation_send_state_chrome(
         true,
         true,
         colors.accent.selected,
         colors.text.primary,
     );
-    let chat_send_streaming = agent_chat_contract::resolved_agent_chat_send_state_chrome(
+    let chat_send_streaming = agent_chat_contract::resolved_conversation_send_state_chrome(
         true,
         false,
         colors.accent.selected,
@@ -3265,14 +3350,14 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         (
             "agentChat.block.borderWidth",
             "--sk-agent-chat-block-border-width",
-            agent_chat_contract::AGENT_CHAT_BLOCK_BORDER_WIDTH,
-            "style_contract::AGENT_CHAT_BLOCK_BORDER_WIDTH",
+            agent_chat_contract::CONVERSATION_BLOCK_BORDER_WIDTH,
+            "conversation_style::CONVERSATION_BLOCK_BORDER_WIDTH",
         ),
         (
             "agentChat.block.headerGap",
             "--sk-agent-chat-block-header-gap",
-            agent_chat_contract::AGENT_CHAT_BLOCK_HEADER_GAP,
-            "style_contract::AGENT_CHAT_BLOCK_HEADER_GAP",
+            agent_chat_contract::CONVERSATION_BLOCK_HEADER_GAP,
+            "conversation_style::CONVERSATION_BLOCK_HEADER_GAP",
         ),
         (
             "agentChat.system.paddingX",
@@ -3307,14 +3392,14 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         (
             "agentChat.send.size",
             "--sk-agent-chat-send-size",
-            agent_chat_contract::AGENT_CHAT_SEND_SIZE,
-            "style_contract::AGENT_CHAT_SEND_SIZE",
+            agent_chat_contract::CONVERSATION_SEND_SIZE,
+            "conversation_style::CONVERSATION_SEND_SIZE",
         ),
         (
             "agentChat.send.radius",
             "--sk-agent-chat-send-radius",
-            agent_chat_contract::AGENT_CHAT_SEND_RADIUS,
-            "style_contract::AGENT_CHAT_SEND_RADIUS",
+            agent_chat_contract::CONVERSATION_SEND_RADIUS,
+            "conversation_style::CONVERSATION_SEND_RADIUS",
         ),
     ] {
         b.source_len(id, var, value, path);
@@ -3391,8 +3476,8 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         (
             "agentChat.diff.contextOpacity",
             "--sk-agent-chat-diff-context-opacity",
-            agent_chat_contract::AGENT_CHAT_DIFF_CONTEXT_OPACITY,
-            "style_contract::AGENT_CHAT_DIFF_CONTEXT_OPACITY",
+            agent_chat_contract::CONVERSATION_DIFF_CONTEXT_OPACITY,
+            "conversation_style::CONVERSATION_DIFF_CONTEXT_OPACITY",
         ),
         (
             "agentChat.system.opacity",
@@ -3415,26 +3500,26 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         (
             "agentChat.send.disabledOpacity",
             "--sk-agent-chat-send-disabled-opacity",
-            agent_chat_contract::AGENT_CHAT_SEND_DISABLED_OPACITY,
-            "style_contract::AGENT_CHAT_SEND_DISABLED_OPACITY",
+            agent_chat_contract::CONVERSATION_SEND_DISABLED_OPACITY,
+            "conversation_style::CONVERSATION_SEND_DISABLED_OPACITY",
         ),
         (
             "agentChat.send.enabledOpacity",
             "--sk-agent-chat-send-enabled-opacity",
-            agent_chat_contract::AGENT_CHAT_SEND_ENABLED_OPACITY,
-            "style_contract::AGENT_CHAT_SEND_ENABLED_OPACITY",
+            agent_chat_contract::CONVERSATION_SEND_ENABLED_OPACITY,
+            "conversation_style::CONVERSATION_SEND_ENABLED_OPACITY",
         ),
         (
             "agentChat.send.queueOpacity",
             "--sk-agent-chat-send-queue-opacity",
-            agent_chat_contract::AGENT_CHAT_SEND_QUEUE_OPACITY,
-            "style_contract::AGENT_CHAT_SEND_QUEUE_OPACITY",
+            agent_chat_contract::CONVERSATION_SEND_QUEUE_OPACITY,
+            "conversation_style::CONVERSATION_SEND_QUEUE_OPACITY",
         ),
         (
             "agentChat.send.streamingOpacity",
             "--sk-agent-chat-send-streaming-opacity",
-            agent_chat_contract::AGENT_CHAT_SEND_STREAMING_OPACITY,
-            "style_contract::AGENT_CHAT_SEND_STREAMING_OPACITY",
+            agent_chat_contract::CONVERSATION_SEND_STREAMING_OPACITY,
+            "conversation_style::CONVERSATION_SEND_STREAMING_OPACITY",
         ),
     ] {
         b.add(
@@ -3496,13 +3581,13 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         ),
         (
             "agentChat.tool.statusPendingAlpha",
-            agent_chat_contract::AGENT_CHAT_TOOL_STATUS_PENDING_ALPHA,
-            "style_contract::AGENT_CHAT_TOOL_STATUS_PENDING_ALPHA (0x80)",
+            agent_chat_contract::CONVERSATION_TOOL_STATUS_PENDING_ALPHA,
+            "conversation_style::CONVERSATION_TOOL_STATUS_PENDING_ALPHA (0x80)",
         ),
         (
             "agentChat.diff.tintAlpha",
-            agent_chat_contract::AGENT_CHAT_DIFF_TINT_ALPHA,
-            "style_contract::AGENT_CHAT_DIFF_TINT_ALPHA (0x14)",
+            agent_chat_contract::CONVERSATION_DIFF_TINT_ALPHA,
+            "conversation_style::CONVERSATION_DIFF_TINT_ALPHA (0x14)",
         ),
         (
             "agentChat.system.borderAlpha",
@@ -3521,18 +3606,18 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         ),
         (
             "agentChat.send.disabledBgAlpha",
-            agent_chat_contract::AGENT_CHAT_SEND_DISABLED_BG_ALPHA,
-            "style_contract::AGENT_CHAT_SEND_DISABLED_BG_ALPHA (0x06)",
+            agent_chat_contract::CONVERSATION_SEND_DISABLED_BG_ALPHA,
+            "conversation_style::CONVERSATION_SEND_DISABLED_BG_ALPHA (0x06)",
         ),
         (
             "agentChat.send.enabledBgAlpha",
-            agent_chat_contract::AGENT_CHAT_SEND_ENABLED_BG_ALPHA,
-            "style_contract::AGENT_CHAT_SEND_ENABLED_BG_ALPHA (0x30)",
+            agent_chat_contract::CONVERSATION_SEND_ENABLED_BG_ALPHA,
+            "conversation_style::CONVERSATION_SEND_ENABLED_BG_ALPHA (0x30)",
         ),
         (
             "agentChat.send.queueBgAlpha",
-            agent_chat_contract::AGENT_CHAT_SEND_QUEUE_BG_ALPHA,
-            "style_contract::AGENT_CHAT_SEND_QUEUE_BG_ALPHA (0x24)",
+            agent_chat_contract::CONVERSATION_SEND_QUEUE_BG_ALPHA,
+            "conversation_style::CONVERSATION_SEND_QUEUE_BG_ALPHA (0x24)",
         ),
     ] {
         b.add(
@@ -3567,13 +3652,13 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
     for (id, value, path) in [
         (
             "agentChat.composer.paddingX",
-            agent_chat_contract::AGENT_CHAT_INPUT_PADDING_X,
-            "style_contract::AGENT_CHAT_INPUT_PADDING_X (picker clamping/measurement; not shell geometry)",
+            agent_chat_contract::CONVERSATION_INPUT_PADDING_X,
+            "conversation_style::CONVERSATION_INPUT_PADDING_X (picker clamping/measurement; not shell geometry)",
         ),
         (
             "agentChat.composer.paddingY",
-            agent_chat_contract::AGENT_CHAT_INPUT_PADDING_Y,
-            "style_contract::AGENT_CHAT_INPUT_PADDING_Y (picker lane positioning; not shell height)",
+            agent_chat_contract::CONVERSATION_INPUT_PADDING_Y,
+            "conversation_style::CONVERSATION_INPUT_PADDING_Y (picker lane positioning; not shell height)",
         ),
     ] {
         b.add(
@@ -3755,7 +3840,8 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         TokenStage::Resolved,
         Some("--sk-agent-chat-md-body-line-height"),
         TokenValue::Length {
-            value: agent_chat_contract::resolved_agent_chat_markdown_body_line_height(&chat) as f64,
+            value: agent_chat_contract::resolved_conversation_markdown_body_line_height(&chat)
+                as f64,
         },
         None,
         false,
@@ -3773,7 +3859,7 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         TokenStage::Resolved,
         Some("--sk-agent-chat-composer-single-line-height"),
         TokenValue::Length {
-            value: agent_chat_contract::resolved_agent_chat_composer_single_line_height(
+            value: agent_chat_contract::resolved_conversation_composer_single_line_height(
                 def.search.height,
             ) as f64,
         },
@@ -3797,18 +3883,18 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
     for (id, value, path) in [
         (
             "agentChat.composer.placeholderEmpty",
-            agent_chat_contract::AGENT_CHAT_PLACEHOLDER_ASK.to_string(),
-            "style_contract::AGENT_CHAT_PLACEHOLDER_ASK",
+            agent_chat_contract::CONVERSATION_PLACEHOLDER_ASK.to_string(),
+            "conversation_style::CONVERSATION_PLACEHOLDER_ASK",
         ),
         (
             "agentChat.composer.placeholderFollowUp",
-            agent_chat_contract::AGENT_CHAT_PLACEHOLDER_FOLLOW_UP.to_string(),
-            "style_contract::AGENT_CHAT_PLACEHOLDER_FOLLOW_UP (non-empty transcript state)",
+            agent_chat_contract::CONVERSATION_PLACEHOLDER_FOLLOW_UP.to_string(),
+            "conversation_style::CONVERSATION_PLACEHOLDER_FOLLOW_UP (non-empty transcript state)",
         ),
         (
             "agentChat.legacyComposer.fontFamily",
-            agent_chat_contract::AGENT_CHAT_INPUT_FONT_FAMILY.to_string(),
-            "style_contract::AGENT_CHAT_INPUT_FONT_FAMILY — detached/experimental Agent Chat and Focused Text Mini only",
+            agent_chat_contract::CONVERSATION_INPUT_FONT_FAMILY.to_string(),
+            "conversation_style::CONVERSATION_INPUT_FONT_FAMILY — detached/experimental Agent Chat and Focused Text Mini only",
         ),
         (
             "agentChat.transcript.alignment",
@@ -3862,18 +3948,18 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         ),
         (
             "agentChat.activity.dotSize",
-            agent_chat_contract::AGENT_CHAT_ACTIVITY_DOT_SIZE as f64,
-            "style_contract::AGENT_CHAT_ACTIVITY_DOT_SIZE — hidden (0px row) in the idle fixture",
+            agent_chat_contract::CONVERSATION_ACTIVITY_DOT_SIZE as f64,
+            "conversation_style::CONVERSATION_ACTIVITY_DOT_SIZE — hidden (0px row) in the idle fixture",
         ),
         (
             "agentChat.activity.gap",
-            agent_chat_contract::AGENT_CHAT_ACTIVITY_GAP as f64,
-            "style_contract::AGENT_CHAT_ACTIVITY_GAP",
+            agent_chat_contract::CONVERSATION_ACTIVITY_GAP as f64,
+            "conversation_style::CONVERSATION_ACTIVITY_GAP",
         ),
         (
             "agentChat.activity.labelAlpha",
-            agent_chat_contract::AGENT_CHAT_ACTIVITY_LABEL_ALPHA as f64,
-            "style_contract::AGENT_CHAT_ACTIVITY_LABEL_ALPHA (0xB0)",
+            agent_chat_contract::CONVERSATION_ACTIVITY_LABEL_ALPHA as f64,
+            "conversation_style::CONVERSATION_ACTIVITY_LABEL_ALPHA (0xB0)",
         ),
     ] {
         b.add(
@@ -4743,6 +4829,37 @@ fn trim_float(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_conflict_has_complete_lifecycle_identity() {
+        let bundle = checked_in_design_bundle().expect("bundle builds");
+        assert_eq!(bundle.conflicts.len(), 34);
+        for conflict in &bundle.conflicts {
+            let lifecycle = &conflict.lifecycle;
+            assert!(!lifecycle.owner.is_empty(), "{} owner", conflict.id);
+            assert!(
+                lifecycle.model_measurement_id.is_some(),
+                "{} model measurement",
+                conflict.id
+            );
+            assert!(
+                lifecycle.render_measurement_id.is_some(),
+                "{} render measurement",
+                conflict.id
+            );
+            assert!(!lifecycle.task.is_empty(), "{} task", conflict.id);
+            assert!(
+                lifecycle.last_receipt.is_some(),
+                "{} last receipt",
+                conflict.id
+            );
+            assert!(
+                !lifecycle.removal_condition.is_empty(),
+                "{} removal condition",
+                conflict.id
+            );
+        }
+    }
 
     /// Locks the renderer-resolved bytes the HTML mockups depend on. If this
     /// test moves, regenerate design/mockups/generated and re-verify the

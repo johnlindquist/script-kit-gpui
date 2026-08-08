@@ -57,10 +57,18 @@ impl ScriptListApp {
                     return;
                 }
 
-                // Arrow up/down for choice navigation
+                // Arrow up/down for choice navigation. GEO-002: Mini shows a
+                // five-row viewport, so selection must scroll the list
+                // (ScrollStrategy::Nearest, same as the Full Arg prompt) or
+                // choice six can be selected while rendered outside the
+                // viewport.
                 if ui_foundation::is_key_up(key) && !modifiers.shift {
                     if this.arg_selected_index > 0 {
                         this.arg_selected_index -= 1;
+                        this.arg_list_scroll_handle.scroll_to_item(
+                            this.arg_selected_index,
+                            gpui::ScrollStrategy::Nearest,
+                        );
                         cx.notify();
                     }
                     cx.stop_propagation();
@@ -71,6 +79,10 @@ impl ScriptListApp {
                     let filtered = this.filtered_arg_choices();
                     if this.arg_selected_index < filtered.len().saturating_sub(1) {
                         this.arg_selected_index += 1;
+                        this.arg_list_scroll_handle.scroll_to_item(
+                            this.arg_selected_index,
+                            gpui::ScrollStrategy::Nearest,
+                        );
                         cx.notify();
                     }
                     cx.stop_propagation();
@@ -110,6 +122,11 @@ impl ScriptListApp {
         );
 
         // Compact choice list for mini prompt (e.g. mic picker)
+        // GEO-002: resolve the Mini row slot once from the active renderer's
+        // themed metrics (canonical 44px general row) — never the stale
+        // LIST_ITEM_HEIGHT constant — and tag the viewport/rows with stable
+        // measurement IDs so model and paint join by identity.
+        let row_slot_height = crate::window_resize::arg_layout::arg_row_slot_height();
         let content = if choices.is_empty() {
             div()
         } else {
@@ -121,7 +138,7 @@ impl ScriptListApp {
             if filtered_choices_len == 0 {
                 div()
                     .w_full()
-                    .h(px(crate::list_item::LIST_ITEM_HEIGHT))
+                    .h(px(row_slot_height))
                     .px(px(mini_padding_x))
                     .flex()
                     .items_center()
@@ -134,6 +151,10 @@ impl ScriptListApp {
                     .flex_1()
                     .min_h(px(0.))
                     .w_full()
+                    .debug_selector(|| {
+                        crate::window_resize::arg_layout::MINI_LIST_VIEWPORT_MEASUREMENT_ID
+                            .to_string()
+                    })
                     .child(
                         uniform_list(
                             "mini-choices",
@@ -143,16 +164,24 @@ impl ScriptListApp {
                                     .map(|ix| {
                                         if let Some((_, choice)) = filtered_choices.get(ix) {
                                             let is_selected = ix == arg_selected_index;
-                                            div().id(ix).child(
-                                                crate::list_item::ListItem::new(
-                                                    choice.name.clone(),
-                                                    arg_list_colors,
+                                            div()
+                                                .id(ix)
+                                                .debug_selector(move || {
+                                                    format!(
+                                                        "{}:{ix}",
+                                                        crate::window_resize::arg_layout::MINI_ROW_MEASUREMENT_ID_PREFIX
+                                                    )
+                                                })
+                                                .child(
+                                                    crate::list_item::ListItem::new(
+                                                        choice.name.clone(),
+                                                        arg_list_colors,
+                                                    )
+                                                    .selected(is_selected)
+                                                    .index(ix),
                                                 )
-                                                .selected(is_selected)
-                                                .index(ix),
-                                            )
                                         } else {
-                                            div().id(ix).h(px(crate::list_item::LIST_ITEM_HEIGHT))
+                                            div().id(ix).h(px(row_slot_height))
                                         }
                                     })
                                     .collect()
@@ -290,6 +319,58 @@ mod mini_prompt_render_tests {
         assert!(
             render_code.contains("stop_propagation()"),
             "mini prompt should stop propagation on handled keys"
+        );
+    }
+
+    /// GEO-002: Mini renders a five-row viewport, so BOTH Up and Down
+    /// selection changes must scroll the list (ScrollStrategy::Nearest, same
+    /// path as the Full Arg prompt) — otherwise choice six can be selected
+    /// while rendered outside the viewport (clipped under the footer).
+    #[test]
+    fn selection_scrolls_nearest_after_up_and_down() {
+        let render_fn_end = MINI_SOURCE
+            .find("#[cfg(test)]")
+            .unwrap_or(MINI_SOURCE.len());
+        let render_code = &MINI_SOURCE[..render_fn_end];
+
+        let up_handler_start = render_code
+            .find("is_key_up(key)")
+            .expect("mini prompt handles Up");
+        let down_handler_start = render_code
+            .find("is_key_down(key)")
+            .expect("mini prompt handles Down");
+        let tab_handler_start = render_code
+            .find("eq_ignore_ascii_case(\"tab\")")
+            .expect("mini prompt handles Tab");
+
+        let up_body = &render_code[up_handler_start..down_handler_start];
+        let down_body = &render_code[down_handler_start..tab_handler_start];
+        for (name, body) in [("Up", up_body), ("Down", down_body)] {
+            assert!(
+                body.contains("scroll_to_item")
+                    && body.contains("ScrollStrategy::Nearest")
+                    && body.contains("arg_list_scroll_handle"),
+                "mini prompt {name} selection must scroll the tracked list \
+                 with ScrollStrategy::Nearest"
+            );
+        }
+    }
+
+    /// GEO-002: the Mini row slot comes from the shared arg_layout resolver
+    /// (themed renderer metrics), never the stale LIST_ITEM_HEIGHT constant.
+    #[test]
+    fn mini_rows_use_resolved_row_slot_height() {
+        let render_fn_end = MINI_SOURCE
+            .find("#[cfg(test)]")
+            .unwrap_or(MINI_SOURCE.len());
+        let render_code = &MINI_SOURCE[..render_fn_end];
+        assert!(
+            render_code.contains("arg_layout::arg_row_slot_height()"),
+            "mini prompt must resolve its row slot from arg_layout"
+        );
+        assert!(
+            !render_code.contains("px(crate::list_item::LIST_ITEM_HEIGHT)"),
+            "mini prompt must not size rows from the legacy LIST_ITEM_HEIGHT constant"
         );
     }
 

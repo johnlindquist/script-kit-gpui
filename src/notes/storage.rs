@@ -121,23 +121,45 @@ fn invalidate_root_notes_search_cache() {
     }
 }
 
-pub(crate) fn automation_storage_identity() -> serde_json::Value {
-    let db_path = get_notes_db_path();
-    let path_text = db_path.to_string_lossy();
+fn fingerprint_path(path: &std::path::Path) -> (String, usize) {
+    let path_text = path.to_string_lossy();
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in path_text.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
+    (format!("fnv1a64:{hash:016x}"), path_text.chars().count())
+}
+
+/// Redacted storage identity for automation receipts. Never returns raw
+/// paths.
+///
+/// The database and the canonical Brain markdown substrate are sandboxed by
+/// SEPARATE environment variables (`SCRIPT_KIT_TEST_NOTES_DB_PATH` and
+/// `SCRIPT_KIT_TEST_NOTES_BRAIN_PATH`); a DB-only sandbox can still point
+/// canonical note writes at the real Brain directory. `fullySandboxed` is
+/// therefore the conjunction, and mutation probes must gate on it — not on
+/// the legacy `testSandbox` (kept for older readers: DB-only signal).
+pub(crate) fn automation_storage_identity() -> serde_json::Value {
+    let (db_fingerprint, db_len) = fingerprint_path(&get_notes_db_path());
+    let (brain_fingerprint, brain_len) = fingerprint_path(&get_notes_brain_base_path());
+    let db_sandbox = std::env::var_os("SCRIPT_KIT_TEST_NOTES_DB_PATH").is_some() || cfg!(test);
+    let brain_sandbox =
+        std::env::var_os("SCRIPT_KIT_TEST_NOTES_BRAIN_PATH").is_some() || cfg!(test);
 
     serde_json::json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "redacted": true,
         "generation": NOTES_STORAGE_GENERATION.load(Ordering::Relaxed),
         "rootSearchCacheGeneration": ROOT_NOTES_SEARCH_CACHE_GENERATION.load(Ordering::Relaxed),
-        "dbPathFingerprint": format!("fnv1a64:{hash:016x}"),
-        "dbPathLength": path_text.chars().count(),
-        "testSandbox": std::env::var_os("SCRIPT_KIT_TEST_NOTES_DB_PATH").is_some() || cfg!(test),
+        "dbPathFingerprint": db_fingerprint,
+        "dbPathLength": db_len,
+        "brainPathFingerprint": brain_fingerprint,
+        "brainPathLength": brain_len,
+        "dbSandbox": db_sandbox,
+        "brainSandbox": brain_sandbox,
+        "fullySandboxed": db_sandbox && brain_sandbox,
+        "testSandbox": db_sandbox,
     })
 }
 

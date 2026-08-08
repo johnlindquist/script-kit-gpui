@@ -5397,7 +5397,7 @@ impl AgentChatView {
         if let Some(snapshot) = self.history_popup_snapshot() {
             if self.history_popup_lifetime.is_none() {
                 let parent_automation_id =
-                    match super::popup_window::resolve_agent_chat_popup_parent_automation_id(
+                    match super::popup_automation::resolve_agent_chat_popup_parent_automation_id(
                         parent.handle,
                         parent.bounds,
                     ) {
@@ -10742,9 +10742,9 @@ impl AgentChatView {
             input_selection,
             cursor_visible,
             if is_empty {
-                super::style_contract::AGENT_CHAT_PLACEHOLDER_ASK
+                crate::components::conversation_style::CONVERSATION_PLACEHOLDER_ASK
             } else {
-                super::style_contract::AGENT_CHAT_PLACEHOLDER_FOLLOW_UP
+                crate::components::conversation_style::CONVERSATION_PLACEHOLDER_FOLLOW_UP
             },
             true,
             mention_highlights,
@@ -13124,12 +13124,13 @@ impl AgentChatView {
         let busy = is_streaming || is_waiting;
         // Surface bytes + opacity come from the shared production resolver
         // (the design-contract exporter reads the SAME function).
-        let state_chrome = super::style_contract::resolved_agent_chat_send_state_chrome(
-            busy,
-            can_send,
-            accent,
-            text_primary,
-        );
+        let state_chrome =
+            crate::components::conversation_style::resolved_conversation_send_state_chrome(
+                busy,
+                can_send,
+                accent,
+                text_primary,
+            );
         let (icon_char, tooltip, id) = match (busy, can_send) {
             (true, true) => (
                 "\u{21E7}",
@@ -13155,8 +13156,12 @@ impl AgentChatView {
             .flex()
             .items_center()
             .justify_center()
-            .size(px(super::style_contract::AGENT_CHAT_SEND_SIZE))
-            .rounded(px(super::style_contract::AGENT_CHAT_SEND_RADIUS))
+            .size(px(
+                crate::components::conversation_style::CONVERSATION_SEND_SIZE,
+            ))
+            .rounded(px(
+                crate::components::conversation_style::CONVERSATION_SEND_RADIUS,
+            ))
             .bg(bg)
             .text_sm()
             .opacity(opacity)
@@ -14278,27 +14283,31 @@ impl AgentChatView {
 
     /// Horizontal padding used by the Agent Chat composer input row.
     /// (Owned by the production style contract; re-pointed for `Self::` use.)
-    const AGENT_CHAT_INPUT_PADDING_X: f32 = super::style_contract::AGENT_CHAT_INPUT_PADDING_X;
+    const AGENT_CHAT_INPUT_PADDING_X: f32 =
+        crate::components::conversation_style::CONVERSATION_INPUT_PADDING_X;
 
     /// Keep the picker inset from the right edge so it never clips.
     const AGENT_CHAT_COMPOSER_PICKER_EDGE_GUTTER: f32 = 12.0;
 
     /// Top padding used by the Agent Chat composer input row.
-    const AGENT_CHAT_INPUT_PADDING_Y: f32 = super::style_contract::AGENT_CHAT_INPUT_PADDING_Y;
+    const AGENT_CHAT_INPUT_PADDING_Y: f32 =
+        crate::components::conversation_style::CONVERSATION_INPUT_PADDING_Y;
 
     /// Effective visual line height of the Agent Chat composer text.
-    const AGENT_CHAT_INPUT_LINE_HEIGHT: f32 = super::style_contract::AGENT_CHAT_INPUT_LINE_HEIGHT;
+    const AGENT_CHAT_INPUT_LINE_HEIGHT: f32 =
+        crate::components::conversation_style::CONVERSATION_INPUT_LINE_HEIGHT;
 
     /// Gap between the active mention line and the picker.
     const AGENT_CHAT_COMPOSER_PICKER_OFFSET_Y: f32 = 4.0;
 
     /// Composer text size used for the inline Agent Chat input.
-    const AGENT_CHAT_INPUT_FONT_SIZE: f32 = super::style_contract::AGENT_CHAT_INPUT_FONT_SIZE;
+    const AGENT_CHAT_INPUT_FONT_SIZE: f32 =
+        crate::components::conversation_style::CONVERSATION_INPUT_FONT_SIZE;
 
     /// The composer inherits GPUI's default window font; measurements must
     /// resolve the same family to stay anchored to real glyph positions.
     const AGENT_CHAT_INPUT_FONT_FAMILY: &'static str =
-        super::style_contract::AGENT_CHAT_INPUT_FONT_FAMILY;
+        crate::components::conversation_style::CONVERSATION_INPUT_FONT_FAMILY;
 
     /// One-word focused-text quick prompt placeholder. The input chrome itself
     /// is rendered through the standard Agent Chat composer text renderer.

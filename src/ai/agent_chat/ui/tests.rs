@@ -374,7 +374,6 @@ const HANDLE_ACTION_SOURCE: &str = include_str!("../../../app_actions/handle_act
 const REGISTRIES_STATE_SOURCE: &str = include_str!("../../../app_impl/registries_state.rs");
 const AGENT_CHAT_MOD_SOURCE: &str = include_str!("mod.rs");
 const AGENT_CHAT_HISTORY_POPUP_SOURCE: &str = include_str!("history_popup.rs");
-const AGENT_CHAT_POPUP_WINDOW_SOURCE: &str = include_str!("popup_window.rs");
 const AGENT_CHAT_ACTIONS_SOURCE: &str = include_str!("../../../actions/builders/script_context.rs");
 const AGENT_CHAT_WINDOW_SOURCE: &str = include_str!("chat_window.rs");
 const AGENT_CHAT_VIEW_SOURCE: &str = include_str!("view.rs");
@@ -676,12 +675,13 @@ fn agent_chat_history_migration_uses_popup_window_instead_of_inline_layer() {
     assert!(
         AGENT_CHAT_HISTORY_POPUP_SOURCE.contains("AgentChatHistoryPopupWindow")
             && AGENT_CHAT_HISTORY_POPUP_SOURCE
-                .contains("super::popup_window::popup_window_options")
+                .contains("inline_popup_window::inline_popup_window_options")
             && AGENT_CHAT_HISTORY_POPUP_SOURCE
                 .contains("configure_inline_popup_window_lifecycle")
             && AGENT_CHAT_HISTORY_POPUP_SOURCE
                 .contains("let bounds = popup_bounds(parent_bounds, &snapshot);")
-            && AGENT_CHAT_HISTORY_POPUP_SOURCE.contains("popup_window_options(bounds, display_id)"),
+            && AGENT_CHAT_HISTORY_POPUP_SOURCE
+                .contains("inline_popup_window_options(bounds, display_id)"),
         "Agent Chat history picker should render through a popup window entity using shared popup mechanics"
     );
     assert!(

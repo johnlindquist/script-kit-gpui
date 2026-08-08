@@ -133,8 +133,101 @@ pub fn base_actions_popup_theme() -> ActionsPopupThemeDef {
     }
 }
 
+impl ActionsPopupSearchTokens {
+    /// The cursor height production actually paints: it is DERIVED from the
+    /// search font size (`current_actions_popup_theme` overwrites the
+    /// authored `cursor_height` with `font_size`), and the GEO-008 audit
+    /// found no live consumer of an independently writable cursor height.
+    /// The `cursor_height` field itself survives only as a
+    /// compatibility-read for the design-contract exporter
+    /// (INT-DESIGN-CONTRACT-GEO008-GOV003 marks it non-writable).
+    pub fn resolved_cursor_height(self) -> f32 {
+        self.font_size
+    }
+}
+
+/// Typed authored-byte projection of the Actions row alphas (GOV-003), for
+/// the design-contract serializer. The renderer-facing fields stay
+/// normalized `f32` (GPUI consumes normalized opacity); quantization to the
+/// byte domain happens HERE, once, through the canonical truncating
+/// constructor — there is no pre-existing Actions byte quantization to
+/// preserve, so the canonical `from_normalized` algorithm is adopted and
+/// recorded in the GOV-003 receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActionsPopupRowAlphaBytes {
+    pub selection: crate::theme::AlphaByte,
+    pub hover: crate::theme::AlphaByte,
+}
+
+impl ActionsPopupRowTokens {
+    pub fn alpha_bytes(self) -> ActionsPopupRowAlphaBytes {
+        ActionsPopupRowAlphaBytes {
+            selection: crate::theme::AlphaByte::from_normalized(self.selection_opacity),
+            hover: crate::theme::AlphaByte::from_normalized(self.hover_opacity),
+        }
+    }
+}
+
 pub fn current_actions_popup_theme() -> ActionsPopupThemeDef {
     let mut def = base_actions_popup_theme();
     def.search.cursor_height = def.search.font_size;
     def
+}
+
+#[cfg(test)]
+mod actions_popup_theme_tests {
+    use super::*;
+
+    /// The derived relation production paints: cursor height == font size,
+    /// both through the legacy field overwrite and the typed accessor.
+    #[test]
+    fn cursor_height_is_derived_from_the_search_font_size() {
+        let current = current_actions_popup_theme();
+        assert_eq!(current.search.cursor_height, current.search.font_size);
+        assert_eq!(
+            current.search.resolved_cursor_height(),
+            current.search.font_size
+        );
+        // The accessor derives even when the legacy field drifts.
+        let mut base = base_actions_popup_theme();
+        base.search.font_size = 16.0;
+        assert_eq!(base.search.resolved_cursor_height(), 16.0);
+    }
+
+    /// Exact quantization lock for the retained normalized alphas: the
+    /// canonical TRUNCATING constructor, at today's authored values.
+    /// 0.72 × 255 = 183.6 → 0xB7; 0.56 × 255 = 142.8 → 0x8E.
+    #[test]
+    fn row_alpha_bytes_quantize_with_the_canonical_truncating_algorithm() {
+        let row = base_actions_popup_theme().row;
+        assert_eq!(row.selection_opacity, 0.72);
+        assert_eq!(row.hover_opacity, 0.56);
+        let bytes = row.alpha_bytes();
+        assert_eq!(bytes.selection.get(), 0xB7);
+        assert_eq!(bytes.hover.get(), 0x8E);
+        // Negative control: rounding would disagree by one byte on
+        // selection — the algorithms must not be silently swapped.
+        assert_ne!(
+            crate::theme::AlphaByte::from_normalized_rounded(0.72).get(),
+            bytes.selection.get()
+        );
+    }
+
+    /// Retained Actions defaults hold their pre-change values (GEO-008 is
+    /// not permission to change Actions layout/density).
+    #[test]
+    fn retained_token_defaults_hold() {
+        let def = base_actions_popup_theme();
+        assert_eq!(def.search.font_size, 14.0);
+        assert_eq!(def.search.cursor_width, 2.0);
+        assert_eq!(def.search.cursor_height, 14.0);
+        assert_eq!(def.list.padding_bottom, 6.0);
+        assert_eq!(def.list.overdraw_px, 100.0);
+        assert_eq!(
+            def.section.padding_top,
+            crate::actions::constants::ACTION_PADDING_TOP
+        );
+        assert_eq!(def.section.padding_bottom, 4.0);
+        assert_eq!(def.row.title_font_size, 14.0);
+    }
 }

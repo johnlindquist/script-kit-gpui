@@ -62,9 +62,21 @@ pub struct DesignColors {
 impl DesignColors {
     /// Combine a hex color (0xRRGGBB) with an alpha value (0-255)
     /// Returns a value suitable for gpui::rgba() in 0xRRGGBBAA format
+    ///
+    /// GOV-003: delegates to the typed `theme::alpha::pack_rgb_alpha` owner.
+    /// The `u8` arity is TRANSITIONAL for pre-existing callers outside this
+    /// lane's owned paths (`src/actions/dialog.rs` + its tests); new code
+    /// should call [`Self::hex_with_alpha_byte`] with an authored
+    /// [`crate::theme::AlphaByte`].
     #[inline]
     pub fn hex_with_alpha(hex: u32, alpha: u8) -> u32 {
-        (hex << 8) | (alpha as u32)
+        Self::hex_with_alpha_byte(hex, crate::theme::AlphaByte::authored(alpha))
+    }
+
+    /// Typed packing boundary: an already-quantized authored alpha byte.
+    #[inline]
+    pub fn hex_with_alpha_byte(hex: u32, alpha: crate::theme::AlphaByte) -> u32 {
+        crate::theme::alpha::pack_rgb_alpha(hex, alpha)
     }
 }
 

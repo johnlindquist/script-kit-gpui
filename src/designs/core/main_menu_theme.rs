@@ -371,6 +371,38 @@ pub struct MainMenuThemeDef {
     pub header_info_bar: HeaderInfoBarTokens,
 }
 
+/// Shared section-separator geometry/typography projection (GEO-007): the
+/// main-menu theme is the section owner, and surfaces that paint the shared
+/// leading separator (Settings, builtin browsers) resolve their section
+/// metrics through THIS projection instead of re-reading individual token
+/// fields or hardcoding values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MainMenuSectionMetrics {
+    pub padding_x: f32,
+    pub padding_top: f32,
+    pub padding_bottom: f32,
+    pub gap: f32,
+    pub icon_size: f32,
+    pub font_size: f32,
+    pub font_weight: FontWeight,
+}
+
+impl MainMenuThemeDef {
+    /// The section metrics this theme def declares — the single projection
+    /// consumers use for shared section-separator geometry.
+    pub fn section_metrics(self) -> MainMenuSectionMetrics {
+        MainMenuSectionMetrics {
+            padding_x: self.list.section_padding_x,
+            padding_top: self.list.section_padding_top,
+            padding_bottom: self.list.section_padding_bottom,
+            gap: self.list.section_gap,
+            icon_size: self.list.section_icon_size,
+            font_size: self.typography.section_font_size,
+            font_weight: self.typography.section_weight,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MainMenuGeometrySignature {
     pub shell_inset_x: u32,

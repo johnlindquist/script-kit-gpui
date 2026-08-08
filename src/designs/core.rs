@@ -25,8 +25,8 @@ pub use main_menu_theme::{
     FooterTheme, HeaderInfoBarLayout, HeaderInfoBarTokens, MainMenuGeometrySignature,
     MainMenuIconTokens, MainMenuInputTextAlignment, MainMenuListTokens, MainMenuLogoPlacement,
     MainMenuMetadataTokens, MainMenuRowKind, MainMenuRowTokens, MainMenuSearchTokens,
-    MainMenuShellTokens, MainMenuThemeDef, MainMenuThemeTier, MainMenuThemeVariant,
-    MainMenuTypographyTokens, MAIN_MENU_HEADER_CONTEXT_EDGE_OUTSET_X,
+    MainMenuSectionMetrics, MainMenuShellTokens, MainMenuThemeDef, MainMenuThemeTier,
+    MainMenuThemeVariant, MainMenuTypographyTokens, MAIN_MENU_HEADER_CONTEXT_EDGE_OUTSET_X,
     MAIN_MENU_METADATA_BADGE_FONT_SIZE, MAIN_MENU_METADATA_BADGE_PADDING_X,
     MAIN_MENU_METADATA_BADGE_PADDING_Y, MAIN_MENU_METADATA_BADGE_RADIUS,
     MAIN_MENU_METADATA_SOURCE_FONT_SIZE, MAIN_MENU_SECTION_GAP, MAIN_MENU_SECTION_ICON_SIZE,
@@ -40,8 +40,9 @@ pub use accent_variation::FooterButtonFill;
 #[allow(unused_imports)]
 pub use actions_popup_theme::{
     base_actions_popup_theme, current_actions_popup_theme, ActionsPopupContextHeaderTokens,
-    ActionsPopupListTokens, ActionsPopupRowTokens, ActionsPopupSearchTokens,
-    ActionsPopupSectionTokens, ActionsPopupShellTokens, ActionsPopupThemeDef,
+    ActionsPopupListTokens, ActionsPopupRowAlphaBytes, ActionsPopupRowTokens,
+    ActionsPopupSearchTokens, ActionsPopupSectionTokens, ActionsPopupShellTokens,
+    ActionsPopupThemeDef,
 };
 pub use render::render_design_item;
 pub use tokens::*;

@@ -11,9 +11,6 @@ use std::sync::Arc;
 
 use super::super::events::AgentChatForkPoint;
 use super::super::layout::{AgentChatTranscriptAnchor, ResolvedAgentChatLayout};
-use super::super::style_contract::{
-    self, resolved_agent_chat_transcript_colors, AgentChatStyleDef,
-};
 use super::super::thread::{
     AgentChatThread, AgentChatThreadMessage, AgentChatThreadMessageRole, AgentChatThreadStatus,
 };
@@ -21,6 +18,11 @@ use super::super::tool_card::{
     classify_diff_line, AgentChatToolCardMeta, AgentChatToolStatus, DiffLineKind,
 };
 use super::super::ui_variant::{AgentChatTranscriptPresentation, AgentChatUiVariant};
+use crate::components::conversation_style::{
+    self as style_contract,
+    resolved_conversation_transcript_colors as resolved_agent_chat_transcript_colors,
+    ConversationStyleDef as AgentChatStyleDef,
+};
 use crate::list_item::FONT_MONO;
 use crate::theme::{self, PromptColors};
 use crate::ui::chrome::AMBIENT_PULSE_CYCLE_MS;
@@ -974,7 +976,7 @@ impl AgentChatTranscript {
     ) -> gpui::AnyElement {
         let resolved = resolved_agent_chat_transcript_colors(style_def, theme);
         let dot = div()
-            .size(px(style_contract::AGENT_CHAT_ACTIVITY_DOT_SIZE))
+            .size(px(style_contract::CONVERSATION_ACTIVITY_DOT_SIZE))
             .rounded(px(999.0))
             .bg(rgb(theme.colors.accent.selected))
             .with_animation(
@@ -990,7 +992,7 @@ impl AgentChatTranscript {
             .debug_selector(|| "agent-chat-transcript-pending".to_string())
             .flex()
             .items_center()
-            .gap(px(style_contract::AGENT_CHAT_ACTIVITY_GAP))
+            .gap(px(style_contract::CONVERSATION_ACTIVITY_GAP))
             .child(dot)
             .child(
                 div()
@@ -1359,7 +1361,7 @@ impl AgentChatTranscript {
                     .bg(rgba(resolved.diff_removed_bg_rgba)),
                 DiffLineKind::Context => row
                     .text_color(rgb(theme.colors.text.primary))
-                    .opacity(style_contract::AGENT_CHAT_DIFF_CONTEXT_OPACITY),
+                    .opacity(style_contract::CONVERSATION_DIFF_CONTEXT_OPACITY),
             };
             rows = rows.child(row);
         }
@@ -1423,7 +1425,7 @@ impl AgentChatTranscript {
             .id(SharedString::from(format!("agent_chat-toggle-{}", msg.id)))
             .flex()
             .items_center()
-            .gap(px(style_contract::AGENT_CHAT_BLOCK_HEADER_GAP))
+            .gap(px(style_contract::CONVERSATION_BLOCK_HEADER_GAP))
             .cursor_pointer()
             .child(
                 div()
@@ -1490,7 +1492,7 @@ impl AgentChatTranscript {
             .pl(px(block_style.padding_x))
             .pr(px(block_style.padding_x))
             .py(px(block_style.padding_y))
-            .border_l(px(style_contract::AGENT_CHAT_BLOCK_BORDER_WIDTH))
+            .border_l(px(style_contract::CONVERSATION_BLOCK_BORDER_WIDTH))
             .border_color(left_border_color)
             .child(header);
 
@@ -1590,7 +1592,7 @@ impl AgentChatTranscript {
             .pl(px(block_style.padding_x))
             .pr(px(block_style.padding_x))
             .py(px(block_style.padding_y))
-            .border_l(px(style_contract::AGENT_CHAT_BLOCK_BORDER_WIDTH))
+            .border_l(px(style_contract::CONVERSATION_BLOCK_BORDER_WIDTH))
             .border_color(left_border_color);
 
         // Header row — clickable toggle uses element ID only (no cx.listener in static context).
@@ -1598,7 +1600,7 @@ impl AgentChatTranscript {
             .id(SharedString::from(format!("agent_chat-toggle-{}", msg.id)))
             .flex()
             .items_center()
-            .gap(px(style_contract::AGENT_CHAT_BLOCK_HEADER_GAP))
+            .gap(px(style_contract::CONVERSATION_BLOCK_HEADER_GAP))
             .cursor_pointer()
             .child(
                 div()
@@ -1681,7 +1683,7 @@ impl AgentChatTranscript {
             .py(px(error_style.padding_y))
             .rounded(px(error_style.radius))
             .bg(rgba(resolved.error_bg_rgba))
-            .border_l(px(style_contract::AGENT_CHAT_BLOCK_BORDER_WIDTH))
+            .border_l(px(style_contract::CONVERSATION_BLOCK_BORDER_WIDTH))
             .border_color(rgba(resolved.error_border_rgba))
             .child(
                 div()
@@ -1734,7 +1736,7 @@ impl AgentChatTranscript {
             .px(px(system_style.padding_x))
             .py(px(system_style.padding_y))
             .opacity(system_style.opacity)
-            .border_l(px(style_contract::AGENT_CHAT_BLOCK_BORDER_WIDTH))
+            .border_l(px(style_contract::CONVERSATION_BLOCK_BORDER_WIDTH))
             .border_color(rgba(
                 resolved_agent_chat_transcript_colors(style_def, theme).system_border_rgba,
             ))
@@ -1760,7 +1762,7 @@ impl Render for AgentChatTranscript {
             crate::logging::agent_chat_render_trace_enabled().then(std::time::Instant::now);
         let theme = theme::get_cached_theme();
         let colors = PromptColors::from_theme(&theme);
-        let style_def = super::super::style_contract::production_agent_chat_style();
+        let style_def = crate::components::conversation_style::production_conversation_style();
         // `theme` is moved into the row-rendering closure below; the
         // jump-to-latest pill is built after that, so it needs its own handle.
         let pill_theme = theme.clone();

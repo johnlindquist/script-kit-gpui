@@ -329,11 +329,20 @@ fn test_notes_editor_disables_dynamic_code_editor_bottom_margin() {
         highlighter_idx < code_editor_idx,
         "Shared notes markdown editor should register highlighting before enabling markdown code editor mode"
     );
+    // Structural (order-based) check, not exact adjacency: builder calls may
+    // gain unrelated links between them (e.g. `.fidelity_scope(...)`), but
+    // the markdown editor must still disable the dynamic code-editor bottom
+    // margin somewhere after entering markdown code-editor mode.
+    let dynamic_margin_idx = COMPONENT_SOURCE
+        .find(".code_editor_dynamic_bottom_margin(false)")
+        .expect(
+            "Shared notes markdown editor should not reserve a large code-editor bottom \
+             scroll margin after trailing lines are deleted",
+        );
     assert!(
-        COMPONENT_SOURCE.contains(
-            ".code_editor(\"markdown\")\n                .code_editor_dynamic_bottom_margin(false)"
-        ),
-        "Shared notes markdown editor should not reserve a large code-editor bottom scroll margin after trailing lines are deleted"
+        code_editor_idx < dynamic_margin_idx,
+        "The dynamic bottom margin opt-out should apply to the markdown code editor \
+         (called after .code_editor(\"markdown\"))"
     );
     assert!(
         INIT_SOURCE.contains("NotesEditor::new_markdown_pair("),
@@ -459,8 +468,10 @@ fn test_notes_automation_state_includes_alias_metadata() {
 #[test]
 fn notes_auto_size_has_no_removed_footer_reservation() {
     // The Notes footer rail is gone; the autosize height equation must
-    // reserve ZERO footer height. `metrics.footer_height` (28) remains a
-    // style/model value but no longer appears in the desired-height sum.
+    // reserve ZERO footer height. The equation's footer term is now the
+    // resolved footer action row (layout::production_notes_footer_action_row,
+    // visible=false → 0.0); `metrics.footer_height` (28) remains a legacy
+    // style/exporter value and never appears in the desired-height sum.
     let metrics =
         super::style::NotesLayoutMetrics::from_style(super::style::NotesWindowStyle::current());
     let line_count = 7usize;

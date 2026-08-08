@@ -131,6 +131,11 @@ pub(crate) struct ConfirmPromptMetrics {
     pub body_font_size: f32,
     pub body_line_height: f32,
     pub body_max_width: f32,
+    /// Shared footer action-row geometry used by the native rail projection.
+    pub action_button_height: f32,
+    pub action_button_gap: f32,
+    pub confirm_slot_width: f32,
+    pub cancel_slot_width: f32,
     /// Height of the in-shell native-footer spacer (the shared footer rail
     /// height). The confirm shell is a fixed `STANDARD_HEIGHT` column, so the
     /// centered region is `STANDARD_HEIGHT - footer_spacer_height` tall
@@ -150,6 +155,17 @@ pub(crate) fn resolved_confirm_prompt_metrics(
         body_font_size: CONFIRM_PROMPT_BODY_FONT_SIZE_PX,
         body_line_height: confirm_prompt_line_height_px(CONFIRM_PROMPT_BODY_FONT_SIZE_PX),
         body_max_width: CONFIRM_PROMPT_BODY_MAX_WIDTH_PX,
+        action_button_height: crate::components::footer_chrome::footer_button_height(
+            footer_rail_height,
+        ),
+        action_button_gap: crate::components::footer_chrome::current_main_menu_footer_metrics()
+            .item_gap_px,
+        confirm_slot_width: crate::components::footer_chrome::footer_action_slot_width(
+            crate::components::footer_chrome::FooterActionSlot::Run,
+        ),
+        cancel_slot_width: crate::components::footer_chrome::footer_action_slot_width(
+            crate::components::footer_chrome::FooterActionSlot::Close,
+        ),
         footer_spacer_height: footer_rail_height,
     }
 }

@@ -280,7 +280,7 @@ fn close_history_popup_window_with_policy(reason: &'static str, restore_focus: b
 }
 
 fn unregister_history_popup_automation_window(generation: InlinePopupGeneration) {
-    super::popup_window::unregister_agent_chat_prompt_popup_automation_window(
+    super::popup_automation::unregister_agent_chat_prompt_popup_automation_window(
         AGENT_CHAT_HISTORY_POPUP_AUTOMATION_ID,
         generation.get(),
     );
@@ -330,7 +330,7 @@ fn register_history_popup_automation_window(
     popup_bounds: Bounds<Pixels>,
     generation: InlinePopupGeneration,
 ) -> anyhow::Result<String> {
-    super::popup_window::register_agent_chat_prompt_popup_automation_window(
+    super::popup_automation::register_agent_chat_prompt_popup_automation_window(
         AGENT_CHAT_HISTORY_POPUP_AUTOMATION_ID,
         "Agent Chat History Popup",
         parent_window_handle,
@@ -423,7 +423,7 @@ pub(crate) fn sync_history_popup_window(
                 if update_result.is_ok() {
                     crate::windows::set_automation_bounds(
                         AGENT_CHAT_HISTORY_POPUP_AUTOMATION_ID,
-                        Some(super::popup_window::automation_bounds(bounds)),
+                        Some(super::popup_automation::automation_bounds(bounds)),
                     );
                     return Ok(());
                 }
@@ -435,7 +435,8 @@ pub(crate) fn sync_history_popup_window(
         }
     }
 
-    let window_options = super::popup_window::popup_window_options(bounds, display_id);
+    let window_options =
+        crate::components::inline_popup_window::inline_popup_window_options(bounds, display_id);
     let native_source_view = source_view.clone();
     let native_lifecycle = lifecycle.clone();
     let native_focus_return = focus_return.clone();

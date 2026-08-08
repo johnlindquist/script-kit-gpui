@@ -10,7 +10,6 @@
 
 // --- merged from part_000.rs ---
 use crate::config::{self, LayoutConfig};
-use crate::list_item::LIST_ITEM_HEIGHT;
 use crate::logging;
 use crate::window_manager;
 #[cfg(target_os = "macos")]
@@ -80,15 +79,25 @@ pub fn quick_terminal_panel_height() -> Pixels {
 /// Maximum number of selectable rows that can fit without clipping, given
 /// `visible_section_headers` section headers that each consume
 /// `MAIN_WINDOW_SECTION_HEADER_HEIGHT` pixels of the list budget.
+///
+/// GEO-009: this budget predicts with the LegacyCompatibility constant model
+/// (ledgered caller `MainWindowRowBudget`, deletion trigger: reconcile the
+/// main-window row budget with themed row metrics via IR-05). It must not be
+/// silently retargeted to themed 44px metrics — that changes window sizing.
 #[allow(dead_code)] // Called from include!()-ed code in app_impl/ui_window.rs
 pub(crate) fn capped_main_window_selectable_rows(visible_section_headers: usize) -> usize {
+    let metrics = crate::list_item::metrics::resolved_legacy_metrics_for_caller(
+        crate::list_item::metrics::LegacyListCallerId::MainWindowRowBudget,
+        crate::designs::DesignVariant::default(),
+        crate::designs::current_main_menu_theme(),
+    );
     let remaining_list_height = main_window_list_budget_height()
         - (visible_section_headers as f32 * MAIN_WINDOW_SECTION_HEADER_HEIGHT);
 
     if remaining_list_height <= 0.0 {
         0
     } else {
-        ((remaining_list_height / LIST_ITEM_HEIGHT).floor() as usize)
+        ((remaining_list_height / metrics.row_slot_height).floor() as usize)
             .min(MAIN_WINDOW_MAX_VISIBLE_ROWS)
     }
 }
@@ -98,6 +107,10 @@ pub(crate) fn capped_main_window_selectable_rows(visible_section_headers: usize)
 /// module: these functions calculate and apply app-driven frames; `policy`
 /// owns user-drag capability.
 pub(crate) mod policy;
+
+/// GEO-002: Arg/Mini prompt geometry resolved from the active renderer
+/// (canonical row slot, real header chrome, rendered footer reservation).
+pub mod arg_layout;
 
 /// Shared layout constants for the main window render branch.
 /// Both resize logic and render code consume these so the geometry contract stays in sync.
@@ -588,6 +601,13 @@ fn runtime_layout_config() -> LayoutConfig {
         .get_or_init(|| sanitize_layout_config(config::load_user_preferences().layout))
         .clone()
 }
+/// Current configured standard height — the clamp ceiling for Arg-family
+/// prompt sizing. Exposed so renderer adapters resolve the same clamp the
+/// resize owner uses.
+pub fn current_standard_height() -> f32 {
+    runtime_layout_config().standard_height
+}
+
 fn height_for_view_with_layout(
     view_type: ViewType,
     item_count: usize,
@@ -649,20 +669,34 @@ fn height_for_view_with_layout(
                 + layout::WINDOW_BORDER_Y),
         },
         ViewType::ArgPromptWithChoices => {
-            let visible_items = item_count.max(1) as f32;
-            let list_height =
-                (visible_items * LIST_ITEM_HEIGHT) + ARG_LIST_PADDING_Y + ARG_DIVIDER_HEIGHT;
-            let total_height = ARG_HEADER_HEIGHT + list_height + WINDOW_BORDER_Y;
-            clamp_height(px(total_height))
+            // GEO-002: typed Arg resolution from the active renderer (44px
+            // themed row slot, real header chrome, rendered footer
+            // reservation, no modeled-only list padding or divider).
+            let (_, target) = arg_layout::current_resolved_arg_layout_for_target(
+                arg_layout::ArgPresentationMode::Full,
+                item_count.max(1),
+                f32::from(MIN_HEIGHT),
+                f32::from(standard_height),
+            );
+            px(target)
         }
         ViewType::SelectPrompt => {
             // Select uses the shared prompt header/footer budget plus the
             // main-window context header. Routing it through Arg sizing
             // omitted that 30px context row and clipped the first 40px
             // Comfortable choice row at small choice counts (OF-13).
+            //
+            // GEO-009: SelectPrompt renders UnifiedListItem (Comfortable), so
+            // its prediction resolves the SelectPromptUnified mode.
+            let select_metrics = crate::list_item::metrics::resolved_list_presentation_metrics(
+                crate::list_item::metrics::ListPresentationMode::SelectPromptUnified,
+                crate::designs::DesignVariant::default(),
+                crate::designs::current_main_menu_theme(),
+            );
             let visible_items = item_count.max(1) as f32;
-            let list_height =
-                (visible_items * LIST_ITEM_HEIGHT) + ARG_LIST_PADDING_Y + ARG_DIVIDER_HEIGHT;
+            let list_height = (visible_items * select_metrics.row_slot_height)
+                + ARG_LIST_PADDING_Y
+                + ARG_DIVIDER_HEIGHT;
             let total_height = ARG_HEADER_HEIGHT
                 + SELECT_CONTEXT_HEADER_HEIGHT
                 + list_height
@@ -671,14 +705,27 @@ fn height_for_view_with_layout(
             clamp_height(px(total_height))
         }
         ViewType::MiniPrompt => {
-            let visible_items = item_count.clamp(1, 5) as f32;
-            let list_height =
-                (visible_items * LIST_ITEM_HEIGHT) + ARG_LIST_PADDING_Y + ARG_DIVIDER_HEIGHT;
-            let total_height = ARG_HEADER_HEIGHT + list_height + WINDOW_BORDER_Y;
-            clamp_height(px(total_height))
+            // GEO-002: Mini declares a five-row visible intent through the
+            // shared resolver; the sixth choice is reached by scrolling.
+            let (_, target) = arg_layout::current_resolved_arg_layout_for_target(
+                arg_layout::ArgPresentationMode::Mini,
+                item_count.max(1),
+                f32::from(MIN_HEIGHT),
+                f32::from(standard_height),
+            );
+            px(target)
         }
-        // Input-only prompt - compact
-        ViewType::ArgPromptNoChoices => MIN_HEIGHT,
+        // Input-only prompt — header chrome + rendered footer reservation
+        // through the same resolver (zero intended rows).
+        ViewType::ArgPromptNoChoices => {
+            let (_, target) = arg_layout::current_resolved_arg_layout_for_target(
+                arg_layout::ArgPresentationMode::Full,
+                0,
+                f32::from(MIN_HEIGHT),
+                f32::from(standard_height),
+            );
+            px(target)
+        }
         // Full content views (editor, terminal) - max height
         ViewType::EditorPrompt | ViewType::TermPrompt => max_height,
     }
@@ -1200,22 +1247,44 @@ mod resize_tests {
     fn test_arg_with_choices_dynamic_height() {
         let layout = default_layout();
 
-        // Arg with choices should size to items, clamped to STANDARD_HEIGHT
-        let base_height = layout::ARG_HEADER_HEIGHT
-            + layout::ARG_DIVIDER_HEIGHT
-            + layout::ARG_LIST_PADDING_Y
-            + layout::WINDOW_BORDER_Y;
+        // GEO-002: Arg sizes from the renderer-derived resolver — window
+        // border + real header chrome + rendered footer reservation + N
+        // canonical row slots (no modeled-only padding or divider), clamped
+        // to STANDARD_HEIGHT.
+        let row = arg_layout::arg_row_slot_height();
+        let base_height = layout::WINDOW_BORDER_Y
+            + arg_layout::arg_header_chrome_height()
+            + arg_layout::arg_rendered_footer_reservation().reservation_height;
         assert_eq!(
             height_for_view_with_layout(ViewType::ArgPromptWithChoices, 1, &layout),
-            px(base_height + LIST_ITEM_HEIGHT)
+            px(base_height + row)
         );
         assert_eq!(
             height_for_view_with_layout(ViewType::ArgPromptWithChoices, 2, &layout),
-            px(base_height + (2.0 * LIST_ITEM_HEIGHT))
+            px(base_height + (2.0 * row))
         );
         assert_eq!(
             height_for_view_with_layout(ViewType::ArgPromptWithChoices, 100, &layout),
             layout::STANDARD_HEIGHT
+        );
+    }
+
+    #[test]
+    fn test_mini_prompt_caps_visible_rows_at_five() {
+        let layout = default_layout();
+        let row = arg_layout::arg_row_slot_height();
+        let base_height = layout::WINDOW_BORDER_Y
+            + arg_layout::arg_header_chrome_height()
+            + arg_layout::arg_rendered_footer_reservation().reservation_height;
+        // Six choices still price a five-row window: choice six is reached by
+        // scrolling (GEO-002 Mini branch).
+        assert_eq!(
+            height_for_view_with_layout(ViewType::MiniPrompt, 6, &layout),
+            px(base_height + 5.0 * row)
+        );
+        assert_eq!(
+            height_for_view_with_layout(ViewType::MiniPrompt, 3, &layout),
+            px(base_height + 3.0 * row)
         );
     }
 
@@ -1229,7 +1298,7 @@ mod resize_tests {
         ));
         let required = layout::ARG_HEADER_HEIGHT
             + layout::SELECT_CONTEXT_HEADER_HEIGHT
-            + LIST_ITEM_HEIGHT
+            + crate::list_item::LIST_ITEM_HEIGHT
             + layout::ARG_LIST_PADDING_Y
             + layout::ARG_DIVIDER_HEIGHT
             + layout::SELECT_SHELL_FOOTER_BOUNDARY
@@ -1243,10 +1312,17 @@ mod resize_tests {
     fn test_arg_no_choices_compact() {
         let layout = default_layout();
 
-        // Arg without choices should be MIN_HEIGHT
+        // Input-only Arg: header chrome + rendered footer reservation +
+        // window border, floored at MIN_HEIGHT. The stale 68px model packed a
+        // 30px GPUI footer into the header; the rendered surface reserves the
+        // native footer height instead.
+        let expected = (layout::WINDOW_BORDER_Y
+            + arg_layout::arg_header_chrome_height()
+            + arg_layout::arg_rendered_footer_reservation().reservation_height)
+            .max(f32::from(layout::MIN_HEIGHT));
         assert_eq!(
             height_for_view_with_layout(ViewType::ArgPromptNoChoices, 0, &layout),
-            layout::MIN_HEIGHT
+            px(expected)
         );
     }
 

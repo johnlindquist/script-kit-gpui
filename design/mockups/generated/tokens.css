@@ -3,7 +3,7 @@
  * and re-run the exporter; Rust is the single authority.
  */
 :root {
-  /* bundleHash: sha256:a56903ee8329dadc31ae3338988c4c499ea2846d39e28abd8ad178a96c38f9c3 */
+  /* bundleHash: sha256:b67da62822a38755e628e89a98acbbe3cdc331bece858187c9433c682ea10df5 */
   --sk-actions-dialog-list-padding-bottom: 6px;
   --sk-actions-dialog-list-padding-top: 0px;
   --sk-actions-dialog-row-height: 36px;
@@ -256,7 +256,7 @@
   --sk-arg-input-font-size: 20px;
   --sk-arg-input-height: 22px;
   --sk-arg-input-line-height: 25px;
-  --sk-arg-window-height: 279px;
+  --sk-arg-window-height: 299px;
   --sk-builtin-main-input-count-font-size: 14px;
   --sk-builtin-main-input-count-font-weight: 400;
   --sk-builtin-main-input-count-line-height: 23px;

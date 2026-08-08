@@ -10,11 +10,15 @@
 //! - `production_*` resolvers read `NotesWindowStyle::current()` directly —
 //!   NEVER the feature-sensitive `adopted_style()` — so a storybook-enabled
 //!   exporter build produces the same bundle as a production renderer.
-//! - Model values (the 28px footer reservation, autosize constants) are
-//!   exported under honest model names; the *painted* footer band is a
-//!   separate resolved value (see [`resolved_notes_footer_intrinsic_height`]).
-//!   The disagreement is recorded as the
-//!   `notesFooter.layoutReservationVsIntrinsicPaint` conflict, not collapsed.
+//! - Footer geometry is owned by the single resolver in [`super::layout`]:
+//!   the runtime paints NO footer row (removed in 4e1a71a84), autosize and
+//!   the projection reserve the resolved row height (0), and the would-be
+//!   row height has exactly one derivation
+//!   (see [`resolved_notes_footer_intrinsic_height`]).
+//! - The 28px `footer_reservation_height` and the footer presentation
+//!   strings are LEGACY export values kept only for the read-only
+//!   design-contract exporter and its recorded
+//!   `notesFooter.layoutReservationVsIntrinsicPaint` conflict.
 
 use super::style::{NotesLayoutMetrics, NotesWindowStyle};
 
@@ -49,13 +53,21 @@ pub(crate) const NOTES_TRAFFIC_LIGHT_ORIGIN_X: f32 = 8.0;
 pub(crate) const NOTES_TRAFFIC_LIGHT_ORIGIN_Y: f32 = 7.0;
 
 // ── Footer presentation facts (contract, not visual numbers) ──────────────
+//
+// STALE EXPORT VALUES, retained for the read-only design-contract exporter
+// (its test asserts these exact strings and the generated bundle is checked
+// in). Runtime truth since commit 4e1a71a84: the Notes window paints NO
+// footer at all — `render_editor` ends at the flexible editor body. The
+// honest presence fact lives in `layout::NOTES_FOOTER_ACTION_ROW_PRESENT`
+// (false) and the resolved row (`layout::production_notes_footer_action_row`,
+// height 0). Migrating these exported facts is the exporter owner's change
+// (integration request filed by the GEO-004 lane).
 
-/// The Notes footer is a GPUI strip rendered INSIDE the window — not the
-/// main window's native AppKit overlay.
+/// LEGACY export: how the footer presented before its removal (a GPUI strip
+/// rendered inside the window, never the main window's native overlay).
 pub(crate) const NOTES_FOOTER_PRESENTATION: &str = "inWindowGpui";
 pub(crate) const NOTES_FOOTER_NATIVE_OVERLAY: bool = false;
-/// The footer renders only while a note is selected
-/// (`render_editor.rs` gates on selection).
+/// LEGACY export: the removed footer's visibility gate.
 pub(crate) const NOTES_FOOTER_VISIBILITY: &str = "selectedNoteOnly";
 
 /// App-authored Notes window/titlebar/footer chrome values, resolved from
@@ -110,11 +122,17 @@ pub(crate) fn production_notes_window_contract() -> NotesWindowChromeContract {
     }
 }
 
-/// The Notes layout *model* — the values autosize math and
-/// `automation_layout_info` reserve, exported under honest model names.
-/// `footer_reservation_height` is `NotesLayoutMetrics.footer_height` (28)
-/// and intentionally disagrees with the painted 32px footer band; that
-/// drift stays a recorded conflict, never a silent fix.
+/// The Notes layout *model* exported to the design-contract bundle.
+///
+/// `footer_reservation_height` is a LEGACY export value (28): it is no longer
+/// consumed by autosize, minimum-height, or the layout projection — all of
+/// those route through the single resolver in `super::layout`, whose footer
+/// term is the resolved footer action row (0 while the row is absent). The
+/// scalar is retained ONLY because the design-contract exporter (read-only
+/// for the Notes owner) still exports it under
+/// `notes.layout.footerReservationHeight` and records the historical
+/// `notesFooter.layoutReservationVsIntrinsicPaint` conflict around it.
+/// Migrating that export to the resolver is the exporter owner's change.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NotesLayoutModelContract {
     pub footer_reservation_height: f32,
@@ -137,18 +155,15 @@ pub(crate) fn production_notes_layout_model() -> NotesLayoutModelContract {
     }
 }
 
-/// The footer band the Notes window actually PAINTS: the shared universal
-/// footer action-button row height. `render_universal_footer_action_buttons`
-/// sizes buttons with `footer_button_height(HINT_STRIP_HEIGHT)`; this
-/// resolver routes through the same shared `footer_chrome` formula owner
-/// (`footer_button_height_in`) with an explicit `button_padding_y` so the
-/// checked-in exporter can pass the base (non-runtime-override) footer
-/// metrics.
+/// The intrinsic height a Notes footer action row WOULD paint (the shared
+/// universal footer action-button row height). The Notes runtime currently
+/// paints NO footer row (`layout::NOTES_FOOTER_ACTION_ROW_PRESENT` is false;
+/// the rail was removed in 4e1a71a84) — this stays exported because the
+/// design-contract exporter publishes it as `resolved.notes.footer.intrinsicHeight`
+/// (`--sk-notes-footer-height`). Delegates to the single layout resolver with
+/// `visible = true` so there is exactly ONE derivation of the row height.
 pub(crate) fn resolved_notes_footer_intrinsic_height(button_padding_y: f32) -> f32 {
-    crate::components::footer_chrome::footer_button_height_in(
-        crate::window_resize::main_layout::HINT_STRIP_HEIGHT,
-        button_padding_y,
-    )
+    super::layout::resolve_notes_footer_action_row(true, button_padding_y).height
 }
 
 #[cfg(test)]
@@ -176,7 +191,12 @@ mod tests {
     }
 
     #[test]
-    fn production_layout_model_preserves_28pt_reservation() {
+    fn production_layout_model_exports_the_legacy_values() {
+        // Exporter-compatibility lock ONLY: these scalars feed the read-only
+        // design-contract bundle (`notes.layout.*` tokens and the recorded
+        // `notesFooter.layoutReservationVsIntrinsicPaint` conflict). None of
+        // them is consumed by autosize/minimum/projection anymore — those go
+        // through `layout::resolve_notes_autosize`.
         let m = production_notes_layout_model();
         assert_eq!(m.footer_reservation_height, 28.0);
         assert_eq!(m.auto_resize_max_height, 600.0);
@@ -186,14 +206,31 @@ mod tests {
     }
 
     #[test]
-    fn painted_footer_band_is_32pt_with_base_button_padding() {
-        // Base footer metrics author button_padding_y = 2 → 36 − 2×2 = 32.
-        assert_eq!(resolved_notes_footer_intrinsic_height(2.0), 32.0);
-        // The model reservation (28) intentionally under-reserves this band;
-        // notesFooter.layoutReservationVsIntrinsicPaint records the drift.
-        assert_ne!(
+    fn model_and_renderer_consume_the_same_notes_footer_action_row() {
+        use crate::notes::window::layout;
+
+        // ONE resolver owns the row: the exported intrinsic height is the
+        // resolver's visible-row height (shared footer_chrome formula), and
+        // the production model/projection/autosize footer term is the
+        // resolver's production row — absent, reserving zero.
+        assert_eq!(
             resolved_notes_footer_intrinsic_height(2.0),
-            production_notes_layout_model().footer_reservation_height
+            layout::resolve_notes_footer_action_row(true, 2.0).height,
         );
+        assert_eq!(resolved_notes_footer_intrinsic_height(2.0), 32.0);
+
+        let production = layout::production_notes_footer_action_row();
+        assert!(!production.visible, "Notes paints no footer action row");
+        assert_eq!(production.height, 0.0);
+        assert_eq!(
+            production.role,
+            crate::protocol::GeometryRole::FooterActionRow
+        );
+
+        // And the autosize composition consumes exactly that resolved row.
+        let metrics = NotesLayoutMetrics::from_style(NotesWindowStyle::current());
+        let resolved =
+            layout::resolve_notes_autosize(layout::notes_autosize_input(&metrics, 3, 280.0));
+        assert_eq!(resolved.footer_action_row.height, production.height,);
     }
 }

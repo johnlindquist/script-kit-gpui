@@ -430,12 +430,14 @@ impl NotesApp {
         });
         let search_text = self.search_state.read(cx).value().to_string();
         let metrics = style::adopted_metrics();
-        let desired_height = Self::autosize_desired_height(&metrics, self.last_line_count);
-        let clamped_height = Self::resolve_auto_resize_height(
-            desired_height,
-            self.initial_height,
-            metrics.auto_resize_max_height,
-        );
+        let resolved_autosize =
+            super::layout::resolve_notes_autosize(super::layout::notes_autosize_input(
+                &metrics,
+                self.last_line_count,
+                self.initial_height,
+            ));
+        let desired_height = resolved_autosize.desired_height;
+        let clamped_height = resolved_autosize.clamped_height;
         let last_autosize_transition = self.last_autosize_transition.as_ref().map(|entry| {
             serde_json::json!({
                 "generation": entry.generation,
@@ -623,18 +625,52 @@ impl NotesApp {
                 "nativeExit": crate::platform::glass_exit_lifecycle_receipt("Notes"),
             },
             "autosize": {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "redacted": true,
                 "generation": self.autosize_generation,
                 "enabled": self.auto_sizing_enabled,
                 "lastWindowHeight": self.last_window_height,
                 "initialHeight": self.initial_height,
-                "minHeight": self.initial_height,
-                "maxHeight": metrics.auto_resize_max_height,
+                "minHeight": resolved_autosize.effective_minimum_height,
+                "maxHeight": resolved_autosize.effective_maximum_height,
                 "lineCount": self.last_line_count,
                 "desiredHeight": desired_height,
                 "clampedHeight": clamped_height,
                 "threshold": metrics.auto_resize_threshold,
+                // Complete resolver composition (layout::resolve_notes_autosize):
+                // the same pure result the resize path consumes.
+                "composition": {
+                    "editorContentHeight": resolved_autosize.editor_content_height,
+                    "editorContentMeasurementSource":
+                        super::layout::EDITOR_CONTENT_MEASUREMENT_SOURCE,
+                    "editorInsets": {
+                        "top": resolved_autosize.editor_insets.top,
+                        "bottom": resolved_autosize.editor_insets.bottom,
+                    },
+                    "editorBoxHeight": resolved_autosize.editor_box_height,
+                    "headingLineHeight": resolved_autosize.heading_line_height,
+                    "bodyLineHeight": resolved_autosize.body_line_height,
+                    "contentChromeHeight": resolved_autosize.content_chrome_height,
+                    "footerActionRow": {
+                        "role": resolved_autosize.footer_action_row.role,
+                        "present": resolved_autosize.footer_action_row.visible,
+                        "visible": resolved_autosize.footer_action_row.visible,
+                        "height": resolved_autosize.footer_action_row.height,
+                        "baseHeight": resolved_autosize.footer_action_row.base_height,
+                        "buttonPaddingY": resolved_autosize.footer_action_row.button_padding_y,
+                    },
+                    "windowNonContentInsets": {
+                        "top": resolved_autosize.window_non_content_insets.top,
+                        "bottom": resolved_autosize.window_non_content_insets.bottom,
+                    },
+                    "nativeFooterHost": {
+                        "height": resolved_autosize.native_footer_host_height,
+                        "includedInAutosize": resolved_autosize.native_footer_host_included,
+                    },
+                },
+                "structuralMinimumHeight": resolved_autosize.structural_minimum_height,
+                "effectiveMinimumHeight": resolved_autosize.effective_minimum_height,
+                "effectiveMaximumHeight": resolved_autosize.effective_maximum_height,
                 "lastCause": last_autosize_transition
                     .as_ref()
                     .and_then(|entry| entry.get("cause"))
@@ -813,14 +849,19 @@ impl NotesApp {
             .unwrap_or((728.0, self.last_window_height.max(self.initial_height)));
         let metrics = style::adopted_metrics();
         let titlebar_height = metrics.titlebar_height;
-        // The Notes content stage always fills the Notes window: no footer
-        // band, no desktop gutter, no partitioned stage.
+        // The Notes content stage always fills the Notes window: no desktop
+        // gutter, no partitioned stage. Whether a footer action row takes
+        // editor space is owned by the single layout resolver — currently
+        // absent (visible = false, height 0), so the editor keeps the full
+        // remaining height. If the row returns, the SAME resolver shrinks the
+        // editor and projects the row component below.
         let stage_height = window_height;
         let content_parent = "NotesWindow";
+        let footer_action_row = super::layout::production_notes_footer_action_row();
         let search_height = if self.show_search { 40.0 } else { 0.0 };
         let toolbar_height = if self.show_format_toolbar { 36.0 } else { 0.0 };
         let content_top = titlebar_height + search_height + toolbar_height;
-        let editor_height = (stage_height - content_top).max(0.0);
+        let editor_height = (stage_height - content_top - footer_action_row.height).max(0.0);
         let mut components = Vec::new();
 
         components.push(
@@ -912,9 +953,38 @@ impl NotesApp {
                 .with_depth(1)
                 .with_parent(content_parent)
                 .with_explanation(
-                    "Primary Notes content region after titlebar/search/toolbar reservations.",
+                    "Primary Notes content region after titlebar/search/toolbar reservations \
+                     and the resolved footer action row (currently absent, height 0).",
                 ),
         );
+
+        if footer_action_row.visible {
+            // Sibling row below the editor, projected from the SAME resolver
+            // the editor reservation consumed. Name slug resolves to
+            // GeometryRole::FooterActionRow; kept distinct from any
+            // NotesFooterNativeHost diagnostic geometry.
+            components.push(
+                LayoutComponentInfo::new("NotesFooterActionRow", LayoutComponentType::Container)
+                    .with_bounds(
+                        0.0,
+                        content_top + editor_height,
+                        window_width,
+                        footer_action_row.height,
+                    )
+                    .with_visual_style(
+                        chrome_tokens::CHROME_LAYER_FUNCTIONAL,
+                        chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
+                        None,
+                    )
+                    .with_visual_token("chrome.notesFooterActionRow")
+                    .with_depth(1)
+                    .with_parent(content_parent)
+                    .with_explanation(
+                        "In-window Notes footer action row resolved by \
+                         layout::resolve_notes_footer_action_row.",
+                    ),
+            );
+        }
 
         if self.command_bar.is_open() {
             components.push(

@@ -162,6 +162,12 @@ impl ScriptListApp {
         let arg_list_colors = ListItemColors::from_theme(theme);
         let text_primary = theme.colors.text.primary;
 
+        // GEO-002: resolve the Full Arg row slot once from the active
+        // renderer's themed metrics (canonical 44px general row). Rows and
+        // the list viewport carry stable measurement IDs so the layout model
+        // and paint measurements join by identity, not by name inference.
+        let row_slot_height = crate::window_resize::arg_layout::arg_row_slot_height();
+
         // P0: Clone data needed for uniform_list closure
         let arg_selected_index = self.arg_selected_index;
         let filtered_choices = self.get_filtered_arg_choices_owned();
@@ -196,14 +202,24 @@ impl ScriptListApp {
                                 let is_selected = ix == arg_selected_index;
 
                                 // Use shared ListItem component for consistent design
-                                div().id(ix).child(
-                                    ListItem::new(choice.name.clone(), arg_list_colors)
-                                        .description_opt(choice.description.clone())
-                                        .selected(is_selected)
-                                        .index(ix),
-                                )
+                                div()
+                                    .id(ix)
+                                    .debug_selector(move || {
+                                        format!(
+                                            "{}:{ix}",
+                                            crate::window_resize::arg_layout::ARG_ROW_MEASUREMENT_ID_PREFIX
+                                        )
+                                    })
+                                    .child(
+                                        ListItem::new(choice.name.clone(), arg_list_colors)
+                                            .description_opt(choice.description.clone())
+                                            .selected(is_selected)
+                                            .index(ix),
+                                    )
                             } else {
-                                div().id(ix).h(px(LIST_ITEM_HEIGHT))
+                                // Fallback rows use the resolved row slot, not
+                                // the stale LIST_ITEM_HEIGHT constant.
+                                div().id(ix).h(px(row_slot_height))
                             }
                         })
                         .collect()
@@ -229,6 +245,9 @@ impl ScriptListApp {
                 .flex_1()
                 .min_h(px(0.))
                 .w_full()
+                .debug_selector(|| {
+                    crate::window_resize::arg_layout::ARG_LIST_VIEWPORT_MEASUREMENT_ID.to_string()
+                })
                 .child(list_element)
         } else {
             div()

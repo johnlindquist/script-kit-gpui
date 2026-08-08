@@ -34,7 +34,7 @@ pub(crate) mod confirm_modal_shell;
 /// Shared per-turn conversation action affordances (response copy control).
 pub(crate) mod conversation_actions;
 /// Shared typed owner of conversation paint values for Agent Chat AND Flow.
-/// `src/ai/agent_chat/ui/style_contract.rs` is a compatibility façade over it.
+/// All callers import this canonical owner directly.
 pub mod conversation_style;
 /// Shared selectable Markdown renderer for every conversation surface.
 /// Selection is opt-in on the vendored `TextView`, so building one outside

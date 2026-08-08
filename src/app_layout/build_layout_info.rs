@@ -1131,27 +1131,31 @@ impl ScriptListApp {
             };
         }
 
-        if matches!(self.current_view, AppView::ConfirmPrompt { .. }) {
-            const CONFIRM_CONTENT_PADDING_X: f32 = 24.0;
-            const CONFIRM_CONTENT_PADDING_Y: f32 = 24.0;
-            const CONFIRM_FOOTER_HEIGHT: f32 = 38.0;
-            const CONFIRM_STACK_WIDTH: f32 = 560.0;
-            const CONFIRM_TITLE_HEIGHT: f32 = 28.0;
-            const CONFIRM_BODY_HEIGHT: f32 = 40.0;
-            const CONFIRM_STACK_GAP: f32 = 16.0;
-            const CONFIRM_BUTTON_HEIGHT: f32 = 28.0;
-            const CONFIRM_BUTTON_WIDTH: f32 = 78.0;
-            const CONFIRM_BUTTON_GAP: f32 = 8.0;
-
-            let confirm_content_height = (content_height - CONFIRM_FOOTER_HEIGHT).max(0.0);
-            let stack_width =
-                CONFIRM_STACK_WIDTH.min(window_width - CONFIRM_CONTENT_PADDING_X * 2.0);
-            let stack_height = CONFIRM_TITLE_HEIGHT + CONFIRM_STACK_GAP + CONFIRM_BODY_HEIGHT;
+        if let AppView::ConfirmPrompt { options, .. } = &self.current_view {
+            // GEO-003: resolve the same geometry owner the renderer consumes.
+            // The model names title/body/rail/action slots separately and does
+            // not substitute a hand-authored rectangle for native footer truth.
+            let metrics = crate::confirm::resolved_confirm_prompt_metrics(
+                crate::designs::get_tokens(self.current_design).spacing(),
+                crate::components::footer_chrome::current_main_menu_footer_height(),
+            );
+            let body_lines = options.body.lines().count().max(1) as f32;
+            let body_height = (body_lines * metrics.body_line_height).max(metrics.body_line_height);
+            let confirm_content_height = (content_height - metrics.footer_spacer_height).max(0.0);
+            let stack_width = metrics
+                .body_max_width
+                .min((window_width - metrics.content_padding * 2.0).max(0.0));
+            let stack_height = metrics.title_line_height + metrics.stack_gap + body_height;
             let stack_x = (window_width - stack_width) / 2.0;
-            let stack_y = content_top + (confirm_content_height - stack_height) / 2.0;
-            let footer_y = window_height - CONFIRM_FOOTER_HEIGHT;
-            let cancel_x = window_width - 16.0 - CONFIRM_BUTTON_WIDTH;
-            let confirm_x = cancel_x - CONFIRM_BUTTON_GAP - CONFIRM_BUTTON_WIDTH;
+            let stack_y = content_top + (confirm_content_height - stack_height).max(0.0) / 2.0;
+            let footer_y = window_height - metrics.footer_spacer_height;
+            let footer_edge_padding =
+                crate::components::footer_chrome::footer_centered_action_edge_padding_x();
+            let cancel_x = window_width - footer_edge_padding - metrics.cancel_slot_width;
+            let confirm_x =
+                cancel_x - metrics.action_button_gap - metrics.confirm_slot_width;
+            let button_y = footer_y
+                + (metrics.footer_spacer_height - metrics.action_button_height).max(0.0) / 2.0;
 
             components.push(
                 LayoutComponentInfo::new("ConfirmPromptContent", LayoutComponentType::Panel)
@@ -1168,10 +1172,10 @@ impl ScriptListApp {
                     )
                     .with_visual_token("confirm.content")
                     .with_padding(
-                        CONFIRM_CONTENT_PADDING_Y,
-                        CONFIRM_CONTENT_PADDING_X,
-                        CONFIRM_CONTENT_PADDING_Y,
-                        CONFIRM_CONTENT_PADDING_X,
+                        metrics.content_padding,
+                        metrics.content_padding,
+                        metrics.content_padding,
+                        metrics.content_padding,
                     )
                     .with_flex_column()
                     .with_depth(2)
@@ -1187,7 +1191,7 @@ impl ScriptListApp {
                         Some(chrome_tokens::LIQUID_GLASS_PANEL_RADIUS_PX),
                     )
                     .with_visual_token("confirm.stack")
-                    .with_gap(CONFIRM_STACK_GAP)
+                    .with_gap(metrics.stack_gap)
                     .with_flex_column()
                     .with_depth(3)
                     .with_parent("ConfirmPromptContent")
@@ -1195,7 +1199,7 @@ impl ScriptListApp {
             );
             components.push(
                 LayoutComponentInfo::new("ConfirmPromptTitle", LayoutComponentType::Header)
-                    .with_bounds(stack_x, stack_y, stack_width, CONFIRM_TITLE_HEIGHT)
+                    .with_bounds(stack_x, stack_y, stack_width, metrics.title_line_height)
                     .with_visual_style(
                         chrome_tokens::CHROME_LAYER_CONTENT,
                         chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
@@ -1210,9 +1214,9 @@ impl ScriptListApp {
                 LayoutComponentInfo::new("ConfirmPromptBody", LayoutComponentType::Other)
                     .with_bounds(
                         stack_x,
-                        stack_y + CONFIRM_TITLE_HEIGHT + CONFIRM_STACK_GAP,
+                        stack_y + metrics.title_line_height + metrics.stack_gap,
                         stack_width,
-                        CONFIRM_BODY_HEIGHT,
+                        body_height,
                     )
                     .with_visual_style(
                         chrome_tokens::CHROME_LAYER_CONTENT,
@@ -1226,7 +1230,7 @@ impl ScriptListApp {
             );
             components.push(
                 LayoutComponentInfo::new("ConfirmPromptFooter", LayoutComponentType::Panel)
-                    .with_bounds(0.0, footer_y, window_width, CONFIRM_FOOTER_HEIGHT)
+                    .with_bounds(0.0, footer_y, window_width, metrics.footer_spacer_height)
                     .with_visual_style(
                         chrome_tokens::CHROME_LAYER_FUNCTIONAL,
                         chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
@@ -1240,23 +1244,188 @@ impl ScriptListApp {
                         "Native footer region owns confirm/cancel button affordances.",
                     ),
             );
-            for (name, x) in [
-                ("ConfirmPromptConfirmButton", confirm_x),
-                ("ConfirmPromptCancelButton", cancel_x),
+            for (name, x, width) in [
+                (
+                    "ConfirmPromptConfirmButton",
+                    confirm_x,
+                    metrics.confirm_slot_width,
+                ),
+                (
+                    "ConfirmPromptCancelButton",
+                    cancel_x,
+                    metrics.cancel_slot_width,
+                ),
             ] {
                 components.push(
                     LayoutComponentInfo::new(name, LayoutComponentType::Button)
-                        .with_bounds(x, footer_y + 5.0, CONFIRM_BUTTON_WIDTH, CONFIRM_BUTTON_HEIGHT)
+                        .with_bounds(x, button_y, width, metrics.action_button_height)
                         .with_visual_style(
                             chrome_tokens::CHROME_LAYER_FUNCTIONAL,
                             chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
                             Some(chrome_tokens::LIQUID_GLASS_COMPACT_RADIUS_PX),
                         )
                         .with_visual_token("confirm.footerButton")
-                        .with_hit_bounds(x, footer_y + 5.0, CONFIRM_BUTTON_WIDTH, CONFIRM_BUTTON_HEIGHT)
+                        .with_hit_bounds(x, button_y, width, metrics.action_button_height)
                         .with_depth(3)
                         .with_parent("ConfirmPromptFooter")
-                        .with_explanation("Footer button is 28px tall with the shared 10px compact Liquid Glass radius."),
+                        .with_explanation(
+                            "Native footer action slot derives height, width, gap, and centering from the shared footer owner.",
+                        ),
+                );
+            }
+
+            return LayoutInfo {
+                window_width,
+                window_height,
+                prompt_type: prompt_type.to_string(),
+                components,
+                fidelity: None,
+                handler_form: None,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            };
+        }
+
+        // GEO-002: explicit Arg/Mini model branch. Header, safe content
+        // viewport, rendered footer reservation, list viewport, and visible
+        // modeled rows all project from the SAME resolver the resize owner
+        // and renderers consume (`window_resize::arg_layout`) — never from
+        // the retired 40px `LIST_ITEM_HEIGHT + ARG_LIST_PADDING_Y` model.
+        if matches!(
+            self.current_view,
+            AppView::ArgPrompt { .. } | AppView::MiniPrompt { .. }
+        ) {
+            use crate::window_resize::arg_layout::{
+                self, ArgPresentationMode, ARG_LIST_VIEWPORT_MEASUREMENT_ID,
+                ARG_ROW_MEASUREMENT_ID_PREFIX, MINI_LIST_VIEWPORT_MEASUREMENT_ID,
+                MINI_ROW_MEASUREMENT_ID_PREFIX,
+            };
+
+            let mode = if matches!(self.current_view, AppView::MiniPrompt { .. }) {
+                ArgPresentationMode::Mini
+            } else {
+                ArgPresentationMode::Full
+            };
+            let filtered_len = self.filtered_arg_choices().len();
+            let resolved = arg_layout::resolved_arg_layout(arg_layout::current_arg_layout_inputs(
+                mode,
+                filtered_len,
+                window_height,
+            ));
+            let (viewport_id, row_id_prefix) = match mode {
+                ArgPresentationMode::Mini => {
+                    (MINI_LIST_VIEWPORT_MEASUREMENT_ID, MINI_ROW_MEASUREMENT_ID_PREFIX)
+                }
+                ArgPresentationMode::Full => {
+                    (ARG_LIST_VIEWPORT_MEASUREMENT_ID, ARG_ROW_MEASUREMENT_ID_PREFIX)
+                }
+            };
+
+            let header_h = resolved.header_chrome_height;
+            let viewport_top = header_h;
+            let viewport_h = resolved.viewport_height;
+            let footer_top = window_height - resolved.footer_reservation_height;
+
+            components.push(
+                LayoutComponentInfo::new("ArgPromptHeader", LayoutComponentType::Header)
+                    .with_geometry_identity(
+                        "layout:arg-prompt-header",
+                        None,
+                        crate::list_item::geometry_roles::GeometryRole::MainHeaderChrome
+                            .to_protocol(),
+                    )
+                    .with_bounds(0.0, 0.0, window_width, header_h)
+                    .with_depth(1)
+                    .with_parent("Window")
+                    .with_explanation(format!(
+                        "Minimal prompt shell header: padding({}) * 2 + input row({}) + divider({}) = {}px.",
+                        crate::ui::chrome::HEADER_PADDING_Y,
+                        crate::panel::HEADER_BUTTON_HEIGHT
+                            .max(crate::window_resize::layout::ARG_INPUT_LINE_HEIGHT),
+                        crate::panel::HEADER_DIVIDER_HEIGHT,
+                        header_h
+                    )),
+            );
+            components.push(
+                LayoutComponentInfo::new(viewport_id, LayoutComponentType::List)
+                    .with_geometry_identity(
+                        format!("layout:{viewport_id}"),
+                        None,
+                        crate::list_item::geometry_roles::GeometryRole::ContentViewport
+                            .to_protocol(),
+                    )
+                    .with_bounds(0.0, viewport_top, window_width, viewport_h)
+                    .with_depth(1)
+                    .with_parent("Window")
+                    .with_explanation(format!(
+                        "Choice-list viewport excludes the rendered footer reservation. \
+                         rowSlotHeight={} visibleRowCapacity={} intendedVisibleRows={} \
+                         listPaddingTop={} listPaddingBottom={} choiceCount={}",
+                        resolved.row_slot_height,
+                        resolved.visible_row_capacity,
+                        resolved.intended_visible_rows,
+                        resolved.list_padding_top,
+                        resolved.list_padding_bottom,
+                        filtered_len
+                    )),
+            );
+            // The derived footer reservation is its own measurement. Its
+            // protocol role is pending IR-01 (renderedFooterReservation); it
+            // must NOT borrow a painted footer owner's role.
+            components.push(
+                LayoutComponentInfo::new("ArgFooterReservation", LayoutComponentType::Panel)
+                    .with_geometry_identity(
+                        "layout:arg-footer-reservation",
+                        None,
+                        crate::list_item::geometry_roles::GeometryRole::RenderedFooterReservation
+                            .to_protocol(),
+                    )
+                    .with_bounds(
+                        0.0,
+                        footer_top,
+                        window_width,
+                        resolved.footer_reservation_height,
+                    )
+                    .with_depth(1)
+                    .with_parent("Window")
+                    .with_explanation(format!(
+                        "Derived safe-viewport exclusion sourced from the native footer owner \
+                         (height {}px). Distinct measurement; not an alias of the painted footer.",
+                        resolved.footer_reservation_height
+                    )),
+            );
+
+            // Visible modeled rows at the current scroll offset.
+            let scroll_offset_y = {
+                let state = self.arg_list_scroll_handle.0.borrow();
+                (-state.base_handle.offset().y.as_f32()).max(0.0)
+            };
+            let first_visible = (scroll_offset_y / resolved.row_slot_height).floor() as usize;
+            let last_visible = ((scroll_offset_y + viewport_h) / resolved.row_slot_height).ceil()
+                as usize;
+            for ix in first_visible..last_visible.min(filtered_len) {
+                let row_y = viewport_top + (ix as f32 * resolved.row_slot_height)
+                    - scroll_offset_y;
+                let selected = ix == self.arg_selected_index;
+                components.push(
+                    LayoutComponentInfo::new(
+                        format!("{row_id_prefix}:{ix}"),
+                        LayoutComponentType::ListItem,
+                    )
+                    .with_geometry_identity(
+                        format!("layout:{row_id_prefix}:{ix}"),
+                        None,
+                        crate::list_item::geometry_roles::GeometryRole::RowSlot.to_protocol(),
+                    )
+                    .with_bounds(0.0, row_y, window_width, resolved.row_slot_height)
+                    .with_depth(2)
+                    .with_parent(viewport_id)
+                    .with_explanation(format!(
+                        "Modeled {} row {} at the resolved {}px row slot{}.",
+                        mode.as_str(),
+                        ix,
+                        resolved.row_slot_height,
+                        if selected { " (selected)" } else { "" }
+                    )),
                 );
             }
 
@@ -1274,7 +1443,15 @@ impl ScriptListApp {
         if let AppView::BrowseKitsView { results, .. } = &self.current_view {
             const KIT_STORE_COUNT_WIDTH: f32 = 68.0;
             const KIT_STORE_LIST_PADDING_Y: f32 = 4.0;
-            const KIT_STORE_ROW_HEIGHT: f32 = 72.0;
+            // GEO-009: the 72px browse card is a SPECIALIZED density — typed
+            // owner/rationale, never forced into the general row resolver.
+            const KIT_STORE_BROWSE_CARD: crate::list_item::metrics::SpecializedListPresentationMetrics =
+                crate::list_item::metrics::SpecializedListPresentationMetrics {
+                    owner: "build_layout_info::BrowseKitsView",
+                    row_height: 72.0,
+                    rationale: "two-line kit-store browse card with install affordance",
+                };
+            const KIT_STORE_ROW_HEIGHT: f32 = KIT_STORE_BROWSE_CARD.row_height;
             const KIT_STORE_ROW_PADDING_X: f32 = 12.0;
             const KIT_STORE_ROW_PADDING_Y: f32 = 8.0;
             const KIT_STORE_ROW_GAP: f32 = 12.0;
@@ -1445,7 +1622,14 @@ impl ScriptListApp {
         if let AppView::InstalledKitsView { filter, kits, .. } = &self.current_view {
             const KIT_STORE_COUNT_WIDTH: f32 = 96.0;
             const KIT_STORE_LIST_PADDING_Y: f32 = 4.0;
-            const KIT_STORE_ROW_HEIGHT: f32 = crate::list_item::LIST_ITEM_HEIGHT;
+            // GEO-009 ledgered legacy caller: InstalledKits.
+            let kit_store_row_metrics = crate::list_item::metrics::resolved_legacy_metrics_for_caller(
+                crate::list_item::metrics::LegacyListCallerId::InstalledKits,
+                self.current_design,
+                menu_theme,
+            );
+            #[allow(non_snake_case)]
+            let KIT_STORE_ROW_HEIGHT: f32 = kit_store_row_metrics.row_slot_height;
             const KIT_STORE_FOOTER_HEIGHT: f32 = 34.0;
 
             let list_top = content_top + KIT_STORE_LIST_PADDING_Y;
@@ -1581,7 +1765,14 @@ impl ScriptListApp {
         ) {
             const GENERIC_CONTENT_PADDING_X: f32 = 16.0;
             const GENERIC_COUNT_WIDTH: f32 = 96.0;
-            const GENERIC_ROW_HEIGHT: f32 = LIST_ITEM_HEIGHT;
+            // GEO-009 ledgered legacy caller: GenericFilterable.
+            let generic_row_metrics = crate::list_item::metrics::resolved_legacy_metrics_for_caller(
+                crate::list_item::metrics::LegacyListCallerId::GenericFilterable,
+                self.current_design,
+                menu_theme,
+            );
+            #[allow(non_snake_case)]
+            let GENERIC_ROW_HEIGHT: f32 = generic_row_metrics.row_slot_height;
             const GENERIC_FOOTER_HEIGHT: f32 = 34.0;
 
             let (variant, footer_surface, list_count) = match &self.current_view {
@@ -1740,7 +1931,14 @@ impl ScriptListApp {
             self.current_view,
             AppView::DictationHistoryView { .. } | AppView::NotesBrowseView { .. }
         ) {
-            const PORTAL_ROW_HEIGHT: f32 = LIST_ITEM_HEIGHT;
+            // GEO-009 ledgered legacy caller: AttachmentPortal.
+            let portal_row_metrics = crate::list_item::metrics::resolved_legacy_metrics_for_caller(
+                crate::list_item::metrics::LegacyListCallerId::AttachmentPortal,
+                self.current_design,
+                menu_theme,
+            );
+            #[allow(non_snake_case)]
+            let PORTAL_ROW_HEIGHT: f32 = portal_row_metrics.row_slot_height;
 
             let (variant, list_count) = match &self.current_view {
                 AppView::DictationHistoryView {

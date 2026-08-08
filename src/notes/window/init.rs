@@ -845,18 +845,24 @@ impl NotesApp {
     }
 
     /// Desired auto-size height for `line_count` editor lines. Shared by the
-    /// resize path and `automation_layout_info` so the two cannot drift.
+    /// resize path and `automation_state` so the two cannot drift.
     ///
-    /// The Notes footer rail was removed (chrome policy
-    /// Notes renders no footer), so the equation
-    /// reserves ZERO footer height — `metrics.footer_height` remains a style
-    /// value consumed by other layout, not by autosize.
+    /// Routes through the single Notes layout resolver
+    /// (`layout::resolve_notes_autosize`), whose footer term is the resolved
+    /// footer action row: ZERO while the row is absent (the Notes footer rail
+    /// was removed — Notes renders no footer), and the shared footer-chrome
+    /// row height if the row ever returns. No independent footer scalar
+    /// participates in this equation.
     pub(super) fn autosize_desired_height(
         metrics: &style::NotesLayoutMetrics,
         line_count: usize,
     ) -> f32 {
-        let content_height = (line_count as f32) * metrics.auto_resize_line_height;
-        metrics.titlebar_height + content_height + metrics.auto_resize_padding
+        // Desired height is independent of the restored floor; 0.0 keeps the
+        // resolver input honest about "no restored minimum considered here".
+        super::layout::resolve_notes_autosize(super::layout::notes_autosize_input(
+            metrics, line_count, 0.0,
+        ))
+        .desired_height
     }
 
     pub(super) fn update_window_height(

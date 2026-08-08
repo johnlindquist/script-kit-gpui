@@ -1514,45 +1514,42 @@ impl ScriptListApp {
                 let viewport_height = self.main_list_state.viewport_bounds().size.height;
                 let safe_viewport_height =
                     (viewport_height - header_overlay_height - footer_overlay_height).max(px(0.0));
-                // Resolve the per-kind heights once: `effective_*_for_theme`
-                // rebuilds the full metrics override struct per call, which is
-                // too expensive to repeat per item on every render.
+                // GEO-009: predictive scrollbar content height resolves the
+                // MainMenuThemed presentation ONCE (same themed metrics the
+                // row renderer paints), then sums typed predictive slots —
+                // no per-item metric rebuilds, no bare height arithmetic.
                 let hide_initial_section_header = current_main_menu_theme
                     .def()
                     .header_info_bar
                     .hide_initial_section_header;
-                let first_section_header_height =
-                    crate::list_item::effective_first_section_header_height_for_theme(
-                        current_main_menu_theme,
-                    );
-                let section_header_height =
-                    crate::list_item::effective_section_header_height_for_theme(
-                        current_main_menu_theme,
-                    );
-                let status_row_height =
-                    crate::list_item::effective_source_status_row_height_for_theme(
-                        current_main_menu_theme,
-                    );
-                let list_item_height =
-                    crate::list_item::effective_list_item_height_for_theme(current_main_menu_theme);
-                let content_height = px(grouped_items
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, item)| match item {
-                        GroupedListItem::SectionHeader(..) => {
-                            if ix == 0 && hide_initial_section_header {
-                                0.0
-                            } else if ix == 0 {
-                                first_section_header_height
-                            } else {
-                                section_header_height
+                let themed_metrics = crate::list_item::metrics::resolved_list_presentation_metrics(
+                    crate::list_item::metrics::ListPresentationMode::MainMenuThemed,
+                    self.current_design,
+                    current_main_menu_theme,
+                );
+                let content_height =
+                    px(crate::list_item::metrics::resolved_list_content_height(
+                        &themed_metrics,
+                        grouped_items.iter().enumerate().map(|(ix, item)| {
+                            use crate::list_item::metrics::PredictiveListSlot;
+                            match item {
+                                GroupedListItem::SectionHeader(..) => {
+                                    if ix == 0 && hide_initial_section_header {
+                                        PredictiveListSlot::HiddenSection
+                                    } else if ix == 0 {
+                                        PredictiveListSlot::FirstSection
+                                    } else {
+                                        PredictiveListSlot::Section
+                                    }
+                                }
+                                GroupedListItem::ReservedSectionSlot => {
+                                    PredictiveListSlot::ReservedFirstSection
+                                }
+                                GroupedListItem::Status(..) => PredictiveListSlot::SourceStatus,
+                                GroupedListItem::Item(..) => PredictiveListSlot::Row,
                             }
-                        }
-                        GroupedListItem::ReservedSectionSlot => first_section_header_height,
-                        GroupedListItem::Status(..) => status_row_height,
-                        GroupedListItem::Item(..) => list_item_height,
-                    })
-                    .sum::<f32>());
+                        }),
+                    ));
 
                 div()
                     .absolute()

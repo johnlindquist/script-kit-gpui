@@ -15,15 +15,15 @@
 //! contract, which says reusable UI belongs under `src/components/**` — lets
 //! both surfaces read the same values.
 //!
-//! `src/ai/agent_chat/ui/style_contract.rs` is now a compatibility façade: it
-//! re-exports these types under their old `AgentChat*` names and forwards
-//! `production_agent_chat_style()` here. It holds NO production values.
+//! The former Agent Chat compatibility façade was deleted after all production,
+//! test, and design-contract callers migrated here (GOV-002). Persisted design
+//! token paths now name this canonical owner directly.
 //!
 //! ## Contract rules
 //!
 //! - This module is the single owner of conversation style values.
 //! - Checked-in design-contract export artifacts read
-//!   [`production_conversation_style`] (via the façade's forwarding function);
+//!   [`production_conversation_style`] directly;
 //!   nothing else may reach the exporter.
 //! - All theme-color + authored-alpha packing shared by the renderers and the
 //!   exporter routes through [`pack_rgb_alpha`] / the resolvers below, so
@@ -308,12 +308,18 @@ pub(crate) const CONVERSATION_ACTIVITY_LABEL_ALPHA: f32 = 0xB0 as f32;
 
 // ── Shared alpha packing ───────────────────────────────────────────────────
 
-/// Pack a `0xRRGGBB` theme color with an authored f32 alpha byte exactly the
-/// way the transcript renderer does (`(rgb << 8) | alpha.round() as u32`).
-/// The ONLY rounding/cast owner for conversation alpha bytes — the exporter
-/// and every render fn share it.
+/// Pack a `0xRRGGBB` theme color with an authored f32 alpha byte. The f32
+/// arity is TRANSITIONAL (GOV-003): the conversation style fields above are
+/// authored alpha BYTES stored as `f32` only because their field-type flip to
+/// [`crate::theme::AlphaByte`] is blocked on the design-contract integration
+/// owner (`src/design_contract/**` reads them with `as f64` casts and
+/// `format!`; see INT-DESIGN-CONTRACT-GEO008-GOV003). The quantization/cast
+/// itself is now owned by the typed packer: this wrapper converts through
+/// [`crate::theme::AlphaByte::from_authored_f32`], which preserves the
+/// historical `alpha.round() as u32` cast byte-for-byte and debug-asserts
+/// the byte domain. Delete this wrapper when the field flip lands.
 pub(crate) fn pack_rgb_alpha(rgb: u32, alpha: f32) -> u32 {
-    (rgb << 8) | alpha.round() as u32
+    crate::theme::alpha::pack_rgb_alpha(rgb, crate::theme::AlphaByte::from_authored_f32(alpha))
 }
 
 // ── Pure resolvers (theme × authored alphas → painted RGBA bytes) ─────────
@@ -395,8 +401,14 @@ pub(crate) fn resolved_conversation_transcript_colors(
             colors.text.primary,
             CONVERSATION_TOOL_STATUS_PENDING_ALPHA,
         ),
-        tool_status_complete_rgba: (colors.ui.success << 8) | 0xFF,
-        tool_status_failed_rgba: (colors.ui.error << 8) | 0xFF,
+        tool_status_complete_rgba: crate::theme::alpha::pack_rgb_alpha(
+            colors.ui.success,
+            crate::theme::AlphaByte::authored(0xFF),
+        ),
+        tool_status_failed_rgba: crate::theme::alpha::pack_rgb_alpha(
+            colors.ui.error,
+            crate::theme::AlphaByte::authored(0xFF),
+        ),
         diff_added_bg_rgba: pack_rgb_alpha(colors.ui.success, CONVERSATION_DIFF_TINT_ALPHA),
         diff_removed_bg_rgba: pack_rgb_alpha(colors.ui.error, CONVERSATION_DIFF_TINT_ALPHA),
         system_border_rgba: pack_rgb_alpha(colors.ui.border, style.system.border_alpha),
@@ -495,6 +507,24 @@ mod conversation_style_contract_tests {
         assert_eq!(style.error.bg_alpha, 50.0);
     }
 
+    /// GOV-003: the authored decimal-50 error byte stays EXACTLY 0x32
+    /// through the typed authored-byte boundary — and would clamp to 0xFF
+    /// through the normalized constructor, which is why the two paths are
+    /// separate types/constructors instead of one f32.
+    #[test]
+    fn error_bg_alpha_is_the_authored_byte_0x32_never_a_normalized_opacity() {
+        use crate::theme::AlphaByte;
+        let style = production_conversation_style();
+        assert_eq!(
+            AlphaByte::from_authored_f32(style.error.bg_alpha).get(),
+            0x32
+        );
+        assert_eq!(AlphaByte::authored(0x32).get(), 0x32);
+        // The negative control: feeding the authored decimal through the
+        // normalized quantizer is NOT the same byte.
+        assert_ne!(AlphaByte::from_normalized(50.0).get(), 0x32);
+    }
+
     #[test]
     fn resolved_transcript_bytes_match_renderer_packing() {
         let theme = stock_theme();
@@ -569,13 +599,10 @@ mod conversation_style_contract_tests {
         );
     }
 
-    /// The promotion must be value-preserving. If someone edits a production
-    /// number in the shared owner, this catches that the Agent Chat façade no
-    /// longer reports the same style — which is the whole point of the façade.
     #[test]
-    fn agent_chat_facade_forwards_to_the_shared_production_style() {
+    fn canonical_owner_is_deterministic() {
         assert_eq!(
-            crate::ai::agent_chat::ui::style_contract::production_agent_chat_style(),
+            production_conversation_style(),
             production_conversation_style()
         );
     }

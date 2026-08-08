@@ -5,6 +5,11 @@
 
 #![allow(dead_code)]
 
+/// GEO-001 canonical geometry-role vocabulary (roles, relations, comparability).
+pub mod geometry_roles;
+/// GEO-009 explicit list presentation modes and predictive metric resolvers.
+pub mod metrics;
+
 use crate::designs::icon_variations::{icon_name_from_str, IconName};
 use crate::logging;
 use gpui::prelude::FluentBuilder;

@@ -166,9 +166,11 @@ against `CleanShot 2026-07-24 at 09.18.40.mp4`):
 - Notes body reveal uses the material-safe anchor, ABSOLUTE from native
   configure: onset + `max(geometric crossing 11ms, alpha ramp 18ms)` =
   `62ms`, then keeps its `90ms` body fade;
-- glass material: stability tint floor `0.35` and capsule veil `0.80`
-  (`src/ui/chrome/tokens.rs`) — the Jul 23 `0.55`/`0.94` stack read
-  near-solid mid-entry, visibly heavier than the Spotlight reference fade;
+- glass material: stability tint floor `0.35` and capsule veil `0.0`
+  (`src/ui/chrome/tokens.rs`) — the veil was removed in the user-authorized
+  Jul 27 calibration; the older `0.80` policy text was stale. The Jul 23
+  `0.55`/`0.94` stack read near-solid mid-entry, visibly heavier than the
+  Spotlight reference fade;
 - detached main-window exit is fixed-frame fade-only;
 - popup exit duration `0.12s`, removal delay `135ms`, grow x/y `0.03/0.012`,
   shrink x/y `0.05/0.035`, and blur radius `8.0`.

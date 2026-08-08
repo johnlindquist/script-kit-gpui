@@ -6,9 +6,9 @@
 
 - Branch: `consistency/default-recommendations`
 - Baseline commit: `e20590073` — visual review explorer
-- Recommendation coverage: 56 / 75 implemented and verified in this execution pass
-- Oracle execution lanes: three plans complete through protocol v2; implementation active
-- Maximum concurrent Oracle consults: 3
+- Recommendation coverage: 75 / 75 implemented; 73 / 75 currently hold evaluable-pass task receipts
+- Oracle execution lanes: all implementation lanes complete; final program audit is fail-closed on PF-011 and UX-013
+- Maximum concurrent Oracle consults: 2
 - Product push/deploy: not authorized
 - Locked glass calibration: protected; no retune authorized
 - Published before/after progress explainer: https://lemon-ether-2sj4.here.now/ (authenticated, permanent)
@@ -1350,6 +1350,134 @@
   7. Repeat after a completed Agent Chat turn. Verify History deletion does not remove or rewrite that sent turn.
   8. Run `PROBE_BINARY="$PWD/target-agent/artifacts/cons-flow-c14/script-kit-gpui" bun scripts/agentic/cons-flow-ux/dictation-history-probe.ts`; expect both scenarios to pass and `exactArtifactOwnedProcessCount:0`.
 - **Intentional differences preserved:** Standalone History may paste to the frontmost app; attachment-portal History never offers Paste and returns to Agent Chat. The C14 matrix verifies the standalone Paste descriptor/Enter route but deliberately does not inject text into an uncontrolled user app; the exact frozen external paste actor remains covered by C12 model/integration proof and the manual step above. Standing instruction-note context can coexist with the newly staged Dictation URI, so context-chip count is not assumed to be exactly one; the proof identifies the intended Dictation resource and asserts zero submitted turns.
+
+### PF-009 — Bind every counted surface to source and runtime evidence
+
+- **Status:** Complete
+- **Changed behavior:** Coverage is now a typed 54-binding source-backed set across 37 surface kinds, 53 AppView variants, 11 runtime profiles, and five explicit non-counting aliases. Aliases and partial profiles cannot claim direct support.
+- **Owners:** `scripts/devtools/surfaces.ts`, `feature-map/index.md`, `scripts/agentic/cons-proof-gov/coverage-family-proof.ts`.
+- **Proof:** `.artifacts/consistency/PF-009/coverage-bindings.json` passes five fail-closed negative controls.
+
+### PF-010 — Provide deterministic fixtures for all nine surface families
+
+- **Status:** Complete
+- **Changed behavior:** Every required consistency family now has a deterministic fixture binding AppView, host, enabled/disabled state, target-switch generation, dismissal/focus return, and stable action identity.
+- **Owners:** `scripts/agentic/fixtures/consistency/**`, `scripts/agentic/cons-proof-gov/coverage-family-proof.ts`.
+- **Proof:** `.artifacts/consistency/PF-010/family-fixtures.json` and `.artifacts/consistency/families/*/fixture.json` pass seven negative controls.
+
+### PF-011 — Aggregate real Main, Notes, and Actions glass observers
+
+- **Status:** Implemented, but final receipt remains `INVALID_OBSERVER`; not complete as proof
+- **Changed behavior:** The serial aggregate hashes its helpers and protected calibration inputs, rejects under-resolved rendering, wrong owners, missing Notes phases, helper drift, and interference, and runs the rapid-toggle support probe with exact generated window handles. Main, Actions, and Notes GPUI event dispatch now retains exact metadata generation through runtime-handle registration. The stress observer distinguishes one visible popup from the calibrated hidden 135 ms exit tail and requires zero settled survivors.
+- **Owners:** `scripts/devtools/glass-observers.ts`, `scripts/devtools/rapid-toggle-stress.ts`, `src/platform/gpui_event_simulator.rs`, `src/main_sections/window_visibility.rs`, `src/actions/window.rs`, `src/notes/window/window_ops.rs`.
+- **Proof:** `.artifacts/consistency/PF-011/glass-observers.json`; invalid pointer movement/load attempts remain red and are not accepted as product proof. Protected calibration hashes remain unchanged.
+
+### PF-012 — Prove mockup geometry in a headed browser
+
+- **Status:** Complete
+- **Changed behavior:** Stories 10 and 11 are measured at 1280×720 CSS pixels, DPR 1, with loaded fonts and zero-pixel comparison tolerance.
+- **Owners:** `design/mockups/tests/story-browser-geometry-harness.mjs`, `scripts/agentic/cons-proof-gov/story-geometry-proof.mjs`.
+- **Proof:** `.artifacts/consistency/PF-012/story-10.json` and `story-11.json`; one-pixel, wrong-chapter, missing-selector, and unresolved-font controls are rejected.
+
+### GEO-001 — Type geometry roles before comparing rectangles
+
+- **Status:** Complete
+- **Changed behavior:** Row, section, footer host/rail/action slot/keycap, rendered reservation, and content viewport rectangles carry semantic roles; wrong-role values cannot be numerically compared and one-pixel same-role drift remains detectable.
+- **Owners:** `src/list_item/geometry_roles.rs`, `src/list_item/mod.rs`.
+- **Proof:** Focused `list_item::geometry_roles` unit tests.
+
+### GEO-002 — Resolve ArgPrompt layout from one explicit mode contract
+
+- **Status:** Complete
+- **Changed behavior:** Mini/full, six-row, footer reservation, and unrendered-padding branches resolve through `src/window_resize/arg_layout.rs`; the stale 40 px footer model and one-pixel overlap are rejected.
+- **Proof:** Nine focused resolver tests.
+
+### GEO-003 — Derive Confirm model geometry from renderer-owned metrics
+
+- **Status:** Complete
+- **Changed behavior:** Confirm layout information now derives stack width, title/body lines, gaps, footer rail, button height, and action slot widths from `resolved_confirm_prompt_metrics` and shared footer owners rather than duplicated constants.
+- **Owners:** `src/confirm/parent_dialog.rs`, `src/app_layout/build_layout_info.rs`.
+- **Proof:** Focused Confirm/layout tests and generated contract conflict routing to GEO-003.
+
+### GEO-004 — Make Notes footer reservation truth explicit
+
+- **Status:** Complete
+- **Changed behavior:** Production Notes reserves zero for an absent action row; native footer host diagnostics are separate and non-additive, while stale 28 px export compatibility remains labeled compatibility only.
+- **Owners:** `src/notes/window/layout.rs`, `src/notes/window/contract.rs`.
+- **Proof:** Ten focused Notes layout resolver tests.
+
+### GEO-005 — Reconcile Notes markdown projection without typography drift
+
+- **Status:** Complete
+- **Changed behavior:** Generated projection metadata now points to the existing rendered heading proof rather than changing typography. Notes and Day Page heading glyphs remain fully displayed with no occluders.
+- **Proof:** PF-006 rendered text-fit receipt (`minimumVisibleRatio: 1`, loaded fonts, matching frame, zero occluders).
+
+### GEO-006 — Give Settings actions stable IDs and destinations
+
+- **Status:** Complete
+- **Changed behavior:** Settings exposes twelve unique stable action descriptors with explicit destinations, Enter shortcut, Open verb, and availability reason.
+- **Owners:** `src/render_builtins/settings_contract.rs`, `src/render_builtins/settings.rs`.
+- **Proof:** Sixteen focused Settings contract tests.
+
+### GEO-007 — Funnel Settings keyboard and click activation through one executor
+
+- **Status:** Complete
+- **Changed behavior:** Enter and click submit the same stable Settings action ID and recheck descriptor availability at execution; selected footer text derives from the same descriptor. Settings rows remain explicitly iconless.
+- **Proof:** Focused Settings submission, availability, footer, and icon-policy tests.
+
+### GEO-008 — Preserve Actions model, paint, and native placement as separate truths
+
+- **Status:** Complete
+- **Changed behavior:** Actions popup geometry receipts preserve intended shell, model layout, painted bounds, and native window placement without collapsing one layer into another; exact popup generation now reaches GPUI dispatch.
+- **Owners:** `src/actions/window.rs`, `src/app_layout/build_layout_info.rs`, `scripts/devtools/actions-entry-filmstrip.ts`.
+- **Proof:** Actions geometry diagnostics and PF-011 exact-owner negative controls.
+
+### GEO-009 — Resolve list metrics by explicit presentation mode
+
+- **Status:** Complete
+- **Changed behavior:** Main-menu themed, Actions-constrained, legacy compatibility, and SelectPrompt unified modes resolve through `src/list_item/metrics.rs`. Distinct metric identities remain distinct even when a theme authors equal numeric section heights.
+- **Proof:** Forty-six focused list-metric tests.
+
+### GOV-002 — Retire compatibility façades with an explicit ledger
+
+- **Status:** Complete
+- **Changed behavior:** Conversation styling is owned directly by `components::conversation_style`; shared popup mechanics are owned by `components::inline_popup_window`; Agent Chat keeps only its narrow automation-identity policy in `popup_automation.rs`. The two obsolete façades were deleted.
+- **Owners:** `src/components/conversation_style.rs`, `src/components/inline_popup_window.rs`, `src/ai/agent_chat/ui/popup_automation.rs`.
+- **Proof:** `.artifacts/consistency/GOV-002/facade-ledger.json` plus focused conversation/popup tests.
+
+### GOV-003 — Make authored alpha bytes explicit
+
+- **Status:** Complete
+- **Changed behavior:** `AlphaByte(u8)` distinguishes authored byte alpha from normalized floating opacity and keeps truncating versus rounded quantization explicit.
+- **Owners:** `src/theme/alpha.rs`, conversation/theme consumers.
+- **Proof:** Focused alpha conversion and packing tests.
+
+### GOV-004 — Keep owner-map paths portable and resolvable
+
+- **Status:** Complete
+- **Changed behavior:** `GLOSSARY.md` owner links are repository-relative, Notes Browse ownership is corrected, and a path-only validator rejects traversal, temporary paths, missing files, malformed fragments, and migration-required legacy URIs.
+- **Proof:** `.artifacts/consistency/GOV-004/owner-map.json` reports 36 rows, 51 links, 51 resolved, zero errors; validator self-test passes.
+
+### GOV-005 — Give every generated contract conflict a lifecycle
+
+- **Status:** Complete
+- **Changed behavior:** Generated conflicts are classified as intentional fact, model drift, consumer drift, evidence pending, or compatibility, with owner, task, measurement IDs, blocker, removal condition, and last receipt.
+- **Owners:** `src/design_contract/mod.rs`, generated `design/mockups/generated/tokens.{json,css}`.
+- **Proof:** `.artifacts/consistency/GOV-005/conflicts.json` and `generated-byte-compare.json`.
+
+### GOV-006 — Document the calibrated glass contract without changing it
+
+- **Status:** Complete
+- **Changed behavior:** Repository guidance now accurately records the user-authorized zero capsule veil while preserving every locked motion, geometry, opacity, fixture, and threshold value.
+- **Owners:** `CLAUDE.md` (`AGENTS.md` symlink).
+- **Proof:** Protected source/fixture hashes in PF-011 remain byte-identical.
+
+### GOV-007 — Close the consistency program through executable governance
+
+- **Status:** Complete as governance machinery; final ledger verdict is FAIL until PF-011 and UX-013 are green
+- **Changed behavior:** The 75-task auditor derives per-task, family, scope, and program status from typed receipts, rejects stale/invalid/blocked evidence, verifies generated outputs and conflict/façade lifecycles, and requires an adversarial final verdict.
+- **Owners:** `scripts/devtools/consistency.ts`, `.notes/oracle/cons-proof-gov/ledger.md`.
+- **Proof:** Final `.artifacts/consistency/program/verify-all.json` and ledger verdict.
 
 ## Verification ledger
 
