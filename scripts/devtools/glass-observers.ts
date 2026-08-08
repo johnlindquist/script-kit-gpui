@@ -56,6 +56,7 @@ import {
   validateHelperEntry,
 } from "./glass-native-helper-cache.ts";
 import { newRunId } from "./glass-evidence-contract.ts";
+import { producerIdentityForTool } from "./lib/receipt-schema.ts";
 
 // ---------------------------------------------------------------------------
 // Disposition table (plan §2.2)
@@ -1204,15 +1205,9 @@ async function verifyCommand(): Promise<never> {
       implementationFingerprint: sha256File(
         resolve(import.meta.dir, "glass-observers.ts"),
       ),
-      producerSourceFingerprint: createHash("sha256")
-        .update(
-          [
-            sha256File(resolve(import.meta.dir, "glass-lifecycle-filmstrip.ts")),
-            sha256File(resolve(import.meta.dir, "actions-entry-filmstrip.ts")),
-            sha256File(resolve(import.meta.dir, "rapid-toggle-stress.ts")),
-          ].join("\n"),
-        )
-        .digest("hex"),
+      producerSourceFingerprint: producerIdentityForTool(
+        "script-kit-devtools.glass-observers",
+      ).fingerprint,
     },
     binary: { path: binary, sha256: binarySha256, sizeBytes: binarySize },
     fixture: {

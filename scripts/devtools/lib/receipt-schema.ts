@@ -825,6 +825,7 @@ const producerFileByTool: Record<string, string> = {
   "script-kit-devtools.dictation": "dictation.ts",
   "script-kit-devtools.inspect": "inspect.ts",
   "script-kit-devtools.consistency": "consistency.ts",
+  "script-kit-devtools.glass-observers": "glass-observers.ts",
 };
 
 function sha256(value: string | Uint8Array): string {
