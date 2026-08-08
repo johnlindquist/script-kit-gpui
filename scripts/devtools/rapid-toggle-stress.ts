@@ -26,6 +26,7 @@ import {
   startInterferenceMonitor,
   waitForInterferenceReady,
 } from "./glass-interference.ts";
+import { exitCodeForDisposition } from "./glass-observers.ts";
 
 type WindowSnapshot = {
   id?: string;
@@ -112,15 +113,22 @@ async function nativeWindowInventory(
   title?: string,
   expectedMainWindowId = 0,
 ) {
-  const child = Bun.spawn([
-    "swift",
-    resolve(import.meta.dir, "../agentic/macos-window-query.swift"),
-    "--pid",
-    String(pid),
-  ], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  // C08: prefer the prepared hash-validated window-query helper; standalone
+  // full-profile runs keep the legacy source interpretation.
+  const child = Bun.spawn(
+    windowQueryHelper
+      ? [windowQueryHelper, "--pid", String(pid)]
+      : [
+        "swift",
+        resolve(import.meta.dir, "../agentic/macos-window-query.swift"),
+        "--pid",
+        String(pid),
+      ],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
@@ -192,34 +200,95 @@ const outPath = resolve(
 if (!binary || !existsSync(binary)) {
   throw new Error(`binary missing: ${binary || "<unset>"}`);
 }
+// C08: backward-compatible probe profiles. `full` is the existing
+// Actions + Notes + Dictation behavior; `pf011` (the PF-011 aggregator
+// profile) runs Actions + Notes only and REQUIRES the named theme fixture
+// and prepared helper manifests instead of interpreting Swift source.
+const RAPID_TOGGLE_PROFILES: Record<string, string[]> = {
+  full: ["actions", "notes", "dictation"],
+  pf011: ["actions", "notes"],
+};
+const profile = arg("--profile", "full") ?? "full";
+const requiredPhaseNames = RAPID_TOGGLE_PROFILES[profile];
+if (!requiredPhaseNames) {
+  console.error(
+    `argument error: unknown profile "${profile}" (expected full | pf011)`,
+  );
+  process.exit(64);
+}
+if (profile === "pf011" && !themeFixture) {
+  console.error("argument error: --profile pf011 requires --theme-fixture");
+  process.exit(64);
+}
+const suppliedWindowQueryHelper = arg("--window-query-helper");
+if (profile === "pf011" && !suppliedWindowQueryHelper) {
+  console.error(
+    "argument error: --profile pf011 requires a validated --window-query-helper",
+  );
+  process.exit(64);
+}
 mkdirSync(dirname(outPath), { recursive: true });
 // WP4 (glass-smoke-harness-max-info): accept a pre-compiled hash-validated
 // interference helper from the study orchestrator; compile only when absent.
+// C08: a malformed SUPPLIED helper keeps its original INVALID_SETUP stderr
+// diagnostic but writes an INVALID_OBSERVER receipt (exit 4) instead of an
+// unclassified crash.
 const suppliedInterferenceHelper = arg("--interference-helper");
 let interferenceHelper: string;
-if (suppliedInterferenceHelper) {
-  interferenceHelper = requireValidatedHelper(
-    suppliedInterferenceHelper,
-    "interference",
-  ).binaryPath;
-} else {
-  interferenceHelper = join(
-    dirname(outPath),
-    "macos-glass-interference-monitor",
-  );
-  const interferenceCompile = Bun.spawnSync([
-    "xcrun",
-    "swiftc",
-    "-O",
-    resolve(import.meta.dir, "../agentic/macos-glass-interference-monitor.swift"),
-    "-o",
-    interferenceHelper,
-  ]);
-  if (interferenceCompile.exitCode !== 0) {
-    throw new Error(
-      `interference helper compile failed: ${interferenceCompile.stderr.toString()}`,
+let windowQueryHelper: string | null = null;
+try {
+  if (suppliedInterferenceHelper) {
+    interferenceHelper = requireValidatedHelper(
+      suppliedInterferenceHelper,
+      "interference",
+    ).binaryPath;
+  } else {
+    interferenceHelper = join(
+      dirname(outPath),
+      "macos-glass-interference-monitor",
     );
+    const interferenceCompile = Bun.spawnSync([
+      "xcrun",
+      "swiftc",
+      "-O",
+      resolve(import.meta.dir, "../agentic/macos-glass-interference-monitor.swift"),
+      "-o",
+      interferenceHelper,
+    ]);
+    if (interferenceCompile.exitCode !== 0) {
+      throw new Error(
+        `interference helper compile failed: ${interferenceCompile.stderr.toString()}`,
+      );
+    }
   }
+  if (suppliedWindowQueryHelper) {
+    windowQueryHelper = requireValidatedHelper(
+      suppliedWindowQueryHelper,
+      "window-query",
+    ).binaryPath;
+  }
+} catch (error) {
+  const message = String(error instanceof Error ? error.message : error);
+  console.error(message);
+  writeFileSync(
+    outPath,
+    `${
+      JSON.stringify(
+        {
+          schemaVersion: 2,
+          scenario: process.env.SCRIPT_KIT_GLASS_SCENARIO ?? "rapid-toggle",
+          profile,
+          helperValidation: { error: message },
+          disposition: "INVALID_OBSERVER",
+          pass: false,
+          finishedAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      )
+    }\n`,
+  );
+  process.exit(4);
 }
 let interferenceMonitor: ReturnType<typeof startInterferenceMonitor> | null = null;
 
@@ -233,6 +302,27 @@ const receipt: Json = {
     binarySha256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
   }),
   scenario: process.env.SCRIPT_KIT_GLASS_SCENARIO ?? "rapid-toggle",
+  profile,
+  requiredPhaseNames,
+  executedPhaseNames: [] as string[],
+  helperIdentities: {
+    interference: suppliedInterferenceHelper
+      ? {
+        binaryPath: interferenceHelper,
+        binarySha256: createHash("sha256")
+          .update(readFileSync(interferenceHelper))
+          .digest("hex"),
+      }
+      : { binaryPath: interferenceHelper, compiledPerRun: true },
+    windowQuery: windowQueryHelper
+      ? {
+        binaryPath: windowQueryHelper,
+        binarySha256: createHash("sha256")
+          .update(readFileSync(windowQueryHelper))
+          .digest("hex"),
+      }
+      : null,
+  },
   themeFixture: themeFixture
     ? {
       path: resolve(themeFixture),
@@ -259,6 +349,9 @@ try {
   driver.send({ type: "show" });
   const mainVisible = await waitForKindCount(driver, "main", 1, 5_000);
   const initialNativeInventory = await nativeWindowInventory(Number(driver.pid));
+  // Preserve the complete inventory even when validation fails so an observer
+  // defect remains diagnosable instead of collapsing to an error string.
+  receipt.initialNativeInventory = initialNativeInventory;
   const mainWindowId = initialNativeInventory.mainWindowId;
   if (!mainWindowId || initialNativeInventory.topology?.pass !== true) {
     throw new Error(
@@ -275,6 +368,11 @@ try {
     dirname(outPath),
   );
   receipt.interferenceReady = await waitForInterferenceReady(interferenceMonitor);
+  receipt.interferenceMonitorPid = interferenceMonitor.process.pid;
+  // C08: observer defects (query failures, missing topology/runtime state)
+  // are collected separately from product failures so the final disposition
+  // can distinguish INVALID_OBSERVER from EVALUABLE_FAIL.
+  receipt.observerErrors = [] as string[];
   const errorBaseline = await driver.getLogs({ limit: 500, level: "error" });
   const baselineErrorCount = ((errorBaseline?.entries ?? []) as Json[]).length;
 
@@ -286,6 +384,7 @@ try {
   const actionDispatches: Json[] = [];
   let maxActionWindows = 0;
   let maxNativeActionWindows = 0;
+  let maxVisibleNativeActionWindows = 0;
   for (let index = 0; index < 20; index += 1) {
     const started = performance.now();
     const dispatch = await driver.simulateGpuiKeyDown("k", {
@@ -302,15 +401,33 @@ try {
     });
     const windows = await driver.listAutomationWindows({ timeoutMs: 5_000 });
     maxActionWindows = Math.max(maxActionWindows, countKind(windows, "actionsDialog"));
-    const native = await nativeWindowInventory(
+    let native = await nativeWindowInventory(
       Number(driver.pid),
       undefined,
       mainWindowId,
     );
+    // Deferred GPUI dispatch can expose AppKit's just-created 0×0 shell for a
+    // few milliseconds before popup configuration assigns its final frame.
+    // That transient is not evaluable geometry, so retry only that explicit
+    // observer state; all other topology failures remain immediate failures.
+    for (let retry = 0; retry < 5 && native.topology?.errors?.some(
+      (error: string) => error.includes("unknown or stale same-PID native window"),
+    ); retry += 1) {
+      await Bun.sleep(10);
+      native = await nativeWindowInventory(
+        Number(driver.pid),
+        undefined,
+        mainWindowId,
+      );
+    }
     const actionOwners = native.topology?.rows?.filter(
       (window: Json) => window?.classification === "Actions",
     ) ?? [];
     maxNativeActionWindows = Math.max(maxNativeActionWindows, actionOwners.length);
+    maxVisibleNativeActionWindows = Math.max(
+      maxVisibleNativeActionWindows,
+      actionOwners.filter((window: Json) => window?.onscreen === true).length,
+    );
     actionDispatches.at(-1)!.nativeTopology = native.topology;
   }
   await Bun.sleep(350);
@@ -348,6 +465,18 @@ try {
   }
   const deliberateClose = await waitForKindCount(driver, "actionsDialog", 0);
   const deliberateCloseMs = performance.now() - deliberateCloseStarted;
+  // Popup exit deliberately retains a hidden native tail for the calibrated
+  // 135 ms removal delay. It is not a second visible popup, but it must still
+  // disappear after that bounded lifecycle completes.
+  await Bun.sleep(250);
+  const settledActionNativeInventory = await nativeWindowInventory(
+    Number(driver.pid),
+    undefined,
+    mainWindowId,
+  );
+  const settledActionOwners = settledActionNativeInventory.topology?.rows?.filter(
+    (window: Json) => window?.classification === "Actions",
+  ) ?? [];
   const actionsErrors = boundedErrors(
     await driver.getLogs({ limit: 500, level: "error" }),
     baselineErrorCount,
@@ -355,8 +484,24 @@ try {
   const actionsPass = mainVisible.pass
     && actionDispatches.every((dispatch) => dispatch.success)
     && maxActionWindows <= 1
-    && maxNativeActionWindows <= 1
-    && actionDispatches.every((dispatch) => dispatch.nativeTopology?.pass === true)
+    && maxVisibleNativeActionWindows <= 1
+    && settledActionOwners.length === 0
+    && settledActionNativeInventory.topology?.pass === true
+    && actionDispatches.every((dispatch) => {
+      const topology = dispatch.nativeTopology;
+      if (topology?.pass === true) return true;
+      const errors = topology?.errors ?? [];
+      const owners = topology?.rows?.filter(
+        (window: Json) => window?.classification === "Actions",
+      ) ?? [];
+      const visibleOwners = owners.filter((window: Json) => window?.onscreen === true);
+      const hiddenOwners = owners.filter((window: Json) => window?.onscreen !== true);
+      return errors.length === 1
+        && errors[0] === "Actions has 2 complete native owners"
+        && owners.length === 2
+        && visibleOwners.length <= 1
+        && hiddenOwners.every((window: Json) => Number(window?.alpha) === 0);
+    })
     && inputRecoveryMs <= 300
     && deliberateOpen.pass
     && deliberateClose.pass
@@ -376,12 +521,23 @@ try {
     },
     maxActionWindows,
     maxNativeActionWindows,
+    maxVisibleNativeActionWindows,
+    settledNativeActionWindows: settledActionOwners.length,
+    settledNativeTopology: settledActionNativeInventory.topology,
     actionsOpenAfterBurst,
     inputRecoveryMs: Number(inputRecoveryMs.toFixed(2)),
     deliberateOpenMs: Number(deliberateOpenMs.toFixed(2)),
     deliberateCloseMs: Number(deliberateCloseMs.toFixed(2)),
     errors: actionsErrors,
   };
+  (receipt.executedPhaseNames as string[]).push("actions");
+  (receipt.observerErrors as string[]).push(
+    ...actionDispatches
+      .filter((dispatch: Json) => dispatch?.nativeTopology == null)
+      .map((dispatch: Json) =>
+        `actions pulse ${dispatch?.index}: native topology query missing`
+      ),
+  );
 
   await announceTestStatus(
     "MWND-15B · Notes hammer",
@@ -570,7 +726,24 @@ try {
     revealInstances: notesRevealInstances,
     errors: notesErrors,
   };
+  (receipt.executedPhaseNames as string[]).push("notes");
+  (receipt.observerErrors as string[]).push(
+    ...notesSamples
+      .filter((sample: Json) => sample?.nativeWindowError != null)
+      .map((sample: Json) =>
+        `notes pulse ${sample?.index}: native window query failed: ${sample?.nativeWindowError}`
+      ),
+    ...notesSamples
+      .filter((sample: Json) => sample?.nativeTopology == null)
+      .map((sample: Json) =>
+        `notes pulse ${sample?.index}: native topology query missing`
+      ),
+  );
 
+  // C08: the pf011 profile supports the PF-011 aggregator with Actions +
+  // Notes only; Dictation remains part of the default full profile.
+  let dictationPass = true;
+  if (profile === "full") {
   await announceTestStatus(
     "MWND-15C · Dictation hammer",
     "12 real start/stop requests, then four exit-ticket cancellation cycles",
@@ -743,7 +916,7 @@ try {
   });
   const fixtureClosed = await waitForKindCount(driver, "dictation", 0, 2_000);
 
-  const dictationPass = maxDictationWindows <= 1
+  dictationPass = maxDictationWindows <= 1
     && maxNativeDictationWindows <= 1
     && dictationSamples.every((sample) => sample?.nativeTopology?.pass === true)
     && exercisedRealToggle
@@ -781,6 +954,15 @@ try {
     },
     errors: dictationErrors,
   };
+  (receipt.executedPhaseNames as string[]).push("dictation");
+  (receipt.observerErrors as string[]).push(
+    ...dictationSamples
+      .filter((sample: Json) => sample?.nativeWindowError != null)
+      .map((sample: Json) =>
+        `dictation pulse ${sample?.index}: native window query failed: ${sample?.nativeWindowError}`
+      ),
+  );
+  }
 
   const finalInputStarted = performance.now();
   driver.send({ type: "show" });
@@ -803,6 +985,9 @@ try {
   receipt.pass = actionsPass
     && notesPass
     && dictationPass
+    && receipt.requiredPhaseNames.every((name: string) =>
+      (receipt.executedPhaseNames as string[]).includes(name)
+    )
     && receipt.finalRecovery.pass
     && receipt.crashScan.pass;
 } catch (error) {
@@ -817,15 +1002,38 @@ try {
   receipt.cleanedUp = !driver.alive;
   receipt.finishedAt = new Date().toISOString();
   receipt.pass = receipt.pass === true && receipt.cleanedUp === true;
-  receipt.disposition = receipt.interference?.disposition === "INVALID_INTERFERENCE"
+  // C08 disposition contract: interference (from a VALID monitor) dominates;
+  // observer defects (caught error, query/topology/runtime-state gaps,
+  // failed cleanup) are INVALID_OBSERVER; only a valid lifecycle observation
+  // with a bad product outcome is EVALUABLE_FAIL. Pass derives from the
+  // final disposition alone.
+  const observerDefects = [
+    ...((receipt.observerErrors as string[] | undefined) ?? []),
+    ...(receipt.error ? [String(receipt.error)] : []),
+    ...(receipt.cleanedUp === true ? [] : ["app process survived driver close"]),
+    ...(receipt.interference?.receipt != null
+        && receipt.interference?.exitCode === 0
+      ? []
+      : ["interference monitor did not produce a valid receipt"]),
+  ];
+  receipt.observerDefects = observerDefects;
+  receipt.disposition = receipt.interference?.receipt != null
+      && receipt.interference?.disposition === "INVALID_INTERFERENCE"
     ? "INVALID_INTERFERENCE"
+    : observerDefects.length > 0
+    ? "INVALID_OBSERVER"
     : receipt.pass === true
     ? "EVALUABLE_PASS"
-    : receipt.error
-    ? "INVALID_OBSERVER"
     : "EVALUABLE_FAIL";
+  receipt.pass = receipt.disposition === "EVALUABLE_PASS";
   writeFileSync(outPath, `${JSON.stringify(receipt, null, 2)}\n`);
-  console.log(JSON.stringify({ receiptPath: outPath, pass: receipt.pass }, null, 2));
+  console.log(
+    JSON.stringify(
+      { receiptPath: outPath, pass: receipt.pass, disposition: receipt.disposition },
+      null,
+      2,
+    ),
+  );
 }
 
-process.exit(receipt.pass ? 0 : 2);
+process.exit(exitCodeForDisposition(String(receipt.disposition)));

@@ -409,6 +409,183 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
     forbidMissingPrimitivesOnPass: true,
     description: "Orchestrate a fail-closed target-scoped investigation stack.",
   }),
+  // ── GOV-006 consistency completion auditor (metadata-only; identity none) ──
+  schema({
+    primitiveId: "devtools.consistency.catalog",
+    tool: "script-kit-devtools.consistency",
+    commands: ["consistency.catalog"],
+    requiredPaths: [
+      "catalogPath",
+      "catalogTaskCount",
+      "expectedProgramTaskCount",
+      "expectedScopeTaskCount",
+      "missingTaskIds",
+      "unknownTaskIds",
+      "duplicateTaskIds",
+    ],
+    identityPolicy: "none",
+    privacyPolicy: "metadata-only",
+    predicates: [{
+      id: "catalog-pass-requires-exact-id-sets",
+      validate(receipt, disposition) {
+        if (disposition !== "EVALUABLE_PASS") return [];
+        const errors: string[] = [];
+        if (receipt.catalogTaskCount !== 75) errors.push("catalog pass requires exactly 75 tasks");
+        if (receipt.expectedProgramTaskCount !== 75) errors.push("catalog pass requires the 75-ID program set");
+        if (receipt.expectedScopeTaskCount !== 28) errors.push("catalog pass requires the 28-ID primary scope set");
+        for (const field of ["missingTaskIds", "unknownTaskIds", "duplicateTaskIds"]) {
+          const value = receipt[field];
+          if (!Array.isArray(value) || value.length > 0) errors.push(`catalog pass requires empty ${field}`);
+        }
+        return errors;
+      },
+    }],
+    description: "Parse and validate the exact 75/28 consistency task catalog.",
+  }),
+  schema({
+    primitiveId: "devtools.consistency.verify-task",
+    tool: "script-kit-devtools.consistency",
+    commands: ["consistency.verify-task"],
+    requiredPaths: [
+      "taskId",
+      "scope",
+      "positiveReceiptPaths",
+      "negativeControlSummary",
+      "privacyStatus",
+      "interferenceStatus",
+      "cleanupStatus",
+      "identities",
+      "staleReasons",
+    ],
+    identityPolicy: "none",
+    privacyPolicy: "metadata-only",
+    predicates: [{
+      id: "task-pass-requires-fresh-clean-evidence",
+      validate(receipt, disposition) {
+        if (disposition !== "EVALUABLE_PASS") return [];
+        const errors: string[] = [];
+        const stale = Array.isArray(receipt.staleReasons) ? receipt.staleReasons : [];
+        if (stale.length > 0) errors.push("task pass requires zero staleness-by-identity reasons");
+        const positives = Array.isArray(receipt.positiveReceiptPaths) ? receipt.positiveReceiptPaths : [];
+        if (positives.length === 0) errors.push("task pass requires at least one positive receipt");
+        const negatives = asObject(receipt.negativeControlSummary);
+        if (Number(negatives.failedCount ?? 0) !== 0 || Number(negatives.totalCount ?? 0) < 1) {
+          errors.push("task pass requires present, passing negative controls");
+        }
+        const privacy = asObject(receipt.privacyStatus);
+        if (privacy.pass !== true || privacy.rawContentReturned === true) {
+          errors.push("task pass requires a passing privacy status without raw content");
+        }
+        const interference = asObject(receipt.interferenceStatus);
+        if (interference.pass !== true) errors.push("task pass cannot pass through interference");
+        const cleanup = asObject(receipt.cleanupStatus);
+        const survivors = Array.isArray(cleanup.survivors) ? cleanup.survivors : [];
+        if (cleanup.closed !== true || survivors.length > 0) {
+          errors.push("task pass requires closed survivor-free cleanup");
+        }
+        return errors;
+      },
+    }],
+    description: "Aggregate one task's receipts into a fresh, identity-bound completion receipt.",
+  }),
+  schema({
+    primitiveId: "devtools.consistency.verify-family",
+    tool: "script-kit-devtools.consistency",
+    commands: ["consistency.verify-family"],
+    requiredPaths: ["familyId", "binding", "memberReceiptCount"],
+    identityPolicy: "none",
+    privacyPolicy: "metadata-only",
+    predicates: [{
+      id: "family-pass-requires-declared-binding",
+      validate(receipt, disposition) {
+        if (disposition !== "EVALUABLE_PASS") return [];
+        const binding = asObject(receipt.binding);
+        return typeof binding.familyId === "string" && binding.familyId === receipt.familyId &&
+            typeof binding.appView === "string" && binding.appView.length > 0 &&
+            typeof binding.host === "string" && binding.host.length > 0
+          ? []
+          : ["family pass requires a declared binding with matching familyId, AppView, and host"];
+      },
+    }],
+    description: "Verify one deterministic family fixture binding and its member receipts.",
+  }),
+  schema({
+    primitiveId: "devtools.consistency.verify-scope",
+    tool: "script-kit-devtools.consistency",
+    commands: ["consistency.verify-scope"],
+    requiredPaths: [
+      "scope",
+      "catalogTaskCount",
+      "scopeTaskCount",
+      "scopePassedTaskCount",
+      "missingScopeTaskIds",
+      "taskDispositions",
+    ],
+    identityPolicy: "none",
+    privacyPolicy: "metadata-only",
+    predicates: [{
+      id: "scope-pass-requires-complete-scope",
+      validate(receipt, disposition) {
+        if (disposition !== "EVALUABLE_PASS") return [];
+        const errors: string[] = [];
+        if (receipt.catalogTaskCount !== 75) errors.push("scope pass requires the 75-task catalog");
+        if (receipt.scopeTaskCount !== receipt.scopePassedTaskCount) {
+          errors.push("scope pass requires every scope task to pass");
+        }
+        const missing = Array.isArray(receipt.missingScopeTaskIds) ? receipt.missingScopeTaskIds : [];
+        if (missing.length > 0) errors.push("scope pass requires zero missing scope tasks");
+        return errors;
+      },
+    }],
+    description: "Aggregate the 28-task cons-proof-gov scope into one completion receipt.",
+  }),
+  schema({
+    primitiveId: "devtools.consistency.verify-all",
+    tool: "script-kit-devtools.consistency",
+    commands: ["consistency.verify-all"],
+    requiredPaths: [
+      "programTaskCount",
+      "passedTaskCount",
+      "missingTaskIds",
+      "blockedTaskIds",
+      "invalidTaskIds",
+      "failedTaskIds",
+      "privacyPass",
+      "cleanup.closed",
+      "protectedHashesPass",
+      "generatedOutputsPass",
+      "conflictLifecyclePass",
+      "facadeLifecyclePass",
+    ],
+    identityPolicy: "none",
+    privacyPolicy: "metadata-only",
+    predicates: [{
+      id: "program-pass-requires-75-of-75-and-clean-governance",
+      validate(receipt, disposition) {
+        if (disposition !== "EVALUABLE_PASS") return [];
+        const errors: string[] = [];
+        if (receipt.programTaskCount !== 75 || receipt.passedTaskCount !== 75) {
+          errors.push("program pass requires exactly 75 of 75 passing tasks");
+        }
+        for (const field of ["missingTaskIds", "blockedTaskIds", "invalidTaskIds", "failedTaskIds"]) {
+          const value = receipt[field];
+          if (!Array.isArray(value) || value.length > 0) errors.push(`program pass requires empty ${field}`);
+        }
+        if (receipt.privacyPass !== true) errors.push("program pass requires privacy pass");
+        if (asObject(receipt.cleanup).closed !== true) errors.push("program pass requires closed cleanup");
+        for (const field of [
+          "protectedHashesPass",
+          "generatedOutputsPass",
+          "conflictLifecyclePass",
+          "facadeLifecyclePass",
+        ]) {
+          if (receipt[field] !== true) errors.push(`program pass requires ${field}`);
+        }
+        return errors;
+      },
+    }],
+    description: "Audit all 75 consistency tasks against final source, binary, fixture, and cleanup identities.",
+  }),
 ];
 
 export interface ReceiptValidationResult {
@@ -497,6 +674,8 @@ function dispositionForClassification(classification: unknown): ReceiptDispositi
   if (value.includes("observer")) return "INVALID_OBSERVER";
   if (value.includes("cleanup")) return "INVALID_CLEANUP";
   if (value.includes("analysis-pending")) return "ANALYSIS_PENDING";
+  if (value.includes("invalid-schema")) return "INVALID_SCHEMA";
+  if (value.includes("invalid-privacy")) return "INVALID_PRIVACY";
   return "BLOCKED_MISSING_PRIMITIVE";
 }
 
@@ -645,6 +824,7 @@ const producerFileByTool: Record<string, string> = {
   "script-kit-devtools.notes": "notes.ts",
   "script-kit-devtools.dictation": "dictation.ts",
   "script-kit-devtools.inspect": "inspect.ts",
+  "script-kit-devtools.consistency": "consistency.ts",
 };
 
 function sha256(value: string | Uint8Array): string {
@@ -1014,6 +1194,39 @@ export function emitValidatedReceipt(
 export function validateReceiptFile(primitiveId: string, path: string) {
   const parsed = JSON.parse(readFileSync(path, "utf8")) as JsonObject;
   return prepareValidatedReceipt(primitiveId, parsed);
+}
+
+/// Stable identity for the receipt registry itself: version plus a
+/// fingerprint over this schema file's exact bytes. Any schema, predicate,
+/// or mapping change (including additive sibling reconciliation) changes the
+/// fingerprint, so downstream auditors detect stale-by-identity receipts
+/// without trusting timestamps.
+export function receiptRegistryIdentity(): {
+  schemaVersion: number;
+  registryVersion: number;
+  registryFingerprint: string;
+} {
+  const schemaPath = resolve(import.meta.dir, "receipt-schema.ts");
+  const fingerprint = fileFingerprint(schemaPath) ?? "missing-receipt-schema-source";
+  return {
+    schemaVersion: RECEIPT_SCHEMA_VERSION,
+    registryVersion: RECEIPT_REGISTRY_VERSION,
+    registryFingerprint: sha256(`${RECEIPT_REGISTRY_VERSION}:${fingerprint}`),
+  };
+}
+
+/// Producer identity for one tool name: the resolved producer source path
+/// (null when the tool is unknown) and the same schema+producer fingerprint
+/// the receipt envelope records, so auditors never duplicate hashing rules.
+export function producerIdentityForTool(tool: string): {
+  producerPath: string | null;
+  fingerprint: string;
+} {
+  const filename = producerFileByTool[tool];
+  return {
+    producerPath: filename ? resolve(import.meta.dir, "..", filename) : null,
+    fingerprint: producerSourceFingerprint(tool),
+  };
 }
 
 export function receiptRegistryReport() {

@@ -67,7 +67,6 @@ fn sync_main_automation_window(
     .and_then(|info| info.semantic_surface)
     .or_else(|| Some("scriptList".to_string()));
 
-    crate::windows::upsert_runtime_window_handle("main", handle);
     crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
         id: "main".to_string(),
         kind: crate::protocol::AutomationWindowKind::Main,
@@ -81,6 +80,14 @@ fn sync_main_automation_window(
         pid: Some(std::process::id()),
         generation: None,
     });
+    let generation = crate::windows::resolve_automation_window(Some(
+        &crate::protocol::AutomationWindowTarget::Id {
+            id: "main".to_string(),
+        },
+    ))
+    .ok()
+    .and_then(|info| info.generation);
+    crate::windows::upsert_runtime_window_handle_instance("main", handle, generation);
 }
 
 fn clamp_restored_main_window_bounds_to_visible_area(

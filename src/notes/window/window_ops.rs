@@ -1000,6 +1000,18 @@ fn open_notes_window_with_close_behavior(
                             generation: None,
                         },
                     );
+                    let generation = crate::windows::resolve_automation_window(Some(
+                        &crate::protocol::AutomationWindowTarget::Id {
+                            id: "notes".to_string(),
+                        },
+                    ))
+                    .ok()
+                    .and_then(|info| info.generation);
+                    crate::windows::upsert_runtime_window_handle_instance(
+                        "notes",
+                        handle.into(),
+                        generation,
+                    );
                     logging::log(
                         "PANEL",
                         "Notes exit superseded - reused the live native window",
@@ -1321,7 +1333,6 @@ fn open_notes_window_with_close_behavior(
     }
 
     let notes_any: gpui::AnyWindowHandle = handle.into();
-    crate::windows::upsert_runtime_window_handle("notes", notes_any);
     crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
         id: "notes".to_string(),
         kind: crate::protocol::AutomationWindowKind::Notes,
@@ -1335,6 +1346,14 @@ fn open_notes_window_with_close_behavior(
         pid: Some(std::process::id()),
         generation: None,
     });
+    let generation = crate::windows::resolve_automation_window(Some(
+        &crate::protocol::AutomationWindowTarget::Id {
+            id: "notes".to_string(),
+        },
+    ))
+    .ok()
+    .and_then(|info| info.generation);
+    crate::windows::upsert_runtime_window_handle_instance("notes", notes_any, generation);
 
     // Resolve and configure the exact GPUI-owned NSWindow before the body
     // reveal sequence begins. A title scan can select a stale tail window

@@ -117,6 +117,7 @@ private struct FrameReceipt: Codable {
     let windowOnscreen: Bool?
     let expectedWindowID: UInt32
     let actualWindowID: UInt32?
+    let geometrySource: String
     let path: String
     let sha256: String
 }
@@ -154,10 +155,17 @@ private func windowState(_ windowID: CGWindowID) -> (
     alpha: Double?,
     onscreen: Bool?
 ) {
+    // `optionIncludingWindow` intermittently returns an empty array while a
+    // floating panel is transitioning between ordered-out and ordered-front on
+    // macOS 26. The complete inventory path used by the sibling window-query
+    // helper remains authoritative across that transition, so enumerate it and
+    // select the already-pinned CGWindowID explicitly.
     guard let info = CGWindowListCopyWindowInfo(
-        [.optionIncludingWindow, .excludeDesktopElements],
-        windowID
-    ) as? [[String: Any]], let row = info.first else {
+        [.optionAll],
+        kCGNullWindowID
+    ) as? [[String: Any]], let row = info.first(where: {
+        ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID
+    }) else {
         return (nil, nil, nil)
     }
     let bounds = (row[kCGWindowBounds as String] as? NSDictionary)
@@ -206,6 +214,48 @@ private func sha256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
+/// SCStream owns a bounded IOSurface pool (queueDepth is capped at eight).
+/// Retaining those sample buffers until finalization stalls capture after the
+/// first eight frames. Clone BGRA bytes into caller-owned CVPixelBuffers so the
+/// stream can immediately recycle every delivered surface.
+private func clonePixelBuffer(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+    let width = CVPixelBufferGetWidth(source)
+    let height = CVPixelBufferGetHeight(source)
+    let pixelFormat = CVPixelBufferGetPixelFormatType(source)
+    var destination: CVPixelBuffer?
+    guard CVPixelBufferCreate(
+        kCFAllocatorDefault,
+        width,
+        height,
+        pixelFormat,
+        nil,
+        &destination
+    ) == kCVReturnSuccess, let destination else {
+        return nil
+    }
+    CVPixelBufferLockBaseAddress(source, .readOnly)
+    CVPixelBufferLockBaseAddress(destination, [])
+    defer {
+        CVPixelBufferUnlockBaseAddress(destination, [])
+        CVPixelBufferUnlockBaseAddress(source, .readOnly)
+    }
+    guard let sourceBase = CVPixelBufferGetBaseAddress(source),
+          let destinationBase = CVPixelBufferGetBaseAddress(destination) else {
+        return nil
+    }
+    let sourceStride = CVPixelBufferGetBytesPerRow(source)
+    let destinationStride = CVPixelBufferGetBytesPerRow(destination)
+    let copiedBytesPerRow = min(sourceStride, destinationStride)
+    for row in 0..<height {
+        memcpy(
+            destinationBase.advanced(by: row * destinationStride),
+            sourceBase.advanced(by: row * sourceStride),
+            copiedBytesPerRow
+        )
+    }
+    return destination
+}
+
 private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
     private struct CapturedSample {
         let displayTime: UInt64
@@ -214,11 +264,15 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
         let windowAlpha: Double?
         let windowOnscreen: Bool?
         let actualWindowID: CGWindowID?
+        let geometrySource: String
     }
 
     private let lock = NSLock()
     private let outputDirectory: URL
     private let windowID: CGWindowID
+    private let captureFrame: CGRect
+    private let captureScale: Double
+    private let displayStream: Bool
     private var captured: [CapturedSample] = []
     private var errors: [String] = []
     private var receivedSampleCount = 0
@@ -229,9 +283,18 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
     private var receivedDisplayTimes: [UInt64] = []
     private let context = CIContext(options: [.cacheIntermediates: false])
 
-    init(outputDirectory: URL, windowID: CGWindowID) {
+    init(
+        outputDirectory: URL,
+        windowID: CGWindowID,
+        captureFrame: CGRect,
+        captureScale: Double,
+        displayStream: Bool
+    ) {
         self.outputDirectory = outputDirectory
         self.windowID = windowID
+        self.captureFrame = captureFrame
+        self.captureScale = captureScale
+        self.displayStream = displayStream
     }
 
     func stream(
@@ -265,16 +328,47 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
             lock.unlock()
             return
         }
+        guard let ownedPixelBuffer = clonePixelBuffer(pixelBuffer) else {
+            lock.lock()
+            errors.append("complete frame pixel-buffer clone failed")
+            lock.unlock()
+            return
+        }
         let state = windowState(windowID)
+        let dirtyRects = (attachments?.first?[.dirtyRects] as? [CGRect])
+            ?? (attachments?.first?[.dirtyRects] as? [NSValue])?.map(\.rectValue)
+            ?? []
+        let dirtyUnion = dirtyRects.reduce(CGRect.null) { partial, rect in
+            partial.union(rect)
+        }
+        var renderedDamageBounds: CGRect?
+        if displayStream
+            && !dirtyUnion.isNull
+            && dirtyUnion.width > 0
+            && dirtyUnion.height > 0
+        {
+            let width = dirtyUnion.width / captureScale
+            let height = dirtyUnion.height / captureScale
+            renderedDamageBounds = CGRect(
+                x: captureFrame.midX - width / 2,
+                y: captureFrame.midY - height / 2,
+                width: width,
+                height: height
+            )
+        }
+        let resolvedBounds = renderedDamageBounds ?? state.bounds
         lock.lock()
         completeSampleCount += 1
         captured.append(CapturedSample(
             displayTime: displayTime,
-            pixelBuffer: pixelBuffer,
-            windowBounds: state.bounds,
+            pixelBuffer: ownedPixelBuffer,
+            windowBounds: resolvedBounds,
             windowAlpha: state.alpha,
             windowOnscreen: state.onscreen,
-            actualWindowID: state.bounds == nil ? nil : windowID
+            actualWindowID: state.bounds == nil ? nil : windowID,
+            geometrySource: renderedDamageBounds == nil
+                ? "cg-window-inventory"
+                : "screen-damage"
         ))
         lock.unlock()
     }
@@ -348,6 +442,7 @@ private final class Capture: NSObject, SCStreamOutput, @unchecked Sendable {
                 windowOnscreen: sample.windowOnscreen,
                 expectedWindowID: windowID,
                 actualWindowID: sample.actualWindowID,
+                geometrySource: sample.geometrySource,
                 path: path,
                 sha256: sha256(png)
             ))
@@ -513,7 +608,13 @@ private enum Main {
                 )
             }
             resolvedWindowID = windowID
-            let receiver = Capture(outputDirectory: directory, windowID: windowID)
+            let receiver = Capture(
+                outputDirectory: directory,
+                windowID: windowID,
+                captureFrame: captureFrame,
+                captureScale: captureScale,
+                displayStream: arguments.displayStream
+            )
             let configuration = SCStreamConfiguration()
             configuration.width = max(1, Int(captureFrame.width * captureScale))
             configuration.height = max(1, Int(captureFrame.height * captureScale))

@@ -1969,7 +1969,18 @@ pub fn open_actions_window(
         return Err(e);
     }
     let popup_any_handle: AnyWindowHandle = handle.into();
-    crate::windows::upsert_runtime_window_handle(&popup_automation_id, popup_any_handle);
+    let popup_generation = crate::windows::resolve_automation_window(Some(
+        &crate::protocol::AutomationWindowTarget::Id {
+            id: popup_automation_id.clone(),
+        },
+    ))
+    .ok()
+    .and_then(|info| info.generation);
+    crate::windows::upsert_runtime_window_handle_instance(
+        &popup_automation_id,
+        popup_any_handle,
+        popup_generation,
+    );
     crate::windows::automation_surface_collector::upsert_actions_dialog_snapshot(
         popup_automation_id.as_str(),
         &dialog_entity,

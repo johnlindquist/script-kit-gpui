@@ -670,14 +670,31 @@ pub(crate) fn dispatch_gpui_event(
     //    so two detached Agent Chat windows can be targeted independently. Attached
     //    popup exact handles also receive popup-local mouse coordinates; only
     //    the parent-window fallback below rebases into parent dispatch space.
-    let exact_runtime_handle = match resolved.generation {
-        Some(generation) => crate::windows::get_valid_runtime_window_handle_for_generation(
-            &resolved.id,
-            generation,
-            cx,
-        ),
-        None => crate::windows::get_valid_runtime_window_handle(&resolved.id, cx),
-    };
+    // Main protocol commands run while the Main window is already on GPUI's
+    // update stack. Probing that handle with `handle.update()` therefore returns
+    // a reentrancy error even though the window is live; treating that error as
+    // staleness evicts the exact generation immediately before dispatch. Keep
+    // the generation check, but defer Main dispatch without the reentrant
+    // liveness probe. Other windows retain the fail-closed validation path.
+    let exact_runtime_handle =
+        if matches!(resolved.kind, crate::protocol::AutomationWindowKind::Main) {
+            match resolved.generation {
+                Some(generation) => crate::windows::get_runtime_window_handle_for_generation(
+                    &resolved.id,
+                    generation,
+                ),
+                None => crate::windows::get_runtime_window_handle(&resolved.id),
+            }
+        } else {
+            match resolved.generation {
+                Some(generation) => crate::windows::get_valid_runtime_window_handle_for_generation(
+                    &resolved.id,
+                    generation,
+                    cx,
+                ),
+                None => crate::windows::get_valid_runtime_window_handle(&resolved.id, cx),
+            }
+        };
     if let Some(handle) = exact_runtime_handle {
         tracing::info!(
             target: "script_kit::automation",
@@ -687,7 +704,8 @@ pub(crate) fn dispatch_gpui_event(
         );
         if matches!(
             resolved.kind,
-            crate::protocol::AutomationWindowKind::AgentChatDetached
+            crate::protocol::AutomationWindowKind::Main
+                | crate::protocol::AutomationWindowKind::AgentChatDetached
                 | crate::protocol::AutomationWindowKind::Dictation
                 | crate::protocol::AutomationWindowKind::PromptPopup
         ) {

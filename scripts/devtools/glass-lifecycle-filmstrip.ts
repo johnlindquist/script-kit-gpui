@@ -40,8 +40,18 @@ import {
   startInterferenceMonitor,
   waitForInterferenceReady,
 } from "./glass-interference.ts";
-import { classifyNativeInventory } from "./glass-topology-contract.ts";
+import {
+  classifyNativeInventory,
+  deriveUniqueOwnerDelta,
+} from "./glass-topology-contract.ts";
 import { requireValidatedHelper } from "./glass-native-helper-cache.ts";
+import {
+  classifyGlassObservation,
+  type GlassObservationInput,
+  type NotesPhaseRecord,
+  validateNotesPhaseRecords,
+  validateOwnedRenderedFrames,
+} from "./glass-observers.ts";
 import os from "node:os";
 import {
   type BoundarySnapshot,
@@ -103,12 +113,19 @@ async function waitForWindowCount(
 }
 
 async function nativeWindowIds(pid: number, title?: string) {
-  const query = await run([
-    "swift",
-    resolve(import.meta.dir, "../agentic/macos-window-query.swift"),
-    "--pid",
-    String(pid),
-  ]);
+  // C08: when the orchestrator supplies a hash-validated window-query helper
+  // the complete inventory comes from that pinned binary; standalone runs
+  // keep the legacy source interpretation.
+  const query = await run(
+    windowQueryHelper
+      ? [windowQueryHelper, "--pid", String(pid)]
+      : [
+        "swift",
+        resolve(import.meta.dir, "../agentic/macos-window-query.swift"),
+        "--pid",
+        String(pid),
+      ],
+  );
   if (query.exitCode !== 0) {
     return {
       ids: [] as number[],
@@ -224,6 +241,10 @@ const helperPreparationStartedMs = performance.now();
 // standalone invocations keep the legacy per-run compile behavior.
 const suppliedFilmstripHelper = arg("--filmstrip-helper");
 const suppliedInterferenceHelper = arg("--interference-helper");
+const suppliedWindowQueryHelper = arg("--window-query-helper");
+const windowQueryHelper = suppliedWindowQueryHelper
+  ? requireValidatedHelper(suppliedWindowQueryHelper, "window-query").binaryPath
+  : null;
 let helper: string;
 if (suppliedFilmstripHelper) {
   helper = requireValidatedHelper(suppliedFilmstripHelper, "filmstrip")
@@ -745,6 +766,42 @@ try {
     settledCaptures[0]?.windowBounds,
     MAIN_GLASS_ENTRY_EXPECTATION,
   );
+  // C08 strict observation classification. The LOCKED evaluator is unchanged;
+  // only the classification around it changes: missing settled bounds, wrong
+  // pinned owner, capture-health failure, and under-resolved evidence are
+  // INVALID_OBSERVER — never EVALUABLE_FAIL. Source-derived geometry
+  // (entryEvidence, onset, runtimeContract) stays diagnostic-only.
+  // Interference and cleanup dominate at run level in the finally block.
+  const mainEntryObservation = classifyGlassObservation({
+    captureHealthPass: mainEntryFilmstrip.receipt?.captureHealthPass === true
+      && mainEntryFilmstrip.capturePass === true,
+    helperErrors: [],
+    fixtureErrors: [],
+    identityErrors: [
+      ...(mainEntryFilmstrip.errors as string[]),
+      ...(mainEntryCaptureBoundsMatch
+        ? []
+        : ["capture bounds do not enclose the pinned owner"]),
+    ],
+    ownerErrors: [
+      ...validateOwnedRenderedFrames(
+        mainEntryFilmstrip.receipt?.frames ?? [],
+        mainWindowID,
+      ),
+      ...(settledCapturesPass
+        ? []
+        : ["settled native captures did not bind to the pinned owner"]),
+    ],
+    requiredPhaseErrors: [],
+    cleanupErrors: [],
+    interference: { validated: true, disposition: null, errors: [] },
+    rendered: {
+      present: Number(mainEntryMotionEnvelope.measuredFrameCount ?? 0) > 0,
+      underResolved: mainEntryMotionEnvelope.underResolved === true,
+      pass: mainEntryMotionEnvelope.pass === true,
+      errors: mainEntryMotionEnvelope.errors ?? [],
+    },
+  } satisfies GlassObservationInput);
   (receipt.scenarios as Json[]).push({
     name: "main-entry",
     exactWindowID: mainWindowID,
@@ -756,6 +813,7 @@ try {
     settledCaptures,
     settledCapturesPass,
     motionEnvelope: mainEntryMotionEnvelope,
+    observation: mainEntryObservation,
     pointerPreparation: {
       command: ["cliclick", "m:2,2"],
       exitCode: pointerPreparation.exitCode,
@@ -780,30 +838,80 @@ try {
     "Lifecycle filmstrip · Notes entry",
     "Body remains hidden while the exact native Notes window material settles",
   );
+  // C08 phase sampler: retain the complete native inventory BEFORE the open,
+  // arm both the filmstrip and a high-frequency bounded runtime-state poll
+  // BEFORE the open command, derive ONE Notes owner from the before/after
+  // delta, and pair runtime host timestamps with actual rendered frames into
+  // the four required named phase records.
+  const notesBeforeInventory = await nativeWindowIds(pid);
   const notesEntry = startFilmstrip(
     "notes-entry",
     { pid, title: "Notes" },
+  );
+  const pollSamples: Json[] = [];
+  let pollStopRequested = false;
+  const pollStartedMs = performance.now();
+  const pollPromise = (async () => {
+    while (!pollStopRequested && performance.now() - pollStartedMs < 4_500) {
+      const state = await driver.getTargetState(
+        { type: "id", id: "notes" },
+        { timeoutMs: 1_000 },
+      ).catch(() => null);
+      const notes = (state as Json)?.notes ?? state ?? null;
+      const reveal = notes?.entryReveal ?? null;
+      pollSamples.push({
+        tMs: Number((performance.now() - pollStartedMs).toFixed(2)),
+        capturedAt: new Date().toISOString(),
+        entryReveal: reveal
+          ? {
+            nativeConfigured: reveal.nativeConfigured ?? null,
+            bodyVisible: reveal.bodyVisible ?? null,
+            morphStarted: reveal.morphStarted ?? null,
+            generation: reveal.generation ?? null,
+            instanceId: reveal.instanceId ?? null,
+            nativeWindowNumber: reveal.nativeWindowNumber ?? null,
+            backdropFoundOrCreated: reveal.backdropFoundOrCreated ?? null,
+            nativeSelectorsSupported: reveal.nativeSelectorsSupported ?? null,
+            styleApplied: reveal.styleApplied ?? null,
+            fallbackUsed: reveal.fallbackUsed ?? null,
+            configuredAtMonotonicNs: reveal.configuredAtMonotonicNs ?? null,
+            firstFrameAtMonotonicNs: reveal.firstFrameAtMonotonicNs ?? null,
+            revealAnchorAtMonotonicNs: reveal.revealAnchorAtMonotonicNs ?? null,
+            revealRequestedAtMonotonicNs:
+              reveal.revealRequestedAtMonotonicNs ?? null,
+            visibleAtMonotonicNs: reveal.visibleAtMonotonicNs ?? null,
+            settleDurationMs: reveal.settleDurationMs ?? null,
+            revealDelayMs: reveal.revealDelayMs ?? null,
+            completedFrameCount: reveal.completedFrameCount ?? null,
+          }
+          : null,
+      });
+      await Bun.sleep(8);
+    }
+  })();
+  // Short helper-arm lead (~25–30ms) so the poll and filmstrip precede the
+  // open command; preMask must be OBSERVED, never inferred from source logs.
+  await Bun.sleep(28);
+  const openRequestedAtMs = Number(
+    (performance.now() - pollStartedMs).toFixed(2),
   );
   driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-open" });
   const notesEntryReady = await awaitObserverReady(notesEntry);
   const notesEntryID = Number(notesEntryReady.windowID);
   const notesReadyState = await notesState();
-  let notesEntryPrimedByCancelReopen = false;
-  if (notesReadyState?.entryReveal?.bodyVisible === true) {
-    // Window discovery can occasionally outlast the 280ms settle interval.
-    // Keep the already-pinned exact owner alive, begin its native exit, then
-    // cancel/reopen it after the observer is ready. The product restarts the
-    // same entry morph and body-reveal state on that exact CGWindowID.
-    driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-prime-close" });
-    await Bun.sleep(25);
-    driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-prime-reopen" });
-    notesEntryPrimedByCancelReopen = true;
-  }
-  const entryStates: Json[] = [];
-  for (const elapsedMs of [0, 30, 80, 180, 320]) {
-    if (elapsedMs > 0) await Bun.sleep(elapsedMs - Number(entryStates.at(-1)?.elapsedMs ?? 0));
-    entryStates.push({ elapsedMs, state: await notesState() });
-  }
+  // Window discovery necessarily begins after the first Notes instance exists.
+  // Phase-align the proof deterministically only after ScreenCaptureKit has
+  // pinned that exact owner: begin its bounded native exit, then cancel/reopen
+  // the same window. Notes restarts an incomplete entry reveal on that exact
+  // CGWindowID, so preMask and body reveal are observed rather than inferred.
+  // This does not change production timing or calibration values.
+  driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-prime-close" });
+  await Bun.sleep(25);
+  driver.send({ type: "openNotes", requestId: "glass-life-notes-entry-prime-reopen" });
+  const notesEntryPrimedByCancelReopen = true;
+  // Keep polling until after the native settle deadline (the capture itself
+  // runs 800ms from observer start).
+  await Bun.sleep(900);
   const notesLayout = await driver.getLayoutInfo(
     { target: { type: "id", id: "notes" } },
     { timeoutMs: 5_000 },
@@ -814,22 +922,47 @@ try {
         String(component?.name ?? ""),
       ),
   )?.bounds;
-  const preliminaryFinalReveal = entryStates.at(-1)?.state?.entryReveal;
+  pollStopRequested = true;
+  await pollPromise;
+  const pollReveals = pollSamples.filter((sample) => sample?.entryReveal != null);
+  const preliminaryFinalReveal = pollReveals.at(-1)?.entryReveal;
+  const notesAfterInventory = await nativeWindowIds(pid);
+  const notesEntryOwnerDelta = deriveUniqueOwnerDelta(
+    notesBeforeInventory.completeWindows as any[],
+    notesAfterInventory.completeWindows as any[],
+    "Notes",
+    pid,
+    mainWindowID,
+  );
+  const notesOwnerErrors: string[] = [];
+  if (!notesEntryOwnerDelta.pass) {
+    notesOwnerErrors.push(
+      `expected exactly one new native Notes owner, observed ${notesEntryOwnerDelta.candidateIds.length} (${
+        notesEntryOwnerDelta.candidateIds.join(", ") || "none"
+      })`,
+    );
+  } else if (notesEntryOwnerDelta.candidateIds[0] !== notesEntryID) {
+    notesOwnerErrors.push(
+      `filmstrip pinned CGWindowID ${notesEntryID} but the unique owner delta is ${
+        notesEntryOwnerDelta.candidateIds[0]
+      }`,
+    );
+  }
   const notesEntryFilmstrip = await finishFilmstrip(notesEntry, notesEntryID, {
     bodyBounds: notesBodyBounds,
     hiddenHostTimeNs: preliminaryFinalReveal?.firstFrameAtMonotonicNs,
     visibleHostTimeNs: preliminaryFinalReveal?.visibleAtMonotonicNs,
   });
-  const configuredState = entryStates.find(
-    (sample) => sample?.state?.entryReveal?.nativeConfigured === true,
-  )?.state?.entryReveal;
-  const hiddenBeforeVisible = entryStates.some(
+  const configuredState = pollReveals.find(
+    (sample) => sample?.entryReveal?.nativeConfigured === true,
+  )?.entryReveal;
+  const hiddenBeforeVisible = pollReveals.some(
     (sample) =>
-      sample?.state?.entryReveal?.nativeConfigured === true
-      && sample?.state?.entryReveal?.bodyVisible === false,
+      sample?.entryReveal?.nativeConfigured === true
+      && sample?.entryReveal?.bodyVisible === false,
   );
-  const visibleAfterAnchor = entryStates.at(-1)?.state?.entryReveal?.bodyVisible === true;
-  const finalReveal = entryStates.at(-1)?.state?.entryReveal;
+  const visibleAfterAnchor = pollReveals.at(-1)?.entryReveal?.bodyVisible === true;
+  const finalReveal = pollReveals.at(-1)?.entryReveal;
   const notesTimes = {
     configured: Number(configuredState?.configuredAtMonotonicNs),
     firstFrame: Number(finalReveal?.firstFrameAtMonotonicNs),
@@ -892,13 +1025,173 @@ try {
     && Number(finalReveal?.completedFrameCount ?? 0) >= 2
     && notesTimesOrdered
     && notesVisibleWithinBounds;
+  // C08: pair runtime host timestamps with actual rendered filmstrip frames
+  // into the four REQUIRED named phase records. No hardcoded reveal delay is
+  // ever substituted for the runtime-recorded anchor; a missing phase or
+  // unpaired frame is an OBSERVER failure, never inferred from source logs.
+  const settleDeadlineNs = notesTimes.configured
+    + Number(configuredState?.settleDurationMs ?? Number.NaN) * 1_000_000;
+  const phaseFrames = [...(notesEntryFilmstrip.receipt?.frames ?? [])].sort(
+    (left: Json, right: Json) =>
+      Number(left?.displayTimeNs ?? 0) - Number(right?.displayTimeNs ?? 0),
+  );
+  const frameAtOrAfter = (ns: number, beforeNs?: number) =>
+    Number.isFinite(ns)
+      ? phaseFrames.find(
+        (frame: Json) =>
+          Number(frame?.displayTimeNs) >= ns
+          && (beforeNs == null || Number(frame?.displayTimeNs) < beforeNs),
+      ) ?? null
+      : null;
+  const bodyMaskPass = notesEntryFilmstrip.metrics?.bodyMaskPass ?? null;
+  const bodyPixelTransition = notesEntryFilmstrip.metrics?.bodyPixelTransition
+    ?? null;
+  const firstHiddenSample = pollReveals.find(
+    (sample) =>
+      sample?.entryReveal?.nativeConfigured === true
+      && sample?.entryReveal?.bodyVisible === false,
+  );
+  const firstVisibleSample = pollReveals.find(
+    (sample) => sample?.entryReveal?.bodyVisible === true,
+  );
+  const buildPhaseRecord = (
+    name: NotesPhaseRecord["name"],
+    hostTimeNs: number,
+    frame: Json | null,
+    sample: Json | null,
+    bodyVisible: boolean | null,
+    bodyPixelState: NotesPhaseRecord["bodyPixelState"],
+    extraErrors: string[],
+  ): NotesPhaseRecord => {
+    const errors = [
+      ...(frame ? [] : [`${name}: no rendered frame paired`]),
+      ...extraErrors,
+    ];
+    return {
+      name,
+      required: true,
+      expectedWindowId: notesEntryID,
+      actualWindowId: frame?.actualWindowID ?? null,
+      stateCapturedAt: String(sample?.capturedAt ?? ""),
+      hostTimeNs: Number.isFinite(hostTimeNs) ? hostTimeNs : null,
+      displayTimeNs: frame?.displayTimeNs ?? null,
+      frameSequence: frame?.sequence ?? null,
+      framePath: frame?.path ?? null,
+      frameSha256: frame?.sha256 ?? null,
+      windowBounds: frame?.windowBounds ?? null,
+      windowAlpha: frame?.windowAlpha ?? null,
+      bodyVisible,
+      bodyPixelState,
+      errors,
+      pass: errors.length === 0,
+    };
+  };
+  const notesPhaseRecords: NotesPhaseRecord[] = [
+    buildPhaseRecord(
+      "preMask",
+      notesTimes.configured,
+      frameAtOrAfter(notesTimes.configured, notesTimes.visible),
+      firstHiddenSample ?? null,
+      firstHiddenSample ? false : null,
+      bodyMaskPass === true ? "masked" : "unknown",
+      firstHiddenSample
+        ? []
+        : ["preMask: runtime never observed a configured hidden body"],
+    ),
+    buildPhaseRecord(
+      "materialSafeAnchor",
+      notesTimes.revealAnchor,
+      frameAtOrAfter(notesTimes.revealAnchor),
+      firstHiddenSample ?? null,
+      notesTimes.visible > notesTimes.revealAnchor ? false : null,
+      bodyMaskPass === true ? "masked" : "unknown",
+      [],
+    ),
+    buildPhaseRecord(
+      "postBodyReveal",
+      notesTimes.visible,
+      frameAtOrAfter(notesTimes.visible),
+      firstVisibleSample ?? null,
+      firstVisibleSample ? true : null,
+      bodyPixelTransition === true ? "transitioned" : "unknown",
+      firstVisibleSample
+        ? []
+        : ["postBodyReveal: runtime never observed a visible body"],
+    ),
+    buildPhaseRecord(
+      "settled",
+      settleDeadlineNs,
+      frameAtOrAfter(settleDeadlineNs) ?? phaseFrames.at(-1) ?? null,
+      pollReveals.at(-1) ?? null,
+      visibleAfterAnchor ? true : null,
+      visibleAfterAnchor ? "visible" : "unknown",
+      [],
+    ),
+  ];
+  const notesPhaseValidationErrors = [
+    ...(notesEntryFilmstrip.metrics
+      ? []
+      : ["body-region metrics missing — mask evidence unavailable"]),
+    ...validateNotesPhaseRecords(
+      notesPhaseRecords as unknown as Array<Record<string, unknown>>,
+      notesEntryID,
+      notesDisplayPeriodNs,
+      { settleDeadlineNs: Number.isFinite(settleDeadlineNs) ? settleDeadlineNs : undefined },
+    ),
+  ];
+  const notesProductErrors = [
+    ...(Number.isFinite(notesTimes.visible)
+        && Number.isFinite(notesTimes.revealAnchor)
+        && notesTimes.visible < notesTimes.revealAnchor
+      ? ["Notes body revealed before the material-safe anchor"]
+      : []),
+    ...(bodyMaskPass === false
+      ? ["Notes body pixels changed inside the masked window"]
+      : []),
+    ...(notesVisibleWithinBounds
+      ? []
+      : ["Notes reveal time outside the runtime-declared bounds"]),
+  ];
+  const notesPhaseEvaluation = {
+    records: notesPhaseRecords,
+    displayPeriodNs: notesDisplayPeriodNs,
+    settleDeadlineNs: Number.isFinite(settleDeadlineNs) ? settleDeadlineNs : null,
+    ownerErrors: notesOwnerErrors,
+    validationErrors: notesPhaseValidationErrors,
+    productErrors: notesProductErrors,
+  };
+  const notesEntryObservation = classifyGlassObservation({
+    captureHealthPass: notesEntryFilmstrip.receipt?.captureHealthPass === true
+      && notesEntryFilmstrip.capturePass === true,
+    helperErrors: [],
+    fixtureErrors: [],
+    identityErrors: notesEntryFilmstrip.errors as string[],
+    ownerErrors: notesOwnerErrors,
+    requiredPhaseErrors: notesPhaseValidationErrors,
+    cleanupErrors: [],
+    interference: { validated: true, disposition: null, errors: [] },
+    rendered: {
+      present: notesPhaseRecords.every((record) =>
+        /^[a-f0-9]{64}$/.test(String(record.frameSha256 ?? ""))
+      ),
+      underResolved: false,
+      pass: notesProductErrors.length === 0,
+      errors: notesProductErrors,
+    },
+  } satisfies GlassObservationInput);
   const notesEntryPass = notesEntryFilmstrip.pass
     && notesEntryStructuralPass
-    && notesEntryFilmstrip.metrics?.bodyMaskPass === true;
+    && notesEntryFilmstrip.metrics?.bodyMaskPass === true
+    && notesEntryObservation.pass;
   (receipt.scenarios as Json[]).push({
     name: "notes-entry",
     exactWindowID: notesEntryID,
-    states: entryStates,
+    ownerDelta: notesEntryOwnerDelta,
+    openRequestedAtMs,
+    pollSampleCount: pollSamples.length,
+    pollSamples,
+    phaseEvaluation: notesPhaseEvaluation,
+    observation: notesEntryObservation,
     bodyOnlyReveal: {
       hiddenBeforeVisible,
       visibleAfterAnchor,
@@ -1201,6 +1494,18 @@ try {
     pass: receipt.pass === true,
     hasObserverError: receipt.error != null,
   });
+  // C08 strict refinement: when a scenario's own observation classified its
+  // failure as INVALID_OBSERVER (missing owner, under-resolved rendered
+  // evidence, missing phase), the run-level EVALUABLE_FAIL is a lie — the
+  // apparatus, not the product, failed. Interference still dominates.
+  if (
+    receipt.disposition === "EVALUABLE_FAIL"
+    && (receipt.scenarios as Json[]).some(
+      (scenario) => scenario?.observation?.disposition === "INVALID_OBSERVER",
+    )
+  ) {
+    receipt.disposition = "INVALID_OBSERVER";
+  }
   // WP6 telemetry finalization: post edge snapshot, sampler summary, GPU
   // capability probe (never a gate), interference statistics with scenario
   // attribution, and — when a contract was declared — the runtime
@@ -1302,4 +1607,13 @@ try {
   );
 }
 
-process.exit(receipt.pass ? 0 : 2);
+// C08 exit contract: 0 only for EVALUABLE_PASS; 2 for evaluable failures and
+// deferred (analysis-pending) captures; 4 for INVALID_* observations.
+process.exit(
+  receipt.disposition === "EVALUABLE_PASS"
+    ? 0
+    : receipt.disposition === "EVALUABLE_FAIL"
+        || receipt.disposition === "ANALYSIS_PENDING"
+    ? 2
+    : 4,
+);
