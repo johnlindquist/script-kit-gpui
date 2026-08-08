@@ -1120,6 +1120,15 @@ try {
           && (beforeNs == null || Number(frame?.displayTimeNs) < beforeNs),
       ) ?? null
       : null;
+  const frameNearest = (ns: number) =>
+    Number.isFinite(ns)
+      ? phaseFrames.reduce<Json | null>((nearest, frame: Json) =>
+        nearest == null
+          || Math.abs(Number(frame?.displayTimeNs) - ns)
+            < Math.abs(Number(nearest?.displayTimeNs) - ns)
+          ? frame
+          : nearest, null)
+      : null;
   const bodyMaskPass = notesEntryFilmstrip.metrics?.bodyMaskPass ?? null;
   const bodyPixelTransition = notesEntryFilmstrip.metrics?.bodyPixelTransition
     ?? null;
@@ -1178,7 +1187,7 @@ try {
     buildPhaseRecord(
       "materialSafeAnchor",
       notesTimes.revealAnchor,
-      frameAtOrAfter(notesTimes.revealAnchor),
+      frameNearest(notesTimes.revealAnchor),
       firstHiddenSample ?? null,
       notesTimes.visible > notesTimes.revealAnchor ? false : null,
       bodyMaskPass === true ? "masked" : "unknown",
