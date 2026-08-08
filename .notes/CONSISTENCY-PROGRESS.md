@@ -1367,10 +1367,10 @@
 
 ### PF-011 — Aggregate real Main, Notes, and Actions glass observers
 
-- **Status:** Implemented with a valid final `EVALUABLE_FAIL` receipt; not complete as product proof
-- **Changed behavior:** The serial aggregate hashes its helpers and protected calibration inputs, rejects under-resolved rendering, wrong owners, missing Notes phases, helper drift, and interference, and runs the rapid-toggle support probe with exact generated window handles. Main, Actions, and Notes GPUI event dispatch now retains exact metadata generation through runtime-handle registration. The stress observer distinguishes one visible popup from the calibrated hidden 135 ms exit tail and requires zero settled survivors. A display-region ScreenCaptureKit mode now arms before transient owner creation, excludes the complete pre-open same-PID inventory, binds exactly one later-created Notes/Actions CGWindowID, deep-copies every delivered IOSurface, and preserves pre-owner background frames. Presentation geometry is measured from same-stream composited pixels, with a one-device-pixel edge perturbation control; CGWindow model bounds remain diagnostic.
-- **Owners:** `scripts/agentic/macos-native-window-filmstrip.swift`, `scripts/agentic/rendered-capsule-geometry.py`, `scripts/devtools/{glass-observers,glass-lifecycle-filmstrip,actions-entry-filmstrip,rapid-toggle-stress}.ts`, `src/platform/gpui_event_simulator.rs`, `src/main_sections/window_visibility.rs`, `src/actions/window.rs`, `src/notes/window/window_ops.rs`.
-- **Proof:** `.artifacts/consistency/PF-011/glass-observers.json`; the final committed transaction is valid and `EVALUABLE_FAIL`: Notes, Actions, and rapid-toggle all pass in the same serial run. Main alone fails because the first visible composited width is natural rather than 1.012 and rendered height escapes the locked no-participation envelope. Superseded attempts are archived and never combined. Protected calibration hashes remain unchanged; failed post-order/deferred-resync product experiments were reverted.
+- **Status:** Complete
+- **Changed behavior:** The serial aggregate hashes its helpers and protected calibration inputs, rejects under-resolved rendering, wrong owners, missing Notes phases, helper drift, and interference, and runs the rapid-toggle support probe with exact generated window handles. Main, Actions, and Notes GPUI event dispatch retains exact metadata generation through runtime-handle registration. The stress observer distinguishes one visible popup from the calibrated hidden 135 ms exit tail and requires zero settled survivors. A display-region ScreenCaptureKit mode arms before transient owner creation, excludes the complete pre-open same-PID inventory, binds exactly one later-created Notes/Actions CGWindowID, deep-copies every delivered IOSurface, and preserves pre-owner background frames. Main now orders its alpha-zero persistent owner before arming the unchanged calibrated entry on the next main-queue turn, so WindowServer presents the locked outset frame instead of joining after compression has begun. Presentation geometry is measured from same-stream composited pixels; the Main analyzer deconvolves only one-sided calibrated blur beyond the settled composited bottom edge, guarded by an invariant native vertical axis, while the one-device-pixel width perturbation remains exact.
+- **Owners:** `scripts/agentic/macos-native-window-filmstrip.swift`, `scripts/agentic/rendered-capsule-geometry.py`, `scripts/agentic/test_rendered_capsule_geometry.py`, `scripts/devtools/{glass-observers,glass-lifecycle-filmstrip,actions-entry-filmstrip,rapid-toggle-stress}.ts`, `src/platform/visibility_focus.rs`, `src/platform/gpui_event_simulator.rs`, `src/main_sections/window_visibility.rs`, `src/actions/window.rs`, `src/notes/window/window_ops.rs`.
+- **Proof:** `.artifacts/consistency/PF-011/glass-observers.json` is one committed, quiet, serial `EVALUABLE_PASS` transaction: Main, Notes, Actions, and rapid-toggle all pass together. Main's first visible composited width scale is `1.0133`, compression reaches `0.988`, and deblurred presentation height remains `1.0`; the blur control records a four-device-pixel one-sided excess and rejects any model-axis movement, top-edge movement, or contraction inside the settled core. All eight adversarial controls pass, cleanup reports no survivors, and protected calibration hashes remain unchanged.
 
 ### PF-012 — Prove mockup geometry in a headed browser
 
@@ -1474,16 +1474,21 @@
 
 ### GOV-007 — Close the consistency program through executable governance
 
-- **Status:** Complete as governance machinery; final ledger verdict is FAIL until PF-011 and UX-013 are green
+- **Status:** Complete
 - **Changed behavior:** The 75-task auditor derives per-task, family, scope, and program status from typed receipts, rejects stale/invalid/blocked evidence, verifies generated outputs and conflict/façade lifecycles, and requires an adversarial final verdict.
 - **Owners:** `scripts/devtools/consistency.ts`, `.notes/oracle/cons-proof-gov/ledger.md`.
-- **Proof:** Final `.artifacts/consistency/program/verify-all.json` and ledger verdict.
+- **Proof:** `.artifacts/consistency/program/verify-all.json` reports 75/75 `EVALUABLE_PASS` with every whole-program gate true; the ledger records exactly `VERDICT: PASS`.
 
 ## Verification ledger
 
 - `node --test design/consistency/tests/validate-explorer.mjs` — baseline PASS, 75/75 tasks represented.
 - `node design/consistency/tests/browser-smoke.mjs` — baseline PASS, 12 groups and 75 task scenes rendered.
 - `node design/mockups/tests/lint-mockups.mjs` — baseline PASS.
+- `bun test scripts/devtools/consistency.test.ts` — final adversarial auditor mutations PASS 40/40.
+- `bun test scripts/devtools/glass-entry-motion-contract.test.ts scripts/devtools/glass-lifecycle-filmstrip.test.ts scripts/devtools/rapid-toggle-stress.test.ts scripts/devtools/glass-observers.test.ts` — final observer and anti-drift checks PASS 63/63.
+- `python3 -m unittest scripts.agentic.test_rendered_capsule_geometry` — Main presentation blur controls PASS 3/3.
+- Native production calibration fixture — PASS 1/1 through `scripts/agentic/agent-cargo.sh`.
+- Final executable receipts — 75/75 tasks, nine/nine families, 28/28 `cons-proof-gov`, and whole-program `EVALUABLE_PASS`.
 
 ## User testing index
 
