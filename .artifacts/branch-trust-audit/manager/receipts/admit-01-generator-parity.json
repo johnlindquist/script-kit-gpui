@@ -1,0 +1,13 @@
+{
+  "command": [
+    "python3",
+    "-B",
+    "design/consistency/tools-build-data.py"
+  ],
+  "exitCode": 0,
+  "stdout": "wrote design/consistency/data/groups.json with 12 groups and 75 tasks\n",
+  "stderr": "",
+  "byteEqual": false,
+  "generatedSha256": "c53a8d7b8c9544eb59f127e16d837ce5c6db9ab6983c5a2e192a6f71b80387e6",
+  "checkedSha256": "f1f440d4c047d0f780b56d7cb19428ad87166200356155a3cba1591e25079982"
+}

@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "command": [
+    "./scripts/agentic/agent-cargo.sh",
+    "test",
+    "-p",
+    "sk-protocol",
+    "ai_reliability::tests::user_stopped_is_cancellation",
+    "--",
+    "--nocapture"
+  ],
+  "timeoutSeconds": 420,
+  "startedAt": "2026-08-08T23:03:16.811919+00:00",
+  "endedAt": "2026-08-08T23:04:13.034099+00:00",
+  "durationMs": 56223,
+  "timedOut": false,
+  "exitCode": 0
+}

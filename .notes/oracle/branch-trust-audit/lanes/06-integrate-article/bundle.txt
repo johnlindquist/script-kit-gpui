@@ -1,0 +1,1280 @@
+This file is a merged representation of the filtered codebase, combined into a single document by packx.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of filtered repository contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<usage_guidelines>
+- Treat this file as a snapshot of the repository's state
+- Be aware that this file may contain sensitive information
+</usage_guidelines>
+
+<notes>
+- Files were filtered by packx based on content and extension matching
+- Total files included: 6
+</notes>
+</file_summary>
+
+<directory_structure>
+AGENTS.md
+GLOSSARY.md
+src/warning_banner.rs
+src/test_support/agent_chat_portal.rs
+src/list_item_tests.rs
+src/actions_button_visibility_tests.rs
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="AGENTS.md">
+For a map of main UI surfaces to code implementation, see [GLOSSARY.md]
+# Before Starting Work
+- **Do the work yourself.** Project flows are DISABLED (see "Project Flows — Disabled" below). Do not delegate to `md flows/<name>.md`. Read the source, make the change, and verify it in this session.
+- Inspect the relevant source, tests, and repo-local skills before editing.
+- Prefer current code and generated artifacts over stale notes or memory.
+- Keep edits narrowly scoped and verify them with the smallest check that can fail for the changed behavior.
+- Keep tool-facing root docs in place: `README.md`, `CLAUDE.md`, `AGENTS.md`, and `.impeccable.md`.
+## Oracle / Packx Bundle Context
+For Oracle review or `oracle-packx` work in this repository, include the repo process context in the bundle or prompt unless the user explicitly excludes it: `AGENTS.md`, the owning `.agents/skills/<skill>/SKILL.md`, and relevant source, tests, generated contracts, and verification notes.
+For runtime/UX bugs headed to `oracle-packx-conversation`, gather the investigation receipts yourself first — intake, primitive stack, measurements, classification, likely owner, red/green proof plan — and include them in the bundle. The `script-kit-devtools` skill and the probes under `scripts/devtools/` and `scripts/agentic/` are the tools for that; run them directly.
+If a `packx` preview with include globs unexpectedly matches `0` files in this repository, rebuild the bundle from an explicit path list instead of widening blindly. A reliable workaround is:
+```bash
+rg --files <scope> | rg '<owners-or-patterns>' > /tmp/script-kit-gpui-packx-files.txt
+xargs packx --preview --no-interactive -x "**/CLAUDE.md" < /tmp/script-kit-gpui-packx-files.txt
+xargs packx --limit 900k --strip-comments --minify -f markdown --no-interactive --stdout -x "**/CLAUDE.md" < /tmp/script-kit-gpui-packx-files.txt > ~/.oracle/bundles/<slug>.txt
+```
+Use this when directory/include-glob matching undercounts relevant files; keep `CLAUDE.md` excluded and verify the preview count plus final non-empty bundle before consulting Oracle.
+## Project Flows — Disabled
+**Flows are OFF. Do not route work through `md flows/<name>.md`.**
+Disabled 2026-07-25 by the repo owner. Do the work yourself, in this session.
+Why: delegation kept producing the appearance of progress without progress.
+Lanes and subagents sat for hours showing running timers while finished or
+dead; one subagent died three times on a harness model-resolution error; a
+"stuck flow" turned out to be a misread. The failure mode is consistent — the
+delegating agent cannot see whether the delegate is working, so it reports
+motion it has not verified. Direct work removes the gap between doing and
+knowing.
+What this means in practice:
+- Read the source, make the change, run the check, report the receipt. No
+`md flows/...` calls.
+- Do not fan out to subagents for work you can do yourself. A subagent's
+self-report is not proof; if you use one at all, verify its claims against
+the tree before repeating them.
+- The routing rules that used to live here were a map of who owns what. That
+map is still useful — it now lives in `flows/README.md` and in the flow files
+themselves. **Read them as documentation of ownership, not as dispatch.**
+`GLOSSARY.md` maps UI surfaces to implementation files and is usually the
+faster start.
+- The `flows/**` files stay on disk. They are not deleted, and their prompt
+content is still a good statement of each area's contract and gotchas —
+`flows/escape.md`'s three-lockstep-keyboard-paths warning, for example, is
+real and load-bearing whether or not a flow ever runs again.
+Re-enabling is the owner's call, not an agent's. If flows come back, the thing
+that has to change first is observability: a delegating agent must be able to
+tell working from finished from dead without asking a human to look at a pane.
+## Domain Crate Boundaries
+- The app may depend on workspace domain crates under `crates/sk-*`; domain crates must never depend on `script-kit-gpui`.
+- App-independent protocol primitives belong in `crates/sk-protocol/**`. Keep app services and compatibility adapters under `src/protocol/**` while migration is in progress.
+- Move pure unit tests with their domain implementation so `./scripts/agentic/agent-cargo.sh test -p <crate>` does not link GPUI.
+- For each extraction, verify the domain dependency tree and preserve the existing app-facing path with a temporary re-export when callers still rely on it.
+- Update `GLOSSARY.md` (and the ownership notes in `flows/README.md`, kept as documentation) whenever a domain moves into `crates/**`, so the next agent can still find the owner.
+## UI Consistency and Shared Component Contract
+When touching app UI, treat shared components and theme/chrome tokens as the source of truth. Do not build one-off UI when an existing component, shell, list item, input, footer, popup, or token can be reused or extended.
+Before adding or changing UI:
+1. Start with `GLOSSARY.md` to identify the owning surface and nearby implementation files.
+2. Inspect the current surface, related tests, and the shared component entry points before editing.
+3. Check `src/components/mod.rs` and the relevant component modules before creating any new UI helper.
+4. Prefer extending the shared component library over adding surface-local render helpers.
+5. If a new reusable primitive is needed, add it under `src/components/**` or the appropriate theme/chrome/design layer and use it from the surface. Do not bury reusable UI in one prompt, built-in, Agent Chat, or main-window renderer.
+Shared UI entry points to check first:
+- Inputs/search/menu fields: `src/components/text_input.rs`, `src/components/text_input/**`, `src/components/inline_prompt_input.rs`, `src/components/inline_dropdown/**`, `src/components/inline_picker.rs`, and `src/components/inline_popup_window.rs`.
+- List rows and sections: `src/components/unified_list_item/**`; preserve existing `crate::list_item` usage where that is the current surface contract, but do not invent a third row system.
+- Prompt shells and prompt chrome: `src/components/prompt_layout_shell.rs`, `src/components/prompt_container.rs`, `src/components/prompt_footer.rs`, and `src/components/minimal_prompt_shell.rs`.
+- Footer and hint strips: `src/components/hint_strip.rs`, `src/components/footer_chrome.rs`, `src/footer_popup.rs`, and native footer handling in `src/app_impl/ui_window.rs`.
+- Main-window chrome/layout: `src/components/main_view_chrome.rs`, `src/main_sections/**`, `src/render_script_list/**`, and `src/app_layout/**`.
+- Empty/info/non-list states: `src/components/info_state.rs` and `src/components/non_list_state.rs`.
+- Forms/buttons/toasts/shortcuts: `src/components/form_fields/**`, `src/components/button.rs`, `src/components/toast/**`, and `src/components/shortcut_recorder.rs`.
+Theme and visual values must be tokenized:
+- Resolve colors and chrome surfaces through `crate::theme`, especially `AppChromeColors::from_theme`, `PromptColors`, theme opacity, and the design token layers.
+- Use chrome/layout constants from `src/ui/chrome/tokens.rs`, `src/theme/**`, `src/designs/core/**`, and `src/designs/traits/**`.
+- Do not hardcode new colors, opacity values, spacing, typography, border radii, borders, popup surfaces, vibrancy behavior, or chrome layer semantics in surface renderers when an existing token/helper exists.
+- If a visual value needs to become standard, add or extend a token/helper in the appropriate shared layer so theme changes propagate automatically.
+Cross-surface behavior must stay predictable:
+- Main window, prompt/make windows, built-ins, and Agent Chat/Agent Chat should share inputs, menu/search behavior, list rows, prompt shells, hint strips, footer affordances, popup/dropdown mechanics, and chrome tokens wherever possible.
+- Native left-pinned and trailing footer keycaps must both resolve token-specific
+x/y glyph offsets and horizontal padding through the shared
+`footer_appkit_glyph_x`, `footer_appkit_glyph_y`, and
+`footer_keycap_padding_x_for_token` helpers. Do not duplicate or locally
+approximate keycap centering formulas.
+- Actions UI should feel like the main list: same row language, same search treatment, same shortcut/keycap conventions, and no extra local chrome unless the owning contract requires it.
+- Expanded/preview surfaces may differ in layout, but their list side, footer, and chrome should still use the shared anatomy and tokens.
+- Any intentional divergence must be documented in the code or PR summary with the owning surface, the reused alternatives considered, and why the shared component could not fit.
+## Glass Motion Calibration Lock
+The main-window, Actions, Notes, Dictation, and popup glass motion was calibrated
+against frame-by-frame Spotlight reference footage. **Agents must not retune,
+normalize, simplify, or "clean up" these values unless the user explicitly asks
+for animation retuning or unlocks the calibration in the current request.** A
+generic bug fix, refactor, theme change, or contrast task is not permission.
+If a requested change appears to require different motion values, preserve the
+calibration and ask for explicit permission instead.
+The locked production contract is (entry retuned 2026-07-26 to the
+Spotlight visible tail — Oracle session `glass-entry-spotlight-retune`,
+user-authorized, evidence: the frame-by-frame measurement page
+https://eager-hollow-dyyf.here.now/ and the before/after receipts in
+`.artifacts/glass-entry-spotlight-retune/`; lineage 09bddd931 → eb8e1e115 →
+cd5634ec8; exit/material values remain from the 2026-07-24 calibration
+against `CleanShot 2026-07-24 at 09.18.40.mp4`):
+- **2026-07-27 SPEED SCALE (authorized): every entry duration is HALVED**
+relative to Spotlight's measured wall clock, at explicit user request
+("make the animate in like 2x faster"). Shape, ratios, curves, geometry,
+and alpha semantics are Spotlight's; only the tempo departs. Restoring
+1:1 Spotlight timing = doubling every entry duration below;
+- default entry duration (visible tail) `0.105s`: `35ms` ease-out
+compression, NO explicit hold, `70ms` ease-in-out rebound. The
+compression ease-out ends at zero velocity and the rebound begins at zero
+velocity — that turn, not a dead hold, is the physical settling;
+- material onset prefix `44ms` (glass Clear→Regular + tint ramp at a
+CONSTANT `0.85` NSWindow alpha, curve `(0.18,0)/(0.14,0)`); GPUI content
+roots hold `26ms` then fade `18ms`, ending exactly at tail start. Total
+entry `149ms` = onset + tail (Oracle session `glass-entry-onset-v2`,
+measured from `CleanShot 2026-07-27 at 10.08.42.mp4`);
+- entry inset `0.006` per side, producing a main/Notes/Dictation shrink-in
+`101.2% → 98.7% → 100%` width path and an Actions/popup grow-in
+`98.8% → 101.3% → 100%` path. Script Kit's first visible frame is
+phase-aligned to Spotlight's measured `t≈88ms` state (101.2% width at
+presence 0.85): NSWindow alpha below 0.85 exposes desktop pixels rather
+than Spotlight's coherent faint glass, so the unsafe `0.05 → 0.85`
+presence prefix (Spotlight's ~110% first photon) is deliberately omitted.
+Height participation is `0` (vertical damping 0.0 — Spotlight measures
+±0–2px). Squish factor stays `0.25`, clamped `0.0065–0.015` per side; the
+default hits the 0.0065 minimum = Spotlight's measured `−1.3%` total
+squish;
+- entry alpha: visible start `0.85`, easing to `0.99` over `18ms`
+(ease-out), holding the model value at `0.99` through max compression,
+then easing `0.99 → 1.0` over `26ms` from rebound start. A shrink-in
+frame must NEVER be fully opaque while wider than natural size;
+- the `0.85` floor lineage: retuned from `0.0` on 2026-07-25 (HITL
+submission `98cab5e5-6f15-4311-8d49-83e31602e641` / Oracle plan
+`floating-capsule-entry-material` — NSWindow alpha multiplies every
+contributed pixel, so low-alpha visible frames displayed mostly
+wallpaper). Truly hidden parking (window ordered out) stays alpha `0.0`
+via `GLASS_HIDDEN_PARK_ALPHA`; zero-alpha parking of a visible window is
+a contract violation (runtime tripwire
+`glass_hidden_park_on_visible_window`);
+- phase-one fraction `1/3`, squish hold `0.0s`, fade fraction `2/3`;
+- Notes body reveal uses the material-safe anchor, ABSOLUTE from native
+configure: onset + `max(geometric crossing 11ms, alpha ramp 18ms)` =
+`62ms`, then keeps its `90ms` body fade;
+- glass material: stability tint floor `0.35` and capsule veil `0.0`
+(`src/ui/chrome/tokens.rs`) — the veil was removed in the user-authorized
+Jul 27 calibration; the older `0.80` policy text was stale. The Jul 23
+`0.55`/`0.94` stack read near-solid mid-entry, visibly heavier than the
+Spotlight reference fade;
+- detached main-window exit is fixed-frame fade-only;
+- popup exit duration `0.12s`, removal delay `135ms`, grow x/y `0.03/0.012`,
+shrink x/y `0.05/0.035`, and blur radius `8.0`.
+Owning sources and anti-drift evidence:
+- defaults: `src/theme/opacity.rs`;
+- native physics/lifecycle: `src/platform/secondary_window_config.rs`;
+- named production fixture:
+`scripts/agentic/fixtures/glass-motion-calibration-theme.json`;
+- geometry envelope:
+`scripts/devtools/glass-entry-motion-contract.ts`;
+- frame/runtime probes:
+`scripts/devtools/glass-lifecycle-filmstrip.ts`,
+`scripts/devtools/actions-entry-filmstrip.ts`, and
+`scripts/devtools/rapid-toggle-stress.ts`.
+Do not update the fixture, envelope thresholds, expected geometry, or their
+tests merely to make a changed animation pass. With explicit user permission,
+retune from new frame-by-frame evidence, update all owning sources together,
+and report the before/after measurements. Without that permission, restore the
+locked values.
+Minimum anti-drift check:
+```bash
+bun test scripts/devtools/glass-entry-motion-contract.test.ts \
+scripts/devtools/glass-lifecycle-filmstrip.test.ts \
+scripts/devtools/rapid-toggle-stress.test.ts
+./scripts/agentic/agent-cargo.sh test --lib \
+platform::secondary_window_config_tests::glass_motion_fixture_matches_the_measured_production_calibration
+```
+For runtime/visual changes, also run the lifecycle, Actions-entry, and rapid
+toggle probes with `SCRIPT_KIT_TEST_STATUS=1` and the named calibration fixture.
+An `INVALID_INTERFERENCE` receipt means rerun when input is quiet; it is not a
+product failure and must not be converted into a green result.
+## Agent Chat Entry Context Contract
+Launcher-sourced Agent Chat opens stage the currently selected launcher row as a context chip (and pre-fill the composer with its `@cmd:` mention) UNLESS the entry request suppresses the focused part. The default selection on a fresh launcher is a real, resolvable row (`first_selectable_index` — a Brain Inbox capture, a flow, a script), so any "just open a clean chat" affordance wired through the default entry silently inherits it. This bit us on 2026-07-10: main-hotkey double-tap opened Agent Chat with the first row attached as if deliberately chosen.
+- Quick/clean-chat affordances (double-tap of the main hotkey, and anything with the same "I just have a quick question" intent) MUST route through `AgentChatEntryRequest::quick_question()` / `open_agent_chat_for_quick_question`, or otherwise pass `suppress_focused_part: true`.
+- Only entries where the user deliberately targeted a row (Cmd+Enter on a selection, actions payloads, explicit handoffs) may stage the focused row — and Cmd+Enter already suppresses the *default auto-selected* row via its empty-input guard in `agent_handoff/mod.rs`. Mirror that guard's intent in any new launcher-sourced entry.
+- The contract is locked by `quick_question_entry_suppresses_all_implicit_context` in `src/app_impl/agent_handoff/agent_chat_entry.rs`; keep new entry points honest against it rather than weakening the test.
+# Agent Cargo Wrapper
+`./dev.sh` runs `cargo watch` on the shared `target/` dir continuously. Bare `cargo build/test/check/clippy` from an AI agent contends on `target/.cargo-lock` and stalls for minutes ("Blocking waiting for file lock on build directory").
+All agent-driven cargo invocations MUST go through `./scripts/agentic/agent-cargo.sh`, which defaults to the bounded shared `CARGO_TARGET_DIR=target-agent/pools/agent-debug` pool with a visible lock. Examples:
+- `./scripts/agentic/agent-cargo.sh test --lib notes_editor::spine`
+- `./scripts/agentic/agent-cargo.sh check --lib`
+- `./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui`
+Use `SCRIPT_KIT_CARGO_TARGET_POOL=<name>` for an intentional shared pool, and set `SCRIPT_KIT_AGENT_TARGET_MODE=exclusive` only when a task truly needs a per-agent cache under `target-agent/agents/<agent-id>`. Do not run bare `cargo` against this repo while `./dev.sh` may be running.
+Disk policy: the wrapper enforces a total `target-agent` budget at lock acquisition (`SCRIPT_KIT_AGENT_TARGET_BUDGET_GB`, default 40) plus a free-disk floor (`SCRIPT_KIT_AGENT_MIN_FREE_GB`, default 25), evicting least-recently-used unlocked pools before building. Extra pools are therefore ephemeral by design — do NOT mint a pool per parallel task. When a task needs a stable binary path, export an APFS clone instead: `SCRIPT_KIT_AGENT_ARTIFACT_NAME=<task> ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui` produces `target-agent/artifacts/<task>/script-kit-gpui` (~0 bytes, replaced atomically on rebuild). Dev builds use `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and non-default pools disable incremental; both respect pre-set env overrides.
+# AI Reliability Rules
+Any work on an AI failure, recovery card, or engine transport (Quick AI, Flow
+chat, Agent Chat) must follow `rules/AI_RELIABILITY.md`. The short version:
+- Classify from the FACT the runtime stated, never from prose you formatted
+yourself. `classify_provider_failure` pattern-matches English and returns
+`Unknown` for anything it does not recognise.
+- Carry the `AppFailureRecord`. Reducing it to its safe copy and re-classifying
+that copy later always downgrades to `Unknown`.
+- Raw provider text, stderr, OS errors, and adapter internals stop at the
+diagnostic vault. Screens get `primary_message()`; logs get the code plus the
+diagnostic fingerprint.
+- A recovery action a surface cannot perform is never rendered enabled — and a
+surface that forgets to install its recovery callback silently hides every
+useful button.
+- A user Stop is cancellation, not an error.
+- If `getElements` cannot see it, it is not proven. Project new shared AI
+elements into the element collector from the same source the renderer uses.
+Focused checks are listed at the bottom of that file.
+# Source Audit Test Policy
+Source-audit tests (tests that `read_to_string`/`include_str!` app source and assert on its text) are decision locks, not behavior coverage. They are a scarce resource — do NOT mint one per feature pass.
+Reality check: `tests/source_audit_inventory.md` is generated by `python3 -B tests/source_audit_inventory.py` and currently reports 3,218 reader sites across 454 of 548 Rust test files. Of those, 2,716 sites in 396 files resolve to `src/**`; another 49 sites in 31 files have dynamic targets the scanner cannot prove safe (the file categories can overlap). The ordinary-PR guard compares normalized per-file reader-site multisets against the exact base tree, so adding a source read inside a grandfathered file or swapping one target for another fails; new unresolved dynamic reads fail conservatively too. Separately, `tests/source_audit_ratchet.rs` has a shrink-only allowlist for `.matches(...).count()` / `.match_indices(...).count()` assertions; it is not a corpus-wide source-audit ratchet. The existing corpus is NOT precedent for writing more. New invariants climb the ladder below, and when a grandfathered audit blocks a legitimate refactor, apply the pruning rule instead of patching its strings.
+Enforcement ladder — pick the highest rung that can express the invariant:
+1. **Compiler/type system** — exhaustive `match` without a wildcard arm, newtypes for tokens, visibility. If the compiler can enforce it, do not write a test for it.
+2. **Lints** — `#[deny]` attributes, clippy `disallowed-methods`/`disallowed-types` in `clippy.toml`.
+3. **Behavior test** — `#[gpui::test]`/`TestAppContext`, or a unit test on the extracted logic.
+4. **Runtime proof** — a devtools probe script under `scripts/agentic/` for window/focus/render behavior tests cannot reach.
+5. **Source audit** — last resort, only for genuinely load-bearing architectural invariants (e.g. the footer blur trio) that no higher rung can express.
+When a source audit is justified:
+- Prefer asserting the **absence of a dangerous pattern** (e.g. no `_ =>` wildcard, no `cx.notify()` in a hot path) over the presence of exact formatted code.
+- Scope assertions with a `function_body`-style structural helper, not whole-file substring search.
+- NEVER assert exact occurrence counts of formatted source lines (`source.matches(...).count() == N`); enumerate the expected sites explicitly instead. `tests/source_audit_ratchet.rs` enforces this.
+- Document in the test's doc comment WHY the invariant exists, so a failing assertion can be evaluated rather than blindly appeased.
+Pruning rule: when a source audit fails on legitimate refactors (no behavior change) for the third time, do not patch the string again — rewrite it structurally, move it up the ladder, or delete it.
+# Post-Task Checklist
+After every task, before responding to the user:
+- [ ] Run the smallest source, test, build, or runtime proof that can fail for the changed behavior.
+- [ ] Use `./scripts/agentic/agent-cargo.sh` (not bare `cargo`) for any cargo invocation while `./dev.sh` may be running.
+- [ ] Report any skipped verification and why it was skipped.
+</file>
+
+<file path="GLOSSARY.md">
+# Script Kit GPUI UI Glossary & Code Map
+This document defines the main user-facing UI surfaces and components in Script Kit GPUI and maps them to their respective locations in the source code.
+---
+## 1. Core Windows & Presentation Modes
+| UI Element | Description | Key Structs / Entities | Main Source File |
+| :--- | :--- | :--- | :--- |
+| **Script List** | The default launcher list view showing all scripts, recent items, and favorites when no prompts are active. Root Windows, file, and Brain search lifecycle state lives in a surface-owned store. | `ScriptListApp`, `RootSearchStore` | [render_impl.rs](src/main_sections/render_impl.rs), [app_state.rs](src/main_sections/app_state.rs), and [root_search_store.rs](src/main_sections/root_search_store.rs) |
+| **Expanded View** | Main window presentation mode (`MainWindowMode::Full`) that expands the list area to show preview details or prompt shells. | `MainWindowMode` | [app_view_state.rs](src/main_sections/app_view_state.rs#L1361) |
+| **Mini View** | Main window presentation mode (`MainWindowMode::Mini`) that uses a single-column layout for quick selection. | `MainWindowMode` | [app_view_state.rs](src/main_sections/app_view_state.rs#L1361) |
+| **Notes Window** | Floating, persistent, editor-only secondary window for creating and browsing notes. Cmd+P uses the shared Notes search container and can open regular notes or day notes inside the Notes editor. Ask AI / Cmd+Enter opens (or activates) the MAIN window's Agent Chat with the current live note snapshot staged as explicit `@note` context — the Notes window itself hosts no Agent Chat surface and always stays open. | `NotesApp`, `handoff_selected_note_to_main_agent_chat` | [window.rs](src/notes/window.rs) & [ai_handoff.rs](src/notes/window/ai_handoff.rs) |
+| **Dictation Window** | overlay panel with one anatomy across all phases: header row (timer, icon destination verb chips Paste · Today · Ask · Send, target badge), a wrapped multi-line caption block that reveals transcript words one at a time (`live_caption.rs`) and grows the window bottom-anchored as text accumulates, and the native footer rail. Processing phases keep the layout — grayed timer/badge, status label, pulsing caption, real finalize progress bar (chunked long-audio transcription). | `DictationOverlay` | [window.rs](src/dictation/window.rs#L503) |
+| **Main Input** | The top search text box where users type filter queries. | `gpui_input_state` (`TextInputState`) | [text_input.rs](src/components/text_input.rs) & [common.rs](src/render_builtins/common.rs#L50) |
+| **Footer** | Visually detached native hint capsules below an 8-point transparent gutter. On Tahoe the footer and bounded GPUI main stage are siblings inside the same main `NSWindow`, so live window drags move them in one compositor transaction; reusable secondary-window footers keep their own lifecycle. | `MainWindowFooterConfig`, `MainWindowDetachedFooterRegions` | [footer_popup.rs](src/footer_popup.rs) |
+---
+## 2. Popups & Dialogs
+| UI Element | Description | Key Structs / Entities | Main Source File |
+| :--- | :--- | :--- | :--- |
+| **Actions Menu** | Searchable, categorised contextual operations menu shown as a popover overlay (Cmd+K). | `ActionsDialog` | [dialog.rs](src/actions/dialog.rs#L520) & [window.rs](src/actions/window.rs) |
+| **Trigger Picker** | Main-list picker rows suggesting capture targets and handlers when prefix characters are typed (e.g. `;`, `+`, `:`). | `MenuSyntaxTriggerPickerState` | [menu_syntax_trigger_picker_main_list.rs](src/app_impl/menu_syntax_trigger_picker_main_list.rs) & [menu_syntax_trigger_picker.rs](src/app_impl/menu_syntax_trigger_picker.rs) |
+| **Confirm Popup** | Dialog box overlay with customizable buttons (e.g. Yes/No/Cancel). | `ConfirmPopup` | [confirm/mod.rs](src/confirm/mod.rs) |
+---
+## 3. Interactive Script Prompts
+These represent the interactive surfaces that scripts spawn when calling methods from the SDK (e.g., `arg()`, `div()`, `editor()`).
+| UI Element | Description | Key Structs / Entities | Main Source File |
+| :--- | :--- | :--- | :--- |
+| **Arg Prompt** | Simple input fields prompting for single arguments. | `ArgPrompt` / `render_arg_prompt` | [render.rs](src/render_prompts/arg/render.rs) & [arg.rs](src/render_prompts/arg.rs) |
+| **Chat Prompt** | AI agent chat surface (Agent Chat Portal) supporting streaming and prompt-specific layouts. | `ChatPrompt` / `render_chat_prompt` | [other.rs](src/render_prompts/other.rs#L441) |
+| **Editor Prompt** | Rich multi-line text editor interface. | `EditorPrompt` / `render_editor_prompt` | [editor.rs](src/render_prompts/editor.rs) |
+| **Form Prompt** | Prompts containing multiple custom input fields. | `FormPrompt` / `render_form_prompt` | [form.rs](src/render_prompts/form.rs) |
+| **Select Prompt** | Dropdown menu allowing search and selection from a list of options. | `SelectPrompt` / `render_select_prompt` | [other.rs](src/render_prompts/other.rs) |
+| **Div Prompt** | Custom HTML-like rendering surface controlled by the script. | `DivPrompt` / `render_div_prompt` | [div.rs](src/render_prompts/div.rs) |
+| **Terminal Prompt** | Embedded terminal shell/PTY widget running executions. | `TermPrompt` / `render_term_prompt` | [term.rs](src/render_prompts/term.rs) & [term_prompt/mod.rs](src/term_prompt/mod.rs) |
+---
+## 4. Built-in Surfaces
+Searchable utility lists available directly from the launcher.
+| UI Element | Description | Key Structs / Entities | Main Source File |
+| :--- | :--- | :--- | :--- |
+| **Clipboard History** | Searchable history of clipboard entries. | `ClipboardHistoryView` | [clipboard.rs](src/render_builtins/clipboard.rs) & [clipboard_history/mod.rs](src/clipboard_history/mod.rs) |
+| **Emoji Picker** | Panel for searching and inserting emojis. | `EmojiPickerView` | [emoji_picker.rs](src/render_builtins/emoji_picker.rs) |
+| **Process Manager** | Search tool to view and kill system processes. | `ProcessManager` | [process_manager.rs](src/render_builtins/process_manager.rs) |
+| **Window Switcher** | Switch focus between active application windows. | `WindowSwitcher` | [window_switcher.rs](src/render_builtins/window_switcher.rs) |
+| **App Launcher** | Search and launch installed local applications. | `AppLauncher` | [app_launcher.rs](src/render_builtins/app_launcher.rs) |
+| **Notes Browse** | List and search local Markdown notes. | `NotesBrowseView` | [notes_browse.rs](src/render_builtins/notes_browse.rs) |
+| **File Search** | Browse files on the local filesystem. | `FileSearchView` | [file_search.rs](src/render_builtins/file_search.rs) |
+| **Permissions Wizard** | Guided grant flow for the macOS permissions Script Kit needs (Accessibility, Screen Recording, Event Synthesizing, Input Monitoring, Microphone) with live TCC status cards. Opens on fresh installs and via "Set Up Permissions". | `PermissionsWizardView` | [permissions_wizard.rs](src/render_builtins/permissions_wizard.rs) & [permissions_wizard.rs](src/permissions_wizard.rs) |
+---
+## 5. Memory Layer (Script Kit Brain)
+| UI Element | Description | Key Structs / Entities | Main Source File |
+| :--- | :--- | :--- | :--- |
+| **Day Page** | Today's diary surface inside the main launcher window — same window frame as Script List, hosts the shared notes editor and defaults to `brain/days/<today>.md`. Cmd+P uses the same Notes search container/result language as the Notes Window, but selections open locally in the Day Page editor unless the explicit "Open in Notes Window" action is run. | `DayPageView`, `AppView::DayPage` | [day_page_view.rs](src/main_sections/day_page_view.rs) & [day_page_types.rs](src/main_sections/day_page_types.rs) |
+| **Script Kit Brain substrate** | Canonical markdown memory under `~/.scriptkit/brain/{days,fragments,notes,trash}` — day-page append API, fragment writer, atomic writes, trash/restore. SQLite indexes are derived only. | `BrainSubstrate`, `DayEntry` | [substrate/mod.rs](src/brain/substrate/mod.rs) |
+| **Gesture classifier** | Pure state machine classifying main-hotkey key-down/key-up into tap, hold, double-tap, and key-down instant show. Wired into main-window surface morphs. | `GestureClassifier`, `GestureEvent` | [gesture.rs](src/hotkeys/gesture.rs) & [gesture_routing.rs](src/main_sections/gesture_routing.rs) |
+| **Fragment** | Long captures (>200 words) stored as `brain/fragments/<date>-<HHMM>-<source-slug>.md` with provenance frontmatter; the day page references them via excerpt + relative link. | `BrainSubstrate::write_fragment` | [fragment.rs](src/brain/substrate/fragment.rs) |
+| **Sediment** | Clipboard auto-keep: URLs land on today's day page; non-URLs promote on re-copy (`copy_count ≥ 2`). Day Page renders kept-URL links and fragment excerpt cards. | `ClipboardSedimentTier`, `DayPageSegment` | [sediment.rs (clipboard)](src/clipboard_history/sediment.rs) & [sediment.rs (day page)](src/day_page/sediment.rs) |
+| **Post-copy tracker** | Clipboard copies flow through sediment rules without opening popup UI. URLs auto-keep to the Day Page and non-URLs promote on re-copy. | `process_text_sediment` | [sediment.rs](src/clipboard_history/sediment.rs) |
+---
+## 6. Flow Launcher (mdflow)
+| UI Element | Description | Key Structs / Entities | Main Source File |
+| :--- | :--- | :--- | :--- |
+| **Flow Desk (Conversation Desk)** | The flow-first surface (main-window "Flows" builtin): sessions, background runs, and the flow corpus in one list. Enter on a flow = converse (Threadline session; codex flows use a persistent app-server thread, other engines run one `md --events` turn per message); ⇧↵ = run once in the background; interactive (TTY-only) flows open in the Quick Terminal; Esc backgrounds/goes back (never cancels). Onboarding rows appear when mdflow is missing (Install) or the roster is empty (`md init`). Contract: `docs/ai/flow-ux-protocol.md`. | `AppView::FlowUxView`, `FlowDeskRow` | [flow_ux.rs](src/render_builtins/flow_ux.rs) |
+| **Flow sessions (Threadline)** | Per-flow conversations with uncapped-by-app v4 thread persistence keyed by flow id + definition path, so same-named flows in different projects never collide. ⌘L New Conversation archives the current thread and starts a blank active thread; archived threads are retained/read-only and Continue as New clones one into a writable child while preserving lineage. ⌘K exposes Stop (turn only), Conversation History, Copy Last Response/Transcript, confirmed Delete Conversation, and confirmed Actions-only Terminate Runtime. Terminate has no shortcut: it settles active work, forgets only runtime state, and preserves transcripts, archives, drafts, and persistence. Delete removes only the selected thread behind confirmation and a tombstone fence. Back, Background, Escape, Close, and Cmd+W never delete. Every advertised chord is held against `resolve_flow_session_key_action` by `every_advertised_session_shortcut_has_a_declared_owner`. Answer text renders through the SHARED selectable conversation renderer, not Flow's own markdown engine. | `FlowSessionMeta`, `FlowTranscriptSelection`, `AppView::FlowSessionView` | [session.rs](src/flows/session.rs) |
+| **Shared conversation renderer** | The ONE owner of how an AI answer looks and behaves across Agent Chat and Flow: paint values (`conversation_style.rs`), the selectable `TextView` seam (`conversation_text.rs`), the per-turn copy control (`conversation_actions.rs`), and the jump-to-latest pill (`list_scroll_affordance.rs`). `agent_chat/ui/style_contract.rs` is a façade over it with zero production values. A turn's render identity is `ConversationTurnRenderKey`, resolved once from its ORIGINATING message — NOT `message_id`, which moves to the assistant's id on first reply. | `ConversationStyleDef`, `conversation_markdown_view`, `ConversationTurnRenderKey` | [conversation_style.rs](src/components/conversation_style.rs) & [conversation_text.rs](src/components/conversation_text.rs) |
+| **Flow runs (in-desk supervision)** | Background run-once/workflow runs are desk rows (phase · elapsed · last output) with ⌘K Cancel Run / Copy Output / Clear Finished, plus exactly one completion/failure toast per run. The detached Flow Manager window and the Flash/Dispatch/Lens/Mission-Control UX variants are dead (`BuiltInFeature::FlowManager` aliases to the desk). | `FlowDeskRow::Run`, `FlowRunRegistry` | [flow_ux.rs](src/render_builtins/flow_ux.rs) |
+| **Flow run substrate** | mdflow owns discovery/execution (`md roster --json`, `md <flow> --events`); the app consumes the event stream STRICTLY (protocol-version check, gapless seq, ordering state machine — violations fail the run closed and kill the process; a missing exit code is never success). Cancellation is truthful: `Cancelling` → SIGTERM → 2s → SIGKILL on the process group → `Cancelled` only once the group is confirmed dead. Raw child stderr is captured as diagnostics; conversation turns stream from an append-only capture, never the bounded display tail. | `FlowRunRegistry`, `EventStreamValidator`, `launch_flow` | [run_registry.rs](src/flows/run_registry.rs) & [runner.rs](src/flows/runner.rs) |
+</file>
+
+<file path="src/warning_banner.rs">
+#![allow(dead_code)]
+use gpui::*;
+use std::rc::Rc;
+use crate::components::button::{Button, ButtonColors, ButtonVariant, TRANSPARENT};
+use crate::theme::{
+best_readable_text_hex,
+opacity::{OPACITY_SUBTLE, OPACITY_WARNING_BANNER_HOVER},
+Theme,
+};
+#[derive(Clone, Copy, Debug)]
+pub struct WarningBannerColors {
+pub background: u32,
+pub text: u32,
+pub icon: u32,
+pub dismiss: u32,
+pub dismiss_hover: u32,
+}
+impl WarningBannerColors {
+pub fn from_theme(theme: &Theme) -> Self {
+let colors = &theme.colors;
+let foreground = best_readable_text_hex(colors.ui.warning);
+Self {
+background: colors.ui.warning,
+text: foreground,
+icon: foreground,
+dismiss: foreground,
+dismiss_hover: foreground,
+}
+}
+}
+impl Default for WarningBannerColors {
+fn default() -> Self {
+Self {
+background: 0xf59e0b,
+text: 0x1e1e1e,
+icon: 0x1e1e1e,
+dismiss: 0x1e1e1e,
+dismiss_hover: 0xffffff,
+}
+}
+}
+pub type OnClickCallback = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+/// Callback type for banner dismiss events
+pub type OnDismissCallback = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+#[derive(IntoElement)]
+pub struct WarningBanner {
+message: SharedString,
+colors: WarningBannerColors,
+on_click: Option<Rc<OnClickCallback>>,
+on_dismiss: Option<Rc<OnDismissCallback>>,
+}
+impl WarningBanner {
+pub fn new(message: impl Into<SharedString>, colors: WarningBannerColors) -> Self {
+Self {
+message: message.into(),
+colors,
+on_click: None,
+on_dismiss: None,
+}
+}
+pub fn on_click(mut self, callback: OnClickCallback) -> Self {
+self.on_click = Some(Rc::new(callback));
+self
+}
+pub fn on_dismiss(mut self, callback: OnDismissCallback) -> Self {
+self.on_dismiss = Some(Rc::new(callback));
+self
+}
+pub fn get_message(&self) -> &SharedString {
+&self.message
+}
+}
+impl RenderOnce for WarningBanner {
+fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+let colors = self.colors;
+let on_click_callback = self.on_click;
+let on_dismiss_callback = self.on_dismiss;
+let message_for_log = self.message.clone();
+let icon = div()
+.flex()
+.items_center()
+.justify_center()
+.w(px(20.))
+.h(px(20.))
+.text_base()
+.text_color(rgb(colors.icon))
+.font_weight(FontWeight::BOLD)
+.child("⚠");
+let message_text = div()
+.flex_1()
+.min_w(px(0.0))
+.overflow_hidden()
+.text_sm()
+.text_ellipsis()
+.text_color(rgb(colors.text))
+.font_weight(FontWeight::MEDIUM)
+.child(self.message.clone());
+let dismiss_btn = {
+let callback = on_dismiss_callback.clone();
+let dismiss_colors = ButtonColors {
+text_color: colors.dismiss,
+text_hover: colors.dismiss_hover,
+background: TRANSPARENT,
+background_hover: 0x000000,
+accent: colors.dismiss,
+border: TRANSPARENT,
+focus_ring: colors.dismiss_hover,
+focus_tint: TRANSPARENT,
+hover_overlay: crate::ui_foundation::hex_to_rgba_with_opacity(
+0x000000,
+OPACITY_SUBTLE,
+),
+};
+Button::new("warning-banner:dismiss", "×", dismiss_colors)
+.variant(ButtonVariant::Icon)
+.on_click(Box::new(move |event, window, cx| {
+cx.stop_propagation();
+tracing::debug!("Warning banner dismiss clicked");
+if let Some(ref cb) = callback {
+cb(event, window, cx);
+}
+}))
+};
+let mut banner = div()
+.id("warning-banner")
+.flex()
+.flex_row()
+.items_center()
+.w_full()
+.gap(rems(0.5))
+.px(rems(0.75))
+.py(rems(0.5))
+.bg(rgb(colors.background))
+.rounded(px(6.))
+.child(icon)
+.child(message_text)
+.child(dismiss_btn);
+if let Some(callback) = on_click_callback {
+banner = banner
+.cursor_pointer()
+.hover(|s| {
+s.bg(rgba(crate::ui_foundation::hex_to_rgba_with_opacity(
+colors.background,
+OPACITY_WARNING_BANNER_HOVER,
+)))
+})
+.on_click(move |event, window, cx| {
+tracing::debug!(message = %message_for_log, "Warning banner clicked");
+callback(event, window, cx);
+});
+}
+banner
+}
+}
+impl WarningBanner {
+pub fn from_theme(message: impl Into<SharedString>, theme: &Theme) -> Self {
+let colors = WarningBannerColors::from_theme(theme);
+Self::new(message, colors)
+}
+}
+</file>
+
+<file path="src/test_support/agent_chat_portal.rs">
+use std::ops::Range;
+use crate::ai::agent_chat::ui::portal_contract::{
+apply_portal_replacement, clear_terminal_portal_state, decide_portal_open,
+exact_replacement_target_for_range, next_portal_state, picker_portal_query,
+portal_target_from_inline_token, portal_target_from_part, AgentChatPortalOpenRefusal,
+AgentChatPortalSessionEvent, AgentChatPortalSessionState,
+};
+use crate::ai::context_selector::types::ContextPortalKind;
+use crate::ai::message_parts::AiContextPart;
+fn parse_kind(kind: &str) -> Option<ContextPortalKind> {
+match kind {
+"file_search" => Some(ContextPortalKind::FileSearch),
+"browser_history" => Some(ContextPortalKind::BrowserHistory),
+"browser_tabs" => Some(ContextPortalKind::BrowserTabs),
+"clipboard_history" => Some(ContextPortalKind::ClipboardHistory),
+"dictation_history" => Some(ContextPortalKind::DictationHistory),
+"script_search" => Some(ContextPortalKind::ScriptSearch),
+"scriptlet_search" => Some(ContextPortalKind::ScriptletSearch),
+"skill_search" => Some(ContextPortalKind::SkillSearch),
+"notes_browse" => Some(ContextPortalKind::NotesBrowse),
+"agent_chat_history" => Some(ContextPortalKind::AgentChatHistory),
+"terminal" => Some(ContextPortalKind::Terminal),
+_ => None,
+}
+}
+fn format_kind(kind: ContextPortalKind) -> String {
+match kind {
+ContextPortalKind::FileSearch => "file_search",
+ContextPortalKind::BrowserHistory => "browser_history",
+ContextPortalKind::BrowserTabs => "browser_tabs",
+ContextPortalKind::ClipboardHistory => "clipboard_history",
+ContextPortalKind::DictationHistory => "dictation_history",
+ContextPortalKind::ScriptSearch => "script_search",
+ContextPortalKind::ScriptletSearch => "scriptlet_search",
+ContextPortalKind::SkillSearch => "skill_search",
+ContextPortalKind::NotesBrowse => "notes_browse",
+ContextPortalKind::AgentChatHistory => "agent_chat_history",
+ContextPortalKind::Terminal => "terminal",
+}
+.to_string()
+}
+#[doc(hidden)]
+pub fn picker_query(kind: &str, session_query: &str) -> Option<String> {
+Some(picker_portal_query(parse_kind(kind)?, session_query))
+}
+#[doc(hidden)]
+pub fn inline_target(token: &str) -> Option<(String, String)> {
+portal_target_from_inline_token(token).map(|(kind, query)| (format_kind(kind), query))
+}
+#[doc(hidden)]
+pub fn part_target(part: &AiContextPart) -> Option<(String, String)> {
+portal_target_from_part(part).map(|(kind, query)| (format_kind(kind), query))
+}
+#[doc(hidden)]
+pub fn dictation_part_token(id: &str) -> Option<String> {
+let part = AiContextPart::ResourceUri {
+uri: format!("kit://dictation-history?id={id}"),
+label: format!("Dictation: {id}"),
+};
+crate::ai::context_mentions::part_to_inline_token(&part)
+}
+#[doc(hidden)]
+pub fn production_dictation_part(id: &str, preview: &str) -> AiContextPart {
+let entry = crate::dictation::DictationHistoryEntry {
+version: crate::dictation::DICTATION_HISTORY_ENTRY_VERSION,
+id: id.to_string(),
+timestamp: "2026-04-16T00:00:00Z".to_string(),
+transcript: preview.to_string(),
+preview: preview.to_string(),
+target_id: crate::dictation::DictationTarget::TabAiHarness
+.sticky_label()
+.to_string(),
+target_label_snapshot: "Agent Chat".to_string(),
+audio_duration_ms: 0,
+};
+crate::ai::context_mentions::dictation_history_part_for_entry(&entry)
+}
+#[doc(hidden)]
+pub fn part_inline_token(part: &AiContextPart) -> Option<String> {
+crate::ai::context_mentions::part_to_inline_token(part)
+}
+#[doc(hidden)]
+pub fn clipboard_part_token(id: &str) -> Option<String> {
+let _ = id;
+Some("@clipboard".to_string())
+}
+#[doc(hidden)]
+pub fn replacement(
+current_text: &str,
+char_range: Range<usize>,
+fallback_cursor: usize,
+replacement_text: &str,
+) -> (String, usize, bool) {
+let target = exact_replacement_target_for_range(current_text, char_range, fallback_cursor);
+apply_portal_replacement(current_text, &target, replacement_text)
+}
+#[doc(hidden)]
+pub fn open_refusal(allowed: bool, has_host_callback: bool) -> Option<&'static str> {
+match decide_portal_open(allowed, has_host_callback) {
+Ok(()) => None,
+Err(AgentChatPortalOpenRefusal::UnsupportedByHost) => Some("unsupported_by_host"),
+Err(AgentChatPortalOpenRefusal::MissingHostCallback) => Some("missing_host_callback"),
+}
+}
+fn parse_state(value: &str) -> Option<AgentChatPortalSessionState> {
+match value {
+"idle" => Some(AgentChatPortalSessionState::Idle),
+"staged" => Some(AgentChatPortalSessionState::Staged),
+"active" => Some(AgentChatPortalSessionState::Active),
+"accepted" => Some(AgentChatPortalSessionState::Accepted),
+"cancelled" => Some(AgentChatPortalSessionState::Cancelled),
+"orphaned" => Some(AgentChatPortalSessionState::Orphaned),
+_ => None,
+}
+}
+fn format_state(value: AgentChatPortalSessionState) -> String {
+match value {
+AgentChatPortalSessionState::Idle => "idle",
+AgentChatPortalSessionState::Staged => "staged",
+AgentChatPortalSessionState::Active => "active",
+AgentChatPortalSessionState::Accepted => "accepted",
+AgentChatPortalSessionState::Cancelled => "cancelled",
+AgentChatPortalSessionState::Orphaned => "orphaned",
+}
+.to_string()
+}
+#[doc(hidden)]
+pub fn state_transition(state: &str, event: &str) -> Option<String> {
+let state = parse_state(state)?;
+let event = match event {
+"stage" => AgentChatPortalSessionEvent::Stage,
+"activate" => AgentChatPortalSessionEvent::Activate,
+"accept" => AgentChatPortalSessionEvent::Accept,
+"cancel" => AgentChatPortalSessionEvent::Cancel,
+"orphan" => AgentChatPortalSessionEvent::Orphan,
+_ => return None,
+};
+next_portal_state(state, event).map(format_state)
+}
+#[doc(hidden)]
+pub fn clear_terminal_state(state: &str) -> Option<String> {
+parse_state(state)
+.map(clear_terminal_portal_state)
+.map(format_state)
+}
+</file>
+
+<file path="src/list_item_tests.rs">
+#[cfg(test)]
+mod tests {
+use crate::list_item::{
+coerce_eligibility_selection, first_selectable_eligibility_index, format_shortcut_display,
+last_selectable_eligibility_index, selectable_eligibility_index_at_or_after,
+selectable_eligibility_index_at_or_before, should_show_row_shortcut,
+should_show_search_description, should_show_search_shortcut, RowEligibility,
+RowShortcutVisibilityPolicy, LIST_ITEM_MOUSE_HOVER_TOOLTIPS_ENABLED,
+};
+#[test]
+fn row_eligibility_navigation_skips_inert_rows_and_keeps_disabled_explanations() {
+let rows = [
+RowEligibility::inert(),
+RowEligibility::enabled_action(),
+RowEligibility::inert(),
+RowEligibility::disabled_explanation(),
+];
+assert_eq!(first_selectable_eligibility_index(&rows), Some(1));
+assert_eq!(last_selectable_eligibility_index(&rows), Some(3));
+assert_eq!(selectable_eligibility_index_at_or_before(&rows, 2), Some(1));
+assert_eq!(selectable_eligibility_index_at_or_after(&rows, 2), Some(3));
+assert_eq!(coerce_eligibility_selection(&rows, 0), Some(1));
+assert_eq!(coerce_eligibility_selection(&rows, 2), Some(3));
+assert_eq!(coerce_eligibility_selection(&rows, 99), Some(3));
+assert!(!rows[3].activatable);
+}
+#[test]
+fn row_eligibility_navigation_returns_none_without_selectable_rows() {
+let rows = [RowEligibility::inert(), RowEligibility::inert()];
+assert_eq!(first_selectable_eligibility_index(&rows), None);
+assert_eq!(last_selectable_eligibility_index(&rows), None);
+assert_eq!(coerce_eligibility_selection(&rows, 0), None);
+}
+#[test]
+#[should_panic(expected = "activatable rows must be selectable")]
+fn row_eligibility_rejects_activatable_non_selectable_rows() {
+let _ = RowEligibility::new(true, false, true);
+}
+#[test]
+#[should_panic(expected = "selectable rows must be focusable")]
+fn row_eligibility_rejects_selectable_non_focusable_rows() {
+let _ = RowEligibility::new(false, true, false);
+}
+#[test]
+fn legacy_rows_share_the_disabled_hover_tooltip_policy() {
+assert!(!LIST_ITEM_MOUSE_HOVER_TOOLTIPS_ENABLED);
+}
+#[test]
+fn test_format_shortcut_display_plus_delimited() {
+assert_eq!(format_shortcut_display("cmd+shift+k"), "⌘⇧K");
+assert_eq!(format_shortcut_display("ctrl+c"), "⌃C");
+assert_eq!(format_shortcut_display("alt+enter"), "⌥↩");
+}
+#[test]
+fn test_format_shortcut_display_space_delimited() {
+assert_eq!(format_shortcut_display("opt i"), "⌥I");
+assert_eq!(format_shortcut_display("cmd shift k"), "⌘⇧K");
+assert_eq!(format_shortcut_display("ctrl alt t"), "⌃⌥T");
+assert_eq!(format_shortcut_display("cmd g"), "⌘G");
+assert_eq!(format_shortcut_display("opt space"), "⌥␣");
+assert_eq!(format_shortcut_display("cmd shift m"), "⌘⇧M");
+}
+#[test]
+fn test_format_shortcut_display_already_native() {
+assert_eq!(format_shortcut_display("⌘⇧K"), "⌘⇧K");
+assert_eq!(format_shortcut_display("⌥I"), "⌥I");
+}
+#[test]
+fn test_format_shortcut_display_special_keys() {
+assert_eq!(format_shortcut_display("escape"), "⎋");
+assert_eq!(format_shortcut_display("tab"), "⇥");
+assert_eq!(format_shortcut_display("backspace"), "⌫");
+assert_eq!(format_shortcut_display("up"), "↑");
+assert_eq!(format_shortcut_display("down"), "↓");
+}
+#[test]
+fn test_format_shortcut_display_mixed_format() {
+assert_eq!(format_shortcut_display("cmd + shift + k"), "⌘⇧K");
+}
+#[test]
+fn test_should_show_search_shortcut_selected_only() {
+assert!(should_show_search_shortcut(true, true, false));
+assert!(should_show_search_shortcut(true, true, true));
+assert!(should_show_search_shortcut(false, true, false));
+assert!(!should_show_search_shortcut(true, false, false));
+assert!(!should_show_search_shortcut(true, false, true));
+assert!(!should_show_search_shortcut(false, false, false));
+}
+#[test]
+fn test_row_shortcut_visibility_selected_only_policy() {
+let policy = RowShortcutVisibilityPolicy::SelectedOnly;
+assert!(should_show_row_shortcut(policy, true, false));
+assert!(should_show_row_shortcut(policy, true, true));
+assert!(!should_show_row_shortcut(policy, false, false));
+assert!(!should_show_row_shortcut(policy, false, true));
+}
+#[test]
+fn test_row_shortcut_visibility_all_rows_policy() {
+let policy = RowShortcutVisibilityPolicy::AllRows;
+assert!(should_show_row_shortcut(policy, true, false));
+assert!(should_show_row_shortcut(policy, true, true));
+assert!(should_show_row_shortcut(policy, false, false));
+assert!(should_show_row_shortcut(policy, false, true));
+}
+#[test]
+fn test_should_show_search_description_only_when_selected_hovered_or_description_matches() {
+assert!(!should_show_search_description(
+false,
+false,
+false
+));
+assert!(should_show_search_description(
+true,
+false,
+false
+));
+assert!(should_show_search_description(
+false,
+true,
+false
+));
+assert!(should_show_search_description(
+false,
+false,
+true
+));
+}
+}
+</file>
+
+<file path="src/actions_button_visibility_tests.rs">
+#[cfg(test)]
+mod tests {
+use std::fs;
+fn read_all_rs_in_dir(dir: &str) -> String {
+let mut content = String::new();
+for entry in fs::read_dir(dir).unwrap_or_else(|_| panic!("Failed to read dir {}", dir)) {
+let entry = entry.expect("dir entry");
+let path = entry.path();
+if path.extension().is_some_and(|ext| ext == "rs") {
+content.push_str(
+&fs::read_to_string(&path)
+.unwrap_or_else(|_| panic!("Failed to read {}", path.display())),
+);
+content.push('\n');
+}
+}
+content
+}
+fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+let start = source
+.find(signature)
+.unwrap_or_else(|| panic!("{signature} function not found"));
+let after_start = &source[start..];
+let open_brace = after_start
+.find('{')
+.unwrap_or_else(|| panic!("{signature} function body not found"));
+let body_start = start + open_brace;
+let mut depth = 0usize;
+for (offset, ch) in source[body_start..].char_indices() {
+match ch {
+'{' => depth += 1,
+'}' => {
+depth -= 1;
+if depth == 0 {
+return &source[body_start..body_start + offset + 1];
+}
+}
+_ => {}
+}
+}
+panic!("{signature} function body did not close")
+}
+/// Extract the block body of a `match` arm (`Pattern => { ... }`) from an
+/// already-scoped function body. Panics if the arm is missing or does not
+/// use a block, so assertions stay pinned to the arm they audit.
+fn match_arm_body<'a>(function_body: &'a str, arm_marker: &str) -> &'a str {
+let arm_start = function_body
+.find(arm_marker)
+.unwrap_or_else(|| panic!("{arm_marker} arm must exist"));
+let after_arm = &function_body[arm_start..];
+let open_brace = after_arm
+.find('{')
+.unwrap_or_else(|| panic!("{arm_marker} arm must use a block body"));
+let body_start = arm_start + open_brace;
+let mut depth = 0usize;
+for (offset, ch) in function_body[body_start..].char_indices() {
+match ch {
+'{' => depth += 1,
+'}' => {
+depth -= 1;
+if depth == 0 {
+return &function_body[body_start..body_start + offset + 1];
+}
+}
+_ => {}
+}
+}
+panic!("{arm_marker} arm body did not close")
+}
+#[test]
+fn test_has_actions_helper_exists_and_handles_clipboard() {
+let content = read_all_rs_in_dir("src/app_actions/handle_action");
+assert!(
+content.contains("fn has_actions"),
+"Expected ScriptListApp::has_actions() helper to exist"
+);
+assert!(
+content.contains("ClipboardHistoryView"),
+"has_actions() should account for ClipboardHistoryView selection"
+);
+assert!(
+content.contains("selected_clipboard_entry"),
+"has_actions() should use selected_clipboard_entry() for clipboard history"
+);
+}
+#[test]
+fn test_footer_uses_config_driven_footer_rail() {
+let content = fs::read_to_string("src/render_script_list/mod.rs")
+.expect("Failed to read src/render_script_list/mod.rs");
+assert!(
+content.contains("render_main_window_footer_config_rail"),
+"render_script_list footer must render the shared config-driven rail"
+);
+assert!(
+content.contains("emit_prompt_hint_audit(\"render_script_list::full\""),
+"render_script_list footer must emit a prompt hint audit"
+);
+}
+#[test]
+fn test_cmd_k_routes_through_shared_dispatcher() {
+let content = fs::read_to_string("src/render_script_list/mod.rs")
+.expect("Failed to read src/render_script_list/mod.rs");
+let cmdk_pos = content
+.find("Cmd+K")
+.expect("Cmd+K handler not found in render_script_list.rs");
+let after_cmdk = &content[cmdk_pos..content.len().min(cmdk_pos + 300)];
+assert!(
+after_cmdk.contains("handle_cmd_k_actions_toggle"),
+"Cmd+K handling should route through the shared dispatcher (handle_cmd_k_actions_toggle). Found section:\n{}",
+after_cmdk
+);
+assert!(
+!after_cmdk.contains("toggle_actions(cx"),
+"Cmd+K must not directly call toggle_actions(); it should use handle_cmd_k_actions_toggle. Found section:\n{}",
+after_cmdk
+);
+}
+#[test]
+fn test_agent_hint_is_clickable_button() {
+let content = fs::read_to_string("src/components/launcher_ask_ai_hint.rs")
+.expect("Failed to read src/components/launcher_ask_ai_hint.rs");
+let hint_pos = content
+.find(".id(\"agent-hint-button\")")
+.expect("Agent hint container not found in src/components/launcher_ask_ai_hint.rs");
+let hint_section = &content[hint_pos..content.len().min(hint_pos + 1200)];
+assert!(
+hint_section.contains(".cursor_pointer()"),
+"Agent hint should be clickable (cursor_pointer). Section:\n{}",
+hint_section
+);
+assert!(
+hint_section.contains(".on_click("),
+"Agent hint should have an on_click handler. Section:\n{}",
+hint_section
+);
+}
+#[test]
+fn test_mini_mode_branch_keeps_shared_ask_ai_hint_and_skips_preview_footer() {
+let content = fs::read_to_string("src/render_script_list/mod.rs")
+.expect("Failed to read src/render_script_list/mod.rs");
+let render_impl = fs::read_to_string("src/main_sections/render_impl.rs")
+.expect("Failed to read src/main_sections/render_impl.rs");
+let footer_popup =
+fs::read_to_string("src/footer_popup.rs").expect("Failed to read src/footer_popup.rs");
+assert!(
+content.contains("let is_mini = self.main_window_mode == MainWindowMode::Mini;"),
+"mini mode flag should be computed from main_window_mode"
+);
+assert!(
+!content.contains("agent-hint-button"),
+"Script list must not render a local agent hint — the Agent button lives in the native footer"
+);
+assert!(
+content.contains("if is_mini {")
+&& content
+.contains("// Mini mode: single column, toggle between list and info panel")
+&& content.contains("mode = \"mini\""),
+"mini mode branch should render the single-column layout and mini perf log"
+);
+assert!(
+render_impl.contains("self.sync_main_footer_popup(window, cx);"),
+"render loop should sync the popup footer when mini mode visibility changes"
+);
+assert!(
+footer_popup.contains("struct FooterButtonConfig")
+&& footer_popup.contains("struct MainWindowFooterConfig")
+&& footer_popup.contains("FooterAction::Run")
+&& footer_popup.contains("FooterAction::Actions")
+&& footer_popup.contains("FooterAction::Ai"),
+"popup footer should define config types and all three canonical actions"
+);
+}
+#[test]
+fn test_native_footer_bridge_exists_and_uses_canonical_channel() {
+let content = fs::read_to_string("src/app_impl/ui_window.rs")
+.expect("Failed to read src/app_impl/ui_window.rs");
+assert!(
+content.contains("fn ensure_main_footer_action_listener"),
+"Native footer bridge listener must exist in ui_window.rs"
+);
+assert!(
+content.contains("footer_popup::footer_action_channel()"),
+"Native footer bridge must use the canonical footer_action_channel()"
+);
+assert!(
+content.contains("handle_main_footer_action(action"),
+"Native footer bridge must route through handle_main_footer_action()"
+);
+}
+#[test]
+fn test_native_footer_dispatches_canonical_actions() {
+let content = fs::read_to_string("src/app_impl/ui_window.rs")
+.expect("Failed to read src/app_impl/ui_window.rs");
+let handler = function_body(&content, "fn handle_main_footer_action");
+assert!(
+handler.contains("dispatch_main_window_footer_action(action"),
+"handle_main_footer_action must route through dispatch_main_window_footer_action()"
+);
+let dispatcher = function_body(&content, "fn dispatch_main_window_footer_action");
+let run_arm = match_arm_body(dispatcher, "crate::footer_popup::FooterAction::Run =>");
+assert!(
+run_arm.contains("try_run_ready_agent_chat_script"),
+"FooterAction::Run must check for a ready Agent Chat script before falling back"
+);
+assert!(
+run_arm.contains("execute_selected"),
+"FooterAction::Run must fall back to execute_selected() for non-Agent Chat views"
+);
+let actions_arm =
+match_arm_body(dispatcher, "crate::footer_popup::FooterAction::Actions =>");
+assert!(
+actions_arm.contains("dispatch_actions_toggle_for_current_view("),
+"FooterAction::Actions must dispatch through dispatch_actions_toggle_for_current_view(), \
+which owns the has_actions() gating"
+);
+assert!(
+!actions_arm.contains("self.toggle_actions("),
+"FooterAction::Actions must not bypass dispatch_actions_toggle_for_current_view()"
+);
+let paste_arm = match_arm_body(
+dispatcher,
+"crate::footer_popup::FooterAction::PasteResponse =>",
+);
+assert!(
+paste_arm.contains("paste_latest_agent_chat_response_to_frontmost"),
+"FooterAction::PasteResponse must paste the latest Agent Chat assistant response"
+);
+let ai_arm = match_arm_body(dispatcher, "crate::footer_popup::FooterAction::Ai =>");
+assert!(
+ai_arm.contains("open_tab_ai_agent_chat_with_entry_intent"),
+"FooterAction::Ai must dispatch to open_tab_ai_agent_chat_with_entry_intent()"
+);
+}
+/// The Agent affordance lives in the standard native footer buttons for
+/// the ScriptList view (FooterAction::Ai with the ⌘↵ shortcut). The shared
+/// launcher hint component must keep using the shared footer hint renderer
+/// so it cannot drift visually if it is re-adopted.
+#[test]
+fn test_agent_button_lives_in_native_footer() {
+let footer_content = fs::read_to_string("src/app_impl/ui_window.rs")
+.expect("Failed to read src/app_impl/ui_window.rs");
+let hint_content = fs::read_to_string("src/components/launcher_ask_ai_hint.rs")
+.expect("Failed to read src/components/launcher_ask_ai_hint.rs");
+// Agent button is part of the standard native footer buttons
+let standard_fn = footer_content
+.find("fn standard_main_window_footer_buttons")
+.expect("standard_main_window_footer_buttons must exist");
+let standard_section =
+&footer_content[standard_fn..footer_content.len().min(standard_fn + 2500)];
+assert!(
+standard_section.contains("FooterAction::Ai") && standard_section.contains("\"Agent\""),
+"Agent button should be in the standard native footer buttons"
+);
+assert!(
+standard_section.contains("\"⌘↵\""),
+"Agent footer button should advertise the ⌘↵ shortcut"
+);
+assert!(
+hint_content.contains("render_footer_hint_content"),
+"Agent hint should use the shared footer hint renderer"
+);
+assert!(
+hint_content.contains("\"Agent\".into()"),
+"Agent hint should show the Agent label"
+);
+}
+#[test]
+fn test_native_footer_guards_mini_scriptlist_surface() {
+let content = fs::read_to_string("src/app_impl/ui_window.rs")
+.expect("Failed to read src/app_impl/ui_window.rs");
+let handler_pos = content
+.find("fn handle_main_footer_action")
+.expect("handle_main_footer_action must exist");
+let handler_section = &content[handler_pos..content.len().min(handler_pos + 1500)];
+assert!(
+handler_section.contains("main_window_footer_config_with_cx("),
+"Native footer handler must check the view-driven footer config to guard dispatch"
+);
+assert!(
+handler_section.contains("is_main_window_visible()"),
+"Native footer handler must check window visibility"
+);
+}
+#[test]
+fn test_sync_footer_popup_starts_listener() {
+let content = fs::read_to_string("src/app_impl/ui_window.rs")
+.expect("Failed to read src/app_impl/ui_window.rs");
+let sync_pos = content
+.find("fn sync_main_footer_popup")
+.expect("sync_main_footer_popup must exist in ui_window.rs");
+let sync_section = &content[sync_pos..content.len().min(sync_pos + 400)];
+assert!(
+sync_section.contains("ensure_main_footer_action_listener"),
+"sync_main_footer_popup must call ensure_main_footer_action_listener to start the bridge"
+);
+}
+#[test]
+fn test_dispatcher_has_shared_dialog_fallback() {
+let content = fs::read_to_string("src/app_impl/actions_toggle.rs")
+.expect("Failed to read src/app_impl/actions_toggle.rs");
+assert!(
+content.contains("dispatch_shared_actions_toggle_fallback"),
+"Dispatcher must have a shared-dialog fallback method"
+);
+assert!(
+content.contains("current_view_supports_shared_actions()"),
+"Dispatcher must check current_view_supports_shared_actions() before the unsupported-view fallthrough"
+);
+assert!(
+content.contains("actions_toggle_dispatch_routed_shared_dialog_fallback"),
+"Shared-dialog fallback must emit a structured tracing event"
+);
+}
+#[test]
+fn test_cmd_k_handler_uses_shared_dispatcher() {
+let content = fs::read_to_string("src/app_impl/actions_toggle.rs")
+.expect("Failed to read src/app_impl/actions_toggle.rs");
+let handler_pos = content
+.find("fn handle_cmd_k_actions_toggle")
+.expect("handle_cmd_k_actions_toggle must exist in actions_toggle.rs");
+let handler_section = &content[handler_pos..content.len().min(handler_pos + 600)];
+assert!(
+handler_section.contains("dispatch_actions_toggle_for_current_view"),
+"handle_cmd_k_actions_toggle must delegate to dispatch_actions_toggle_for_current_view"
+);
+assert!(
+handler_section.contains("cmd_k_actions_routed"),
+"handle_cmd_k_actions_toggle must emit cmd_k_actions_routed tracing event"
+);
+}
+#[test]
+fn test_startup_cmd_k_uses_shared_dispatcher_after_popup_router() {
+let content = fs::read_to_string("src/app_impl/startup.rs")
+.expect("Failed to read src/app_impl/startup.rs");
+let route_pos = content
+.find("match this.route_key_to_actions_dialog(")
+.expect("startup.rs must route popup-owned keys through route_key_to_actions_dialog()");
+let intent_pos = content[route_pos..]
+.find("main_window_actions_key_intent(&this.current_view, event)")
+.map(|offset| route_pos + offset)
+.expect("startup.rs must classify local actions key intent after popup routing");
+let intent_section = &content[intent_pos..content.len().min(intent_pos + 500)];
+assert!(
+intent_section.contains("handle_main_window_actions_key_intent(intent, window, cx)"),
+"startup actions key intent must route through the named intent handler. Found:\n{}",
+intent_section
+);
+assert!(
+content.contains("self.handle_cmd_k_actions_toggle(window, cx)"),
+"ToggleActions must still route through handle_cmd_k_actions_toggle()"
+);
+assert!(
+!intent_section.contains("toggle_actions_for_host("),
+"startup actions key intent must not bypass the shared dispatcher with toggle_actions_for_host(). Found:\n{}",
+intent_section
+);
+assert!(
+route_pos < intent_pos,
+"startup must check route_key_to_actions_dialog() before local actions key intent dispatch"
+);
+}
+#[test]
+fn test_native_footer_buttons_use_first_mouse_subclass() {
+let content =
+fs::read_to_string("src/footer_popup.rs").expect("Failed to read src/footer_popup.rs");
+assert!(
+content.contains("ScriptKitFooterButton"),
+"Footer buttons must use the ScriptKitFooterButton subclass"
+);
+assert!(
+content.contains("footer_button_class()"),
+"make_footer_hint_item must allocate from footer_button_class()"
+);
+assert!(
+content.contains("footer_button_accepts_first_mouse"),
+"ScriptKitFooterButton must implement acceptsFirstMouse:"
+);
+assert!(
+content.contains("footer_button_mouse_down_can_move_window"),
+"ScriptKitFooterButton must implement mouseDownCanMoveWindow"
+);
+let hint_item_pos = content
+.find("unsafe fn make_footer_hint_item")
+.expect("make_footer_hint_item must exist");
+let hint_item_end = content[hint_item_pos..]
+.find("\nunsafe fn ")
+.or_else(|| content[hint_item_pos..].find("\nfn "))
+.map(|offset| hint_item_pos + offset)
+.unwrap_or(content.len());
+let hint_item_section = &content[hint_item_pos..hint_item_end];
+assert!(
+!hint_item_section.contains("msg_send![class!(NSButton), alloc]"),
+"Footer hint items must not allocate plain NSButton — use footer_button_class()"
+);
+}
+#[test]
+fn test_native_footer_hit_test_resolves_whole_item_to_button() {
+let content =
+fs::read_to_string("src/footer_popup.rs").expect("Failed to read src/footer_popup.rs");
+assert!(
+content.contains("fn footer_item_button_at_point"),
+"Native footer must resolve visible item slots by geometry, not only from super hitTest"
+);
+assert!(
+content.contains("fn footer_button_in_subviews"),
+"Footer hit testing must be able to find a button inside an item wrapper"
+);
+assert!(
+content.contains("fn nearest_footer_item_button"),
+"Footer hit testing must map text-field/wrapper hits to the sibling button"
+);
+let hit_test_pos = content
+.find("extern \"C\" fn footer_hit_test")
+.expect("footer_hit_test must exist");
+let hit_test_section = &content[hit_test_pos..content.len().min(hit_test_pos + 2200)];
+let geometry_pos = hit_test_section
+.find("footer_item_button_at_point(this_id, point)")
+.expect("footer_hit_test must call footer_item_button_at_point(this_id, point)");
+let super_pos = hit_test_section
+.find("super(this_id, class!(NSVisualEffectView)), hitTest: point")
+.expect("footer_hit_test must retain the AppKit super fallback");
+assert!(
+geometry_pos < super_pos,
+"Footer item geometry must be checked before super hitTest so front sibling overlays cannot steal item-slot clicks. Found:\n{}",
+hit_test_section
+);
+assert!(
+hit_test_section.contains("nearest_footer_button(hit)"),
+"footer_hit_test must preserve direct button hits. Found:\n{}",
+hit_test_section
+);
+assert!(
+hit_test_section.contains("nearest_footer_item_button(hit)"),
+"footer_hit_test must resolve footer item wrapper hits to the sibling button. Found:\n{}",
+hit_test_section
+);
+let helper_pos = content
+.find("fn footer_item_button_at_point")
+.expect("footer_item_button_at_point must exist");
+let helper_section = &content[helper_pos..content.len().min(helper_pos + 3000)];
+assert!(
+helper_section.contains("FOOTER_HINTS_ID")
+&& helper_section.contains("convertPoint")
+&& helper_section.contains("footer_button_in_subviews(item)"),
+"Geometry helper must search the native hints view, convert points into item bounds, and return the contained button. Found:\n{}",
+helper_section
+);
+}
+#[test]
+fn test_native_footer_left_info_view_is_passthrough() {
+let content =
+fs::read_to_string("src/footer_popup.rs").expect("Failed to read src/footer_popup.rs");
+assert!(
+content.contains("fn footer_passthrough_view_class")
+&& content.contains("footer_passthrough_hit_test"),
+"Passive native footer overlays need a pass-through view class"
+);
+let ensure_pos = content.find("unsafe fn install_footer_host_view").expect(
+"install_footer_host_view must exist — if it was renamed, repoint this audit at \
+the function that allocates left_info_view",
+);
+let ensure_section = &content[ensure_pos..content.len().min(ensure_pos + 5000)];
+assert!(
+ensure_section.contains("msg_send![footer_passthrough_view_class(), alloc]"),
+"left_info_view must use a hit-test pass-through class so it cannot cover footer item slots. Found:\n{}",
+ensure_section
+);
+assert!(
+!ensure_section.contains("let left_info_view: id = msg_send![class!(NSView), alloc];"),
+"left_info_view must not be a plain NSView because it can steal super hitTest over the hint strip"
+);
+}
+/// Fails if the ScriptList footer rail stops dispatching clicks through
+/// the canonical footer action authority. The old clickable strip
+/// hand-rolled per-button callbacks (toggle_actions, open_tab_ai…, a
+/// local has_actions() gate); the config-driven rail routes every button
+/// through dispatch_main_window_footer_action, the same authority the
+/// native footer and Cmd+K use — gating and view-aware routing are locked
+/// there (see test_native_footer_dispatches_canonical_actions and
+/// test_cmd_k_handler_uses_shared_dispatcher).
+/// Complements test_footer_uses_config_driven_footer_rail by verifying
+/// the actual callback wiring, not just the function name.
+#[test]
+fn test_full_footer_clickable_strip_dispatches_canonical_actions() {
+let content = fs::read_to_string("src/render_script_list/mod.rs")
+.expect("Failed to read src/render_script_list/mod.rs");
+let mut search_from = 0usize;
+let mut rail_sites = 0usize;
+while let Some(found) = content[search_from..].find("render_main_window_footer_config_rail")
+{
+let strip_pos = search_from + found;
+let strip_section = &content[strip_pos..content.len().min(strip_pos + 2000)];
+assert!(
+strip_section.contains("dispatch_main_window_footer_action"),
+"every footer rail click handler must route through dispatch_main_window_footer_action()"
+);
+rail_sites += 1;
+search_from = strip_pos + "render_main_window_footer_config_rail".len();
+}
+assert!(
+rail_sites >= 1,
+"the config-driven footer rail must exist in render_script_list"
+);
+}
+}
+</file>
+
+</files>

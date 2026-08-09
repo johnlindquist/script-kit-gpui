@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "lane": "04-window-flows",
+  "candidateSha": "a3fc52549b4c1566bbfc585a79fa1c18478ddc86",
+  "status": "ADMITTED_WITH_DOWNGRADES",
+  "pathRows": 45,
+  "findingRows": 16,
+  "scopeExact": true,
+  "evidenceReferencesValidated": true,
+  "independentFalsifier": {
+    "receipt": ".artifacts/branch-trust-audit/manager/receipts/admit-04-notes-handoff.json",
+    "result": "10 passed, 0 failed"
+  },
+  "downgrades": [
+    "Flow persistence/restart, Notes readiness/focus, Dictation privacy/geometry, and native registry convergence remain C4 proof gaps.",
+    "Broad Notes suite failure is stale source-audit proof debt, not a product regression.",
+    "Dictation Debug projection and Notes accounting/focus issues remain unreproduced candidates.",
+    "Glass unit/fixture checks do not substitute for runtime filmstrip evidence."
+  ]
+}

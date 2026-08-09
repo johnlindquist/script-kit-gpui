@@ -1,0 +1,55 @@
+{
+  "url": "https://coral-oyster-xrzw.here.now/",
+  "assets": [
+    {
+      "path": "index.html",
+      "bytes": 120679,
+      "localSha256": "6cfdaf9ad190d84549058224f1660ee66c0bc48b873b50a62c247246dd27ac06",
+      "liveSha256": "6cfdaf9ad190d84549058224f1660ee66c0bc48b873b50a62c247246dd27ac06",
+      "match": true
+    },
+    {
+      "path": "assets/S01-main-launcher.png",
+      "bytes": 221072,
+      "localSha256": "09b03650a1c983c3c13081bc2ba94d288abe798453a9c23770b548ad9858364c",
+      "liveSha256": "09b03650a1c983c3c13081bc2ba94d288abe798453a9c23770b548ad9858364c",
+      "match": true
+    },
+    {
+      "path": "assets/S02-actions.png",
+      "bytes": 82376,
+      "localSha256": "53bc0297b3295a1060fa65f7ec53bec175d56a094b394e50ffe081d529298ea3",
+      "liveSha256": "53bc0297b3295a1060fa65f7ec53bec175d56a094b394e50ffe081d529298ea3",
+      "match": true
+    },
+    {
+      "path": "assets/S05-dictation.png",
+      "bytes": 49579,
+      "localSha256": "45421fec98c665637a6603b076795f6860aa3817aa681a87570f57e38d3c8bbd",
+      "liveSha256": "45421fec98c665637a6603b076795f6860aa3817aa681a87570f57e38d3c8bbd",
+      "match": true
+    },
+    {
+      "path": "assets/S06-settings.png",
+      "bytes": 177705,
+      "localSha256": "529f93a88ea25456055124447d8827c1864c0eacc5f519184f5a919b69016237",
+      "liveSha256": "529f93a88ea25456055124447d8827c1864c0eacc5f519184f5a919b69016237",
+      "match": true
+    },
+    {
+      "path": "assets/S07-flow-desk.png",
+      "bytes": 212140,
+      "localSha256": "46adea53cc23573c7f73b7663d7380e7b2e628745f81507f45deefe128d3a356",
+      "liveSha256": "46adea53cc23573c7f73b7663d7380e7b2e628745f81507f45deefe128d3a356",
+      "match": true
+    },
+    {
+      "path": "assets/S08-consistency-explorer.png",
+      "bytes": 293733,
+      "localSha256": "6b86dfcb9db130d4bf5b6dd29ecdb54d1e89f6a448a27703fcabf057c2e3ff1c",
+      "liveSha256": "6b86dfcb9db130d4bf5b6dd29ecdb54d1e89f6a448a27703fcabf057c2e3ff1c",
+      "match": true
+    }
+  ],
+  "allMatch": true
+}

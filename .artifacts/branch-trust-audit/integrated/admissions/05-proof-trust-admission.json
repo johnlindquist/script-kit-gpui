@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "lane": "05-proof-trust",
+  "candidateSha": "a3fc52549b4c1566bbfc585a79fa1c18478ddc86",
+  "status": "ADMITTED_WITH_DOWNGRADES",
+  "pathRows": 160,
+  "findingRows": 9,
+  "scopeExact": true,
+  "evidenceReferencesValidated": true,
+  "independentFalsifier": {
+    "receipt": ".artifacts/branch-trust-audit/manager/receipts/admit-05-forged-task.json",
+    "aggregate": ".artifacts/branch-trust-audit/manager/receipts/admit-05-forged-task-aggregate.json",
+    "result": "FORGED_WRONG_TASK_ACCEPTED_WITH_EXIT_ZERO"
+  },
+  "downgrades": [
+    "Historical checked-in receipts remain UNPROVEN_CLAIM/C0 for the current candidate.",
+    "Source-reading failures establish proof-suite regressions, not user-visible runtime regressions.",
+    "Owner-map and geometry helper passes do not establish live UI behavior."
+  ],
+  "mergeImpact": "BLOCKED_BY_FALSE_GREEN_RECEIPT_ADMISSION"
+}

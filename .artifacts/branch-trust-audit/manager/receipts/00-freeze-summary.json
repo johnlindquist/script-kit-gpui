@@ -1,0 +1,12 @@
+{
+  "branch": "consistency/default-recommendations",
+  "main": "3775672d251cc8895583ed246e7600c10b723a94",
+  "base": "3775672d251cc8895583ed246e7600c10b723a94",
+  "head": "a3fc52549b4c1566bbfc585a79fa1c18478ddc86",
+  "commits": 50,
+  "paths": 481,
+  "insertions": 73667,
+  "deletions": 13925,
+  "binary": 0,
+  "diffCheckExit": 0
+}

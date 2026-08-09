@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "campaignId": "branch-trust-audit",
+  "repoRoot": "/Users/johnlindquist/dev/script-kit-gpui",
+  "runDir": ".notes/oracle/branch-trust-audit",
+  "requireDistinctProfiles": true,
+  "oracleSeatTimeoutSeconds": 7200,
+  "seats": [
+    {
+      "id": "01-shared-ui",
+      "workPackage": "Shared UI and design-system audit",
+      "slug": "ui-trust-audit-plan",
+      "promptFile": ".notes/oracle/branch-trust-audit/lanes/01-shared-ui/prompt.md",
+      "bundle": ".notes/oracle/branch-trust-audit/lanes/01-shared-ui/bundle.txt",
+      "files": [
+        ".notes/oracle/branch-trust-audit/lanes/01-shared-ui/changed-paths.txt",
+        ".notes/oracle/branch-trust-audit/lanes/01-shared-ui/diff-stat.txt"
+      ]
+    },
+    {
+      "id": "02-core-surfaces",
+      "workPackage": "Core launcher surfaces audit",
+      "slug": "core-view-audit-plan",
+      "promptFile": ".notes/oracle/branch-trust-audit/lanes/02-core-surfaces/prompt.md",
+      "bundle": ".notes/oracle/branch-trust-audit/lanes/02-core-surfaces/bundle.txt",
+      "files": [
+        ".notes/oracle/branch-trust-audit/lanes/02-core-surfaces/changed-paths.txt",
+        ".notes/oracle/branch-trust-audit/lanes/02-core-surfaces/diff-stat.txt"
+      ]
+    },
+    {
+      "id": "03-ai-protocol",
+      "workPackage": "AI and protocol reliability audit",
+      "slug": "ai-proto-audit-plan",
+      "promptFile": ".notes/oracle/branch-trust-audit/lanes/03-ai-protocol/prompt.md",
+      "bundle": ".notes/oracle/branch-trust-audit/lanes/03-ai-protocol/bundle.txt",
+      "files": [
+        ".notes/oracle/branch-trust-audit/lanes/03-ai-protocol/changed-paths.txt",
+        ".notes/oracle/branch-trust-audit/lanes/03-ai-protocol/diff-stat.txt"
+      ]
+    },
+    {
+      "id": "04-window-flows",
+      "workPackage": "Windows, Flow, Notes, Dictation audit",
+      "slug": "window-flow-audit-plan",
+      "promptFile": ".notes/oracle/branch-trust-audit/lanes/04-window-flows/prompt.md",
+      "bundle": ".notes/oracle/branch-trust-audit/lanes/04-window-flows/bundle.txt",
+      "files": [
+        ".notes/oracle/branch-trust-audit/lanes/04-window-flows/changed-paths.txt",
+        ".notes/oracle/branch-trust-audit/lanes/04-window-flows/diff-stat.txt"
+      ]
+    },
+    {
+      "id": "05-proof-trust",
+      "workPackage": "Proof and provenance audit",
+      "slug": "proof-trust-audit-plan",
+      "promptFile": ".notes/oracle/branch-trust-audit/lanes/05-proof-trust/prompt.md",
+      "bundle": ".notes/oracle/branch-trust-audit/lanes/05-proof-trust/bundle.txt",
+      "files": [
+        ".notes/oracle/branch-trust-audit/lanes/05-proof-trust/changed-paths.txt",
+        ".notes/oracle/branch-trust-audit/lanes/05-proof-trust/diff-stat.txt"
+      ]
+    },
+    {
+      "id": "06-integrate-article",
+      "workPackage": "Integration, screenshots, and article plan",
+      "slug": "audit-story-next-plan",
+      "promptFile": ".notes/oracle/branch-trust-audit/lanes/06-integrate-article/prompt.md",
+      "bundle": ".notes/oracle/branch-trust-audit/lanes/06-integrate-article/bundle.txt",
+      "files": [
+        ".notes/oracle/branch-trust-audit/lanes/06-integrate-article/changed-paths.txt",
+        ".notes/oracle/branch-trust-audit/lanes/06-integrate-article/diff-stat.txt"
+      ]
+    }
+  ]
+}

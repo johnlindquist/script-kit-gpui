@@ -1,0 +1,11 @@
+GLOSSARY.md
+AGENTS.md
+src/app_layout/collect_elements.rs
+src/components/conversation_actions.rs
+design/consistency/data/groups.json
+src/components/info_state.rs
+src/app_layout/build_component_bounds.rs
+src/list_item/mod.rs
+src/components/inline_popup_window.rs
+design/consistency/README.md
+src/components/toast.rs

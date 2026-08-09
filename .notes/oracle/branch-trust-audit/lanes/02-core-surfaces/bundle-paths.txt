@@ -1,0 +1,14 @@
+GLOSSARY.md
+AGENTS.md
+src/app_impl/agent_handoff/agent_chat_entry.rs
+src/actions/window.rs
+src/render_builtins/actions.rs
+src/actions/builders/notes.rs
+src/app_impl/ui_window.rs
+src/render_builtins/settings_contract.rs
+src/actions/tests/dialog_runtime_path_tests.rs
+src/render_builtins/notes_browse.rs
+src/prompts/chat/types.rs
+src/toast_manager/notification.rs
+src/prompts/chat/mod.rs
+src/prompts/prelude.rs

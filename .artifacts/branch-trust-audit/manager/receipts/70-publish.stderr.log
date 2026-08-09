@@ -1,0 +1,13 @@
+creating publish (7 files)...
+uploading 7 files...
+finalizing...
+
+publish_result.site_url=https://coral-oyster-xrzw.here.now/
+publish_result.slug=coral-oyster-xrzw
+publish_result.action=create
+publish_result.auth_mode=authenticated
+publish_result.api_key_source=credentials
+publish_result.persistence=permanent
+publish_result.expires_at=
+publish_result.claim_url=
+authenticated publish (permanent, saved to your account)

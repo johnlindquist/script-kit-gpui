@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "command": [
+    "./scripts/agentic/agent-cargo.sh",
+    "test",
+    "-p",
+    "sk-protocol",
+    "--",
+    "--list"
+  ],
+  "timeoutSeconds": 420,
+  "startedAt": "2026-08-08T23:04:45.673561+00:00",
+  "endedAt": "2026-08-08T23:04:55.754934+00:00",
+  "durationMs": 10082,
+  "timedOut": false,
+  "exitCode": 0
+}

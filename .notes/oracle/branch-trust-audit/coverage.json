@@ -1,0 +1,95 @@
+{
+  "premiseClauses": [
+    {
+      "id": "C1",
+      "text": "Account for every changed path exactly once",
+      "packages": [
+        "01-shared-ui",
+        "02-core-surfaces",
+        "03-ai-protocol",
+        "04-window-flows",
+        "05-proof-trust",
+        "06-integrate-article"
+      ],
+      "proof": "path-ownership.json count equals git diff path count, with no duplicates or unmapped entries"
+    },
+    {
+      "id": "C2",
+      "text": "Identify verified improvements and user-visible value",
+      "packages": [
+        "01-shared-ui",
+        "02-core-surfaces",
+        "03-ai-protocol",
+        "04-window-flows",
+        "06-integrate-article"
+      ],
+      "proof": "diff-linked findings corroborated by focused tests, runtime receipts, or screenshots"
+    },
+    {
+      "id": "C3",
+      "text": "Identify breakage candidates and unproven claims",
+      "packages": [
+        "01-shared-ui",
+        "02-core-surfaces",
+        "03-ai-protocol",
+        "04-window-flows",
+        "05-proof-trust",
+        "06-integrate-article"
+      ],
+      "proof": "ranked findings with concrete failure scenarios and evidence labels"
+    },
+    {
+      "id": "C4",
+      "text": "Audit AI-authored proof and provenance integrity",
+      "packages": [
+        "03-ai-protocol",
+        "05-proof-trust",
+        "06-integrate-article"
+      ],
+      "proof": "receipt/ledger/test review plus independent reruns of selected high-risk checks"
+    },
+    {
+      "id": "C5",
+      "text": "Capture representative real-app screenshots with inspection guidance",
+      "packages": [
+        "01-shared-ui",
+        "02-core-surfaces",
+        "04-window-flows",
+        "06-integrate-article"
+      ],
+      "proof": "branch-runtime screenshots and captions, with temporal claims separated from static evidence"
+    },
+    {
+      "id": "C6",
+      "text": "Publish a comprehensive Paper Fold here-now article",
+      "packages": [
+        "06-integrate-article"
+      ],
+      "proof": "live here.now URL fetched after publication and checked for required sections/assets"
+    },
+    {
+      "id": "C7",
+      "text": "Make next steps the largest substantive section and executable",
+      "packages": [
+        "01-shared-ui",
+        "02-core-surfaces",
+        "03-ai-protocol",
+        "04-window-flows",
+        "05-proof-trust",
+        "06-integrate-article"
+      ],
+      "proof": "ordered roadmap where every item has rationale, owner, proof, and stop condition"
+    },
+    {
+      "id": "C8",
+      "text": "Preserve lifecycle and calibration boundaries",
+      "packages": [
+        "04-window-flows",
+        "05-proof-trust",
+        "06-integrate-article"
+      ],
+      "proof": "no production edits or motion retune; commit/push/merge/app deploy recorded as not authorized"
+    }
+  ],
+  "unmapped": []
+}

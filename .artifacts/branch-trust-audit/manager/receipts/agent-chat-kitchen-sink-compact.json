@@ -1,0 +1,7 @@
+{
+  "classification": "blocked-by-target-ambiguity",
+  "requestId": "devtools-agent_chat-kitchen-sink-1786232561002",
+  "target": null,
+  "errorCount": 1,
+  "disposition": "PROOF_GAP_NO_AGENT_CHAT_TARGET"
+}

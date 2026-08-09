@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "command": [
+    "./scripts/agentic/agent-cargo.sh",
+    "test",
+    "--bin",
+    "script-kit-gpui",
+    "quick_question_contract"
+  ],
+  "timeoutSeconds": 600,
+  "startedAt": "2026-08-08T23:14:52.905888+00:00",
+  "endedAt": "2026-08-08T23:14:55.339590+00:00",
+  "durationMs": 2434,
+  "timedOut": false,
+  "exitCode": 0
+}

@@ -1,0 +1,9 @@
+ CLAUDE.md                              |   8 +-
+ GLOSSARY.md                            |  72 ++--
+ src/actions_button_visibility_tests.rs |   6 -
+ src/footer_popup.rs                    | 751 +++++++++++++++++++++++++++++----
+ src/list_item_tests.rs                 |  47 ++-
+ src/mcp_computer_use_tools.rs          |   3 +
+ src/test_support/agent_chat_portal.rs  |   6 +-
+ src/warning_banner.rs                  |   2 +-
+ 8 files changed, 769 insertions(+), 126 deletions(-)
