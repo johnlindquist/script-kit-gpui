@@ -167,13 +167,7 @@ impl ScriptListApp {
             interaction_before.viewport,
         ));
 
-        let restored = match main_menu_refresh_selection_policy(self.main_menu_selection_user_moved)
-        {
-            MainMenuRefreshSelectionPolicy::RestoreIdentity => {
-                self.restore_main_menu_selection_from_snapshot(interaction_before.selection)
-            }
-            MainMenuRefreshSelectionPolicy::SnapToFirst => false,
-        };
+        let restored = self.restore_main_menu_selection_from_snapshot(interaction_before.selection);
         if !restored {
             self.snap_main_menu_selection_to_first();
             tracing::debug!(
@@ -545,23 +539,24 @@ impl ScriptListApp {
         // Skip when a subview handled the filter: `get_filtered_results_cached`
         // and `collect_fallbacks` are ScriptList-only and would incorrectly
         // flip a builtin subview into the script-list fallback mode.
-        if !handled_by_subview && !text.is_empty()
+        if !handled_by_subview
+            && !text.is_empty()
             && !handler_form_owns_input
-                && !self.menu_syntax_mode.is_menu_syntax_for(&text)
-                && !crate::menu_syntax::active_filter_head_owns_main_list(&text)
-                && self.menu_syntax_trigger_picker_state.snapshot.is_none()
-                && self.menu_syntax_object_selector_state.snapshot.is_none()
-            {
-                let results = self.get_filtered_results_cached();
-                if results.is_empty() {
-                    // No matches - check if we should enter fallback mode
-                    use crate::fallbacks::collect_fallbacks;
-                    let fallbacks = collect_fallbacks(&text, self.scripts.as_slice());
-                    if !fallbacks.is_empty() {
-                        self.main_menu_fallback_state.replace_items(fallbacks);
-                    }
+            && !self.menu_syntax_mode.is_menu_syntax_for(&text)
+            && !crate::menu_syntax::active_filter_head_owns_main_list(&text)
+            && self.menu_syntax_trigger_picker_state.snapshot.is_none()
+            && self.menu_syntax_object_selector_state.snapshot.is_none()
+        {
+            let results = self.get_filtered_results_cached();
+            if results.is_empty() {
+                // No matches - check if we should enter fallback mode
+                use crate::fallbacks::collect_fallbacks;
+                let fallbacks = collect_fallbacks(&text, self.scripts.as_slice());
+                if !fallbacks.is_empty() {
+                    self.main_menu_fallback_state.replace_items(fallbacks);
                 }
             }
+        }
 
         // Single final preflight rebuild for immediate input changes. This must
         // stay after fallback state updates so submit diagnostics/preflight see

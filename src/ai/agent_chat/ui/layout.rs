@@ -63,8 +63,11 @@ impl ResolvedAgentChatLayout {
         let config = variant.config();
         let composer_slot = match config.composer {
             AgentChatComposerPlacement::Default => AgentChatComposerSlot::Header,
-            AgentChatComposerPlacement::BottomDock
-            | AgentChatComposerPlacement::FocusedTextSingleLine => AgentChatComposerSlot::Bottom,
+            AgentChatComposerPlacement::BottomDock => AgentChatComposerSlot::Bottom,
+            // FocusedTextMini retains its compact outer bottom slot because the window's
+            // variation-card sizing contract is 44px-row based. Its nested instruction
+            // and scope composers are canonical MainViewInput shells.
+            AgentChatComposerPlacement::FocusedTextSingleLine => AgentChatComposerSlot::Bottom,
         };
         // Anchor follows the composer slot: header composer → top-anchored
         // transcript, bottom composer → bottom-anchored transcript. This makes
@@ -328,6 +331,7 @@ mod tests {
             AgentChatUiVariant::BottomDock,
             AgentChatUiVariant::DenseLog,
             AgentChatUiVariant::Sidecar,
+            AgentChatUiVariant::FocusedTextMini,
         ] {
             let resolved = ResolvedAgentChatLayout::resolve(variant);
             assert_eq!(resolved.composer_slot, AgentChatComposerSlot::Bottom);

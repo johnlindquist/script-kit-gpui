@@ -364,6 +364,20 @@ pub(crate) struct MainViewInputChrome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MainViewInputShellIds {
+    pub(crate) shell: &'static str,
+    pub(crate) body: &'static str,
+}
+impl MainViewInputShellIds {
+    pub(crate) const CANONICAL: Self = Self {
+        shell: MAIN_VIEW_INPUT_SHELL_ID,
+        body: MAIN_VIEW_INPUT_BODY_ID,
+    };
+    pub(crate) const fn new(shell: &'static str, body: &'static str) -> Self {
+        Self { shell, body }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PromptSearchInputKind {
     EntityBacked,
     ControllerOwned,
@@ -1522,9 +1536,48 @@ pub(crate) fn render_main_view_text_plane(
         .child(content)
         .into_any_element()
 }
-
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MainViewInputHorizontalMetrics {
+    pub(crate) shell_x: f32,
+    pub(crate) shell_width: f32,
+    pub(crate) text_inset_left: f32,
+    pub(crate) text_inset_right: f32,
+}
+impl MainViewInputHorizontalMetrics {
+    pub(crate) fn text_width_after_trailing(self, trailing_width: f32) -> f32 {
+        (self.shell_width - self.text_inset_left - self.text_inset_right - trailing_width).max(1.0)
+    }
+}
 pub(crate) fn main_view_input_text_inset_left(def: MainMenuThemeDef) -> f32 {
     def.search.text_inset_x
+}
+pub(crate) fn main_view_input_horizontal_metrics(
+    def: MainMenuThemeDef,
+    window_width: f32,
+) -> MainViewInputHorizontalMetrics {
+    let shell_x = def.shell.header_padding_x;
+    MainViewInputHorizontalMetrics {
+        shell_x,
+        shell_width: (window_width - shell_x * 2.0).max(0.0),
+        text_inset_left: main_view_input_text_inset_left(def),
+        text_inset_right: def.search.text_inset_x * 0.5,
+    }
+}
+pub(crate) fn render_main_view_input_slot(def: MainMenuThemeDef, input: AnyElement) -> AnyElement {
+    render_main_view_input_slot_with_inset_x(def.shell.header_padding_x, input)
+}
+
+pub(crate) fn render_main_view_input_slot_with_inset_x(
+    inset_x: f32,
+    input: AnyElement,
+) -> AnyElement {
+    div()
+        .w_full()
+        .px(px(inset_x))
+        .flex()
+        .items_center()
+        .child(input)
+        .into_any_element()
 }
 
 pub(crate) fn main_view_row_leading_x(def: MainMenuThemeDef) -> f32 {
@@ -1547,8 +1600,6 @@ pub(crate) fn main_view_content_columns(def: MainMenuThemeDef) -> MainViewColumn
         top_inset_y: def.list.first_section_header_height,
     }
 }
-
-#[allow(dead_code)] // Binary-only built-in renderers consume the default-height wrapper.
 pub(crate) fn render_main_view_input_shell(
     theme: &crate::theme::Theme,
     def: MainMenuThemeDef,
@@ -1582,13 +1633,30 @@ pub(crate) fn render_main_view_input_shell_with_height(
     chrome: MainViewInputChrome,
     height: Option<f32>,
 ) -> AnyElement {
+    render_main_view_input_shell_with_height_and_ids(
+        theme,
+        def,
+        chrome,
+        height,
+        MainViewInputShellIds::CANONICAL,
+    )
+}
+pub(crate) fn render_main_view_input_shell_with_height_and_ids(
+    theme: &crate::theme::Theme,
+    def: MainMenuThemeDef,
+    chrome: MainViewInputChrome,
+    height: Option<f32>,
+    ids: MainViewInputShellIds,
+) -> AnyElement {
     let search = def.search;
     let text_inset_left = main_view_input_text_inset_left(def);
     let height = resolved_main_view_input_height(search.height, height);
 
+    let shell_id = ids.shell;
+    let body_id = ids.body;
     let mut input = div()
-        .id(MAIN_VIEW_INPUT_SHELL_ID)
-        .debug_selector(|| MAIN_VIEW_INPUT_SHELL_ID.to_string())
+        .id(shell_id)
+        .debug_selector(move || shell_id.to_string())
         .w_full()
         .flex_1()
         .h(px(height))
@@ -1604,7 +1672,7 @@ pub(crate) fn render_main_view_input_shell_with_height(
 
     input = input.child(
         div()
-            .debug_selector(|| MAIN_VIEW_INPUT_BODY_ID.to_string())
+            .debug_selector(move || body_id.to_string())
             .flex_1()
             .pl(px(text_inset_left))
             .pr(px(search.text_inset_x * 0.5))
@@ -1701,6 +1769,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn input_horizontal_metrics_share_header_and_search_insets() {
+        let def = crate::designs::MainMenuThemeVariant::default().def();
+        let metrics = super::main_view_input_horizontal_metrics(def, 480.0);
+        assert_eq!(metrics.shell_x, def.shell.header_padding_x);
+        assert_eq!(
+            metrics.shell_width,
+            480.0 - def.shell.header_padding_x * 2.0
+        );
+        assert_eq!(metrics.text_inset_left, def.search.text_inset_x);
+        assert_eq!(metrics.text_inset_right, def.search.text_inset_x * 0.5);
+        assert_eq!(
+            metrics.text_width_after_trailing(24.0),
+            metrics.shell_width - metrics.text_inset_left - metrics.text_inset_right - 24.0
+        );
+    }
     #[test]
     fn input_shell_accepts_taller_surface_height_without_shrinking_theme_default() {
         assert_eq!(resolved_main_view_input_height(26.0, None), 26.0);

@@ -488,27 +488,21 @@ fn build_style_section(
 ) -> SpineListSection {
     let range = active_segment_range(parse, projection);
     let query = projection.active_query.as_str();
-
-    let mut rows = super::catalog_style::build_style_rows(
+    let rows = super::catalog_style::build_style_rows(
         query,
         projection.active_segment_index,
         range,
         super::prompt_plan::spine_parse_is_style_only(parse),
     );
-
-    if let Some(lp) = live_preview {
-        let preview = lp.style_selection_preview();
-        for row in &mut rows {
-            if row.is_selectable {
-                row.subtitle = Some(ss(preview.clone()));
-            }
-        }
-    }
+    let subtitle = live_preview
+        .map(|preview| preview.style_target_subtitle())
+        .unwrap_or_else(|| "Rewrites the selected or focused text".to_string());
+    let title = format!("Styles · {subtitle}");
 
     section_with_empty(
         "spine-section-style",
-        "Styles",
-        Some(ss("Style sugar for rewrite prompts")),
+        title,
+        Some(ss(subtitle)),
         Some(ss("sparkles")),
         rows,
         "No style matches",
@@ -708,14 +702,71 @@ mod tests {
     }
 
     #[test]
-    fn style_produces_rows() {
+    fn style_section_keeps_catalog_descriptions_and_never_contains_captured_text() {
+        const SELECTION_SENTINEL: &str = "P01_SELECTION_BYTES_MUST_NOT_LEAK";
         let parse = parse_spine(".");
         let proj = project_cursor(&parse, 1);
-        let sections = build_spine_list_sections(&parse, &proj);
-        let rows: Vec<_> = sections.iter().flat_map(|s| &s.rows).collect();
-        assert!(rows
+        let preview = crate::spine::live_preview::SpineLivePreview {
+            selection_text: Some(SELECTION_SENTINEL.to_string()),
+            selection_source_app: Some("Mail".to_string()),
+            ..Default::default()
+        };
+        let sections = build_spine_list_sections_full(&parse, &proj, Some(&preview));
+
+        assert_eq!(sections.len(), 1);
+        let section = &sections[0];
+        assert_eq!(section.id.as_ref(), "spine-section-style");
+        assert_eq!(
+            section.title.as_ref(),
+            "Styles · Rewrites your selection in Mail"
+        );
+        assert_eq!(
+            section.subtitle.as_ref().map(|subtitle| subtitle.as_ref()),
+            Some("Rewrites your selection in Mail")
+        );
+        assert_eq!(
+            section.icon.as_ref().map(|icon| icon.as_ref()),
+            Some("sparkles")
+        );
+
+        let catalog = crate::spine::catalog_style::resolved_styles();
+        let style_rows = section
+            .rows
             .iter()
-            .any(|r| matches!(r.kind, SpineListRowKind::Style { .. })));
+            .filter(|row| matches!(&row.kind, SpineListRowKind::Style { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(style_rows.len(), catalog.len());
+
+        for row in style_rows {
+            let SpineListRowKind::Style { style_id } = &row.kind else {
+                unreachable!("filtered to style rows")
+            };
+            let style = catalog
+                .iter()
+                .find(|style| style.id == style_id.as_ref())
+                .unwrap_or_else(|| panic!("missing catalog style {}", style_id.as_ref()));
+            let expected_id = format!("spine:.:{}", style.id);
+            assert_eq!(row.id.as_ref(), expected_id.as_str());
+            assert_eq!(
+                row.subtitle.as_ref().map(|subtitle| subtitle.as_ref()),
+                Some(style.description.as_str()),
+                "style row {} must retain its catalog description",
+                style.id
+            );
+            assert_eq!(
+                row.icon.as_ref().map(|icon| icon.as_ref()),
+                Some(style.icon.as_str())
+            );
+            assert_eq!(
+                row.action_label.as_ref().map(|label| label.as_ref()),
+                Some("Rewrite")
+            );
+        }
+
+        assert!(
+            !format!("{section:?}").contains(SELECTION_SENTINEL),
+            "captured selection bytes must not enter any style section or row field"
+        );
     }
 
     #[test]

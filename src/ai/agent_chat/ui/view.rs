@@ -562,57 +562,128 @@ fn composer_visible_line_count(visual_lines: usize, expanded: bool) -> usize {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct AgentChatComposerTextStyle {
     font_size: f32,
-    font_weight: Option<FontWeight>,
+    font_weight: FontWeight,
+    font_family: String,
     line_height: f32,
-    uses_main_menu_font: bool,
+    one_line_height: f32,
+    shell_inset_x: f32,
+    text_inset_left: f32,
+    text_inset_right: f32,
 }
 
 impl AgentChatComposerTextStyle {
     /// The legacy composer metrics remain scoped to detached/experimental
     /// layouts and the focused-text mini early-return path.
-    fn legacy() -> Self {
-        Self {
-            font_size: AgentChatView::AGENT_CHAT_INPUT_FONT_SIZE,
-            font_weight: None,
-            line_height: AgentChatView::AGENT_CHAT_INPUT_LINE_HEIGHT,
-            uses_main_menu_font: false,
-        }
-    }
-
-    /// Embedded main-window Agent Chat is a canonical multiline main-view
-    /// input: paint and growth both derive from the active main-menu search.
-    fn current_main_menu() -> Self {
-        let search = crate::designs::current_main_menu_theme().def().search;
+    fn current(theme: &crate::theme::Theme) -> Self {
+        let def = crate::designs::current_main_menu_theme().def();
+        let search = def.search;
+        let horizontal =
+            crate::components::main_view_chrome::main_view_input_horizontal_metrics(def, 0.0);
         Self {
             font_size: search.font_size,
-            font_weight: Some(search.font_weight),
+            font_weight: search.font_weight,
+            font_family: theme.get_fonts().ui_family,
             line_height: search.height,
-            uses_main_menu_font: true,
+            one_line_height: search.height,
+            shell_inset_x: horizontal.shell_x,
+            text_inset_left: horizontal.text_inset_left,
+            text_inset_right: horizontal.text_inset_right,
         }
     }
 
-    fn for_main_window(is_main_window: bool) -> Self {
-        if is_main_window {
-            Self::current_main_menu()
-        } else {
-            Self::legacy()
-        }
-    }
-
-    fn font(self) -> gpui::Font {
-        let family = if self.uses_main_menu_font {
-            theme::get_cached_theme().get_fonts().ui_family
-        } else {
-            AgentChatView::AGENT_CHAT_INPUT_FONT_FAMILY.to_string()
-        };
-        let mut font = gpui::font(family);
-        if let Some(weight) = self.font_weight {
-            font.weight = weight;
-        }
+    fn font(&self) -> gpui::Font {
+        let mut font = gpui::font(self.font_family.clone());
+        font.weight = self.font_weight;
         font
+    }
+    fn wrap_width(&self, window_width: f32, trailing_width: f32) -> f32 {
+        (window_width
+            - self.shell_inset_x * 2.0
+            - self.text_inset_left
+            - self.text_inset_right
+            - trailing_width)
+            .max(1.0)
+    }
+    fn height_for_visible_lines(&self, visible_lines: usize) -> f32 {
+        crate::components::main_view_chrome::main_view_multiline_input_height(
+            self.one_line_height,
+            self.line_height,
+            visible_lines,
+        )
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AgentChatComposerGeometry {
+    composer_x: f32,
+    composer_y: f32,
+    composer_width: f32,
+    composer_height: f32,
+    message_top: f32,
+    message_height: f32,
+}
+fn agent_chat_composer_geometry(
+    window_width: f32,
+    window_height: f32,
+    footer_height: f32,
+    composer_slot: crate::ai::agent_chat::ui::layout::AgentChatComposerSlot,
+    composer_height: f32,
+) -> AgentChatComposerGeometry {
+    use crate::ai::agent_chat::ui::layout::AgentChatComposerSlot;
+    let def = crate::designs::current_main_menu_theme().def();
+    let horizontal =
+        crate::components::main_view_chrome::main_view_input_horizontal_metrics(def, window_width);
+    match composer_slot {
+        AgentChatComposerSlot::Header => {
+            let header = crate::components::main_view_chrome::main_view_header_metrics(
+                def,
+                Some(composer_height),
+            );
+            let message_top = header.header_height;
+            AgentChatComposerGeometry {
+                composer_x: horizontal.shell_x,
+                composer_y: header.input_y,
+                composer_width: horizontal.shell_width,
+                composer_height,
+                message_top,
+                message_height: (window_height - message_top - footer_height).max(0.0),
+            }
+        }
+        AgentChatComposerSlot::Bottom => {
+            let composer_y = (window_height - footer_height - composer_height).max(0.0);
+            AgentChatComposerGeometry {
+                composer_x: horizontal.shell_x,
+                composer_y,
+                composer_width: horizontal.shell_width,
+                composer_height,
+                message_top: 0.0,
+                message_height: composer_y,
+            }
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FocusedTextMiniInputShellGeometry {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+const FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX: f32 = 1.0;
+
+fn focused_text_mini_input_shell_geometry(
+    window_width: f32,
+    row_y: f32,
+    row_height: f32,
+    text_style: &AgentChatComposerTextStyle,
+) -> FocusedTextMiniInputShellGeometry {
+    FocusedTextMiniInputShellGeometry {
+        x: text_style.shell_inset_x,
+        y: row_y + ((row_height - text_style.one_line_height).max(0.0) / 2.0),
+        width: (window_width - text_style.shell_inset_x * 2.0).max(0.0),
+        height: text_style.one_line_height.min(row_height.max(0.0)),
     }
 }
 
@@ -1555,7 +1626,7 @@ impl AgentChatView {
     fn composer_height(
         &self,
         window_width: f32,
-        text_style: AgentChatComposerTextStyle,
+        text_style: &AgentChatComposerTextStyle,
         cx: &App,
     ) -> f32 {
         let visual_lines = match &self.session {
@@ -1567,40 +1638,23 @@ impl AgentChatView {
             ),
             AgentChatSession::Setup(_) => 1,
         };
-        Self::composer_height_for_visual_lines(
-            visual_lines,
-            self.expanded_composer,
-            text_style.line_height,
-        )
-    }
-
-    fn composer_height_for_expanded(expanded: bool) -> f32 {
-        let visible_lines = if expanded { 6 } else { 1 };
-        Self::composer_height_for_visible_lines(
-            visible_lines,
-            AgentChatComposerTextStyle::legacy().line_height,
-        )
+        Self::composer_height_for_visual_lines(visual_lines, self.expanded_composer, text_style)
     }
 
     fn composer_height_for_visual_lines(
         visual_lines: usize,
         expanded: bool,
-        line_height: f32,
+        text_style: &AgentChatComposerTextStyle,
     ) -> f32 {
         let visible_lines = composer_visible_line_count(visual_lines, expanded);
-        Self::composer_height_for_visible_lines(visible_lines, line_height)
+        Self::composer_height_for_visible_lines(visible_lines, text_style)
     }
 
-    fn composer_height_for_visible_lines(visible_lines: usize, line_height: f32) -> f32 {
-        let default_height = crate::designs::current_main_menu_theme()
-            .def()
-            .search
-            .height;
-        crate::components::main_view_chrome::main_view_multiline_input_height(
-            default_height,
-            line_height,
-            visible_lines,
-        )
+    fn composer_height_for_visible_lines(
+        visible_lines: usize,
+        text_style: &AgentChatComposerTextStyle,
+    ) -> f32 {
+        text_style.height_for_visible_lines(visible_lines)
     }
 
     fn focused_text_mini_automation_layout_info(
@@ -1633,6 +1687,20 @@ impl AgentChatView {
             self.scope_visible,
             footer_height,
         );
+        let theme = theme::get_cached_theme();
+        let text_style = AgentChatComposerTextStyle::current(&theme);
+        let input_shell = focused_text_mini_input_shell_geometry(
+            window_width,
+            FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX,
+            budget.input_height,
+            &text_style,
+        );
+        let scope_shell = focused_text_mini_input_shell_geometry(
+            window_width,
+            FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX + budget.input_height,
+            budget.scope_height,
+            &text_style,
+        );
         let shows_result_area = matches!(
             self.focused_text_mini_phase_for_thread(self.live_thread().read(cx)),
             Some(
@@ -1654,26 +1722,49 @@ impl AgentChatView {
                 .with_flex_column()
                 .with_depth(0)
                 .with_explanation(
-                    "Intentional compact main-window exception. Its 44px input row cannot contain the canonical 58px MainViewHeader anatomy.",
+"Intentional compact outer-slot exception: the 44px row is retained for the focused-text variation-card window contract, while its nested composer is the canonical MainViewInput shell.",
                 ),
             LayoutComponentInfo::new("FocusedTextMiniInputRow", LayoutComponentType::Input)
-                .with_bounds(0.0, 0.0, window_width, budget.input_height)
-                .with_padding(
-                    0.0,
-                    crate::panel::HEADER_PADDING_X,
-                    0.0,
-                    crate::panel::HEADER_PADDING_X,
+                .with_bounds(
+                    FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX,
+                    FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX,
+                    (window_width - FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX * 2.0).max(0.0),
+                    budget.input_height,
                 )
                 .with_visual_style(
                     chrome_tokens::CHROME_LAYER_FUNCTIONAL,
                     chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
                     Some(chrome_tokens::LIQUID_GLASS_COMPACT_RADIUS_PX),
                 )
-                .with_visual_token("chrome.focusedTextMiniInput")
+                .with_visual_token("chrome.focusedTextMiniInputSlot")
                 .with_depth(1)
                 .with_parent(root_name)
                 .with_explanation(
-                    "Compact focused-text instruction row; deliberately not a MainViewInput receipt.",
+"Compact focused-text slot retained for variation cards; it centers one canonical-height MainViewInput shell.",
+),
+LayoutComponentInfo::new("FocusedTextMiniInputShell", LayoutComponentType::Input)
+.with_bounds(
+input_shell.x,
+input_shell.y,
+input_shell.width,
+input_shell.height,
+)
+.with_padding(
+0.0,
+text_style.text_inset_right,
+0.0,
+text_style.text_inset_left,
+)
+.with_visual_style(
+chrome_tokens::CHROME_LAYER_FUNCTIONAL,
+chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
+Some(chrome_tokens::LIQUID_GLASS_PANEL_RADIUS_PX),
+)
+.with_visual_token("chrome.mainViewInput")
+.with_depth(2)
+.with_parent("FocusedTextMiniInputRow")
+.with_explanation(
+"Canonical MainViewInput shell using active main-menu height and insets inside the compact focused-text slot.",
                 ),
         ];
 
@@ -1681,15 +1772,35 @@ impl AgentChatView {
             components.push(
                 LayoutComponentInfo::new("FocusedTextMiniScopeRow", LayoutComponentType::Input)
                     .with_bounds(0.0, budget.input_height, window_width, budget.scope_height)
-                    .with_padding(
-                        0.0,
-                        crate::panel::HEADER_PADDING_X,
-                        0.0,
-                        crate::panel::HEADER_PADDING_X,
-                    )
                     .with_depth(1)
                     .with_parent(root_name)
-                    .with_explanation("Optional compact scope row below the instruction row."),
+                    .with_explanation("Optional compact scope slot below the instruction row."),
+            );
+            components.push(
+LayoutComponentInfo::new("FocusedTextMiniScopeShell", LayoutComponentType::Input)
+.with_bounds(
+scope_shell.x,
+scope_shell.y,
+scope_shell.width,
+scope_shell.height,
+)
+.with_padding(
+0.0,
+text_style.text_inset_right,
+0.0,
+text_style.text_inset_left,
+)
+.with_visual_style(
+chrome_tokens::CHROME_LAYER_FUNCTIONAL,
+chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
+Some(chrome_tokens::LIQUID_GLASS_PANEL_RADIUS_PX),
+)
+.with_visual_token("chrome.mainViewInput")
+.with_depth(2)
+.with_parent("FocusedTextMiniScopeRow")
+.with_explanation(
+"Scope input reuses the same canonical MainViewInput shell and one-line geometry.",
+),
             );
         }
         if shows_result_area && budget.result_height > 0.0 {
@@ -1891,9 +2002,8 @@ impl AgentChatView {
             .as_ref()
             .map(|bounds| (bounds.width as f32, bounds.height as f32))
             .unwrap_or((480.0, 440.0));
-        let text_style = AgentChatComposerTextStyle::for_main_window(
-            target.kind == crate::protocol::AutomationWindowKind::Main,
-        );
+        let theme = theme::get_cached_theme();
+        let text_style = AgentChatComposerTextStyle::current(&theme);
         let embedded_main = target.kind == crate::protocol::AutomationWindowKind::Main;
         // WP6/C-R7: composer placement comes from the resolved plan's layout,
         // not the host window kind. A header-slot composer (Standard/Quick
@@ -1901,7 +2011,7 @@ impl AgentChatView {
         // embedded and detached windows, exactly as `render` paints it.
         let resolved_layout = plan.layout;
         let composer_in_header = resolved_layout.composer_in_header();
-        let composer_height = self.composer_height(window_width, text_style, cx);
+        let composer_height = self.composer_height(window_width, &text_style, cx);
         // C-R7: footer band geometry is driven by the plan's reserved band
         // count — the same value automation and the renderer both consume.
         let footer_height = if plan.reserved_footer_band_count() == 0 {
@@ -1909,38 +2019,22 @@ impl AgentChatView {
         } else {
             self.inline_footer_height()
         };
-        let main_header_metrics = composer_in_header.then(|| {
-            crate::components::main_view_chrome::main_view_header_metrics(
-                crate::designs::current_main_menu_theme().def(),
-                Some(composer_height),
-            )
-        });
-        let message_top = main_header_metrics
-            .map(|metrics| metrics.header_height)
-            .unwrap_or(0.0);
-        let message_height = if composer_in_header {
-            (window_height - message_top - footer_height).max(0.0)
-        } else {
-            (window_height - composer_height - footer_height).max(0.0)
-        };
+        let geometry = agent_chat_composer_geometry(
+            window_width,
+            window_height,
+            footer_height,
+            resolved_layout.composer_slot,
+            composer_height,
+        );
         let message_bounds = self.transcript_viewport_bounds_px(cx).unwrap_or((
             0.0,
-            message_top,
+            geometry.message_top,
             window_width,
-            message_height,
+            geometry.message_height,
         ));
-        let composer_x = main_header_metrics
-            .map(|metrics| metrics.input_x)
-            .unwrap_or(0.0);
-        let composer_y = main_header_metrics
-            .map(|metrics| metrics.input_y)
-            .unwrap_or(message_height);
-        let composer_width = if composer_in_header {
-            let shell = crate::designs::current_main_menu_theme().def().shell;
-            (window_width - shell.header_padding_x * 2.0).max(0.0)
-        } else {
-            window_width
-        };
+        let composer_x = geometry.composer_x;
+        let composer_y = geometry.composer_y;
+        let composer_width = geometry.composer_width;
         let footer_y = (window_height - footer_height).max(composer_y + composer_height);
         let root_name = if embedded_main {
             "MainViewShell"
@@ -2002,10 +2096,10 @@ impl AgentChatView {
                     composer_height,
                 )
                 .with_padding(
-                    Self::AGENT_CHAT_INPUT_PADDING_Y,
-                    Self::AGENT_CHAT_INPUT_PADDING_X,
-                    Self::AGENT_CHAT_INPUT_PADDING_Y,
-                    Self::AGENT_CHAT_INPUT_PADDING_X,
+0.0,
+text_style.text_inset_right,
+0.0,
+text_style.text_inset_left,
                 )
                 .with_visual_style(
                     chrome_tokens::CHROME_LAYER_FUNCTIONAL,
@@ -2018,8 +2112,8 @@ impl AgentChatView {
                 .with_explanation(if composer_in_header {
                     "Header-slot Agent Chat composer occupies the shared MainViewInput slot at the top of the shell."
                 } else {
-                    "Bottom-docked Agent Chat composer row sits below the transcript with its measured multiline height."
-                }),
+"Intentional bottom-slot Agent Chat composer keeps its surface contract while reusing the canonical MainViewInput x/width, shell paint, typography, and one-line height."
+}),
         );
 
         if footer_height > 0.0 {
@@ -2048,7 +2142,7 @@ impl AgentChatView {
             components.push(
                 LayoutComponentInfo::new("AgentChatComposerPicker", LayoutComponentType::Panel)
                     .with_bounds(
-                        composer_x + Self::AGENT_CHAT_INPUT_PADDING_X,
+                        composer_x + text_style.text_inset_left,
                         (composer_y + composer_height + Self::AGENT_CHAT_COMPOSER_PICKER_OFFSET_Y)
                             .min(window_height),
                         picker_width,
@@ -2094,10 +2188,18 @@ impl AgentChatView {
             .as_ref()
             .map(|bounds| (bounds.width as f32, bounds.height as f32))
             .unwrap_or((480.0, 440.0));
-        let composer_height = Self::composer_height_for_expanded(false);
+        let theme = theme::get_cached_theme();
+        let text_style = AgentChatComposerTextStyle::current(&theme);
+        let composer_height = text_style.one_line_height;
         let footer_height = crate::window_resize::main_layout::HINT_STRIP_HEIGHT;
-        let message_height = (window_height - composer_height - footer_height).max(0.0);
-        let footer_y = (window_height - footer_height).max(message_height + composer_height);
+        let geometry = agent_chat_composer_geometry(
+            window_width,
+            window_height,
+            footer_height,
+            crate::ai::agent_chat::ui::layout::AgentChatComposerSlot::Header,
+            composer_height,
+        );
+        let footer_y = (window_height - footer_height).max(geometry.composer_y + composer_height);
 
         LayoutInfo {
             window_width,
@@ -2118,7 +2220,10 @@ impl AgentChatView {
                         "Detached Agent Chat placeholder window root measured from the resolved automation target bounds.",
                     ),
                 LayoutComponentInfo::new("AgentChatMessageViewport", LayoutComponentType::List)
-                    .with_bounds(0.0, 0.0, window_width, message_height)
+                    .with_bounds(0.0,
+geometry.message_top, window_width,
+geometry.message_height,
+)
                     .with_visual_style(
                         chrome_tokens::CHROME_LAYER_CONTENT,
                         chrome_tokens::MATERIAL_SOLID_THEME_TOKEN,
@@ -2132,12 +2237,17 @@ impl AgentChatView {
                         "Placeholder Agent Chat transcript region above the composer and footer.",
                     ),
                 LayoutComponentInfo::new("AgentChatComposerBar", LayoutComponentType::Input)
-                    .with_bounds(0.0, message_height, window_width, composer_height)
+                    .with_bounds(
+geometry.composer_x,
+geometry.composer_y,
+geometry.composer_width,
+geometry.composer_height,
+)
                     .with_padding(
-                        Self::AGENT_CHAT_INPUT_PADDING_Y,
-                        Self::AGENT_CHAT_INPUT_PADDING_X,
-                        Self::AGENT_CHAT_INPUT_PADDING_Y,
-                        Self::AGENT_CHAT_INPUT_PADDING_X,
+0.0,
+text_style.text_inset_right,
+0.0,
+text_style.text_inset_left,
                     )
                     .with_visual_style(
                         chrome_tokens::CHROME_LAYER_FUNCTIONAL,
@@ -2148,7 +2258,7 @@ impl AgentChatView {
                     .with_depth(1)
                     .with_parent("AgentChatDetachedWindow")
                     .with_explanation(
-                        "Agent Chat composer row: vertical padding plus the measured single-line input height.",
+"Detached placeholder composer occupies the canonical MainViewInput header position and one-line geometry.",
                     ),
                 LayoutComponentInfo::new("AgentChatFooterRail", LayoutComponentType::Panel)
                     .with_bounds(0.0, footer_y, window_width, footer_height)
@@ -10551,7 +10661,7 @@ impl AgentChatView {
         theme: &crate::theme::Theme,
         max_visible_height: Option<f32>,
         top_aligned: bool,
-        text_style: AgentChatComposerTextStyle,
+        text_style: &AgentChatComposerTextStyle,
     ) -> gpui::AnyElement {
         div()
             .flex_1()
@@ -10562,8 +10672,9 @@ impl AgentChatView {
             .when_some(max_visible_height, |d, height| {
                 d.max_h(px(height)).overflow_hidden()
             })
+            .font_family(text_style.font_family.clone())
             .text_size(px(text_style.font_size))
-            .when_some(text_style.font_weight, |d, weight| d.font_weight(weight))
+            .font_weight(text_style.font_weight)
             .line_height(px(text_style.line_height))
             .text_color(if input_text.is_empty() {
                 placeholder_text
@@ -10680,7 +10791,7 @@ impl AgentChatView {
         weak_view: WeakEntity<AgentChatView>,
         theme: &crate::theme::Theme,
         expanded_composer: bool,
-        text_style: AgentChatComposerTextStyle,
+        text_style: &AgentChatComposerTextStyle,
         window_width: f32,
         composer_scroll_handle: &gpui::ScrollHandle,
         cx: &App,
@@ -10793,7 +10904,7 @@ impl AgentChatView {
             Some(Self::composer_height_for_visual_lines(
                 visual_lines,
                 expanded_composer,
-                text_style.line_height,
+                text_style,
             )),
         )
     }
@@ -11356,6 +11467,7 @@ impl AgentChatView {
         cursor_visible: bool,
         weak_view: WeakEntity<AgentChatView>,
         theme: &crate::theme::Theme,
+        text_style: &AgentChatComposerTextStyle,
     ) -> gpui::AnyElement {
         let selected = variation.selected;
         let streaming = matches!(variation.status, FocusedTextVariationStatus::Streaming);
@@ -11412,6 +11524,8 @@ impl AgentChatView {
         let variation_index = variation.index;
         let editor_cursor = variation.text.chars().count();
         let editor_selection = TextSelection::caret(editor_cursor);
+        let editor_visible_lines = variation.text.lines().count().clamp(1, 6);
+        let editor_height = text_style.height_for_visible_lines(editor_visible_lines);
         let select_view = weak_view.clone();
         div()
             .id(SharedString::from(format!(
@@ -11491,16 +11605,12 @@ impl AgentChatView {
                     .w_full()
                     .pt(px(6.0))
                     .child(
-                        div()
-                            .w_full()
-                            .min_h(px(54.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(rgba((theme.colors.accent.selected << 8) | 0x38))
-                            .bg(rgba((theme.colors.text.primary << 8) | 0x04))
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .child(Self::render_composer_input_text(
+crate::components::main_view_chrome::render_main_view_input_shell_with_height_and_ids(
+theme,
+crate::designs::current_main_menu_theme()
+                            .def(),
+crate::components::main_view_chrome::MainViewInputChrome {
+body: Self::render_composer_input_text(
                                 &variation.text,
                                 editor_cursor,
                                 editor_selection,
@@ -11511,10 +11621,18 @@ impl AgentChatView {
                                 &[],
                                 rgba((theme.colors.text.primary << 8) | 0x62),
                                 theme,
-                                None,
-                                false,
-                                AgentChatComposerTextStyle::legacy(),
-                            )),
+Some(editor_height),
+editor_visible_lines > 1,
+text_style,
+),
+trailing: Vec::new(),
+},
+Some(editor_height),
+crate::components::main_view_chrome::MainViewInputShellIds::new(
+"focused-text-variation-editor-shell",
+"focused-text-variation-editor-body",
+),
+),
                     )
                     .into_any_element()
             } else {
@@ -11556,6 +11674,7 @@ impl AgentChatView {
         input_locked: bool,
         placeholder_text: Rgba,
         theme: &crate::theme::Theme,
+        text_style: &AgentChatComposerTextStyle,
     ) -> gpui::AnyElement {
         let chrome = AppChromeColors::from_theme(theme);
         let input_height = crate::window_resize::focused_text_mini_input_height();
@@ -11590,7 +11709,63 @@ impl AgentChatView {
             focused_text_mini_layout_budget(total_height, self.scope_visible, footer_height);
         let content_height = budget.content_height;
         let preview_height = budget.result_height;
+        let menu_def = crate::designs::current_main_menu_theme().def();
         let instruction_focus_view = weak_view.clone();
+        let input_body = div()
+            .id("focused-text-input")
+            .min_w_0()
+            .flex_1()
+            .when(input_locked, |d| d.opacity(0.55))
+            .when(self.scope_focused && !input_locked, |d| d.opacity(0.72))
+            .child(Self::render_composer_input_text(
+                input_text,
+                input_cursor,
+                input_selection,
+                if input_locked
+                    || self.scope_focused
+                    || self.focused_text_editing_variation.is_some()
+                {
+                    false
+                } else {
+                    cursor_visible
+                },
+                Self::FOCUSED_TEXT_MINI_PLACEHOLDER,
+                false,
+                &[],
+                &[],
+                placeholder_text,
+                theme,
+                Some(text_style.one_line_height),
+                false,
+                text_style,
+            ))
+            .into_any_element();
+        let mut input_trailing = Vec::new();
+        if let Some(state) = self.focused_text.as_ref() {
+            input_trailing.push(Self::render_focused_text_app_icon_badge(state, theme));
+            input_trailing.push(Self::render_focused_text_context_status_badge(state, theme));
+        }
+        input_trailing.push(Self::render_input_profile_icon(
+            "focused-text-profile-icon",
+            profile_icon_name,
+            active_pending,
+            weak_view.clone(),
+            theme,
+        ));
+        let input_shell =
+            crate::components::main_view_chrome::render_main_view_input_shell_with_height_and_ids(
+                theme,
+                menu_def,
+                crate::components::main_view_chrome::MainViewInputChrome {
+                    body: input_body,
+                    trailing: input_trailing,
+                },
+                Some(text_style.one_line_height),
+                crate::components::main_view_chrome::MainViewInputShellIds::new(
+                    "focused-text-mini-input-shell",
+                    "focused-text-mini-input-body",
+                ),
+            );
 
         let input_row = div()
             .id("focused-text-mini-input-row")
@@ -11600,14 +11775,9 @@ impl AgentChatView {
             .max_h(px(input_height))
             .flex_none()
             .overflow_hidden()
-            .px(px(crate::panel::HEADER_PADDING_X))
             .flex()
             .items_center()
-            .gap(px(8.0))
-            .when(show_result_area || self.scope_visible, |d| {
-                d.border_b_1().border_color(rgba(chrome.divider_rgba))
-            })
-            .on_click(move |_event, window, cx| {
+            .on_click(move |_, window, cx| {
                 if let Some(entity) = instruction_focus_view.upgrade() {
                     entity.update(cx, |chat, cx| {
                         window.focus(&chat.focus_handle, cx);
@@ -11618,51 +11788,68 @@ impl AgentChatView {
                 }
             })
             .child(
-                div()
-                    .id("focused-text-input")
-                    .min_w_0()
-                    .flex_1()
-                    .when(input_locked, |d| d.opacity(0.55))
-                    .when(self.scope_focused && !input_locked, |d| d.opacity(0.72))
-                    .child(Self::render_composer_input_text(
-                        input_text,
-                        input_cursor,
-                        input_selection,
-                        if input_locked
-                            || self.scope_focused
-                            || self.focused_text_editing_variation.is_some()
-                        {
-                            false
-                        } else {
-                            cursor_visible
-                        },
-                        Self::FOCUSED_TEXT_MINI_PLACEHOLDER,
-                        false,
-                        &[],
-                        &[],
-                        placeholder_text,
-                        theme,
-                        Some(Self::FOCUSED_TEXT_MINI_INPUT_MAX_VISIBLE_HEIGHT),
-                        false,
-                        AgentChatComposerTextStyle::legacy(),
-                    )),
-            )
-            .when_some(self.focused_text.as_ref(), |d, state| {
-                d.child(Self::render_focused_text_app_icon_badge(state, theme))
-                    .child(Self::render_focused_text_context_status_badge(state, theme))
-            })
-            .child(Self::render_input_profile_icon(
-                "focused-text-profile-icon",
-                profile_icon_name,
-                active_pending,
-                weak_view.clone(),
-                theme,
-            ));
+                crate::components::main_view_chrome::render_main_view_input_slot_with_inset_x(
+                    (menu_def.shell.header_padding_x - FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX)
+                        .max(0.0),
+                    input_shell,
+                ),
+            );
 
         let scope_row = if self.scope_visible {
             let scope_cursor = self.scope_input.chars().count();
             let scope_selection = TextSelection::caret(scope_cursor);
             let scope_focus_view = weak_view.clone();
+            let scope_body = div()
+                .id("focused-text-scope-input")
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .when(input_locked, |d| d.opacity(0.55))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(44.0))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme.colors.text.muted))
+                        .child("Scope"),
+                )
+                .child(Self::render_composer_input_text(
+                    &self.scope_input,
+                    scope_cursor,
+                    scope_selection,
+                    if input_locked {
+                        false
+                    } else {
+                        cursor_visible && self.scope_focused
+                    },
+                    "Scope\u{2026}",
+                    false,
+                    &[],
+                    &[],
+                    placeholder_text,
+                    theme,
+                    Some(text_style.one_line_height),
+                    false,
+                    text_style,
+                ))
+                .into_any_element();
+            let scope_shell =
+crate::components::main_view_chrome::render_main_view_input_shell_with_height_and_ids(
+theme,
+menu_def,
+crate::components::main_view_chrome::MainViewInputChrome {
+body: scope_body,
+trailing: Vec::new(),
+},
+Some(text_style.one_line_height),
+crate::components::main_view_chrome::MainViewInputShellIds::new(
+"focused-text-mini-scope-shell",
+"focused-text-mini-scope-body",
+),
+);
             Some(
                 div()
                     .id("focused-text-mini-scope-row")
@@ -11672,10 +11859,8 @@ impl AgentChatView {
                     .max_h(px(input_height))
                     .flex_none()
                     .overflow_hidden()
-                    .px(px(crate::panel::HEADER_PADDING_X))
                     .flex()
                     .items_center()
-                    .gap(px(8.0))
                     .when(show_result_area, |d| {
                         d.border_b_1().border_color(rgba(chrome.divider_rgba))
                     })
@@ -11691,39 +11876,12 @@ impl AgentChatView {
                         }
                     })
                     .child(
-                        div()
-                            .flex_none()
-                            .w(px(44.0))
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(theme.colors.text.muted))
-                            .child("Scope"),
-                    )
-                    .child(
-                        div()
-                            .id("focused-text-scope-input")
-                            .min_w_0()
-                            .flex_1()
-                            .when(input_locked, |d| d.opacity(0.55))
-                            .child(Self::render_composer_input_text(
-                                &self.scope_input,
-                                scope_cursor,
-                                scope_selection,
-                                if input_locked {
-                                    false
-                                } else {
-                                    cursor_visible && self.scope_focused
-                                },
-                                "Scope\u{2026}",
-                                false,
-                                &[],
-                                &[],
-                                placeholder_text,
-                                theme,
-                                Some(Self::FOCUSED_TEXT_MINI_INPUT_MAX_VISIBLE_HEIGHT),
-                                false,
-                                AgentChatComposerTextStyle::legacy(),
-                            )),
+                        crate::components::main_view_chrome::render_main_view_input_slot_with_inset_x(
+                            (menu_def.shell.header_padding_x
+                                - FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX)
+                                .max(0.0),
+                            scope_shell,
+                        ),
                     )
                     .into_any_element(),
             )
@@ -11788,6 +11946,7 @@ impl AgentChatView {
                                     cursor_visible && editing,
                                     weak_view.clone(),
                                     theme,
+                                    text_style,
                                 )
                             })),
                     )
@@ -11827,7 +11986,7 @@ impl AgentChatView {
                 crate::ui_foundation::get_vibrancy_background(theme),
                 |d, bg| d.bg(bg),
             )
-            .border_1()
+            .border(px(FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX))
             .border_color(rgba(chrome.border_rgba))
             .rounded(px(10.0))
             .overflow_hidden()
@@ -14281,38 +14440,20 @@ impl AgentChatView {
     /// Minimum usable picker width when the window is narrow.
     const AGENT_CHAT_COMPOSER_PICKER_MIN_WIDTH: f32 = 200.0;
 
+    /// Compatibility assertion for the checked-in default theme; runtime
+    /// clamping resolves the active main-menu shell inset below.
+    #[cfg(test)]
+    const AGENT_CHAT_INPUT_PADDING_X: f32 = 2.0;
+
     /// Horizontal padding used by the Agent Chat composer input row.
     /// (Owned by the production style contract; re-pointed for `Self::` use.)
-    const AGENT_CHAT_INPUT_PADDING_X: f32 =
-        crate::components::conversation_style::CONVERSATION_INPUT_PADDING_X;
-
-    /// Keep the picker inset from the right edge so it never clips.
     const AGENT_CHAT_COMPOSER_PICKER_EDGE_GUTTER: f32 = 12.0;
-
-    /// Top padding used by the Agent Chat composer input row.
-    const AGENT_CHAT_INPUT_PADDING_Y: f32 =
-        crate::components::conversation_style::CONVERSATION_INPUT_PADDING_Y;
-
-    /// Effective visual line height of the Agent Chat composer text.
-    const AGENT_CHAT_INPUT_LINE_HEIGHT: f32 =
-        crate::components::conversation_style::CONVERSATION_INPUT_LINE_HEIGHT;
 
     /// Gap between the active mention line and the picker.
     const AGENT_CHAT_COMPOSER_PICKER_OFFSET_Y: f32 = 4.0;
 
     /// Composer text size used for the inline Agent Chat input.
-    const AGENT_CHAT_INPUT_FONT_SIZE: f32 =
-        crate::components::conversation_style::CONVERSATION_INPUT_FONT_SIZE;
-
-    /// The composer inherits GPUI's default window font; measurements must
-    /// resolve the same family to stay anchored to real glyph positions.
-    const AGENT_CHAT_INPUT_FONT_FAMILY: &'static str =
-        crate::components::conversation_style::CONVERSATION_INPUT_FONT_FAMILY;
-
-    /// One-word focused-text quick prompt placeholder. The input chrome itself
-    /// is rendered through the standard Agent Chat composer text renderer.
     const FOCUSED_TEXT_MINI_PLACEHOLDER: &'static str = "Ask";
-    const FOCUSED_TEXT_MINI_INPUT_MAX_VISIBLE_HEIGHT: f32 = 44.0;
     const FOCUSED_TEXT_VARIATION_CARD_MIN_HEIGHT: f32 = 96.0;
     const FOCUSED_TEXT_VARIATION_CARD_GAP: f32 = 8.0;
     const FOCUSED_TEXT_VARIATION_AREA_PADDING_Y: f32 = 8.0;
@@ -14325,7 +14466,12 @@ impl AgentChatView {
     }
 
     fn clamp_composer_picker_left(anchor_left: f32, picker_width: f32, window_width: f32) -> f32 {
-        let min_left = Self::AGENT_CHAT_INPUT_PADDING_X;
+        let def = crate::designs::current_main_menu_theme().def();
+        let min_left = crate::components::main_view_chrome::main_view_input_horizontal_metrics(
+            def,
+            window_width,
+        )
+        .shell_x;
         let max_left = (window_width - picker_width - Self::AGENT_CHAT_COMPOSER_PICKER_EDGE_GUTTER)
             .max(min_left);
         anchor_left.clamp(min_left, max_left)
@@ -14337,7 +14483,7 @@ impl AgentChatView {
     fn measure_agent_chat_input_prefix_width(
         prefix: &str,
         cx: &App,
-        text_style: AgentChatComposerTextStyle,
+        text_style: &AgentChatComposerTextStyle,
     ) -> f32 {
         if prefix.is_empty() {
             return 0.0;
@@ -14353,8 +14499,14 @@ impl AgentChatView {
     }
 
     /// Returns the maximum text wrapping width for the Agent Chat composer.
-    fn composer_wrap_width_for_window(window_width: f32) -> f32 {
-        (window_width - (Self::AGENT_CHAT_INPUT_PADDING_X * 2.0)).max(1.0)
+    fn composer_wrap_width_for_window(
+        window_width: f32,
+        text_style: &AgentChatComposerTextStyle,
+    ) -> f32 {
+        text_style.wrap_width(
+            window_width,
+            crate::components::conversation_style::CONVERSATION_SEND_SIZE,
+        )
     }
 
     /// Returns the Agent Chat composer cursor position `(x, y)` after rendering `text`,
@@ -14365,12 +14517,12 @@ impl AgentChatView {
         text: &str,
         window_width: f32,
         cx: &App,
-        text_style: AgentChatComposerTextStyle,
+        text_style: &AgentChatComposerTextStyle,
     ) -> (f32, f32) {
         if text.is_empty() {
             return (0.0, 0.0);
         }
-        let wrap_width = Self::composer_wrap_width_for_window(window_width);
+        let wrap_width = Self::composer_wrap_width_for_window(window_width, text_style);
         let mut wrapper = cx
             .text_system()
             .line_wrapper(text_style.font(), gpui::px(text_style.font_size));
@@ -14404,7 +14556,7 @@ impl AgentChatView {
         text: &str,
         window_width: f32,
         cx: &App,
-        text_style: AgentChatComposerTextStyle,
+        text_style: &AgentChatComposerTextStyle,
     ) -> usize {
         let (_, cursor_y) =
             Self::measure_agent_chat_input_cursor_position(text, window_width, cx, text_style);
@@ -14427,22 +14579,22 @@ impl AgentChatView {
             AgentChatComposerPickerTrigger::Slash => "/",
             AgentChatComposerPickerTrigger::Profile => PROFILE_TRIGGER_STR,
         };
-        let text_style = AgentChatComposerTextStyle::legacy();
+        let theme = theme::get_cached_theme();
+        let text_style = AgentChatComposerTextStyle::current(&theme);
         let trigger_width =
-            Self::measure_agent_chat_input_prefix_width(trigger_text, cx, text_style);
+            Self::measure_agent_chat_input_prefix_width(trigger_text, cx, &text_style);
         let (after_trigger_x, after_trigger_y) = Self::measure_agent_chat_input_cursor_position(
             &format!("{prefix}{trigger_text}"),
             window_width,
             cx,
-            text_style,
+            &text_style,
         );
-        let unclamped_left =
-            Self::AGENT_CHAT_INPUT_PADDING_X + (after_trigger_x - trigger_width).max(0.0);
+        let unclamped_left = text_style.shell_inset_x
+            + text_style.text_inset_left
+            + (after_trigger_x - trigger_width).max(0.0);
         let left = Self::clamp_composer_picker_left(unclamped_left, picker_width, window_width);
-        let top = Self::AGENT_CHAT_INPUT_PADDING_Y
-            + after_trigger_y
-            + text_style.line_height
-            + Self::AGENT_CHAT_COMPOSER_PICKER_OFFSET_Y;
+        let top =
+            after_trigger_y + text_style.line_height + Self::AGENT_CHAT_COMPOSER_PICKER_OFFSET_Y;
         (left, top, picker_width)
     }
 
@@ -16590,6 +16742,7 @@ impl Render for AgentChatView {
         let _colors = Self::prompt_colors();
         let theme = theme::get_cached_theme();
         let menu_def = crate::designs::current_main_menu_theme().def();
+        let composer_text_style = AgentChatComposerTextStyle::current(&theme);
         let window_width: f32 = window.viewport_size().width.into();
         let chrome = AppChromeColors::from_theme(&theme);
         let placeholder_text = rgba(chrome.placeholder_text_rgba);
@@ -16721,18 +16874,13 @@ impl Render for AgentChatView {
                     input_locked,
                     placeholder_text,
                     &theme,
+                    &composer_text_style,
                 ))
                 .into_any_element();
         }
 
         let root = crate::components::main_view_chrome::render_main_view_shell()
-            .font_family(
-                if self.host_window_state_for_window(window).kind == AgentChatHostWindowKind::Main {
-                    theme.get_fonts().ui_family
-                } else {
-                    Self::AGENT_CHAT_INPUT_FONT_FAMILY.to_string()
-                },
-            )
+            .font_family(composer_text_style.font_family.clone())
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
@@ -16760,9 +16908,6 @@ impl Render for AgentChatView {
             }));
 
         if resolved_layout.composer_in_header() {
-            let text_style = AgentChatComposerTextStyle::for_main_window(
-                self.host_window_state_for_window(window).kind == AgentChatHostWindowKind::Main,
-            );
             let input = Self::render_composer_input_shell(
                 &input_text,
                 input_cursor,
@@ -16778,7 +16923,7 @@ impl Render for AgentChatView {
                 view_entity.clone(),
                 &theme,
                 self.expanded_composer,
-                text_style,
+                &composer_text_style,
                 window_width,
                 &self.composer_scroll_handle,
                 cx,
@@ -17195,7 +17340,7 @@ impl Render for AgentChatView {
         // WP6: bottom docking renders ONLY the input shell (no second
         // header context zone) — the resolved model owns the placement.
         .when(resolved_layout.composer_at_bottom(), |d| {
-            d.child(Self::render_composer_input_shell(
+            let input = Self::render_composer_input_shell(
                 &input_text,
                 input_cursor,
                 input_selection,
@@ -17210,11 +17355,14 @@ impl Render for AgentChatView {
                 view_entity.clone(),
                 &theme,
                 self.expanded_composer,
-                AgentChatComposerTextStyle::legacy(),
+                &composer_text_style,
                 window_width,
                 &self.composer_scroll_handle,
                 cx,
-            ))
+            );
+            d.child(
+                crate::components::main_view_chrome::render_main_view_input_slot(menu_def, input),
+            )
         })
         // ── Attach menu popup ──────────────────────────
         .when(self.attach_menu_open, |d| {
@@ -17544,9 +17692,11 @@ mod footer_owner_tests {
 #[cfg(test)]
 mod composer_sizing_tests {
     use super::{
-        combined_agent_model_header_label, composer_visible_line_count, AgentChatComposerTextStyle,
-        AgentChatView,
+        agent_chat_composer_geometry, combined_agent_model_header_label,
+        composer_visible_line_count, focused_text_mini_input_shell_geometry,
+        AgentChatComposerTextStyle, AgentChatView, FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX,
     };
+    use crate::ai::agent_chat::ui::layout::AgentChatComposerSlot;
     use crate::ai::agent_chat::ui::permission_broker::AgentChatApprovalPreviewKind;
     use crate::theme::{AppChromeColors, Theme};
     use crate::ui_foundation::hex_to_rgba_with_opacity;
@@ -17562,30 +17712,94 @@ mod composer_sizing_tests {
     }
 
     #[test]
-    fn main_window_composer_tracks_canonical_search_typography_and_line_growth() {
-        let search = crate::designs::current_main_menu_theme().def().search;
-        let text_style = AgentChatComposerTextStyle::for_main_window(true);
+    fn composer_constructor_tracks_active_search_tokens_and_theme_ui_family() {
+        let theme = Theme::dark_default();
+        let def = crate::designs::current_main_menu_theme().def();
+        let search = def.search;
+        let horizontal =
+            crate::components::main_view_chrome::main_view_input_horizontal_metrics(def, 480.0);
+        let text_style = AgentChatComposerTextStyle::current(&theme);
 
         assert_eq!(search.font_size, 20.0);
         assert_eq!(search.font_weight.0, 430.0);
         assert_eq!(search.height, 26.0);
         assert_eq!(text_style.font_size, search.font_size);
-        assert_eq!(text_style.font_weight, Some(search.font_weight));
+        assert_eq!(text_style.font_weight, search.font_weight);
+        assert_eq!(text_style.font_family, theme.get_fonts().ui_family);
         assert_eq!(text_style.line_height, search.height);
+        assert_eq!(text_style.one_line_height, search.height);
+        assert_eq!(text_style.shell_inset_x, horizontal.shell_x);
+        assert_eq!(text_style.text_inset_left, horizontal.text_inset_left);
+        assert_eq!(text_style.text_inset_right, horizontal.text_inset_right);
         assert_eq!(
-            AgentChatView::composer_height_for_visible_lines(1, text_style.line_height),
+            AgentChatView::composer_height_for_visible_lines(1, &text_style),
             search.height
         );
         assert_eq!(
-            AgentChatView::composer_height_for_visible_lines(3, text_style.line_height),
+            AgentChatView::composer_height_for_visible_lines(3, &text_style),
             search.height * 3.0
         );
-        assert_eq!(
-            AgentChatComposerTextStyle::for_main_window(false),
-            AgentChatComposerTextStyle::legacy()
+    }
+    #[test]
+    fn automation_composer_geometry_matches_shared_renderer_slots() {
+        let theme = Theme::dark_default();
+        let def = crate::designs::current_main_menu_theme().def();
+        let text_style = AgentChatComposerTextStyle::current(&theme);
+        let composer_height = text_style.height_for_visible_lines(3);
+        let horizontal =
+            crate::components::main_view_chrome::main_view_input_horizontal_metrics(def, 480.0);
+        let header_metrics = crate::components::main_view_chrome::main_view_header_metrics(
+            def,
+            Some(composer_height),
         );
+        let header = agent_chat_composer_geometry(
+            480.0,
+            440.0,
+            44.0,
+            AgentChatComposerSlot::Header,
+            composer_height,
+        );
+        assert_eq!(header.composer_x, horizontal.shell_x);
+        assert_eq!(header.composer_y, header_metrics.input_y);
+        assert_eq!(header.composer_width, horizontal.shell_width);
+        assert_eq!(header.composer_height, composer_height);
+        assert_eq!(header.message_top, header_metrics.header_height);
+        assert_eq!(
+            header.message_height,
+            440.0 - header_metrics.header_height - 44.0
+        );
+        let bottom = agent_chat_composer_geometry(
+            480.0,
+            440.0,
+            44.0,
+            AgentChatComposerSlot::Bottom,
+            composer_height,
+        );
+        assert_eq!(bottom.composer_x, horizontal.shell_x);
+        assert_eq!(bottom.composer_width, horizontal.shell_width);
+        assert_eq!(bottom.composer_y, 440.0 - 44.0 - composer_height);
+        assert_eq!(bottom.message_top, 0.0);
+        assert_eq!(bottom.message_height, bottom.composer_y);
     }
 
+    #[test]
+    fn focused_text_mini_centers_one_canonical_shell_in_its_compact_slot() {
+        let theme = Theme::dark_default();
+        let text_style = AgentChatComposerTextStyle::current(&theme);
+        let shell = focused_text_mini_input_shell_geometry(
+            750.0,
+            FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX,
+            44.0,
+            &text_style,
+        );
+        assert_eq!(shell.x, text_style.shell_inset_x);
+        assert_eq!(
+            shell.y,
+            FOCUSED_TEXT_MINI_FRAME_BORDER_WIDTH_PX + (44.0 - text_style.one_line_height) / 2.0
+        );
+        assert_eq!(shell.width, 750.0 - text_style.shell_inset_x * 2.0);
+        assert_eq!(shell.height, text_style.one_line_height);
+    }
     #[test]
     fn permission_execute_chrome_follows_theme_warning_and_text_tiers() {
         let mut theme = Theme::dark_default();

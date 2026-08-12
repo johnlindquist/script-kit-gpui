@@ -252,17 +252,11 @@ pub(crate) const CONVERSATION_INPUT_PADDING_X: f32 = 12.0;
 /// positioning; the shell height derives from the shared search height +
 /// line growth, not from this padding).
 pub(crate) const CONVERSATION_INPUT_PADDING_Y: f32 = 10.0;
-/// Legacy visual line height retained for detached and experimental hosts.
-/// The standard embedded main-window composer derives its 26px line height
-/// from `MainMenuThemeDef::search`.
+/// Legacy design-contract line height for detached/experimental hosts.
+/// Active Agent Chat composers use the main-menu search geometry instead.
 pub(crate) const CONVERSATION_INPUT_LINE_HEIGHT: f32 = 22.0;
-/// Legacy composer text size retained for detached and experimental hosts.
-/// The standard embedded main-window composer derives its 20px size and 430
-/// weight from `MainMenuThemeDef::search`.
-pub(crate) const CONVERSATION_INPUT_FONT_SIZE: f32 = 17.0;
-/// The composer inherits GPUI's default window font. A SEPARATE authority
-/// from `list_item::FONT_SYSTEM_UI` even though both name the system font —
-/// do not collapse into `--sk-font-ui` until the renderer shares the const.
+/// Legacy design-contract font identity. Active composers resolve the
+/// theme UI family through `AgentChatComposerTextStyle`.
 pub(crate) const CONVERSATION_INPUT_FONT_FAMILY: &str = ".SystemUIFont";
 
 /// Composer placeholder while the transcript is empty.
@@ -460,11 +454,8 @@ pub(crate) fn resolved_conversation_markdown_body_line_height(style: &Conversati
     crate::confirm::confirm_prompt_line_height_px(style.markdown.body_font_size)
 }
 
-/// Single-line composer shell height through the SAME shared formula owner
-/// the renderer calls (`main_view_multiline_input_height`): the main-menu
-/// search height grows by one composer line per extra visible line, so one
-/// line == the shared search height. Fixture-resolved — NOT a universal
-/// "composer height" (multiline/expanded composers are taller).
+/// Legacy design-contract projection of the one-line composer shell. Active
+/// Agent Chat rendering reads the canonical main-menu search geometry.
 pub(crate) fn resolved_conversation_composer_single_line_height(search_height: f32) -> f32 {
     crate::components::main_view_chrome::main_view_multiline_input_height(
         search_height,
@@ -583,8 +574,6 @@ mod conversation_style_contract_tests {
 
     #[test]
     fn composer_single_line_height_tracks_the_shared_search_height() {
-        // One visible line preserves the main menu's exact input geometry
-        // (InfoBarBase search height 26); each extra line adds 22.
         assert_eq!(
             resolved_conversation_composer_single_line_height(26.0),
             26.0

@@ -656,27 +656,9 @@ pub(crate) enum AgentChatReturnRoute {
     Direct,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MainMenuRefreshSelectionPolicy {
-    SnapToFirst,
-    RestoreIdentity,
-}
-
-pub(crate) fn main_menu_refresh_selection_policy(
-    user_moved_selection: bool,
-) -> MainMenuRefreshSelectionPolicy {
-    // Hard rule (user, 2026-07-20): until the user moves selection themselves,
-    // the focused row is ALWAYS the first item in the list — a late async
-    // provider (brain, files, generate) injecting rows above the selection
-    // must never leave focus stranded on a non-first row. Once the user has
-    // deliberately moved, provider timing must not change what Enter runs
-    // (OF-32), so the painted stable identity is restored instead.
-    if user_moved_selection {
-        MainMenuRefreshSelectionPolicy::RestoreIdentity
-    } else {
-        MainMenuRefreshSelectionPolicy::SnapToFirst
-    }
-}
+// Supersedes the 2026-07-20 hard rule: every same-query async results refresh first restores the
+// pre-refresh stable selected identity, regardless of movement tracking. Only a missing identity
+// may snap to the first selectable row; genuinely new queries reset in the filter-change path.
 
 impl ScriptListApp {
     pub(crate) fn mark_main_menu_selection_user_moved(&mut self) {
@@ -739,8 +721,12 @@ impl ScriptListApp {
     }
 
     pub(crate) fn main_menu_selection_snapshot(&mut self) -> MainMenuSelectionSnapshot {
-        self.get_grouped_results_cached();
-        let selected_key = self
+        // The grouped cache is also the last row set presented to the user.
+        // Read it before considering a rebuild: async providers publish their
+        // new generation before some owners request this snapshot, and a
+        // generation-triggered rebuild here would preserve whichever new row
+        // landed at the old index instead of the row the user actually saw.
+        let mut selected_key = self
             .main_menu_result_caches
             .flat_result_index_for_coerced_grouped_selection(self.selected_index)
             .and_then(|(_, result_idx)| {
@@ -748,6 +734,20 @@ impl ScriptListApp {
                     .search_result_for_flat_index(result_idx)
             })
             .and_then(|result| result.stable_selection_key());
+
+        // Startup and non-rendered callers may not have populated the painted
+        // cache yet. Only that empty-cache path builds current grouped rows.
+        if selected_key.is_none() {
+            self.get_grouped_results_cached();
+            selected_key = self
+                .main_menu_result_caches
+                .flat_result_index_for_coerced_grouped_selection(self.selected_index)
+                .and_then(|(_, result_idx)| {
+                    self.main_menu_result_caches
+                        .search_result_for_flat_index(result_idx)
+                })
+                .and_then(|result| result.stable_selection_key());
+        }
 
         MainMenuSelectionSnapshot {
             query: self.computed_filter_text.clone(),
@@ -1625,21 +1625,166 @@ pub(crate) const ROOT_LAUNCHER_PLACEHOLDER: &str =
 
 #[cfg(test)]
 mod app_state_selection_tests {
-    use super::{MainMenuRefreshSelectionPolicy, main_menu_refresh_selection_policy};
+    use super::*;
 
-    /// Hard rule (user, 2026-07-20): no down-arrow → focus pinned to the
-    /// first item even when async results inject rows above it. Deliberate
-    /// user movement keeps the OF-32 identity restore so Enter stays stable.
-    #[test]
-    fn async_refresh_snaps_untouched_selection_and_restores_user_moved_identity() {
-        assert_eq!(
-            main_menu_refresh_selection_policy(false),
-            MainMenuRefreshSelectionPolicy::SnapToFirst
-        );
-        assert_eq!(
-            main_menu_refresh_selection_policy(true),
-            MainMenuRefreshSelectionPolicy::RestoreIdentity
-        );
+    fn install_async_refresh_script_fixture(
+        app: &mut ScriptListApp,
+        query: &str,
+        script_names: &[&str],
+    ) {
+        app.scripts = script_names
+            .iter()
+            .map(|name| main_menu_selection_test_script(name))
+            .collect();
+        app.scriptlets.clear();
+        app.skills.clear();
+        app.apps.clear();
+        app.computed_filter_text = query.to_string();
+        app.filter_text = query.to_string();
+        app.menu_syntax_mode = crate::menu_syntax::MenuSyntaxMode::from_input(query);
+        app.reset_main_menu_selection_user_moved();
+        app.invalidate_filter_cache();
+        app.invalidate_grouped_cache();
+        app.get_grouped_results_cached();
+        app.sync_list_state();
+    }
+
+    fn script_selection(app: &mut ScriptListApp, script_name: &str) -> Option<(usize, String)> {
+        let (grouped_items, flat_results) = app.get_grouped_results_cached();
+        grouped_items
+            .iter()
+            .enumerate()
+            .find_map(|(grouped_index, item)| {
+                let GroupedListItem::Item(result_index) = item else {
+                    return None;
+                };
+                let Some(crate::scripts::SearchResult::Script(script_match)) =
+                    flat_results.get(*result_index)
+                else {
+                    return None;
+                };
+                if script_match.script.name != script_name {
+                    return None;
+                }
+                flat_results
+                    .get(*result_index)
+                    .and_then(crate::scripts::SearchResult::stable_selection_key)
+                    .map(|stable_key| (grouped_index, stable_key))
+            })
+    }
+
+    #[gpui::test]
+    fn async_refresh_preserves_untouched_non_first_identity_when_rows_insert_above(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let app = main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            let query = "zzlauncheridentityrefresh";
+            let target_name = "zzlauncheridentityrefresh target trailing";
+            install_async_refresh_script_fixture(
+                app,
+                query,
+                &["zzlauncheridentityrefresh first", target_name],
+            );
+
+            let first_index_before = app
+                .main_menu_result_caches
+                .first_selectable_index()
+                .expect("fixture must expose a first selectable row");
+            let (target_index_before, target_key_before) = script_selection(app, target_name)
+                .expect("fixture must expose the target script row");
+            assert!(
+                target_index_before > first_index_before,
+                "the retained identity must start as a non-first row"
+            );
+            app.selected_index = target_index_before;
+            assert!(!app.main_menu_selection_user_moved);
+            assert_eq!(
+                selected_main_menu_stable_key(app).as_deref(),
+                Some(target_key_before.as_str())
+            );
+
+            let interaction_before = app.main_menu_interaction_snapshot();
+            app.scripts
+                .insert(0, main_menu_selection_test_script(query));
+            app.invalidate_filter_cache();
+            app.invalidate_grouped_cache();
+            app.reconcile_script_list_after_results_refresh(
+                "test_async_identity_retained_with_inserted_row",
+                interaction_before,
+                cx,
+            );
+
+            let (inserted_index, _) =
+                script_selection(app, query).expect("refresh must add the exact-match row");
+            let (target_index_after, target_key_after) = script_selection(app, target_name)
+                .expect("refresh must retain the selected target row");
+            assert!(inserted_index < target_index_after);
+            assert!(target_index_after > target_index_before);
+            assert_eq!(app.selected_index, target_index_after);
+            assert_eq!(target_key_after, target_key_before);
+            assert_eq!(
+                selected_main_menu_stable_key(app).as_deref(),
+                Some(target_key_before.as_str())
+            );
+            assert!(!app.main_menu_selection_user_moved);
+        });
+    }
+
+    #[gpui::test]
+    fn async_refresh_falls_back_to_first_when_untouched_identity_disappears(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let app = main_menu_selection_test_app(cx);
+        app.update(cx, |app, cx| {
+            let query = "zzlaunchermissingidentity";
+            let target_name = "zzlaunchermissingidentity target trailing";
+            install_async_refresh_script_fixture(
+                app,
+                query,
+                &["zzlaunchermissingidentity first", target_name],
+            );
+
+            let first_index_before = app
+                .main_menu_result_caches
+                .first_selectable_index()
+                .expect("fixture must expose a first selectable row");
+            let (target_index_before, target_key_before) = script_selection(app, target_name)
+                .expect("fixture must expose the target script row");
+            assert!(target_index_before > first_index_before);
+            app.selected_index = target_index_before;
+            assert!(!app.main_menu_selection_user_moved);
+            assert_eq!(
+                selected_main_menu_stable_key(app).as_deref(),
+                Some(target_key_before.as_str())
+            );
+
+            let interaction_before = app.main_menu_interaction_snapshot();
+            app.scripts
+                .retain(|script| script.name.as_str() != target_name);
+            app.invalidate_filter_cache();
+            app.invalidate_grouped_cache();
+            app.reconcile_script_list_after_results_refresh(
+                "test_async_identity_missing_falls_back",
+                interaction_before,
+                cx,
+            );
+
+            assert!(script_selection(app, target_name).is_none());
+            let first_index_after = app
+                .main_menu_result_caches
+                .first_selectable_index()
+                .expect("remaining fixture must expose a first selectable row");
+            let first_key_after = first_selectable_main_menu_stable_key(app)
+                .expect("remaining first row must have a stable key");
+            assert_eq!(app.selected_index, first_index_after);
+            assert_eq!(
+                selected_main_menu_stable_key(app).as_deref(),
+                Some(first_key_after.as_str())
+            );
+            assert_ne!(first_key_after, target_key_before);
+            assert!(!app.main_menu_selection_user_moved);
+        });
     }
 }
 

@@ -186,11 +186,37 @@ impl SpineLivePreviewCache {
         }
     }
 
+    fn seed_style_preview_fixture(&mut self, needs: SpinePreviewNeeds) -> bool {
+        if needs != SpinePreviewNeeds::STYLE
+            || std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() != Some("1")
+        {
+            return false;
+        }
+
+        let Ok(selection_text) = std::env::var("SCRIPT_KIT_TEST_SPINE_STYLE_SELECTION_TEXT") else {
+            return false;
+        };
+        let selection = (!selection_text.trim().is_empty()).then_some(selection_text);
+        let is_draft = std::env::var("SCRIPT_KIT_TEST_SPINE_STYLE_SELECTION_KIND")
+            .ok()
+            .as_deref()
+            == Some("draft");
+        let source_app = std::env::var("SCRIPT_KIT_TEST_SPINE_STYLE_SOURCE_APP")
+            .ok()
+            .filter(|app| !app.trim().is_empty());
+        self.seed_selection_preview(selection, is_draft, source_app);
+        true
+    }
+
     pub(crate) fn refresh_preview_nonblocking(&mut self, needs: SpinePreviewNeeds) {
         self.collect_pending_expensive();
 
         if needs.cheap_context {
             self.refresh_cheap_fields();
+        }
+
+        if self.seed_style_preview_fixture(needs) {
+            return;
         }
 
         if !needs.browser_url && !needs.selection_text {
@@ -450,32 +476,28 @@ impl SpineLivePreview {
         }
     }
 
-    pub(crate) fn style_selection_preview(&self) -> String {
-        if let Some(t) = &self.selection_text {
-            let preview = truncate_preview(t, 80);
-            if !preview.is_empty() {
-                let what = if self.selection_is_draft {
-                    "your draft"
-                } else {
-                    "selection"
-                };
-                return match self
-                    .selection_source_app
-                    .as_deref()
-                    .or(self.frontmost_app_name.as_deref())
-                {
-                    Some(app) => {
-                        format!("Will rewrite {what} in {app}: \u{201c}{preview}\u{201d}")
-                    }
-                    None => format!("Will rewrite {what}: \u{201c}{preview}\u{201d}"),
-                };
-            }
-        }
-        // Nothing readable passively (AX-opaque apps like Chrome/Google Docs):
-        // the text is still captured at submit via the Cmd+C fallback.
-        match self.frontmost_app_name.as_deref() {
-            Some(app) => format!("Will rewrite the selected or focused text in {app}"),
-            None => "Will rewrite the selected or focused text".to_string(),
+    pub(crate) fn style_target_subtitle(&self) -> String {
+        let selection_app = self
+            .selection_source_app
+            .as_deref()
+            .map(str::trim)
+            .filter(|app| !app.is_empty());
+        let frontmost_app = self
+            .frontmost_app_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|app| !app.is_empty());
+        let app = selection_app.or(frontmost_app);
+        let has_readable_text = self
+            .selection_text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty());
+
+        match (has_readable_text, self.selection_is_draft, app) {
+            (true, false, Some(app)) => format!("Rewrites your selection in {app}"),
+            (true, true, Some(app)) => format!("Rewrites your draft in {app}"),
+            (_, _, Some(app)) => format!("Rewrites the selected or focused text in {app}"),
+            _ => "Rewrites the selected or focused text".to_string(),
         }
     }
 }
@@ -511,6 +533,62 @@ mod tests {
         assert!(cache
             .last_clipboard_read
             .is_some_and(|at| at.elapsed() < CLIPBOARD_PREVIEW_TTL));
+    }
+
+    #[test]
+    fn style_target_subtitle_uses_closed_non_leaking_templates() {
+        const SELECTION_SENTINEL: &str = "P01_SELECTION_BYTES_MUST_NOT_LEAK";
+        const DRAFT_SENTINEL: &str = "P01_DRAFT_BYTES_MUST_NOT_LEAK";
+        let cases = [
+            (
+                "selection",
+                SpineLivePreview {
+                    selection_text: Some(SELECTION_SENTINEL.to_string()),
+                    selection_source_app: Some("Mail".to_string()),
+                    ..Default::default()
+                },
+                "Rewrites your selection in Mail",
+            ),
+            (
+                "draft",
+                SpineLivePreview {
+                    selection_text: Some(DRAFT_SENTINEL.to_string()),
+                    selection_is_draft: true,
+                    selection_source_app: Some("Notes".to_string()),
+                    ..Default::default()
+                },
+                "Rewrites your draft in Notes",
+            ),
+            (
+                "no-readable-text",
+                SpineLivePreview {
+                    frontmost_app_name: Some("Safari".to_string()),
+                    ..Default::default()
+                },
+                "Rewrites the selected or focused text in Safari",
+            ),
+            (
+                "unknown-app",
+                SpineLivePreview {
+                    selection_text: Some(SELECTION_SENTINEL.to_string()),
+                    ..Default::default()
+                },
+                "Rewrites the selected or focused text",
+            ),
+        ];
+
+        for (label, preview, expected) in cases {
+            let subtitle = preview.style_target_subtitle();
+            assert_eq!(subtitle, expected, "{label}");
+            assert!(
+                !subtitle.contains(SELECTION_SENTINEL),
+                "{label} leaked selection bytes"
+            );
+            assert!(
+                !subtitle.contains(DRAFT_SENTINEL),
+                "{label} leaked draft bytes"
+            );
+        }
     }
 
     #[test]

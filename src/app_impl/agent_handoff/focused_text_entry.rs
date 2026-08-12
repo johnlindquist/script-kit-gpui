@@ -269,7 +269,10 @@ impl ScriptListApp {
         });
         self.enter_embedded_agent_chat_surface(view_entity, cx);
         self.request_focus(FocusTarget::ChatPrompt, cx);
-        script_kit_gpui::request_show_main_window();
+        self.dispatch_window_event(
+            crate::window_orchestrator::WindowEvent::ShowMain { activate_app: true },
+            cx,
+        );
         crate::window_resize::resize_to_view_sync(
             crate::window_resize::ViewType::FocusedTextMini,
             0,
@@ -339,7 +342,10 @@ impl ScriptListApp {
             chat.mark_focused_text_originated_from_quick_prompt();
         });
         self.request_focus(FocusTarget::ChatPrompt, cx);
-        script_kit_gpui::request_show_main_window();
+        self.dispatch_window_event(
+            crate::window_orchestrator::WindowEvent::ShowMain { activate_app: true },
+            cx,
+        );
         crate::window_resize::resize_to_view_sync(
             crate::window_resize::ViewType::FocusedTextMini,
             0,
@@ -554,7 +560,10 @@ impl ScriptListApp {
             chat.mark_focused_text_originated_from_quick_prompt();
         });
         self.request_focus(FocusTarget::ChatPrompt, cx);
-        script_kit_gpui::request_show_main_window();
+        self.dispatch_window_event(
+            crate::window_orchestrator::WindowEvent::ShowMain { activate_app: true },
+            cx,
+        );
         crate::window_resize::resize_to_view_sync(
             crate::window_resize::ViewType::FocusedTextMini,
             0,

@@ -130,7 +130,7 @@ mod tests {
             crate::config::SpineStyleConfig {
                 id: "concise".to_string(),
                 title: Some("Ultra Concise".to_string()),
-                description: None,
+                description: Some("Configured brevity description".to_string()),
                 icon: None,
                 instruction: "Halve the word count.".to_string(),
             },
@@ -141,6 +141,7 @@ mod tests {
         assert_eq!(pirate.instruction, "Rewrite like a pirate.");
         let concise = styles.iter().find(|s| s.id == "concise").expect("concise");
         assert_eq!(concise.title, "Ultra Concise");
+        assert_eq!(concise.description, "Configured brevity description");
         assert_eq!(concise.instruction, "Halve the word count.");
         // Built-ins not overridden remain intact.
         assert!(styles.iter().any(|s| s.id == "professional"));
