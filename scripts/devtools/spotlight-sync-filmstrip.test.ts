@@ -87,14 +87,17 @@ function captureReceipt(frames: JsonRecord[]): JsonRecord {
   };
 }
 
-function validBundle(): SpotlightSyncBundle {
+function validBundle(runOffset = 0): SpotlightSyncBundle {
+  const onsetWidthScale = 1.0305 + runOffset * 0.0004;
+  const onsetBlurRadius = 12 + runOffset * 0.02;
   const entryGeometry = [
-    geometryFrame(0, 0, 1.012, 0.85),
-    geometryFrame(1, 44, 1.008, 0.90),
-    geometryFrame(2, 60, 0.999, 0.97),
-    geometryFrame(3, 79, 0.987, 0.99),
-    geometryFrame(4, 114, 0.995, 0.995),
-    geometryFrame(5, 149, 1, 1),
+    geometryFrame(0, 0, onsetWidthScale, 0.85),
+    geometryFrame(1, 18, 1.012, 0.85),
+    geometryFrame(2, 44, 1.012, 0.85),
+    geometryFrame(3, 60, 0.999, 0.97),
+    geometryFrame(4, 79, 0.987, 0.99),
+    geometryFrame(5, 114, 0.995, 0.995),
+    geometryFrame(6, 149, 1, 1),
   ];
   const exitGeometry = [
     geometryFrame(20, 0, 1, 1),
@@ -136,6 +139,26 @@ function validBundle(): SpotlightSyncBundle {
           name: "main-entry",
           exactWindowID: OWNER,
           settledCapturesPass: true,
+          nativeGlassOnset: {
+            present: true,
+            line: "event=native_glass_entry_onset",
+            supported: true,
+            entryBlurRadius: onsetBlurRadius,
+            entryBlurToRadius: 0,
+            footerBlurRadius: 0,
+            footerEnrolled: false,
+            entryBlurDurationNs: 44_000_000,
+            onsetStartWidthScale: onsetWidthScale,
+            tailStartWidthScale: 1.012,
+            onsetGeometryDurationNs: 18_000_000,
+            onsetDurationNs: 44_000_000,
+            contentRootCount: 4,
+            contentHoldNs: 26_000_000,
+            contentFadeNs: 18_000_000,
+            windowAlpha: 0.85,
+            errors: [],
+            pass: true,
+          },
           presentationGeometry: {
             receipt: { pass: true, frames: entryGeometry },
           },
@@ -209,30 +232,42 @@ function frameCapsule(row: JsonRecord, id: string): JsonRecord {
 }
 
 describe("Spotlight-sync filmstrip contract", () => {
-  test("accepts a dense synchronized entry and exit receipt", () => {
-    const grade = gradeSpotlightSyncBundle(validBundle());
-    expect(grade.disposition).toBe("EVALUABLE_PASS");
-    expect(grade.pass).toBe(true);
-    expect(grade.failures).toEqual([]);
-    expect(grade.coverage.entryDistinctWidthCount).toBeGreaterThanOrEqual(4);
-    expect(grade.coverage.capsuleIds).toEqual([LEFT, RIGHT]);
-    expect(grade.measurements.entry[0]?.capsules[0]?.geometry).toHaveProperty(
-      "screenshotFrame",
-    );
+  test("accepts three dense synchronized retuned entry and exit receipts", () => {
+    for (const runOffset of [-1, 0, 1]) {
+      const grade = gradeSpotlightSyncBundle(validBundle(runOffset));
+      expect(grade.disposition).toBe("EVALUABLE_PASS");
+      expect(grade.pass).toBe(true);
+      expect(grade.failures).toEqual([]);
+      expect(grade.coverage.entryOnsetReceiptPresent).toBe(true);
+      expect(grade.coverage.entryDistinctWidthCount).toBeGreaterThanOrEqual(5);
+      expect(grade.coverage.entryOnsetTailAtMs).toBe(18);
+      expect(grade.coverage.entryOnsetTailWidthScale).toBeCloseTo(1.012, 6);
+      expect(grade.coverage.capsuleIds).toEqual([LEFT, RIGHT]);
+      expect(grade.measurements.onset).toMatchObject({
+        entryBlurToRadius: 0,
+        footerBlurRadius: 0,
+        footerEnrolled: false,
+      });
+      expect(grade.measurements.entry[0]?.capsules[0]?.geometry).toHaveProperty(
+        "screenshotFrame",
+      );
+    }
   });
 
-  test("locks the Spotlight wide-start gate at exactly 1.012 ± 0.006", () => {
-    // Durable anti-redrift guard (wide-start regression, 2026-08-13): the
-    // first visible frame must be phase-aligned to Spotlight's measured
-    // 101.2% wide state. 1.000 is the exact signature of the queued-move
-    // stomp that erased the wide parking.
+  test("locks the Spotlight soft-materialize start at exactly 1.0305 ± 0.006", () => {
+    // Durable anti-redrift guard: the first visible frame is the measured
+    // 103.05% soft-materialize photon (2026-08-13 retune). 1.012 — the old
+    // wide-start-only first frame — is an explicit FAILURE case now, so the
+    // onset stretch cannot silently regress; 1.000 remains the signature of
+    // the queued-move stomp.
     const cases: Array<[number, boolean]> = [
       [1.000, false],
-      [1.005, false],
-      [1.006, true],
-      [1.012, true],
-      [1.018, true],
-      [1.019, false],
+      [1.012, false],
+      [1.0244, false],
+      [1.0245, true],
+      [1.0305, true],
+      [1.0365, true],
+      [1.0366, false],
     ];
     for (const [scale, shouldPass] of cases) {
       const bundle = clonedBundle();
@@ -257,7 +292,49 @@ describe("Spotlight-sync filmstrip contract", () => {
     }
   });
 
-  test("names the exact entry frame and capsule for a brightness excursion", () => {
+  test("rejects the stale eight-point full-entry onset blur", () => {
+  const bundle = clonedBundle();
+  const onset = scenario(bundle, "main-entry").nativeGlassOnset as JsonRecord;
+  onset.entryBlurRadius = 8;
+  onset.entryBlurDurationNs = 149_000_000;
+  onset.pass = false;
+  onset.errors = ["stale onset blur"];
+  const grade = gradeSpotlightSyncBundle(bundle);
+  expect(grade.disposition).toBe("EVALUABLE_FAIL");
+  expect(grade.failures).toContainEqual(expect.objectContaining({
+    kind: "product",
+    phase: "entry",
+    metric: "entry.onset.blurFromRadius",
+  }));
+  expect(grade.failures).toContainEqual(expect.objectContaining({
+    kind: "product",
+    phase: "entry",
+    metric: "entry.onset.blurDurationMs",
+  }));
+});
+
+test("rejects independent footer onset effects", () => {
+  const bundle = clonedBundle();
+  const onset = scenario(bundle, "main-entry").nativeGlassOnset as JsonRecord;
+  onset.footerBlurRadius = 8;
+  onset.footerEnrolled = true;
+  onset.pass = false;
+  onset.errors = ["footer effects"];
+  const grade = gradeSpotlightSyncBundle(bundle);
+  expect(grade.disposition).toBe("EVALUABLE_FAIL");
+  expect(grade.failures).toContainEqual(expect.objectContaining({
+    kind: "product",
+    phase: "entry",
+    metric: "entry.onset.footerBlurRadius",
+  }));
+  expect(grade.failures).toContainEqual(expect.objectContaining({
+    kind: "product",
+    phase: "entry",
+    metric: "entry.onset.footerEnrolled",
+  }));
+});
+
+test("names the exact entry frame and capsule for a brightness excursion", () => {
     const bundle = clonedBundle();
     const row = frame(bundle.entryColor, "motion", 2);
     const left = frameCapsule(row, LEFT);

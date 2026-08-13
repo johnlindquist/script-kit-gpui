@@ -139,17 +139,24 @@ against `CleanShot 2026-07-24 at 09.18.40.mp4`):
   roots hold `26ms` then fade `18ms`, ending exactly at tail start. Total
   entry `149ms` = onset + tail (Oracle session `glass-entry-onset-v2`,
   measured from `CleanShot 2026-07-27 at 10.08.42.mp4`);
-- entry inset `0.006` per side, producing a main/Notes/Dictation shrink-in
-  `101.2% → 98.7% → 100%` width path and an Actions/popup grow-in
-  `98.8% → 101.3% → 100%` path. Script Kit's first visible frame is
-  phase-aligned to Spotlight's measured `t≈88ms` state (101.2% width at
-  presence 0.85): NSWindow alpha below 0.85 exposes desktop pixels rather
-  than Spotlight's coherent faint glass, so the unsafe `0.05 → 0.85`
-  presence prefix (Spotlight's ~110% first photon) is deliberately omitted.
-  Height participation is `0` (vertical damping 0.0 — Spotlight measures
-  ±0–2px). Squish factor stays `0.25`, clamped `0.0065–0.015` per side; the
-  default hits the 0.0065 minimum = Spotlight's measured `−1.3%` total
-  squish;
+- entry inset `0.006` per side, producing a main shrink-in
+  `103.05% → 101.2% → 98.7% → 100%` width path (Notes/Dictation stay
+  `101.2% → 98.7% → 100%`) and an Actions/popup grow-in
+  `98.8% → 101.3% → 100%` path. **2026-08-13 soft-materialize retune
+  (user-authorized, measured from `CleanShot 2026-08-13 at 00.25.36.mp4`,
+  57fps):** the MAIN window's first photon is `103.05%` wide (Spotlight's
+  measured first photon), easing to the preserved `101.2%` visible-tail
+  start over `18ms` inside the material prefix, with the main backdrop's
+  onset defocus raised to `12pt → 0` resolved across the `44ms` prefix
+  (`GLASS_MAIN_ONSET_START_WIDTH_SCALE`, `GLASS_MAIN_ONSET_GEOMETRY_DURATION`,
+  `GLASS_MAIN_ENTRY_BLUR_RADIUS`; popups/secondary keep the shared `8pt`
+  full-entry ramp, and the floating footer keeps ZERO independent blur).
+  NSWindow alpha below 0.85 still exposes desktop pixels, so the sub-0.85
+  presence prefix remains deliberately omitted — the wider+blurrier first
+  photon at the 0.85 floor is the safe reproduction. Height participation
+  is `0` (vertical damping 0.0 — Spotlight measures ±0–2px). Squish factor
+  stays `0.25`, clamped `0.0065–0.015` per side; the default hits the
+  0.0065 minimum = Spotlight's measured `−1.3%` total squish;
 - entry alpha: visible start `0.85`, easing to `0.99` over `18ms`
   (ease-out), holding the model value at `0.99` through max compression,
   then easing `0.99 → 1.0` over `26ms` from rebound start. A shrink-in

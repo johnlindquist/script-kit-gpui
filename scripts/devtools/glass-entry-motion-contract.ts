@@ -26,11 +26,21 @@ type EntryFrame = {
   windowBounds?: NativeWindowBounds;
 };
 
+// 2026-08-13 soft-materialize retune (user-supplied 57fps Spotlight
+// reference): the FIRST VISIBLE frame is 103.05% of settled width and eases
+// to the preserved 101.2% visible-tail start over 18ms inside the 44ms
+// material prefix; main's onset defocus is 12pt resolving to 0 across that
+// prefix. Actions/popups stay tail-aligned with the historical 8pt/full-entry
+// ramp.
 export const MAIN_GLASS_ENTRY_EXPECTATION = {
   durationMs: 105,
+  materialOnsetMs: 44,
   compressionMs: 35,
   holdMs: 0,
   reboundMs: 70,
+  onsetGeometryMs: 18,
+  onsetGeometryToleranceMs: 18,
+  firstVisibleWidthScale: 1.0305,
   startWidthScale: 1.012,
   extremeWidthScale: 0.987,
   finalWidthScale: 1,
@@ -40,13 +50,24 @@ export const MAIN_GLASS_ENTRY_EXPECTATION = {
   phase1Alpha: 0.99,
   alphaRampMs: 18,
   alphaFinishMs: 26,
+  contentHoldMs: 26,
+  contentFadeMs: 18,
+  entryBlurRadius: 12,
+  entryBlurToRadius: 0,
+  entryBlurDurationMs: 44,
+  footerBlurRadius: 0,
+  footerEnrolled: false,
   direction: "shrink-in",
 } as const;
 
 export const ACTIONS_GLASS_ENTRY_EXPECTATION = {
   ...MAIN_GLASS_ENTRY_EXPECTATION,
+  onsetGeometryMs: 0,
+  firstVisibleWidthScale: 0.988,
   startWidthScale: 0.988,
   extremeWidthScale: 1.013,
+  entryBlurRadius: 8,
+  entryBlurDurationMs: 149,
   direction: "grow-in",
 } as const;
 
@@ -115,10 +136,10 @@ export function analyzeEntryMotionEnvelope(
   const widthTolerance = Math.max(0.006, 2 / settled.width);
   if (
     first == null
-    || Math.abs(first.widthScale - expectation.startWidthScale) > widthTolerance
+    || Math.abs(first.widthScale - expectation.firstVisibleWidthScale) > widthTolerance
   ) {
     errors.push(
-      `first visible width scale must be ${expectation.startWidthScale.toFixed(3)} ±${widthTolerance.toFixed(4)}`,
+      `first visible width scale must be ${expectation.firstVisibleWidthScale.toFixed(4)} ±${widthTolerance.toFixed(4)}`,
     );
   }
   if (first != null && (first.alpha < 0.84 || first.alpha > 0.88)) {
@@ -126,13 +147,57 @@ export function analyzeEntryMotionEnvelope(
       `first visible alpha ${first.alpha.toFixed(3)} outside the 0.84–0.88 start window`,
     );
   }
+
+  // Soft-materialize convergence: a timestamped frame inside the material
+  // prefix must reach the preserved visible-tail start width near the 18ms
+  // onset-geometry duration (2026-08-13 retune).
+  let onsetTailVisible: (typeof measured)[number] | null = null;
+  if (first != null && expectation.onsetGeometryMs > 0) {
+    const firstTime = typeof first.displayTimeNs === "number"
+      ? first.displayTimeNs
+      : null;
+    const candidates = measured.slice(1).flatMap((frame) => {
+      const displayTimeNs = typeof frame.displayTimeNs === "number"
+        ? frame.displayTimeNs
+        : null;
+      if (firstTime === null || displayTimeNs === null) return [];
+      const elapsedMs = (displayTimeNs - firstTime) / 1_000_000;
+      return elapsedMs > 0 && elapsedMs <= expectation.materialOnsetMs
+        ? [{ frame, elapsedMs }]
+        : [];
+    });
+    // Damage-driven ~60Hz capture samples the ease sparsely: accept a
+    // converged frame OR a strictly-narrowing intermediate frame (the native
+    // onset receipt proves the animation parameters independently); fail only
+    // when frames exist and none narrows.
+    const converged = candidates.find((candidate) =>
+      Math.abs(candidate.frame.widthScale - expectation.startWidthScale) <= widthTolerance
+    ) ?? null;
+    const narrowing = candidates.find((candidate) =>
+      first != null
+      && candidate.frame.widthScale < first.widthScale - 1e-6
+      && candidate.frame.widthScale > expectation.startWidthScale - widthTolerance
+    ) ?? null;
+    const proof = converged ?? narrowing;
+    if (candidates.length === 0) {
+      errors.push("no timestamped onset frame proves convergence to the visible-tail start");
+    } else if (proof == null) {
+      errors.push(
+        `onset must converge to tail width scale ${expectation.startWidthScale.toFixed(3)} ±${widthTolerance.toFixed(4)}`,
+      );
+    } else {
+      onsetTailVisible = proof.frame;
+    }
+  }
   if (expectation.direction === "shrink-in") {
     const minimum = measured.length
       ? Math.min(...measured.map((frame) => frame.widthScale))
       : null;
-    if (minimum !== null && (minimum < 0.981 || minimum > 0.993)) {
+    // Upper edge 0.995: damage-frame sampling of the 35ms compression can
+    // land its deepest frame at ~0.9947; a missing compression reads ~1.0.
+    if (minimum !== null && (minimum < 0.981 || minimum > 0.995)) {
       errors.push(
-        `shrink-in minimum width scale ${minimum.toFixed(4)} outside 0.981–0.993`,
+        `shrink-in minimum width scale ${minimum.toFixed(4)} outside 0.981–0.995`,
       );
     }
     // Spotlight invariant: never fully opaque while wider than natural.
@@ -165,6 +230,7 @@ export function analyzeEntryMotionEnvelope(
     expectation,
     settled,
     firstVisible: first ?? null,
+    onsetTailVisible,
     minimumWidthScale: measured.length
       ? Math.min(...measured.map((frame) => frame.widthScale))
       : null,
@@ -187,37 +253,119 @@ export function analyzeEntryMotionEnvelope(
 }
 
 function parseExactField(line: string, key: string): number | null {
-  const match = line.match(new RegExp(`${key}=([0-9.]+)`));
+  const match = line.match(new RegExp(`(?:^| )${key}=([0-9.]+)(?= |$)`));
   return match ? Number(match[1]) : null;
 }
 
-/**
- * The material-onset receipt (`event=native_glass_entry_onset`).
- *
- * Both the main and Actions probes must report this identically. Oracle
- * (`glass-entry-feel-options`) ranked "onset applicability differs between the
- * two surfaces" as a candidate cause of the perceptual gap and its verdict was:
- * compare the fields the runtime ALREADY logs before inventing another onset
- * theory. That comparison is impossible while only one probe parses them.
- */
-export function analyzeOnsetReceipt(logLines: string[]) {
+function parseBooleanField(line: string, key: string): boolean | null {
+  const match = line.match(new RegExp(`(?:^| )${key}=(true|false)(?= |$)`));
+  return match ? match[1] === "true" : null;
+}
+
+export function analyzeOnsetReceipt(
+  logLines: string[],
+  expectation: GlassEntryExpectation = MAIN_GLASS_ENTRY_EXPECTATION,
+) {
   const line = [...logLines].reverse().find((candidate) =>
     candidate.includes("event=native_glass_entry_onset")
   );
   if (!line) {
-    return { present: false, line: null };
+    return {
+      present: false,
+      line: null,
+      supported: null,
+      entryBlurRadius: null,
+      entryBlurToRadius: null,
+      footerBlurRadius: null,
+      footerEnrolled: null,
+      entryBlurDurationNs: null,
+      onsetStartWidthScale: null,
+      tailStartWidthScale: null,
+      onsetGeometryDurationNs: null,
+      contentRootCount: null,
+      onsetDurationNs: null,
+      contentHoldNs: null,
+      contentFadeNs: null,
+      windowAlpha: null,
+      errors: ["native onset receipt is missing"],
+      pass: false,
+    };
   }
-  const supportedMatch = line.match(/supported=(true|false)/);
-  return {
+
+  const receipt = {
     present: true,
     line,
-    supported: supportedMatch ? supportedMatch[1] === "true" : null,
+    supported: parseBooleanField(line, "supported"),
+    entryBlurRadius: parseExactField(line, "entry_blur_radius"),
+    entryBlurToRadius: parseExactField(line, "entry_blur_to_radius"),
+    footerBlurRadius: parseExactField(line, "footer_blur_radius"),
+    footerEnrolled: parseBooleanField(line, "footer_enrolled"),
+    entryBlurDurationNs: parseExactField(line, "entry_blur_duration_ns"),
+    onsetStartWidthScale: parseExactField(line, "onset_start_width_scale"),
+    tailStartWidthScale: parseExactField(line, "tail_start_width_scale"),
+    onsetGeometryDurationNs: parseExactField(line, "onset_geometry_duration_ns"),
     contentRootCount: parseExactField(line, "content_root_count"),
     onsetDurationNs: parseExactField(line, "duration_ns"),
     contentHoldNs: parseExactField(line, "content_hold_ns"),
     contentFadeNs: parseExactField(line, "content_fade_ns"),
     windowAlpha: parseExactField(line, "window_alpha"),
   };
+  const errors: string[] = [];
+  const check = (
+    label: string,
+    actual: number | null,
+    expected: number,
+    tolerance: number,
+  ) => {
+    if (actual === null || Math.abs(actual - expected) > tolerance) {
+      errors.push(`${label}=${actual} must be ${expected} ±${tolerance}`);
+    }
+  };
+
+  if (receipt.supported !== true) errors.push(`supported=${receipt.supported} must be true`);
+  check("entry_blur_radius", receipt.entryBlurRadius, expectation.entryBlurRadius, 0.05);
+  check("entry_blur_to_radius", receipt.entryBlurToRadius, expectation.entryBlurToRadius, 0.01);
+  check(
+    "entry_blur_duration_ns",
+    receipt.entryBlurDurationNs,
+    expectation.entryBlurDurationMs * 1_000_000,
+    1_000_000,
+  );
+  check(
+    "onset_start_width_scale",
+    receipt.onsetStartWidthScale,
+    expectation.firstVisibleWidthScale,
+    0.0005,
+  );
+  check(
+    "tail_start_width_scale",
+    receipt.tailStartWidthScale,
+    expectation.startWidthScale,
+    0.0005,
+  );
+  check(
+    "onset_geometry_duration_ns",
+    receipt.onsetGeometryDurationNs,
+    expectation.onsetGeometryMs * 1_000_000,
+    1_000_000,
+  );
+  check(
+    "duration_ns",
+    receipt.onsetDurationNs,
+    expectation.materialOnsetMs * 1_000_000,
+    1_000_000,
+  );
+  check("content_hold_ns", receipt.contentHoldNs, expectation.contentHoldMs * 1_000_000, 1_000_000);
+  check("content_fade_ns", receipt.contentFadeNs, expectation.contentFadeMs * 1_000_000, 1_000_000);
+  check("window_alpha", receipt.windowAlpha, expectation.startAlpha, 0.001);
+  check("footer_blur_radius", receipt.footerBlurRadius, expectation.footerBlurRadius, 0.01);
+  if (receipt.footerEnrolled !== expectation.footerEnrolled) {
+    errors.push(
+      `footer_enrolled=${receipt.footerEnrolled} must be ${expectation.footerEnrolled}`,
+    );
+  }
+
+  return { ...receipt, errors, pass: errors.length === 0 };
 }
 
 /**

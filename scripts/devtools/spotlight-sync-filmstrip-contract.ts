@@ -30,16 +30,37 @@ export const SPOTLIGHT_SYNC_CONTRACT = {
     framePeriodMs: 17.5,
   },
   entry: {
-    totalMs: 44 + MAIN_GLASS_ENTRY_EXPECTATION.durationMs,
+    totalMs: MAIN_GLASS_ENTRY_EXPECTATION.materialOnsetMs
+      + MAIN_GLASS_ENTRY_EXPECTATION.durationMs,
     totalToleranceMs: 40,
-    extremeAtMs: 44 + MAIN_GLASS_ENTRY_EXPECTATION.compressionMs,
+    extremeAtMs: MAIN_GLASS_ENTRY_EXPECTATION.materialOnsetMs
+      + MAIN_GLASS_ENTRY_EXPECTATION.compressionMs,
     extremeToleranceMs: 35,
     reboundMs: MAIN_GLASS_ENTRY_EXPECTATION.reboundMs,
     reboundToleranceMs: 35,
-    minimumGeometryFrames: 6,
-    minimumDistinctWidths: 4,
-    startWidthScale: MAIN_GLASS_ENTRY_EXPECTATION.startWidthScale,
-    extremeWidthScale: [0.981, 0.993],
+    minimumGeometryFrames: 7,
+    minimumDistinctWidths: 5,
+    // 2026-08-13 soft-materialize retune: the first visible frame is the
+    // 103.05% first photon; a timestamped prefix frame must converge to the
+    // preserved 101.2% tail start near 18ms, before the 44ms material onset
+    // completes.
+    firstVisibleWidthScale: MAIN_GLASS_ENTRY_EXPECTATION.firstVisibleWidthScale,
+    tailStartWidthScale: MAIN_GLASS_ENTRY_EXPECTATION.startWidthScale,
+    onsetGeometryMs: MAIN_GLASS_ENTRY_EXPECTATION.onsetGeometryMs,
+    onsetGeometryToleranceMs: MAIN_GLASS_ENTRY_EXPECTATION.onsetGeometryToleranceMs,
+    materialOnsetMs: MAIN_GLASS_ENTRY_EXPECTATION.materialOnsetMs,
+    entryBlurRadius: MAIN_GLASS_ENTRY_EXPECTATION.entryBlurRadius,
+    entryBlurRadiusTolerance: 0.05,
+    entryBlurToRadius: MAIN_GLASS_ENTRY_EXPECTATION.entryBlurToRadius,
+    entryBlurDurationMs: MAIN_GLASS_ENTRY_EXPECTATION.entryBlurDurationMs,
+    entryBlurDurationToleranceMs: 1,
+    footerBlurRadius: MAIN_GLASS_ENTRY_EXPECTATION.footerBlurRadius,
+    footerEnrolled: MAIN_GLASS_ENTRY_EXPECTATION.footerEnrolled,
+    // Upper edge 0.995: a 35ms compression sampled at damage-driven ~60Hz can
+    // land its deepest frame at ~0.9947 (measured across the 2026-08-13
+    // corpus) while the true inter-frame extreme still reaches 0.987. A
+    // MISSING compression reads ~1.0, so the guard keeps its purpose.
+    extremeWidthScale: [0.981, 0.995],
     finalWidthScale: [0.997, 1.003],
     heightScale: [0.997, 1.003],
     firstAlpha: [0.84, 0.88],
@@ -293,6 +314,197 @@ function validateOwner(failures: SpotlightFailure[], scenario: JsonRecord, phase
   }
 }
 
+function findEntryOnsetReceipt(value: unknown): JsonRecord | null {
+  if (typeof value === "string") {
+    return value.includes("event=native_glass_entry_onset")
+      ? { present: true, line: value }
+      : null;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findEntryOnsetReceipt(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  const object = rec(value);
+  if (!object) return null;
+  const line = typeof object.line === "string" ? object.line : "";
+  const looksLikeOnset = line.includes("event=native_glass_entry_onset")
+    || (object.present === true
+      && Object.prototype.hasOwnProperty.call(object, "entryBlurRadius")
+      && Object.prototype.hasOwnProperty.call(object, "onsetStartWidthScale"));
+  if (looksLikeOnset) return object;
+  for (const nested of Object.values(object)) {
+    const found = findEntryOnsetReceipt(nested);
+    if (found) return found;
+  }
+  return null;
+}
+
+function gradeEntryOnset(failures: SpotlightFailure[], scenario: JsonRecord): JsonRecord | null {
+  const receipt = findEntryOnsetReceipt(scenario);
+  if (!receipt) {
+    observer(
+      failures,
+      "entry",
+      "entry.onset.nativeReceipt",
+      null,
+      "native_glass_entry_onset receipt",
+      "entry onset lacks attributable native blur and prefix geometry evidence",
+    );
+    return null;
+  }
+
+  const line = typeof receipt.line === "string" ? receipt.line : "";
+  const lineNumber = (key: string): number | null => {
+    const match = line.match(new RegExp(`(?:^| )${key}=([0-9.]+)(?= |$)`));
+    return match ? Number(match[1]) : null;
+  };
+  const lineBoolean = (key: string): boolean | null => {
+    const match = line.match(new RegExp(`(?:^| )${key}=(true|false)(?= |$)`));
+    return match ? match[1] === "true" : null;
+  };
+  const numberField = (field: string, logKey: string) =>
+    receipt[field] == null
+      ? lineNumber(logKey)
+      : num(receipt[field]) ?? lineNumber(logKey);
+  const booleanField = (field: string, logKey: string) =>
+    typeof receipt[field] === "boolean" ? receipt[field] as boolean : lineBoolean(logKey);
+
+  const values = {
+    supported: booleanField("supported", "supported"),
+    entryBlurRadius: numberField("entryBlurRadius", "entry_blur_radius"),
+    entryBlurToRadius: numberField("entryBlurToRadius", "entry_blur_to_radius"),
+    entryBlurDurationNs: numberField("entryBlurDurationNs", "entry_blur_duration_ns"),
+    onsetStartWidthScale: numberField("onsetStartWidthScale", "onset_start_width_scale"),
+    tailStartWidthScale: numberField("tailStartWidthScale", "tail_start_width_scale"),
+    onsetGeometryDurationNs: numberField(
+      "onsetGeometryDurationNs",
+      "onset_geometry_duration_ns",
+    ),
+    windowAlpha: numberField("windowAlpha", "window_alpha"),
+    footerBlurRadius: numberField("footerBlurRadius", "footer_blur_radius"),
+    footerEnrolled: booleanField("footerEnrolled", "footer_enrolled"),
+  };
+  const expected = SPOTLIGHT_SYNC_CONTRACT.entry;
+  const checkNumber = (
+    observed: number | null,
+    metric: string,
+    expectedValue: number,
+    tolerance: number,
+    message: string,
+  ) => {
+    if (observed === null) {
+      observer(failures, "entry", metric, null, `${expectedValue} ± ${tolerance}`, message);
+    } else if (Math.abs(observed - expectedValue) > tolerance) {
+      product(failures, "entry", metric, observed, `${expectedValue} ± ${tolerance}`, message);
+    }
+  };
+
+  if (values.supported !== true) {
+    product(
+      failures,
+      "entry",
+      "entry.onset.nativeSelectorsSupported",
+      values.supported,
+      true,
+      "native material parameters were not applied for the entry onset",
+    );
+  }
+  checkNumber(
+    values.entryBlurRadius,
+    "entry.onset.blurFromRadius",
+    expected.entryBlurRadius,
+    expected.entryBlurRadiusTolerance,
+    "entry onset did not begin with the measured stronger defocus",
+  );
+  checkNumber(
+    values.entryBlurToRadius,
+    "entry.onset.blurToRadius",
+    expected.entryBlurToRadius,
+    0.01,
+    "entry defocus did not decay to the settled zero-radius state",
+  );
+  checkNumber(
+    values.entryBlurDurationNs,
+    "entry.onset.blurDurationMs",
+    expected.entryBlurDurationMs * 1_000_000,
+    expected.entryBlurDurationToleranceMs * 1_000_000,
+    "entry defocus did not resolve inside the measured material-onset interval",
+  );
+  checkNumber(
+    values.onsetStartWidthScale,
+    "entry.onset.startWidthScale",
+    expected.firstVisibleWidthScale,
+    0.0005,
+    "native onset did not arm the measured wider first photon",
+  );
+  checkNumber(
+    values.tailStartWidthScale,
+    "entry.onset.tailStartWidthScale",
+    expected.tailStartWidthScale,
+    0.0005,
+    "native onset did not converge to the locked visible-tail start",
+  );
+  checkNumber(
+    values.onsetGeometryDurationNs,
+    "entry.onset.geometryDurationMs",
+    expected.onsetGeometryMs * 1_000_000,
+    1_000_000,
+    "native onset stretch did not use the measured 2x-tempo duration",
+  );
+  checkNumber(
+    values.footerBlurRadius,
+    "entry.onset.footerBlurRadius",
+    expected.footerBlurRadius,
+    0.01,
+    "footer capsules regained an independent entry blur",
+  );
+  if (values.footerEnrolled !== expected.footerEnrolled) {
+    product(
+      failures,
+      "entry",
+      "entry.onset.footerEnrolled",
+      values.footerEnrolled,
+      expected.footerEnrolled,
+      "footer capsules regained independent content-fade enrollment",
+    );
+  }
+  const [alphaLow, alphaHigh] = expected.firstAlpha;
+  if (values.windowAlpha === null) {
+    observer(
+      failures,
+      "entry",
+      "entry.onset.windowAlpha",
+      null,
+      `[${alphaLow}, ${alphaHigh}]`,
+      "native onset receipt lacks the owning window alpha",
+    );
+  } else if (values.windowAlpha < alphaLow || values.windowAlpha > alphaHigh) {
+    product(
+      failures,
+      "entry",
+      "entry.onset.windowAlpha",
+      values.windowAlpha,
+      `[${alphaLow}, ${alphaHigh}]`,
+      "native onset escaped the safe visible-alpha floor window",
+    );
+  }
+  if (receipt.pass === false && arr(receipt.errors).length === 0) {
+    observer(
+      failures,
+      "entry",
+      "entry.onset.receiptPass",
+      false,
+      true,
+      "native onset receipt failed without attributable field errors",
+    );
+  }
+
+  return values;
+}
+
 function gradeEntryGeometry(failures: SpotlightFailure[], scenario: JsonRecord) {
   const frames = sortedFrames(get(scenario, "presentationGeometry", "receipt", "frames"));
   const measured = frames.flatMap((frame) => {
@@ -306,7 +518,16 @@ function gradeEntryGeometry(failures: SpotlightFailure[], scenario: JsonRecord) 
   if (!settled) {
     observer(failures, "entry", "entry.geometry.frames", measured.length,
       `>= ${SPOTLIGHT_SYNC_CONTRACT.entry.minimumGeometryFrames}`, "entry rendered geometry is absent");
-    return { frames, bounds: null as Rect | null, distinct: 0, total: null, extremeAt: null, rebound: null };
+    return {
+  frames,
+  bounds: null as Rect | null,
+  distinct: 0,
+  total: null,
+  extremeAt: null,
+  rebound: null,
+  onsetTailAt: null,
+  onsetTailWidthScale: null,
+};
   }
   const rows = measured.map((row) => ({
     ...row,
@@ -327,10 +548,60 @@ function gradeEntryGeometry(failures: SpotlightFailure[], scenario: JsonRecord) 
   const widthTolerance = Math.max(0.006, 2 / settled.bounds.width);
   // 1e-9 epsilon keeps the declared "± tolerance" boundary inclusive under
   // binary floating point (|1.006 - 1.012| evaluates to 0.006000000000000005).
-  if (Math.abs(first.widthScale - SPOTLIGHT_SYNC_CONTRACT.entry.startWidthScale) > widthTolerance + 1e-9) {
+  if (Math.abs(first.widthScale - SPOTLIGHT_SYNC_CONTRACT.entry.firstVisibleWidthScale) > widthTolerance + 1e-9) {
     product(failures, "entry", "entry.geometry.firstVisibleWidthScale", first.widthScale,
-      `${SPOTLIGHT_SYNC_CONTRACT.entry.startWidthScale} ± ${widthTolerance}`,
-      "entry first visible frame is not phase-aligned to the Spotlight-derived wide state", seq(first.frame.sequence));
+      `${SPOTLIGHT_SYNC_CONTRACT.entry.firstVisibleWidthScale} ± ${widthTolerance}`,
+      "entry first visible frame is not phase-aligned to the Spotlight-derived soft-materialize state",
+      seq(first.frame.sequence));
+  }
+  // 2026-08-13 soft-materialize retune: a timestamped prefix frame must
+  // converge from the wider first photon to the preserved visible-tail start
+  // near the onset-geometry duration, before the material onset completes.
+  const firstTime = first.time;
+  const onsetCandidates = rows.slice(1).flatMap((row) => {
+    if (firstTime === null || row.time === null) return [];
+    const elapsedMs = (row.time - firstTime) / 1_000_000;
+    return elapsedMs > 0 && elapsedMs <= SPOTLIGHT_SYNC_CONTRACT.entry.materialOnsetMs
+      ? [{ row, elapsedMs }]
+      : [];
+  });
+  // Damage-driven ~60Hz capture samples the 18ms convergence ease sparsely
+  // and with jitter: the prefix may hold only the wide photon, a mid-ease
+  // frame, or a converged frame depending on where damage lands. Convergence
+  // is therefore proven by EITHER a converged frame inside the material
+  // prefix OR a strictly-narrowing intermediate frame (the ease demonstrably
+  // running toward the tail width; the native onset receipt independently
+  // proves the animation parameters). Frames that show NO narrowing are a
+  // product failure; an empty prefix is observer under-resolution.
+  const tailTarget = SPOTLIGHT_SYNC_CONTRACT.entry.tailStartWidthScale;
+  const converged = onsetCandidates.find((candidate) =>
+    Math.abs(candidate.row.widthScale - tailTarget) <= widthTolerance + 1e-9
+  ) ?? null;
+  const narrowing = onsetCandidates.find((candidate) =>
+    candidate.row.widthScale < first.widthScale - 1e-6
+    && candidate.row.widthScale > tailTarget - widthTolerance - 1e-9
+  ) ?? null;
+  const onsetTail = converged ?? narrowing;
+  if (onsetCandidates.length === 0) {
+    observer(
+      failures,
+      "entry",
+      "entry.geometry.onsetTailFrame",
+      null,
+      `timestamped frame inside the ${SPOTLIGHT_SYNC_CONTRACT.entry.materialOnsetMs}ms material prefix`,
+      "entry filmstrip does not resolve the wider first photon converging to the visible tail",
+    );
+  } else if (onsetTail == null) {
+    const latest = onsetCandidates[onsetCandidates.length - 1]!;
+    product(
+      failures,
+      "entry",
+      "entry.geometry.onsetTailWidthScale",
+      latest.row.widthScale,
+      `converged (${tailTarget} ± ${widthTolerance}) or narrowing from ${first.widthScale.toFixed(4)}`,
+      "entry onset never narrowed from the first photon toward the locked visible-tail width",
+      seq(latest.row.frame.sequence),
+    );
   }
   const [alphaLow, alphaHigh] = SPOTLIGHT_SYNC_CONTRACT.entry.firstAlpha;
   if (first.alpha < alphaLow || first.alpha > alphaHigh) {
@@ -393,7 +664,16 @@ function gradeEntryGeometry(failures: SpotlightFailure[], scenario: JsonRecord) 
       product(failures, "entry", metric, observed, `${expected} ± ${tolerance} ms`, message, seq(frame.sequence));
     }
   }
-  return { frames, bounds: settled.bounds, distinct, total, extremeAt, rebound };
+  return {
+    frames,
+    bounds: settled.bounds,
+    distinct,
+    total,
+    extremeAt,
+    rebound,
+    onsetTailAt: onsetTail?.elapsedMs ?? null,
+    onsetTailWidthScale: onsetTail?.row.widthScale ?? null,
+  };
 }
 
 function gradeExitGeometry(failures: SpotlightFailure[], scenario: JsonRecord) {
@@ -816,15 +1096,17 @@ export function gradeSpotlightSyncBundle(bundle: SpotlightSyncBundle) {
     observer(failures, "identity", "exitColor.schemaVersion", exitColor?.schemaVersion ?? null, 2,
       "exit color receipt is missing or has the wrong schema");
   }
-  const empty = { entry: [], exit: [], settled: [], edgeFlush: {
+  const empty = { onset: null, entry: [], exit: [], settled: [], edgeFlush: {
     footerWidth: null, leftCapsuleId: null, rightCapsuleId: null,
     leftInsetPxAt1x: null, rightInsetPxAt1x: null,
   } };
-  const emptyCoverage = { entryGeometryFrameCount: 0, entryMotionColorFrameCount: 0,
-    entrySettledColorFrameCount: 0, exitGeometryFrameCount: 0, exitMotionColorFrameCount: 0,
+  const emptyCoverage = { entryOnsetReceiptPresent: false, entryGeometryFrameCount: 0,
+    entryMotionColorFrameCount: 0, entrySettledColorFrameCount: 0,
+    exitGeometryFrameCount: 0, exitMotionColorFrameCount: 0,
     exitComparableColorFrameCount: 0, capsuleIds: [], entryDistinctWidthCount: 0,
-    entryVisibleDurationMs: null, entryCompressionDeadlineMs: null, entryReboundDurationMs: null,
-    edgeFlushMeasured: false };
+    entryOnsetTailAtMs: null, entryOnsetTailWidthScale: null,
+    entryVisibleDurationMs: null, entryCompressionDeadlineMs: null,
+    entryReboundDurationMs: null, edgeFlushMeasured: false };
   if (!lifecycle || !entryColor || !exitColor) return finish(failures, emptyCoverage, empty);
 
   if (entryColor.lifecyclePhase !== "entry") observer(failures, "identity", "entryColor.lifecyclePhase",
@@ -877,6 +1159,14 @@ export function gradeSpotlightSyncBundle(bundle: SpotlightSyncBundle) {
   if (exit.hiddenReferencePass !== true) observer(failures, "exit", "exit.hiddenReferencePass",
     exit.hiddenReferencePass ?? null, true, "exit did not produce a valid explicit post-hide background reference");
 
+  // The lifecycle tool attaches the parsed onset receipt at the TOP-LEVEL
+  // `entryEvidence.onset`; synthetic fixtures may embed it inside the
+  // main-entry scenario. Search both so runtime receipts and fixtures grade
+  // identically.
+  const entryOnset = gradeEntryOnset(failures, {
+    scenario: entry,
+    entryEvidence: get(lifecycle, "entryEvidence") ?? null,
+  });
   const entryGeometry = gradeEntryGeometry(failures, entry);
   const exitGeometry = gradeExitGeometry(failures, exit);
   const settledBounds = entryGeometry.bounds ?? exitGeometry.bounds;
@@ -905,6 +1195,7 @@ export function gradeSpotlightSyncBundle(bundle: SpotlightSyncBundle) {
   const exitComparable = validateRelation(failures, exitMotion, ids, references, "exit");
   const edge = edgeFlush(failures, entry);
   return finish(failures, {
+    entryOnsetReceiptPresent: entryOnset !== null,
     entryGeometryFrameCount: entryGeometry.frames.length,
     entryMotionColorFrameCount: entryMotion.length,
     entrySettledColorFrameCount: settled.length,
@@ -913,11 +1204,14 @@ export function gradeSpotlightSyncBundle(bundle: SpotlightSyncBundle) {
     exitComparableColorFrameCount: exitComparable,
     capsuleIds: ids,
     entryDistinctWidthCount: entryGeometry.distinct,
+    entryOnsetTailAtMs: entryGeometry.onsetTailAt,
+    entryOnsetTailWidthScale: entryGeometry.onsetTailWidthScale,
     entryVisibleDurationMs: entryGeometry.total,
     entryCompressionDeadlineMs: entryGeometry.extremeAt,
     entryReboundDurationMs: entryGeometry.rebound,
     edgeFlushMeasured: edge.leftInsetPxAt1x !== null && edge.rightInsetPxAt1x !== null,
   }, {
+    onset: entryOnset,
     entry: measurements(entryMotion, "entry", settledBounds, references),
     exit: measurements(exitMotion, "exit", exitGeometry.bounds ?? settledBounds, references),
     settled: measurements(settled, "settled", settledBounds, references),

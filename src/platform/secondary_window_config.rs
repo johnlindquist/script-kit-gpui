@@ -215,12 +215,50 @@ enum GlassEntryOnsetPolicy {
     TailOnly,
 }
 
+/// How the FIRST PHOTON's geometry relates to the calibrated visible-tail
+/// start frame.
+///
+/// Retuned 2026-08-13 from the user-supplied 57fps Spotlight reference
+/// (`.artifacts/entry-onset-retune/reference/measurements.json`): Spotlight's
+/// first photon is ~103.05% of settled width and converges to the ~101.2%
+/// tail-start width within the material prefix. The main window restores that
+/// soft-materialize stretch; popups and secondary windows stay tail-aligned.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlassEntryOnsetGeometry {
+    /// Begin directly on the calibrated visible-tail frame.
+    TailAligned,
+    /// Restore Spotlight's wider first photon, then converge to the calibrated
+    /// visible-tail frame inside the existing material-onset prefix.
+    SpotlightSoftMaterialize,
+}
+
+#[cfg(target_os = "macos")]
+impl GlassEntryOnsetGeometry {
+    fn start_per_side(self, final_width: f64, tail_start_per_side: f64) -> f64 {
+        match self {
+            Self::TailAligned => tail_start_per_side,
+            Self::SpotlightSoftMaterialize => {
+                final_width * (GLASS_MAIN_ONSET_START_WIDTH_SCALE - 1.0) * 0.5
+            }
+        }
+    }
+
+    fn duration(self) -> f64 {
+        match self {
+            Self::TailAligned => 0.0,
+            Self::SpotlightSoftMaterialize => GLASS_MAIN_ONSET_GEOMETRY_DURATION,
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct GlassEntryPolicy {
     direction: GlassEntryDirection,
     travel: GlassEntryTravelPolicy,
     onset: GlassEntryOnsetPolicy,
+    onset_geometry: GlassEntryOnsetGeometry,
 }
 
 /// The per-surface entry policy.
@@ -236,16 +274,19 @@ fn glass_entry_policy(surface: GlassEntrySurface) -> GlassEntryPolicy {
             direction: GlassEntryDirection::ShrinkIn,
             travel: GlassEntryTravelPolicy::Fractional,
             onset: GlassEntryOnsetPolicy::Full,
+            onset_geometry: GlassEntryOnsetGeometry::SpotlightSoftMaterialize,
         },
         GlassEntrySurface::ChildPopup => GlassEntryPolicy {
             direction: GlassEntryDirection::GrowIn,
             travel: GlassEntryTravelPolicy::Fractional,
             onset: GlassEntryOnsetPolicy::Full,
+            onset_geometry: GlassEntryOnsetGeometry::TailAligned,
         },
         GlassEntrySurface::FreeStandingSecondary => GlassEntryPolicy {
             direction: GlassEntryDirection::ShrinkIn,
             travel: GlassEntryTravelPolicy::Fractional,
             onset: GlassEntryOnsetPolicy::Full,
+            onset_geometry: GlassEntryOnsetGeometry::TailAligned,
         },
     }
 }
@@ -258,6 +299,36 @@ impl GlassEntrySurface {
             Self::ChildPopup => "child_popup",
             Self::FreeStandingSecondary => "free_standing_secondary",
         }
+    }
+
+    /// The main window's stronger onset defocus vs the shared popup/secondary
+    /// radius (2026-08-13 soft-materialize retune).
+    fn entry_blur_radius(self) -> f64 {
+        match self {
+            Self::Main => glass_main_entry_blur_radius(),
+            Self::ChildPopup | Self::FreeStandingSecondary => glass_entry_blur_radius(),
+        }
+    }
+
+    /// Main resolves its defocus inside the material-onset prefix; other
+    /// surfaces keep the historical full-entry ramp.
+    fn entry_blur_duration(self, tuning: GlassMorphTuning) -> f64 {
+        match self {
+            Self::Main => tuning.material_onset_duration,
+            Self::ChildPopup | Self::FreeStandingSecondary => tuning.total_entry_duration(),
+        }
+    }
+}
+
+/// Resolve the physical main NSWindow to `GlassEntrySurface::Main` at the
+/// shared window-frame animation owner so the main-only onset policy is
+/// actually exercised; every other window-frame surface stays secondary.
+#[cfg(target_os = "macos")]
+fn glass_entry_surface_for_window_frame(is_main_window: bool) -> GlassEntrySurface {
+    if is_main_window {
+        GlassEntrySurface::Main
+    } else {
+        GlassEntrySurface::FreeStandingSecondary
     }
 }
 
@@ -468,6 +539,16 @@ const GLASS_MORPH_ALPHA_FINISH_DURATION: f64 = 0.026;
 /// constant 0.85 NSWindow alpha — never sub-0.85 window alpha.
 #[cfg(target_os = "macos")]
 const GLASS_MATERIAL_ONSET_DURATION: f64 = 0.044;
+/// The main window's FIRST PHOTON width scale (2026-08-13 soft-materialize
+/// retune, measured from the user-supplied 57fps Spotlight reference:
+/// first photon 1.0305 of settled width).
+#[cfg(target_os = "macos")]
+const GLASS_MAIN_ONSET_START_WIDTH_SCALE: f64 = 1.0305;
+/// How long the first-photon frame eases into the calibrated 101.2%
+/// visible-tail start (reference: converged by ~35ms at 1:1; 18ms at the
+/// authorized 2x tempo, matching the content-fade cadence).
+#[cfg(target_os = "macos")]
+const GLASS_MAIN_ONSET_GEOMETRY_DURATION: f64 = 0.018;
 /// GPUI content roots stay hidden through the early onset…
 #[cfg(target_os = "macos")]
 const GLASS_ENTRY_CONTENT_HOLD_DURATION: f64 = 0.026;
@@ -535,6 +616,23 @@ fn glass_entry_blur_radius() -> f64 {
         .and_then(|raw| raw.trim().parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 64.0)
         .unwrap_or(GLASS_ENTRY_BLUR_RADIUS)
+}
+
+/// The main window's onset defocus radius (2026-08-13 soft-materialize
+/// retune): stronger than the shared 8pt so the first photon reads soft, and
+/// resolved inside the 44ms material prefix rather than the full entry.
+#[cfg(target_os = "macos")]
+const GLASS_MAIN_ENTRY_BLUR_RADIUS: f64 = 12.0;
+
+/// Same live override contract as `glass_entry_blur_radius`, scoped to the
+/// main window's onset defocus.
+#[cfg(target_os = "macos")]
+fn glass_main_entry_blur_radius() -> f64 {
+    std::env::var("SCRIPT_KIT_GLASS_MAIN_ENTRY_BLUR")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 64.0)
+        .unwrap_or(GLASS_MAIN_ENTRY_BLUR_RADIUS)
 }
 
 /// Effective GPUI content fade duration for the entry.
@@ -671,7 +769,9 @@ fn record_glass_exit_begin(window: id, ticket: GlassExitTicket, window_name: &st
         ],
         host_attached_at_request: crate::platform::glass_button_host::host_attached(
             ticket.window_key,
-        ) || unsafe { crate::footer_popup::native_footer_host_attached(window) },
+        ) || unsafe {
+            crate::footer_popup::native_footer_host_attached(window)
+        },
         request_host_time_ns: now,
         fade_duration_ns,
         expected_removal_deadline_ns: deadline_ns,
@@ -820,16 +920,14 @@ fn advance_glass_exit_generation(window_key: usize) -> GlassExitTicket {
     let mut generations = GLASS_EXIT_GENERATIONS
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let generation = if let Some((_, generation)) = generations
-        .iter_mut()
-        .find(|(key, _)| *key == window_key)
-    {
-        *generation = generation.wrapping_add(1).max(1);
-        *generation
-    } else {
-        generations.push((window_key, 1));
-        1
-    };
+    let generation =
+        if let Some((_, generation)) = generations.iter_mut().find(|(key, _)| *key == window_key) {
+            *generation = generation.wrapping_add(1).max(1);
+            *generation
+        } else {
+            generations.push((window_key, 1));
+            1
+        };
     GlassExitTicket {
         window_key,
         generation,
@@ -842,9 +940,7 @@ pub(crate) fn glass_exit_ticket_is_current(ticket: GlassExitTicket) -> bool {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .iter()
-        .any(|(key, generation)| {
-            *key == ticket.window_key && *generation == ticket.generation
-        })
+        .any(|(key, generation)| *key == ticket.window_key && *generation == ticket.generation)
 }
 
 #[cfg(target_os = "macos")]
@@ -916,7 +1012,10 @@ unsafe fn cancel_pending_glass_window_selectors(window: id) {
         selector: sel!(settleOwnWindowFrame)
         object: nil
     ];
-    for selector in [sel!(revealOwnWindowEntryContent), sel!(beginOwnWindowEntryTail)] {
+    for selector in [
+        sel!(revealOwnWindowEntryContent),
+        sel!(beginOwnWindowEntryTail),
+    ] {
         let _: () = msg_send![
             class!(NSObject),
             cancelPreviousPerformRequestsWithTarget: glass_view
@@ -1004,8 +1103,8 @@ fn glass_morph_tuning_from(duration: f64, inset_fraction: f64) -> Option<GlassMo
     let squish_fraction = (inset_fraction * GLASS_MORPH_SQUISH_FACTOR)
         .clamp(GLASS_MORPH_MIN_SQUISH, GLASS_MORPH_MAX_SQUISH);
     let phase1 = duration * GLASS_MORPH_PHASE1_FRACTION;
-    let phase2 = (duration - phase1 - GLASS_MORPH_SQUISH_HOLD)
-        .max(GLASS_MORPH_MIN_REBOUND_DURATION);
+    let phase2 =
+        (duration - phase1 - GLASS_MORPH_SQUISH_HOLD).max(GLASS_MORPH_MIN_REBOUND_DURATION);
     Some(GlassMorphTuning {
         duration,
         inset_fraction,
@@ -1108,7 +1207,7 @@ unsafe fn configure_window_vibrancy_common(
     if glass_created {
         match morph_variant {
             GlassMorphVariant::WindowFrame => {
-                animate_tahoe_glass_secondary_appearance(window, log_target, window_name)
+                animate_tahoe_glass_window_frame_appearance(window, log_target, window_name)
             }
             GlassMorphVariant::ContentLayer => {
                 // Runtime-proven (real-pixel capture + static-transform
@@ -1468,7 +1567,10 @@ impl TahoeBackdropLayout {
                 let bottom_inset = bottom_inset.clamp(0.0, bounds.size.height.max(0.0));
                 NSRect::new(
                     NSPoint::new(bounds.origin.x, bounds.origin.y + bottom_inset),
-                    NSSize::new(bounds.size.width, (bounds.size.height - bottom_inset).max(0.0)),
+                    NSSize::new(
+                        bounds.size.width,
+                        (bounds.size.height - bottom_inset).max(0.0),
+                    ),
                 )
             }
         }
@@ -1543,8 +1645,7 @@ extern "C" fn tahoe_glass_backdrop_repin(this: &objc::runtime::Object, _: objc::
         }
         let bounds: cocoa::foundation::NSRect = msg_send![superview, bounds];
         let bottom_inset = *this.get_ivar::<f64>("_scriptKitBottomInset");
-        let frame = TahoeBackdropLayout::ContentAboveDetachedFooter { bottom_inset }
-            .frame(bounds);
+        let frame = TahoeBackdropLayout::ContentAboveDetachedFooter { bottom_inset }.frame(bounds);
         let _: () = msg_send![this_id, setFrame: frame];
     }
 }
@@ -1724,10 +1825,7 @@ unsafe fn update_tahoe_backdrop_geometry_and_shadow(
 
     let content_bounds: NSRect = msg_send![content_view, bounds];
     let backdrop_frame = backdrop_layout.frame(content_bounds);
-    (*glass_view).set_ivar(
-        "_scriptKitBottomInset",
-        backdrop_layout.bottom_inset(),
-    );
+    (*glass_view).set_ivar("_scriptKitBottomInset", backdrop_layout.bottom_inset());
     let _: () = msg_send![glass_view, setFrame: backdrop_frame];
 
     let content_layer: id = msg_send![content_view, layer];
@@ -2161,12 +2259,7 @@ unsafe fn timing_function_with_control_points(c1x: f32, c1y: f32, c2x: f32, c2y:
 /// private `CAFilter` class, so the receipt can distinguish "no blur ran"
 /// from "blur ran at 0").
 #[cfg(target_os = "macos")]
-unsafe fn ramp_entry_defocus(
-    target_view: id,
-    duration: f64,
-    radius: f64,
-    log_target: &str,
-) -> f64 {
+unsafe fn ramp_entry_defocus(target_view: id, duration: f64, radius: f64, log_target: &str) -> f64 {
     // Every bail-out names itself: a silent 0.0 was indistinguishable from
     // "blur ran and did nothing".
     let bail = |reason: &str| {
@@ -3038,6 +3131,22 @@ unsafe fn animate_tahoe_glass_main_appearance(window: id, log_target: &str, wind
 
 /// Notes, Dictation, HUD — free-standing secondary windows. Keeps the
 /// Spotlight-derived shrink-in profile.
+/// Window-frame morphs resolve their surface at the shared owner: the
+/// physical main NSWindow gets `GlassEntrySurface::Main` (and with it the
+/// soft-materialize onset), every other window-frame surface remains
+/// `FreeStandingSecondary` (2026-08-13 onset retune).
+#[cfg(target_os = "macos")]
+unsafe fn animate_tahoe_glass_window_frame_appearance(
+    window: id,
+    log_target: &str,
+    window_name: &str,
+) {
+    let surface = glass_entry_surface_for_window_frame(
+        crate::window_manager::get_main_window() == Some(window),
+    );
+    animate_tahoe_glass_appearance_profiled(window, log_target, window_name, surface)
+}
+
 #[cfg(target_os = "macos")]
 unsafe fn animate_tahoe_glass_secondary_appearance(
     window: id,
@@ -3157,10 +3266,48 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
         ),
     );
 
+    // Soft-materialize onset geometry (2026-08-13 retune): the main window's
+    // FIRST PHOTON is wider than the calibrated visible-tail start (measured
+    // 103.05% vs 101.2%) and eases into the tail frame inside the material
+    // prefix. Tail-aligned surfaces resolve to the same frame with a zero
+    // duration, i.e. exactly the previous behavior.
+    let onset_outset_x = policy
+        .onset_geometry
+        .start_per_side(final_frame.size.width, outset_x);
+    let onset_start = NSRect::new(
+        NSPoint::new(
+            final_frame.origin.x - onset_outset_x * outset_sign,
+            final_frame.origin.y - outset_y * outset_sign,
+        ),
+        NSSize::new(
+            final_frame.size.width + onset_outset_x * 2.0 * outset_sign,
+            final_frame.size.height + outset_y * 2.0 * outset_sign,
+        ),
+    );
+    let onset_geometry_duration = policy.onset_geometry.duration();
+
     // Alpha BEFORE geometry: the extreme calibration frame must never be
     // displayed above the visible-entry start alpha.
     let _: () = msg_send![window, setAlphaValue: tuning.start_alpha];
-    let _: () = msg_send![window, setFrame: start display: true];
+    let _: () = msg_send![window, setFrame: onset_start display: true];
+    if onset_geometry_duration > 0.0 {
+        let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+        let onset_geometry_ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+        let _: () = msg_send![onset_geometry_ctx, setDuration: onset_geometry_duration];
+        let _: () = msg_send![onset_geometry_ctx, setAllowsImplicitAnimation: true];
+        if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
+            let name = tahoe_ns_string("easeOut");
+            if name != nil {
+                let timing: id = msg_send![timing_class, functionWithName: name];
+                if timing != nil {
+                    let _: () = msg_send![onset_geometry_ctx, setTimingFunction: timing];
+                }
+            }
+        }
+        let onset_geometry_animator: id = msg_send![window, animator];
+        let _: () = msg_send![onset_geometry_animator, setFrame: start display: true];
+        let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+    }
     record_native_glass_entry_span(window, tuning.total_entry_duration());
     // Instrumentation only (runtime-contract cross-check, no animation value
     // is changed): the moment the enter morph is armed, on the same host
@@ -3173,7 +3320,8 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
     // must read `visible_tail_duration_ns` / `total_entry_duration_ns` below,
     // which state which is which.
     let settle_duration_ns = (tuning.duration * 1_000_000_000.0) as u64;
-    let visible_tail_duration_ns = (tuning.visible_tail_duration() * 1_000_000_000.0).round() as u64;
+    let visible_tail_duration_ns =
+        (tuning.visible_tail_duration() * 1_000_000_000.0).round() as u64;
     let total_entry_duration_ns = (tuning.total_entry_duration() * 1_000_000_000.0).round() as u64;
     // Whether AppKit still considered this a child window at the moment the
     // morph was armed. `animate_tahoe_glass_child_appearance` intends to
@@ -3243,9 +3391,8 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
     // `GlassEntryOnsetPolicy::Full` is the only policy production resolves
     // today, so this gate is always open; it exists so a `TailOnly` surface
     // can skip the prefix without another branch being invented later.
-    let onset_supported = style_supported
-        && tint_supported
-        && policy.onset == GlassEntryOnsetPolicy::Full;
+    let onset_supported =
+        style_supported && tint_supported && policy.onset == GlassEntryOnsetPolicy::Full;
     if onset_supported {
         // Seed clear/untinted with implicit actions disabled.
         let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
@@ -3275,8 +3422,8 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
         }
         let glass_animator: id = msg_send![glass_view, animator];
         let _: () = msg_send![glass_animator, setStyle: 0isize]; // Regular
-        // Resolved production tint, same construction as
-        // apply_native_glass_style_with_reason.
+                                                                 // Resolved production tint, same construction as
+                                                                 // apply_native_glass_style_with_reason.
         let red = f64::from((final_style.signature.tint_rgb >> 16) & 0xff) / 255.0;
         let green = f64::from((final_style.signature.tint_rgb >> 8) & 0xff) / 255.0;
         let blue = f64::from(final_style.signature.tint_rgb & 0xff) / 255.0;
@@ -3304,20 +3451,18 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
             if child == nil || child == glass_view {
                 continue;
             }
-            let is_glass: bool = if let Some(class) =
-                objc::runtime::Class::get("NSGlassEffectView")
+            let is_glass: bool = if let Some(class) = objc::runtime::Class::get("NSGlassEffectView")
             {
                 msg_send![child, isKindOfClass: class]
             } else {
                 false
             };
-            let is_container: bool = if let Some(class) =
-                objc::runtime::Class::get("NSGlassEffectContainerView")
-            {
-                msg_send![child, isKindOfClass: class]
-            } else {
-                false
-            };
+            let is_container: bool =
+                if let Some(class) = objc::runtime::Class::get("NSGlassEffectContainerView") {
+                    msg_send![child, isKindOfClass: class]
+                } else {
+                    false
+                };
             if is_glass || is_container {
                 continue;
             }
@@ -3344,7 +3489,8 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
             // disappearing completely. The footer is present from the first
             // stage frame, then resolves 0.85 -> 1.0 with the shared content
             // fade while the defocus supplies the stronger materialization.
-            let _: () = msg_send![footer_entry_target, setAlphaValue: footer_entry_policy.target_alpha];
+            let _: () =
+                msg_send![footer_entry_target, setAlphaValue: footer_entry_policy.target_alpha];
             if footer_entry_policy.enroll_in_content_fade {
                 content_targets.push((footer_entry_target as usize, alpha));
             }
@@ -3385,26 +3531,28 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
     // from softness instead of snapping in already sharp. Installed here —
     // after the exit-blur cancel at the top of this function, which clears
     // every layer filter.
+    let entry_blur_duration = surface.entry_blur_duration(tuning);
     let entry_blur_radius = ramp_entry_defocus(
         glass_view,
-        tuning.total_entry_duration(),
-        glass_entry_blur_radius(),
+        entry_blur_duration,
+        surface.entry_blur_radius(),
         log_target,
     );
     // Defocus the footer on the same ramp. It is its own view tree with no
     // gutter beneath it, so unlike the main content view it is safe to filter
     // directly — which also means the BUTTONS actually blur, where the main
     // backdrop had almost no detail to lose.
-    let footer_blur_radius = if footer_entry_target != nil && footer_entry_policy.defocus_radius > 0.0 {
-        ramp_entry_defocus(
-            footer_entry_target,
-            tuning.total_entry_duration(),
-            glass_entry_blur_radius(),
-            log_target,
-        )
-    } else {
-        0.0
-    };
+    let footer_blur_radius =
+        if footer_entry_target != nil && footer_entry_policy.defocus_radius > 0.0 {
+            ramp_entry_defocus(
+                footer_entry_target,
+                tuning.total_entry_duration(),
+                glass_entry_blur_radius(),
+                log_target,
+            )
+        } else {
+            0.0
+        };
     let _: () = msg_send![
         glass_view,
         performSelector: sel!(revealOwnWindowEntryContent)
@@ -3420,12 +3568,15 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
     logging::log(
         log_target,
         &format!(
-            "event=native_glass_entry_onset primitive=material_parameters supported={} entry_blur_radius={:.2} footer_blur_radius={:.2} footer_enrolled={} entry_blur_duration_ns={} from_style=clear to_style=regular duration_ns={} content_root_count={} content_hold_ns={} content_fade_ns={} window_alpha={:.2}",
+            "event=native_glass_entry_onset primitive=material_parameters supported={} entry_blur_radius={:.2} entry_blur_to_radius=0.00 footer_blur_radius={:.2} footer_enrolled={} entry_blur_duration_ns={} onset_start_width_scale={:.6} tail_start_width_scale={:.6} onset_geometry_duration_ns={} from_style=clear to_style=regular duration_ns={} content_root_count={} content_hold_ns={} content_fade_ns={} window_alpha={:.2}",
             onset_supported,
             entry_blur_radius,
             footer_blur_radius,
             footer_entry_policy.enroll_in_content_fade,
-            (tuning.total_entry_duration() * 1_000_000_000.0).round() as u64,
+            (entry_blur_duration * 1_000_000_000.0).round() as u64,
+            onset_start.size.width / final_frame.size.width,
+            start.size.width / final_frame.size.width,
+            (onset_geometry_duration * 1_000_000_000.0).round() as u64,
             (tuning.material_onset_duration * 1_000_000_000.0).round() as u64,
             content_root_count,
             (tuning.content_hold_duration * 1_000_000_000.0).round() as u64,
@@ -3652,9 +3803,7 @@ impl NativeGlassStyleLedger {
     fn record_application(&mut self, application: NativeGlassStyleApplication) -> bool {
         let in_span = self
             .entry_span(application.window_number)
-            .is_some_and(|(start, end)| {
-                application.at_ns >= start && application.at_ns <= end
-            });
+            .is_some_and(|(start, end)| application.at_ns >= start && application.at_ns <= end);
         let has_prior = self.applications.iter().any(|prior| {
             prior.window_number == application.window_number
                 && prior.surface_id == application.surface_id
@@ -3734,19 +3883,14 @@ unsafe fn record_native_glass_entry_span(window: id, duration_seconds: f64) {
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 pub(crate) fn native_glass_style_mutation_count_during_entry(window_number: i64) -> usize {
-    with_native_glass_style_ledger(|ledger| {
-        ledger.style_mutation_count_during_entry(window_number)
-    })
+    with_native_glass_style_ledger(|ledger| ledger.style_mutation_count_during_entry(window_number))
 }
 
 /// Apply the complete shared native glass policy. AppKit mutations are made
 /// in one disabled-actions transaction so a theme refresh cannot expose an
 /// intermediate untinted or mismatched frame.
 #[cfg(target_os = "macos")]
-pub(crate) unsafe fn apply_native_glass_style(
-    glass_view: id,
-    style: NativeGlassStyle,
-) -> bool {
+pub(crate) unsafe fn apply_native_glass_style(glass_view: id, style: NativeGlassStyle) -> bool {
     apply_native_glass_style_with_reason(
         glass_view,
         style,
@@ -3880,8 +4024,7 @@ pub(crate) unsafe fn apply_native_glass_style_with_reason(
         // private material hierarchy.
         if content_layer != nil {
             let _: () = msg_send![content_layer, setBorderColor: rim_cg];
-            let _: () =
-                msg_send![content_layer, setBorderWidth: f64::from(style.rim_width)];
+            let _: () = msg_send![content_layer, setBorderWidth: f64::from(style.rim_width)];
         }
         let _: () = msg_send![layer, setBorderWidth: 0.0f64];
         // R is the locked production treatment. Clear any stale shadow state
@@ -4145,7 +4288,8 @@ unsafe fn configure_tahoe_window_backdrop_with_result(
         },
     );
 
-    let corner_radius = tahoe_backdrop_corner_radius_for(window_name, backdrop_layout, content_view);
+    let corner_radius =
+        tahoe_backdrop_corner_radius_for(window_name, backdrop_layout, content_view);
     let corner_applied = {
         let responds: bool = msg_send![glass_view, respondsToSelector: sel!(setCornerRadius:)];
         if responds {
@@ -4727,8 +4871,12 @@ mod secondary_window_config_tests {
         assert_eq!(super::GLASS_MORPH_ALPHA_FINISH_DURATION, 0.026);
         assert_eq!(super::GLASS_MORPH_FADE_FRACTION, 2.0 / 3.0);
         assert_eq!(super::GLASS_MATERIAL_ONSET_DURATION, 0.044);
+        assert_eq!(super::GLASS_MAIN_ONSET_START_WIDTH_SCALE, 1.0305);
+        assert_eq!(super::GLASS_MAIN_ONSET_GEOMETRY_DURATION, 0.018);
         assert_eq!(super::GLASS_ENTRY_CONTENT_HOLD_DURATION, 0.026);
         assert_eq!(super::GLASS_ENTRY_CONTENT_FADE_DURATION, 0.018);
+        assert_eq!(super::GLASS_ENTRY_BLUR_RADIUS, 8.0);
+        assert_eq!(super::GLASS_MAIN_ENTRY_BLUR_RADIUS, 12.0);
         let tuning =
             super::glass_morph_tuning_from(duration, inset).expect("fixture enables glass morph");
         assert_eq!(super::settled_size_crossing_delay_ms(tuning), 11);
@@ -4859,37 +5007,99 @@ mod secondary_window_config_tests {
         assert!((capped.extreme_per_side - travel.extreme_per_side).abs() < 1e-9);
     }
 
-    /// Baseline lock: the main window and free-standing secondaries (Notes,
-    /// Dictation, HUD) still enter with Spotlight's shrink-in. WP1 was a typed
-    /// refactor with ZERO behavior change; if this fails, the refactor moved
-    /// motion it was not allowed to move.
+    /// 2026-08-13 soft-materialize retune lock: main ALONE owns the wider
+    /// first-photon onset geometry, while secondary and child-popup
+    /// directions, travel, and material onset remain unchanged.
     #[cfg(target_os = "macos")]
     #[test]
-    fn main_and_secondary_remain_shrink_before_the_retune() {
+    fn main_owns_the_soft_materialize_prefix_while_secondary_remains_tail_aligned() {
         let main = super::glass_entry_policy(super::GlassEntrySurface::Main);
         assert_eq!(main.direction, super::GlassEntryDirection::ShrinkIn);
         assert_eq!(main.travel, super::GlassEntryTravelPolicy::Fractional);
         assert_eq!(main.onset, super::GlassEntryOnsetPolicy::Full);
-
-        let secondary =
-            super::glass_entry_policy(super::GlassEntrySurface::FreeStandingSecondary);
+        assert_eq!(
+            main.onset_geometry,
+            super::GlassEntryOnsetGeometry::SpotlightSoftMaterialize
+        );
+        let secondary = super::glass_entry_policy(super::GlassEntrySurface::FreeStandingSecondary);
         assert_eq!(secondary.direction, super::GlassEntryDirection::ShrinkIn);
         assert_eq!(secondary.travel, super::GlassEntryTravelPolicy::Fractional);
         assert_eq!(secondary.onset, super::GlassEntryOnsetPolicy::Full);
+        assert_eq!(
+            secondary.onset_geometry,
+            super::GlassEntryOnsetGeometry::TailAligned
+        );
     }
 
-    /// Baseline lock: the Cmd+K Actions popup keeps the grow-in direction that
-    /// the user named as the reference feel. This must NOT change in WP2 —
-    /// WP2 moves main TOWARD this, it does not move this.
+    /// The Cmd+K Actions popup keeps the grow-in direction the user named as
+    /// the reference feel, and stays tail-aligned.
     #[cfg(target_os = "macos")]
     #[test]
-    fn child_popup_remains_grow_before_the_retune() {
+    fn child_popup_remains_tail_aligned_grow_in() {
         let child = super::glass_entry_policy(super::GlassEntrySurface::ChildPopup);
         assert_eq!(child.direction, super::GlassEntryDirection::GrowIn);
         assert_eq!(child.travel, super::GlassEntryTravelPolicy::Fractional);
         assert_eq!(child.onset, super::GlassEntryOnsetPolicy::Full);
+        assert_eq!(
+            child.onset_geometry,
+            super::GlassEntryOnsetGeometry::TailAligned
+        );
         assert_eq!(child.direction.geometry_sign(), -1.0);
         assert_eq!(child.direction.log_name(), "grow_in");
+    }
+
+    /// 2026-08-13 soft-materialize retune lock (measured from the
+    /// user-supplied 57fps Spotlight reference): main's first photon is
+    /// 103.05% of settled width converging to the preserved 101.2% tail start
+    /// over 18ms; its onset defocus is 12pt resolved inside the 44ms material
+    /// prefix; the total entry stays 149ms; non-main surfaces stay
+    /// tail-aligned with the historical full-entry 8pt ramp.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn main_entry_restores_the_spotlight_soft_materialize_prefix() {
+        let tuning = super::glass_morph_tuning_from(0.105, 0.006).expect("morph enabled");
+        let main = super::glass_entry_policy(super::GlassEntrySurface::Main);
+        assert_eq!(
+            super::glass_entry_surface_for_window_frame(true),
+            super::GlassEntrySurface::Main
+        );
+        assert_eq!(
+            super::glass_entry_surface_for_window_frame(false),
+            super::GlassEntrySurface::FreeStandingSecondary
+        );
+        let tail_start_per_side = 750.0 * tuning.inset_fraction;
+        let onset_start_per_side = main
+            .onset_geometry
+            .start_per_side(750.0, tail_start_per_side);
+        let onset_start_scale = 1.0 + onset_start_per_side * 2.0 / 750.0;
+        let tail_start_scale = 1.0 + tail_start_per_side * 2.0 / 750.0;
+        let epsilon = 1e-12;
+
+        assert_eq!(
+            main.onset_geometry,
+            super::GlassEntryOnsetGeometry::SpotlightSoftMaterialize
+        );
+        assert!((onset_start_scale - 1.0305).abs() < epsilon);
+        assert!((tail_start_scale - 1.012).abs() < epsilon);
+        assert!((main.onset_geometry.duration() - 0.018).abs() < epsilon);
+        assert_eq!(super::GLASS_MAIN_ENTRY_BLUR_RADIUS, 12.0);
+        assert!(
+            (super::GlassEntrySurface::Main.entry_blur_duration(tuning) - 0.044).abs() < epsilon
+        );
+        assert!((tuning.total_entry_duration() - 0.149).abs() < epsilon);
+
+        for surface in [
+            super::GlassEntrySurface::ChildPopup,
+            super::GlassEntrySurface::FreeStandingSecondary,
+        ] {
+            let policy = super::glass_entry_policy(surface);
+            assert_eq!(
+                policy.onset_geometry,
+                super::GlassEntryOnsetGeometry::TailAligned
+            );
+            assert_eq!(policy.onset_geometry.duration(), 0.0);
+            assert!((surface.entry_blur_duration(tuning) - 0.149).abs() < epsilon);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -4898,9 +5108,7 @@ mod secondary_window_config_tests {
         use cocoa::foundation::{NSPoint, NSRect, NSSize};
 
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(750.0, 501.0));
-        let layout = super::TahoeBackdropLayout::ContentAboveDetachedFooter {
-            bottom_inset: 40.0,
-        };
+        let layout = super::TahoeBackdropLayout::ContentAboveDetachedFooter { bottom_inset: 40.0 };
         let frame = layout.frame(bounds);
         assert_eq!(frame.origin.x, 0.0);
         assert_eq!(frame.origin.y, 40.0);
@@ -4971,9 +5179,10 @@ mod secondary_window_config_tests {
         assert_eq!(full.size.height, 280.0);
 
         let inset = 44.0;
-        let partitioned =
-            super::TahoeBackdropLayout::ContentAboveDetachedFooter { bottom_inset: inset }
-                .frame(bounds);
+        let partitioned = super::TahoeBackdropLayout::ContentAboveDetachedFooter {
+            bottom_inset: inset,
+        }
+        .frame(bounds);
         assert_eq!(partitioned.origin.y, inset);
         assert_eq!(partitioned.size.height, 280.0 - inset);
         assert_eq!(partitioned.size.width, full.size.width);
@@ -4990,11 +5199,7 @@ mod secondary_window_config_tests {
         let mut inherited = crate::theme::Theme::default();
         inherited.opacity.as_mut().unwrap().glass_tint_opacity = None;
         let mut explicit_zero = inherited.clone();
-        explicit_zero
-            .opacity
-            .as_mut()
-            .unwrap()
-            .glass_tint_opacity = Some(0.0);
+        explicit_zero.opacity.as_mut().unwrap().glass_tint_opacity = Some(0.0);
         let mut below_floor = inherited.clone();
         below_floor.opacity.as_mut().unwrap().glass_tint_opacity = Some(0.34);
         let mut at_floor = inherited.clone();
@@ -5103,18 +5308,19 @@ mod secondary_window_config_tests {
             super::NativeGlassSurfaceRole::FloatingCapsule,
         )
         .signature;
-        let application = |window_number: i64,
-                           surface_id: usize,
-                           at_ns: u64,
-                           reason: super::NativeGlassStyleApplicationReason| {
-            super::NativeGlassStyleApplication {
-                window_number,
-                surface_id,
-                at_ns,
-                reason,
-                signature,
-            }
-        };
+        let application =
+            |window_number: i64,
+             surface_id: usize,
+             at_ns: u64,
+             reason: super::NativeGlassStyleApplicationReason| {
+                super::NativeGlassStyleApplication {
+                    window_number,
+                    surface_id,
+                    at_ns,
+                    reason,
+                    signature,
+                }
+            };
         use super::NativeGlassStyleApplicationReason::{Install, ThemeRefresh};
 
         let mut ledger = super::NativeGlassStyleLedger::default();
