@@ -102,6 +102,23 @@ struct GlassMorphTuning {
     content_fade_duration: f64,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MainFooterEntryMaterialPolicy {
+    target_alpha: f64,
+    enroll_in_content_fade: bool,
+    defocus_radius: f64,
+}
+
+#[cfg(target_os = "macos")]
+fn main_footer_entry_material_policy() -> MainFooterEntryMaterialPolicy {
+    MainFooterEntryMaterialPolicy {
+        target_alpha: 1.0,
+        enroll_in_content_fade: false,
+        defocus_radius: 0.0,
+    }
+}
+
 /// Which product surface is entering. The geometry function must be told this
 /// EXPLICITLY by its caller — never infer it from `window_name`, which is a
 /// human-readable log label and not a policy input.
@@ -3358,16 +3375,19 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
     // the one surface that never faded or defocused with the rest of the
     // window. Enrol it explicitly so the whole main surface materializes as one
     // object.
+    let footer_entry_policy = main_footer_entry_material_policy();
     let footer_entry_target = crate::footer_popup::main_window_footer_entry_target(window);
     if footer_entry_target != nil {
         let alpha: f64 = msg_send![footer_entry_target, alphaValue];
-        if alpha > 0.001 {
+        if alpha > 0.001 || !footer_entry_policy.enroll_in_content_fade {
             // Match the NSWindow's material-safe visible floor rather than
             // disappearing completely. The footer is present from the first
             // stage frame, then resolves 0.85 -> 1.0 with the shared content
             // fade while the defocus supplies the stronger materialization.
-            let _: () = msg_send![footer_entry_target, setAlphaValue: tuning.start_alpha];
-            content_targets.push((footer_entry_target as usize, alpha));
+            let _: () = msg_send![footer_entry_target, setAlphaValue: footer_entry_policy.target_alpha];
+            if footer_entry_policy.enroll_in_content_fade {
+                content_targets.push((footer_entry_target as usize, alpha));
+            }
         }
     }
     let content_root_count = content_targets.len();
@@ -3415,7 +3435,7 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
     // gutter beneath it, so unlike the main content view it is safe to filter
     // directly — which also means the BUTTONS actually blur, where the main
     // backdrop had almost no detail to lose.
-    let footer_blur_radius = if footer_entry_target != nil {
+    let footer_blur_radius = if footer_entry_target != nil && footer_entry_policy.defocus_radius > 0.0 {
         ramp_entry_defocus(
             footer_entry_target,
             tuning.total_entry_duration(),
@@ -3444,7 +3464,7 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
             onset_supported,
             entry_blur_radius,
             footer_blur_radius,
-            footer_entry_target != nil,
+            footer_entry_policy.enroll_in_content_fade,
             (tuning.total_entry_duration() * 1_000_000_000.0).round() as u64,
             (tuning.material_onset_duration * 1_000_000_000.0).round() as u64,
             content_root_count,
@@ -4798,6 +4818,15 @@ mod secondary_window_config_tests {
         // 88 + max(23, 35) = 123ms.
         assert_eq!(super::settled_size_crossing_delay_ms(tuning), 11);
         assert_eq!(super::entry_content_reveal_delay_ms(tuning), 62);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn main_footer_entry_inherits_window_material_without_independent_effects() {
+        let policy = super::main_footer_entry_material_policy();
+        assert_eq!(policy.target_alpha, 1.0);
+        assert!(!policy.enroll_in_content_fade);
+        assert_eq!(policy.defocus_radius, 0.0);
     }
 
     #[cfg(target_os = "macos")]

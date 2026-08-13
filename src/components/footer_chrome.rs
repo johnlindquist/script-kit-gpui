@@ -358,6 +358,14 @@ pub(crate) fn current_main_menu_footer_appkit_font_weight() -> f64 {
     ((gpui_weight - 400.0) / 700.0).clamp(-1.0, 1.0) as f64
 }
 
+pub(crate) fn footer_rail_side_inset_px(floating_glass: bool, ordinary_side_inset_px: f32) -> f32 {
+    if floating_glass {
+        0.0
+    } else {
+        ordinary_side_inset_px
+    }
+}
+
 pub(crate) fn footer_rail_chrome(theme: &Theme) -> FooterRailChrome {
     let chrome = crate::theme::AppChromeColors::from_theme(theme);
     let row_states = resolved_footer_button_visual_colors(theme).row_states;
@@ -412,7 +420,9 @@ fn render_footer_action_rail_with_leading_and_cleanup(
     let has_leading = leading.is_some();
     let buttons = buttons.into_iter().collect::<Vec<_>>();
 
+    let floating_glass = crate::footer_popup::glass_scroll_bands_active();
     let glass_buttons_enabled = glass_capsules_enabled();
+    let side_inset_px = footer_rail_side_inset_px(floating_glass, rail.side_inset_px);
 
     let item_gap_px = if glass_buttons_enabled {
         FOOTER_GLASS_BUTTON_GAP_PX
@@ -424,7 +434,7 @@ fn render_footer_action_rail_with_leading_and_cleanup(
         .w_full()
         .h(px(rail.height_px))
         .min_h(px(rail.height_px))
-        .px(px(rail.side_inset_px))
+        .px(px(side_inset_px))
         .flex()
         .flex_row()
         .items_center()
@@ -2490,6 +2500,13 @@ mod tests {
             footer_horizontal_run_origins_px(&[40.0, 20.0], FOOTER_ACTION_ITEM_GAP_PX, 10.0),
             vec![10.0, 52.0]
         );
+    }
+
+    #[test]
+    fn floating_glass_rail_is_edge_flush_while_legacy_rail_keeps_its_inset() {
+        let ordinary = crate::window_resize::main_layout::HINT_STRIP_PADDING_X;
+        assert_eq!(footer_rail_side_inset_px(true, ordinary), 0.0);
+        assert_eq!(footer_rail_side_inset_px(false, ordinary), ordinary);
     }
 
     #[test]

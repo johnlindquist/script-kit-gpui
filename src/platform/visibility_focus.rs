@@ -366,6 +366,14 @@ fn show_main_window_without_activation_impl(cycle_id: Option<u64>) {
 
         crate::platform::host_clock::log_entry_timeline_event("main_show_requested");
 
+        // Apply any queued show bounds BEFORE the morph arms: the entry
+        // choreography captures the window's current frame as its final
+        // frame and parks the calibrated wide start against it. A deferred
+        // `window_ops` flush landing after `orderFrontRegardless` rewrote
+        // the frame mid-onset and erased the 101.2% wide state (wide-start
+        // regression receipts, 2026-08-13).
+        crate::window_ops::flush_pending_ops_before_native_reveal();
+
         if let Some(cycle_id) = cycle_id {
             trace_main_window_native_geometry("before_order_front", cycle_id, None, None);
         }
@@ -489,6 +497,10 @@ pub fn show_main_window_background() {
         );
 
         crate::platform::host_clock::log_entry_timeline_event("main_show_requested");
+
+        // See show_main_window_without_activation_impl: queued show bounds
+        // must land before the morph captures its final frame.
+        crate::window_ops::flush_pending_ops_before_native_reveal();
 
         prepare_main_window_native_composition_for_show();
         crate::platform::host_clock::log_entry_timeline_event(

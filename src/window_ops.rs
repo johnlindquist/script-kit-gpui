@@ -155,6 +155,35 @@ pub fn queue_move(bounds: Bounds<Pixels>, window: &mut Window, cx: &mut gpui::Ap
     schedule_flush(window, cx);
 }
 
+/// Apply any queued move/resize SYNCHRONOUSLY, for the native main-window
+/// reveal path to call BEFORE the glass entry morph is armed.
+///
+/// Why this exists (wide-start regression, oracle-execute `wide-start-restore`,
+/// 2026-08-13): show paths queue the canonical show bounds via `queue_move`
+/// and then call `platform::show_main_window_without_activation()`. The morph
+/// arms against the window's CURRENT frame and parks the calibrated 101.2%
+/// wide state — and only afterwards did `Window::defer` flush the queued
+/// bounds, rewriting the frame to final width ~20ms into the visible onset.
+/// Frame-event receipts showed `writer_move_first_window_to` at t≈23ms
+/// stomping 760→750 before the tail began, which erased Spotlight's measured
+/// wide start from every entry. Flushing before arming both fixes the stomp
+/// and lets the morph capture the true final bounds (including a fresh
+/// height) instead of a stale pre-show frame.
+///
+/// Safe in the same contexts as the deferred flush: the direct `setFrame:`
+/// resize callback uses `try_borrow_mut` and no-ops under an active GPUI
+/// borrow; the still-scheduled deferred flush then finds nothing pending and
+/// only performs the `bounds_changed` viewport sync.
+pub fn flush_pending_ops_before_native_reveal() {
+    if has_pending_ops() {
+        logging::log(
+            "WINDOW_OPS",
+            "Flushing pending window ops before native reveal (pre-morph)",
+        );
+        flush_pending_ops();
+    }
+}
+
 /// Check if there are any pending window operations.
 ///
 /// Useful for debugging or testing.

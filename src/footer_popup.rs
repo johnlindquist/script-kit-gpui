@@ -4030,10 +4030,19 @@ fn footer_height() -> f64 {
 }
 
 #[cfg(target_os = "macos")]
+fn footer_hint_side_inset(glass_active: bool) -> f64 {
+    f64::from(crate::components::footer_chrome::footer_rail_side_inset_px(
+        glass_active,
+        FOOTER_HINT_SIDE_INSET as f32,
+    ))
+}
+
+#[cfg(target_os = "macos")]
 fn footer_hints_frame(width: f64) -> cocoa::foundation::NSRect {
+    let side_inset = footer_hint_side_inset(glass_scroll_bands_active());
     cocoa::foundation::NSRect::new(
-        cocoa::foundation::NSPoint::new(FOOTER_HINT_SIDE_INSET, 0.0),
-        cocoa::foundation::NSSize::new(width - (FOOTER_HINT_SIDE_INSET * 2.0), footer_height()),
+        cocoa::foundation::NSPoint::new(side_inset, 0.0),
+        cocoa::foundation::NSSize::new((width - (side_inset * 2.0)).max(0.0), footer_height()),
     )
 }
 
@@ -4132,10 +4141,37 @@ fn resolve_native_footer_lanes(
     left_pinned_end_x: f64,
     trailing_start_x: f64,
 ) -> NativeFooterLaneLayout {
+    resolve_native_footer_lanes_with_mode(
+        hints_width,
+        left_pinned_end_x,
+        trailing_start_x,
+        glass_scroll_bands_active(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_native_footer_lanes_with_mode(
+    hints_width: f64,
+    left_pinned_end_x: f64,
+    trailing_start_x: f64,
+    edge_flush: bool,
+) -> NativeFooterLaneLayout {
     let gap = f64::from(crate::components::footer_chrome::FOOTER_LEFT_RIGHT_MIN_GAP_PX);
     let left_pinned_end_x = left_pinned_end_x.clamp(0.0, hints_width.max(0.0));
     let trailing_start_x = trailing_start_x.clamp(0.0, hints_width.max(0.0));
-    let left_info_x = left_pinned_end_x + gap + FOOTER_LEFT_INFO_CAPSULE_PAD_X;
+    // The inter-lane gap separates the left-info capsule from a PRECEDING
+    // left-pinned chip. When no left-pinned lane exists in the edge-flush
+    // floating footer, the gap would render as a bare sliver between the
+    // window edge and the first capsule (user report 2026-08-12), so it only
+    // applies when there is something to separate from. The strip origin is
+    // already edge-flush via `footer_hint_side_inset`; the capsule's visual
+    // leading edge sits at `left_info_x - FOOTER_LEFT_INFO_CAPSULE_PAD_X`.
+    let lead_gap = if edge_flush && left_pinned_end_x <= 0.0 {
+        0.0
+    } else {
+        gap
+    };
+    let left_info_x = left_pinned_end_x + lead_gap + FOOTER_LEFT_INFO_CAPSULE_PAD_X;
     let left_info_end_x = trailing_start_x - gap - FOOTER_LEFT_INFO_CAPSULE_PAD_X;
     let trailing_overflow = trailing_start_x < left_pinned_end_x + gap;
     NativeFooterLaneLayout {
@@ -4230,7 +4266,10 @@ fn resolve_footer_left_info_allocation(
 #[cfg(target_os = "macos")]
 fn footer_left_info_frame(layout: NativeFooterLaneLayout) -> cocoa::foundation::NSRect {
     cocoa::foundation::NSRect::new(
-        cocoa::foundation::NSPoint::new(FOOTER_HINT_SIDE_INSET + layout.left_info_x, 0.0),
+        cocoa::foundation::NSPoint::new(
+            footer_hint_side_inset(glass_scroll_bands_active()) + layout.left_info_x,
+            0.0,
+        ),
         cocoa::foundation::NSSize::new(layout.left_info_width, footer_height()),
     )
 }
@@ -6827,6 +6866,46 @@ mod footer_layout_tests {
         assert!(regions.main_content.height >= 0.0);
         assert!(regions.transparent_gap.height >= 0.0);
         assert!(regions.footer.height >= 0.0);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn floating_footer_hints_are_edge_flush_while_legacy_keeps_its_inset() {
+        let width = 750.0;
+        let floating_inset = super::footer_hint_side_inset(true);
+        let legacy_inset = super::footer_hint_side_inset(false);
+        assert_eq!(floating_inset, 0.0);
+        assert_eq!(
+            legacy_inset,
+            crate::window_resize::main_layout::HINT_STRIP_PADDING_X as f64
+        );
+        assert_eq!(width - floating_inset * 2.0, width);
+        assert!(width - legacy_inset * 2.0 < width);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn edge_flush_left_info_capsule_reaches_the_window_edge_without_a_lead_gap() {
+        // No left-pinned chip in edge-flush (floating glass) mode: the
+        // left-info content sits at PAD_X so its visual capsule (which
+        // extends back by PAD_X) starts exactly at x = 0.
+        let lane = super::resolve_native_footer_lanes_with_mode(718.0, 0.0, 506.0, true);
+        assert_eq!(lane.left_info_x, super::FOOTER_LEFT_INFO_CAPSULE_PAD_X);
+        // A preceding left-pinned chip keeps the separating gap.
+        let with_chip = super::resolve_native_footer_lanes_with_mode(718.0, 120.0, 506.0, true);
+        assert_eq!(
+            with_chip.left_info_x,
+            120.0
+                + f64::from(crate::components::footer_chrome::FOOTER_LEFT_RIGHT_MIN_GAP_PX)
+                + super::FOOTER_LEFT_INFO_CAPSULE_PAD_X
+        );
+        // Legacy (non-flush) mode keeps the frozen lane math.
+        let legacy = super::resolve_native_footer_lanes_with_mode(718.0, 0.0, 506.0, false);
+        assert_eq!(
+            legacy.left_info_x,
+            f64::from(crate::components::footer_chrome::FOOTER_LEFT_RIGHT_MIN_GAP_PX)
+                + super::FOOTER_LEFT_INFO_CAPSULE_PAD_X
+        );
     }
 
     #[test]
