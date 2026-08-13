@@ -549,12 +549,17 @@ const GLASS_MAIN_ONSET_START_WIDTH_SCALE: f64 = 1.0305;
 /// authorized 2x tempo, matching the content-fade cadence).
 #[cfg(target_os = "macos")]
 const GLASS_MAIN_ONSET_GEOMETRY_DURATION: f64 = 0.018;
-/// GPUI content roots stay hidden through the early onset…
+/// GPUI content roots fade in WITH the material from the first photon
+/// (2026-08-13 content-timing retune: the user-supplied 57fps Spotlight
+/// reference shows the bar's content faintly present from the very first
+/// frame, and the previous 26ms hold produced readable empty-body frames
+/// once the native footer stopped enrolling in the content fade).
 #[cfg(target_os = "macos")]
-const GLASS_ENTRY_CONTENT_HOLD_DURATION: f64 = 0.026;
-/// …then fade in over 18ms, finishing exactly when the tail begins.
+const GLASS_ENTRY_CONTENT_HOLD_DURATION: f64 = 0.0;
+/// Content fade spans the full material prefix, finishing exactly when the
+/// tail begins (clamped to onset − hold in glass_entry_content_fade_duration).
 #[cfg(target_os = "macos")]
-const GLASS_ENTRY_CONTENT_FADE_DURATION: f64 = 0.018;
+const GLASS_ENTRY_CONTENT_FADE_DURATION: f64 = 0.044;
 /// Onset timing curve reproducing the measured normalized presence samples
 /// (~0.294/0.535/0.761/1.0, sampled proportionally across the onset).
 #[cfg(target_os = "macos")]
@@ -639,7 +644,7 @@ fn glass_main_entry_blur_radius() -> f64 {
 ///
 /// THE DEFAULT IS THE THING THAT MAKES THE ENTRY FEEL UNFADED. The stock value
 /// is `GLASS_ENTRY_CONTENT_FADE_DURATION` clamped so the fade ENDS at the
-/// material-onset boundary: `0.018.min(0.044 - 0.026)` = 18ms. The content is
+/// material-onset boundary: `0.044.min(0.044 - 0.0)` = 44ms. The content is
 /// therefore fully opaque at t=44ms, before the 105ms geometry tail begins — so
 /// across the whole visible tail nothing is fading, and the entry reads as a
 /// solid panel doing a 1.2% width wiggle rather than something materializing.
@@ -4873,8 +4878,8 @@ mod secondary_window_config_tests {
         assert_eq!(super::GLASS_MATERIAL_ONSET_DURATION, 0.044);
         assert_eq!(super::GLASS_MAIN_ONSET_START_WIDTH_SCALE, 1.0305);
         assert_eq!(super::GLASS_MAIN_ONSET_GEOMETRY_DURATION, 0.018);
-        assert_eq!(super::GLASS_ENTRY_CONTENT_HOLD_DURATION, 0.026);
-        assert_eq!(super::GLASS_ENTRY_CONTENT_FADE_DURATION, 0.018);
+        assert_eq!(super::GLASS_ENTRY_CONTENT_HOLD_DURATION, 0.0);
+        assert_eq!(super::GLASS_ENTRY_CONTENT_FADE_DURATION, 0.044);
         assert_eq!(super::GLASS_ENTRY_BLUR_RADIUS, 8.0);
         assert_eq!(super::GLASS_MAIN_ENTRY_BLUR_RADIUS, 12.0);
         let tuning =

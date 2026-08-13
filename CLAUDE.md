@@ -136,9 +136,13 @@ against `CleanShot 2026-07-24 at 09.18.40.mp4`):
   velocity — that turn, not a dead hold, is the physical settling;
 - material onset prefix `44ms` (glass Clear→Regular + tint ramp at a
   CONSTANT `0.85` NSWindow alpha, curve `(0.18,0)/(0.14,0)`); GPUI content
-  roots hold `26ms` then fade `18ms`, ending exactly at tail start. Total
-  entry `149ms` = onset + tail (Oracle session `glass-entry-onset-v2`,
-  measured from `CleanShot 2026-07-27 at 10.08.42.mp4`);
+  roots fade in WITH the material from the first photon — hold `0ms`, fade
+  `44ms`, ending exactly at tail start (2026-08-13 content-timing retune:
+  the 57fps Spotlight reference shows content faintly present from frame 1,
+  and the prior 26ms hold produced readable empty-body frames once the
+  native footer stopped enrolling in the content fade). Total entry `149ms`
+  = onset + tail (Oracle session `glass-entry-onset-v2`, measured from
+  `CleanShot 2026-07-27 at 10.08.42.mp4`);
 - entry inset `0.006` per side, producing a main shrink-in
   `103.05% → 101.2% → 98.7% → 100%` width path (Notes/Dictation stay
   `101.2% → 98.7% → 100%`) and an Actions/popup grow-in
