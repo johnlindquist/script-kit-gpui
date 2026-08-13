@@ -174,11 +174,16 @@
                                         notes_open
                                     ),
                                 );
-                                platform::defer_hide_main_window(ctx);
-                                view.defer_reset_to_script_list_after_main_window_hidden(
+                                let visibility_generation =
+                                    script_kit_gpui::main_window_visibility_generation();
+                                view.defer_calibrated_main_window_hide(
                                     ctx,
-                                    "stdin_hide_rpc",
-                                    false,
+                                    visibility_generation,
+                                    None,
+                                    MainWindowPostHide::ResetScriptList {
+                                        reason: "stdin_hide_rpc",
+                                        reset_mini_bounds_after_hidden_reset: false,
+                                    },
                                 );
                             }
                             ExternalCommand::SetFilter { ref text, ref request_id } => {

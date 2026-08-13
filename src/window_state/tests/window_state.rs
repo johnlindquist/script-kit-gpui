@@ -233,11 +233,16 @@ mod tests {
             let after_start = &content[start..];
             let end = after_start.find("\n    ///").unwrap_or(after_start.len());
             let function_chunk = &after_start[..end];
-            let has_reset = function_chunk.contains("reset_to_script_list");
+            // The reset is expressed either as a direct reset_to_script_list
+            // call or as the calibrated-hide owner's ResetScriptList policy,
+            // which performs the same reset only after AppKit confirms the
+            // native hide (exit-fade restoration, 2026-08-13).
+            let has_reset = function_chunk.contains("reset_to_script_list")
+                || function_chunk.contains("MainWindowPostHide::ResetScriptList");
 
             assert!(
                 has_reset,
-                "close_and_reset_window() must call reset_to_script_list()"
+                "close_and_reset_window() must reset the launcher route to ScriptList"
             );
         } else {
             panic!("close_and_reset_window() function not found in app_impl/lifecycle_reset.rs");
@@ -310,8 +315,8 @@ mod tests {
             .and_then(|rest| rest.split("pub(crate) fn can_preserve_hide").next())
             .expect("close_and_reset_window should exist");
         assert!(
-            close_chunk.contains("platform::defer_hide_main_window(cx);"),
-            "close_and_reset_window must hide only the main panel"
+            close_chunk.contains("defer_calibrated_main_window_hide("),
+            "close_and_reset_window must route through the shared calibrated main-only hide owner"
         );
         assert!(
             !close_chunk.contains("cx.hide();"),
@@ -324,8 +329,8 @@ mod tests {
             .and_then(|rest| rest.split("/// Clear the current built-in view").next())
             .expect("hide_main_window_preserving_state_for_focus_loss should exist");
         assert!(
-            preserve_chunk.contains("platform::defer_hide_main_window(cx);"),
-            "focus-loss hide must hide only the main panel"
+            preserve_chunk.contains("defer_calibrated_main_window_hide("),
+            "focus-loss hide must route through the shared calibrated main-only hide owner"
         );
         assert!(
             !preserve_chunk.contains("cx.hide();"),
@@ -339,8 +344,8 @@ mod tests {
             .and_then(|rest| rest.split("/// Handle window resize events").next())
             .unwrap_or_else(|| visibility.split("fn hide_main_window_helper").nth(1).unwrap());
         assert!(
-            helper_chunk.contains("platform::defer_hide_main_window(cx);"),
-            "shared hide helper must hide only the main panel"
+            helper_chunk.contains("defer_calibrated_main_window_hide("),
+            "shared hide helper must route through the shared calibrated main-only hide owner"
         );
         assert!(
             !helper_chunk.contains("cx.hide();"),
@@ -422,8 +427,8 @@ mod tests {
                 });
         let fallback_branch = &branch[fallback_start..];
         assert!(
-            fallback_branch.contains("platform::defer_hide_main_window(ctx);"),
-            "non-opened-from-main-menu fallback should hide only the main panel"
+            fallback_branch.contains("defer_calibrated_main_window_hide("),
+            "non-opened-from-main-menu fallback must route through the shared calibrated main-only hide owner"
         );
         assert!(
             !fallback_branch.contains("ctx.hide();"),

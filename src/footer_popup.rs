@@ -1770,6 +1770,24 @@ pub(crate) fn close_main_footer_popup_after_hidden_settle(
     cx: &mut gpui::AsyncApp,
     expected_visibility_generation: u64,
 ) {
+    // Glass mode: the footer is an in-window NSGlassEffectContainerView that
+    // hides WITH the window. Tearing it down after every ordinary hide forced
+    // the next show to recreate its NSGlassEffectView capsules, whose private
+    // material re-materializes through the following entry — measured as
+    // capsule-vs-main relation drift during entry plus post-settle color
+    // movement once every hide route played the calibrated exit (2026-08-13
+    // exit-fade restoration receipts). Keep the container installed across
+    // hides, exactly like the main glass backdrop; content refresh on the
+    // next show already restyles it on theme/content change.
+    if glass_scroll_bands_active() {
+        tracing::info!(
+            target: "script_kit::footer_popup",
+            event = "main_footer_hidden_cleanup_skipped_glass_mode",
+            expected_visibility_generation,
+            "Kept the in-window glass footer host installed across the hide"
+        );
+        return;
+    }
     cx.spawn(async move |cx: &mut gpui::AsyncApp| {
         cx.background_executor()
             .timer(std::time::Duration::from_millis(80))

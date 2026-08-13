@@ -775,95 +775,24 @@ fn hide_main_window_helper(app_entity: Entity<ScriptListApp>, cx: &mut App) {
     // orderOut: itself must stay synchronous inside that flow (deferring it
     // at the platform layer livelocked the hotkey gesture listener). A
     // re-show during the animation supersedes the delayed hide.
-    if platform::begin_main_window_exit_dematerialize() {
-        let trace = platform::main_window_geometry_trace_enabled();
-        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(135))
-                .await;
-            cx.update(move |cx| {
-                if crate::is_main_window_visible() {
-                    logging::log(
-                        "VISIBILITY",
-                        "Exit dematerialize superseded by re-show; skipping deferred hide",
-                    );
-                    return;
-                }
-                // Keep the native footer host installed for the entire window
-                // fade and through native orderOut:. Removing it before
-                // orderOut lets GPUI draw its fallback footer inside the
-                // stage for one frame — the visible "rejoin" glitch.
-                let cleanup = move |outcome, cx: &mut gpui::AsyncApp| {
-                    if matches!(
-                        outcome,
-                        crate::platform::MainWindowHideCompletion::Hidden(_)
-                    ) {
-                        crate::footer_popup::close_main_footer_popup_after_hidden_settle(
-                            cx,
-                            visibility_generation,
-                        );
-                    }
-                };
-                if trace {
-                    platform::defer_hide_main_window_with_geometry_trace_and_completion(
-                        cx,
-                        visibility_generation,
-                        geometry_cycle_id,
-                        cleanup,
-                    );
-                } else {
-                    platform::defer_hide_main_window_with_completion(
-                        cx,
-                        visibility_generation,
-                        cleanup,
-                    );
-                }
-            });
-        })
-        .detach();
-    } else if platform::main_window_geometry_trace_enabled() {
-        platform::defer_hide_main_window_with_geometry_trace_and_completion(
-            cx,
-            visibility_generation,
-            geometry_cycle_id,
-            move |outcome, cx| {
-                if matches!(
-                    outcome,
-                    crate::platform::MainWindowHideCompletion::Hidden(_)
-                ) {
-                    crate::footer_popup::close_main_footer_popup_after_hidden_settle(
-                        cx,
-                        visibility_generation,
-                    );
-                }
-            },
-        );
-    } else {
-        platform::defer_hide_main_window_with_completion(
-            cx,
-            visibility_generation,
-            move |outcome, cx| {
-                if matches!(
-                    outcome,
-                    crate::platform::MainWindowHideCompletion::Hidden(_)
-                ) {
-                    crate::footer_popup::close_main_footer_popup_after_hidden_settle(
-                        cx,
-                        visibility_generation,
-                    );
-                }
-            },
-        );
-    }
+    // One shared owner for the calibrated exit: fade, locked removal delay,
+    // completion-gated native hide, and the ScriptList reset only after AppKit
+    // confirms the window hidden (exit-fade regression receipts, 2026-08-13).
+    let helper_geometry_cycle_id = platform::main_window_geometry_trace_enabled()
+        .then_some(geometry_cycle_id);
     app_entity.update(cx, |view, ctx| {
-        view.defer_reset_to_script_list_after_main_window_hidden(
+        view.defer_calibrated_main_window_hide(
             ctx,
-            "hide_main_window_helper",
-            reset_mini_bounds_after_hidden_reset,
+            visibility_generation,
+            helper_geometry_cycle_id,
+            MainWindowPostHide::ResetScriptList {
+                reason: "hide_main_window_helper",
+                reset_mini_bounds_after_hidden_reset,
+            },
         );
     });
     platform::trace_main_window_native_geometry(
-        "after_hidden_reset_scheduled",
+        "after_calibrated_hide_scheduled",
         geometry_cycle_id,
         None,
         Some("hide_main_window_helper"),

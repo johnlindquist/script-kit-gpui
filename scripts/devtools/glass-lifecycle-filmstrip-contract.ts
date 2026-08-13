@@ -25,12 +25,29 @@ export const SCENARIO_CAPTURE_DURATIONS_MS: Record<
   LifecycleScenarioName,
   number
 > = {
-  "main-exit": 200,
+  // 400ms observation budget = 40ms pre-roll + the full calibrated exit
+  // envelope (0.11-0.12s fade + 135ms deferred native hide ≈ 245-255ms to
+  // fully hidden) + scheduler margin. This is a CAPTURE window, not an
+  // animation value: the 2026-08-13 exit-fade restoration made the protocol
+  // hide actually play the locked fade, and the previous 200ms window ended
+  // before the fade tail was observable.
+  "main-exit": 400,
   "main-entry": 700,
   "notes-entry": 800,
   "notes-close-before-settle-reopen": 950,
   "dictation-exit-reopen": 900,
 };
+
+/** Capture pre-roll before the main-exit hide is issued (observation value). */
+export const MAIN_EXIT_CAPTURE_PREROLL_MS = 40;
+
+/**
+ * Settle budget between the LOGICAL hide acknowledgment and any post-hide
+ * screenshot/normalization step: the calibrated exit keeps the native window
+ * on screen ~245-255ms after the protocol accepts the hide (fade + deferred
+ * orderOut). Observation value, not an animation value.
+ */
+export const MAIN_EXIT_POST_HIDE_SETTLE_MS = 320;
 
 /**
  * Resolve a capture profile to its ordered scenario list.

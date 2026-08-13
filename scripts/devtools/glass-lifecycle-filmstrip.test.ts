@@ -194,6 +194,8 @@ import {
   computeLifecycleDisposition,
   filmstripVerdict,
   LEGACY_FULL_SCENARIO_ORDER,
+  MAIN_EXIT_CAPTURE_PREROLL_MS,
+  MAIN_EXIT_POST_HIDE_SETTLE_MS,
   parseAnalysisMode,
   resolveScenarioNames,
   SCENARIO_CAPTURE_DURATIONS_MS,
@@ -235,13 +237,26 @@ describe("scenario profiles", () => {
   });
 
   test("locked legacy capture durations are unchanged", () => {
+    // main-exit was raised 200 → 400 on 2026-08-13 WITH the exit-fade
+    // restoration: once the protocol hide actually plays the calibrated
+    // 0.11-0.12s fade + 135ms deferred orderOut, a 200ms window ends before
+    // the fade tail is observable. These are observation windows, never
+    // animation values.
     expect(SCENARIO_CAPTURE_DURATIONS_MS).toEqual({
-      "main-exit": 200,
+      "main-exit": 400,
       "main-entry": 700,
       "notes-entry": 800,
       "notes-close-before-settle-reopen": 950,
       "dictation-exit-reopen": 900,
     });
+  });
+
+  test("main-exit observation budget covers the calibrated exit envelope", () => {
+    expect(MAIN_EXIT_CAPTURE_PREROLL_MS).toBe(40);
+    expect(MAIN_EXIT_POST_HIDE_SETTLE_MS).toBe(320);
+    expect(SCENARIO_CAPTURE_DURATIONS_MS["main-exit"]).toBeGreaterThanOrEqual(
+      MAIN_EXIT_CAPTURE_PREROLL_MS + MAIN_EXIT_POST_HIDE_SETTLE_MS,
+    );
   });
 });
 

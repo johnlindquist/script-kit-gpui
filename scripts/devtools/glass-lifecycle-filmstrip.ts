@@ -22,6 +22,8 @@ import {
   type LifecycleScenarioName,
   parseAnalysisMode,
   resolveScenarioNames,
+  MAIN_EXIT_CAPTURE_PREROLL_MS,
+  MAIN_EXIT_POST_HIDE_SETTLE_MS,
   SCENARIO_CAPTURE_DURATIONS_MS,
   type ScenarioProfile,
   type ScenarioTimingInterval,
@@ -607,7 +609,7 @@ try {
   );
   driver.send({ type: "hide", requestId: "glass-life-warm-hide" });
   await driver.waitForState({ windowVisible: false }, { timeoutMs: 3_000 });
-  await Bun.sleep(220);
+  await Bun.sleep(MAIN_EXIT_POST_HIDE_SETTLE_MS);
   driver.send({ type: "show", requestId: "glass-life-warm-show" });
   await driver.waitForState({ windowVisible: true }, { timeoutMs: 3_000 });
   await driver.waitForSettle({ timeoutMs: 3_000 });
@@ -667,10 +669,10 @@ try {
     { windowID: mainWindowID, bounds: mainCaptureBounds },
   );
   await awaitObserverReady(mainExit);
-  await Bun.sleep(40);
+  await Bun.sleep(MAIN_EXIT_CAPTURE_PREROLL_MS);
   driver.send({ type: "hide", requestId: "glass-life-main-hide" });
   await driver.waitForState({ windowVisible: false }, { timeoutMs: 3_000 });
-  await Bun.sleep(220);
+  await Bun.sleep(MAIN_EXIT_POST_HIDE_SETTLE_MS);
   const mainExitReferencePath = join(mainExit.directory, "hidden-reference.png");
   const mainExitReferenceCapture = await run([
     "screencapture",

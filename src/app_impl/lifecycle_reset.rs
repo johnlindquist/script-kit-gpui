@@ -10,6 +10,45 @@ struct HiddenMainWindowResetRequest {
     reset_mini_bounds_after_hidden_reset: bool,
 }
 
+/// What happens to the (already hidden) main window AFTER the calibrated exit
+/// completes and AppKit confirms `orderOut:`. Every ordinary main-window
+/// dismissal funnels through [`ScriptListApp::defer_calibrated_main_window_hide`]
+/// with one of these policies instead of duplicating fade/timer/hide/reset
+/// closures per call site.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MainWindowPostHide {
+    /// Reset the launcher route to ScriptList (the ordinary close).
+    ResetScriptList {
+        reason: &'static str,
+        reset_mini_bounds_after_hidden_reset: bool,
+    },
+    /// Reset a prepared Agent Chat surface back to ScriptList.
+    ResetPreparedAgentChat { reason: &'static str },
+    /// Keep the view state exactly as-is (focus-loss / escape preserve hides).
+    PreserveState { reason: &'static str },
+}
+
+impl MainWindowPostHide {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::ResetScriptList { reason, .. }
+            | Self::ResetPreparedAgentChat { reason }
+            | Self::PreserveState { reason } => reason,
+        }
+    }
+}
+
+/// Whether a scheduled calibrated hide is still the CURRENT request when its
+/// exit-fade delay elapses. A re-show (logical visibility true) or a newer
+/// visibility generation supersedes it.
+fn calibrated_hide_request_is_current(
+    expected_visibility_generation: u64,
+    current_visibility_generation: u64,
+    is_logically_visible: bool,
+) -> bool {
+    !is_logically_visible && current_visibility_generation == expected_visibility_generation
+}
+
 fn hidden_main_window_reset_is_current(
     expected_visibility_generation: u64,
     current_visibility_generation: u64,
@@ -348,106 +387,154 @@ impl ScriptListApp {
         Some(script_kit_gpui::main_window_visibility_generation())
     }
 
+    /// The ONE application-level owner of an ordinary main-window dismissal.
+    ///
+    /// Sequence (locked exit contract, values immutable):
+    /// 1. Play the calibrated fixed-frame exit fade
+    ///    (`begin_main_window_exit_dematerialize`, `DetachedRegionsFadeOnly`).
+    /// 2. Wait the locked removal delay (`glass_exit_remove_delay`) — zero when
+    ///    glass is unavailable so non-glass hides stay instant.
+    /// 3. Reject the request when a re-show or newer visibility generation
+    ///    superseded it during the fade.
+    /// 4. Run the native completion hide (`orderOut:` stays synchronous inside
+    ///    that flow — deferring it at the platform layer livelocked hotkey
+    ///    toggling), then apply `post_hide` ONLY on a confirmed
+    ///    `MainWindowHideCompletion::Hidden`.
+    ///
+    /// Every ordinary dismissal (protocol hide, escape, focus-loss preserve,
+    /// close-and-reset, Agent Chat close) must call this instead of pairing raw
+    /// `platform::defer_hide_main_window` with its own reset scheduling — the
+    /// raw pairing is exactly what skipped the calibrated exit on the protocol
+    /// and escape routes (exit-fade regression receipts, 2026-08-13).
+    pub(crate) fn defer_calibrated_main_window_hide(
+        &mut self,
+        cx: &mut Context<Self>,
+        expected_visibility_generation: u64,
+        geometry_cycle_id: Option<u64>,
+        post_hide: MainWindowPostHide,
+    ) {
+        let app_entity = cx.entity().downgrade();
+        let fade_started = platform::begin_main_window_exit_dematerialize();
+        let delay = if fade_started {
+            platform::glass_exit_remove_delay()
+        } else {
+            std::time::Duration::ZERO
+        };
+        cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            let _ = cx.update(move |cx| {
+                if !calibrated_hide_request_is_current(
+                    expected_visibility_generation,
+                    script_kit_gpui::main_window_visibility_generation(),
+                    script_kit_gpui::is_main_window_visible(),
+                ) {
+                    logging::log(
+                        "VISIBILITY",
+                        &format!(
+                            "Calibrated hide superseded before native hide ({})",
+                            post_hide.reason()
+                        ),
+                    );
+                    return;
+                }
+                let completion = move |outcome: crate::platform::MainWindowHideCompletion,
+                                       cx: &mut gpui::AsyncApp| {
+                    match outcome {
+                        crate::platform::MainWindowHideCompletion::Hidden(native_hidden) => {
+                            crate::footer_popup::close_main_footer_popup_after_hidden_settle(
+                                cx,
+                                expected_visibility_generation,
+                            );
+                            match post_hide {
+                                MainWindowPostHide::PreserveState { .. } => {}
+                                MainWindowPostHide::ResetScriptList {
+                                    reason,
+                                    reset_mini_bounds_after_hidden_reset,
+                                } => {
+                                    let request = HiddenMainWindowResetRequest {
+                                        _native_hidden: native_hidden,
+                                        visibility_generation: expected_visibility_generation,
+                                        reason,
+                                        reset_mini_bounds_after_hidden_reset,
+                                    };
+                                    let _ = cx.update(|cx| {
+                                        if let Some(app_entity) = app_entity.upgrade() {
+                                            app_entity.update(cx, |app, cx| {
+                                                app.complete_hidden_main_window_script_list_reset(
+                                                    request, cx,
+                                                );
+                                            });
+                                        }
+                                    });
+                                }
+                                MainWindowPostHide::ResetPreparedAgentChat { reason } => {
+                                    let request = HiddenMainWindowResetRequest {
+                                        _native_hidden: native_hidden,
+                                        visibility_generation: expected_visibility_generation,
+                                        reason,
+                                        reset_mini_bounds_after_hidden_reset: false,
+                                    };
+                                    let _ = cx.update(|cx| {
+                                        if let Some(app_entity) = app_entity.upgrade() {
+                                            app_entity.update(cx, |app, cx| {
+                                                app.complete_hidden_main_window_reset(request, cx);
+                                            });
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        failure => {
+                            logging::log(
+                                "VISIBILITY",
+                                &format!(
+                                    "Calibrated hide barrier failed closed ({}): {failure:?}",
+                                    post_hide.reason()
+                                ),
+                            );
+                        }
+                    }
+                };
+                if let Some(cycle_id) = geometry_cycle_id {
+                    platform::defer_hide_main_window_with_geometry_trace_and_completion(
+                        cx,
+                        expected_visibility_generation,
+                        cycle_id,
+                        completion,
+                    );
+                } else {
+                    platform::defer_hide_main_window_with_completion(
+                        cx,
+                        expected_visibility_generation,
+                        completion,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn close_and_reset_window(&mut self, cx: &mut Context<Self>) {
         let Some(visibility_generation) =
             self.prepare_main_window_close(cx, "close_and_reset_window", true, false)
         else {
             return;
         };
-        let app_entity = cx.entity().downgrade();
-
         logging::log(
             "VISIBILITY",
-            "Using defer_hide_main_window() - main-only hide",
+            "Using calibrated main-window hide - main-only hide",
         );
-        // Glass mode: play the Spotlight-style dematerialize (~120ms fade +
-        // blur + slight growth) and delay the normal hide flow past it. The
-        // native orderOut: stays synchronous inside that flow; a re-show
-        // during the animation supersedes the deferred hide.
-        if platform::begin_main_window_exit_dematerialize() {
-            cx.spawn(async move |_this, cx: &mut gpui::AsyncApp| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(135))
-                    .await;
-                cx.update(|cx| {
-                    if script_kit_gpui::is_main_window_visible() {
-                        logging::log(
-                            "VISIBILITY",
-                            "Exit dematerialize superseded by re-show; skipping deferred hide",
-                        );
-                        return;
-                    }
-                    platform::defer_hide_main_window_with_completion(
-                        cx,
-                        visibility_generation,
-                        move |outcome, cx| match outcome {
-                            crate::platform::MainWindowHideCompletion::Hidden(native_hidden) => {
-                                let request = HiddenMainWindowResetRequest {
-                                    _native_hidden: native_hidden,
-                                    visibility_generation,
-                                    reason: "close_and_reset_window",
-                                    reset_mini_bounds_after_hidden_reset: false,
-                                };
-                                crate::footer_popup::close_main_footer_popup_after_hidden_settle(
-                                    cx,
-                                    visibility_generation,
-                                );
-                                cx.update(|cx| {
-                                    if let Some(app_entity) = app_entity.upgrade() {
-                                        app_entity.update(cx, |app, cx| {
-                                            app.complete_hidden_main_window_script_list_reset(
-                                                request, cx,
-                                            );
-                                        });
-                                    }
-                                });
-                            }
-                            failure => {
-                                logging::log(
-                                    "VISIBILITY",
-                                    &format!(
-                                        "Main native hide/reset barrier failed closed: {failure:?}"
-                                    ),
-                                );
-                            }
-                        },
-                    );
-                });
-            })
-            .detach();
-        } else {
-            platform::defer_hide_main_window_with_completion(
-                &mut *cx,
-                visibility_generation,
-                move |outcome, cx| match outcome {
-                    crate::platform::MainWindowHideCompletion::Hidden(native_hidden) => {
-                        let request = HiddenMainWindowResetRequest {
-                            _native_hidden: native_hidden,
-                            visibility_generation,
-                            reason: "close_and_reset_window",
-                            reset_mini_bounds_after_hidden_reset: false,
-                        };
-                        crate::footer_popup::close_main_footer_popup_after_hidden_settle(
-                            cx,
-                            visibility_generation,
-                        );
-                        cx.update(|cx| {
-                            if let Some(app_entity) = app_entity.upgrade() {
-                                app_entity.update(cx, |app, cx| {
-                                    app.complete_hidden_main_window_script_list_reset(request, cx);
-                                });
-                            }
-                        });
-                    }
-                    failure => {
-                        logging::log(
-                            "VISIBILITY",
-                            &format!("Main native hide/reset barrier failed closed: {failure:?}"),
-                        );
-                    }
-                },
-            );
-        }
+        self.defer_calibrated_main_window_hide(
+            cx,
+            visibility_generation,
+            None,
+            MainWindowPostHide::ResetScriptList {
+                reason: "close_and_reset_window",
+                reset_mini_bounds_after_hidden_reset: false,
+            },
+        );
         logging::log("VISIBILITY", "=== Window closed ===");
     }
 
@@ -469,36 +556,12 @@ impl ScriptListApp {
         ) else {
             return;
         };
-        let app_entity = cx.entity().downgrade();
-        platform::defer_hide_main_window_with_completion(
+        self.defer_calibrated_main_window_hide(
             cx,
             visibility_generation,
-            move |completion, cx| match completion {
-                crate::platform::MainWindowHideCompletion::Hidden(native_hidden) => {
-                    let request = HiddenMainWindowResetRequest {
-                        _native_hidden: native_hidden,
-                        visibility_generation,
-                        reason: "close_agent_chat_native_hide_barrier",
-                        reset_mini_bounds_after_hidden_reset: false,
-                    };
-                    crate::footer_popup::close_main_footer_popup_after_hidden_settle(
-                        cx,
-                        visibility_generation,
-                    );
-                    cx.update(|cx| {
-                        if let Some(app_entity) = app_entity.upgrade() {
-                            app_entity.update(cx, |app, cx| {
-                                app.complete_hidden_main_window_reset(request, cx);
-                            });
-                        }
-                    });
-                }
-                failure => {
-                    logging::log(
-                        "VISIBILITY",
-                        &format!("Agent Chat native hide barrier failed closed: {failure:?}"),
-                    );
-                }
+            None,
+            MainWindowPostHide::ResetPreparedAgentChat {
+                reason: "close_agent_chat_native_hide_barrier",
             },
         );
     }
@@ -588,51 +651,6 @@ impl ScriptListApp {
         was_mini || post_reset_is_mini
     }
 
-    pub(crate) fn defer_reset_to_script_list_after_main_window_hidden(
-        &mut self,
-        cx: &mut Context<Self>,
-        reason: &'static str,
-        reset_mini_bounds_after_hidden_reset: bool,
-    ) {
-        let scheduled_generation = script_kit_gpui::main_window_visibility_generation();
-        cx.spawn(async move |this, cx| {
-            cx.update(|cx| {
-                if script_kit_gpui::is_main_window_visible()
-                    || script_kit_gpui::main_window_visibility_generation()
-                        != scheduled_generation
-                {
-                    logging::log(
-                        "VISIBILITY",
-                        &format!(
-                            "Skipping stale hidden main window reset after {reason}"
-                        ),
-                    );
-                    return;
-                }
-                let _ = this.update(cx, |app, cx| {
-                    if script_kit_gpui::is_main_window_visible()
-                        || script_kit_gpui::main_window_visibility_generation()
-                            != scheduled_generation
-                    {
-                        logging::log(
-                            "VISIBILITY",
-                            &format!(
-                                "Skipping stale hidden main window reset inside app update after {reason}"
-                            ),
-                        );
-                        return;
-                    }
-                    let hidden_reset_is_mini =
-                        app.reset_hidden_main_window_to_script_list(cx, reason);
-                    if reset_mini_bounds_after_hidden_reset || hidden_reset_is_mini {
-                        crate::window_resize::resize_to_mini_main_window_sync();
-                    }
-                });
-            });
-        })
-        .detach();
-    }
-
     pub(crate) fn can_preserve_hide_script_list_on_passive_focus_loss(&self) -> bool {
         matches!(self.current_view, AppView::ScriptList)
             && self.is_dismissable_view()
@@ -677,7 +695,6 @@ impl ScriptListApp {
 
         script_kit_gpui::set_main_window_visible(false);
         self.was_window_focused = false;
-        crate::footer_popup::close_main_footer_popup(&mut *cx);
         mark_main_state_restore_after_focus_loss();
 
         let notes_open = notes::is_notes_window_open();
@@ -694,11 +711,19 @@ impl ScriptListApp {
         logging::log(
             "VISIBILITY",
             &format!(
-                "Using defer_hide_main_window() - preserving state with main-only hide, secondary_windows_open={}",
+                "Using calibrated main-window hide - preserving state with main-only hide, secondary_windows_open={}",
                 secondary_windows_open
             ),
         );
-        platform::defer_hide_main_window(cx);
+        let visibility_generation = script_kit_gpui::main_window_visibility_generation();
+        self.defer_calibrated_main_window_hide(
+            cx,
+            visibility_generation,
+            None,
+            MainWindowPostHide::PreserveState {
+                reason: "focus_loss_preserve_state",
+            },
+        );
 
         logging::log(
             "VISIBILITY",
@@ -1074,5 +1099,21 @@ mod lifecycle_reset_unix_tests {
     fn test_process_group_id_from_pid_rejects_out_of_range_u32() {
         let err = process_group_id_from_pid(u32::MAX).expect_err("u32::MAX should be rejected");
         assert!(err.contains("out of range"));
+    }
+}
+
+#[cfg(test)]
+mod calibrated_hide_tests {
+    /// The shared calibrated-hide owner may perform its native hide only while
+    /// it is still the CURRENT request: same visibility generation, still
+    /// logically hidden. A re-show or newer generation supersedes it.
+    #[test]
+    fn calibrated_hide_request_currency_matches_the_supersede_contract() {
+        // same generation + logically hidden => current
+        assert!(super::calibrated_hide_request_is_current(7, 7, false));
+        // changed generation + logically hidden => superseded
+        assert!(!super::calibrated_hide_request_is_current(7, 8, false));
+        // same generation + logically visible (re-shown) => superseded
+        assert!(!super::calibrated_hide_request_is_current(7, 7, true));
     }
 }

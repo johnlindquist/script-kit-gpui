@@ -35,6 +35,7 @@ mod filter_input_updates;
 mod filtering_cache;
 #[path = "lifecycle_reset.rs"]
 mod lifecycle_reset;
+pub(crate) use lifecycle_reset::MainWindowPostHide;
 #[path = "main_list_loading.rs"]
 pub(crate) mod main_list_loading;
 #[path = "menu_syntax_actions.rs"]

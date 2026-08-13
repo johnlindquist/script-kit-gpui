@@ -916,12 +916,6 @@ unsafe fn cancel_pending_glass_window_selectors(window: id) {
         selector: sel!(settleOwnWindowFrame)
         object: nil
     ];
-    let _: () = msg_send![
-        class!(NSObject),
-        cancelPreviousPerformRequestsWithTarget: glass_view
-        selector: sel!(orderOutOwnWindow)
-        object: nil
-    ];
     for selector in [sel!(revealOwnWindowEntryContent), sel!(beginOwnWindowEntryTail)] {
         let _: () = msg_send![
             class!(NSObject),
@@ -1609,10 +1603,6 @@ fn tahoe_glass_backdrop_view_class(glass_class: id) -> Option<*const objc::runti
             tahoe_glass_backdrop_settle as extern "C" fn(&Object, Sel),
         );
         decl.add_method(
-            sel!(orderOutOwnWindow),
-            tahoe_glass_backdrop_order_out_window as extern "C" fn(&Object, Sel),
-        );
-        decl.add_method(
             sel!(revealOwnWindowEntryContent),
             tahoe_glass_backdrop_reveal_entry_content as extern "C" fn(&Object, Sel),
         );
@@ -2114,27 +2104,6 @@ extern "C" fn tahoe_glass_backdrop_settle(this: &objc::runtime::Object, _: objc:
         let alpha_animator: id = msg_send![window, animator];
         let _: () = msg_send![alpha_animator, setAlphaValue: 1.0f64];
         let _: () = msg_send![class!(NSAnimationContext), endGrouping];
-    }
-}
-
-/// Deferred exit: order the glass view's window out after the exit fade and
-/// restore its alpha for the next show. Runs on the raw main run loop, i.e.
-/// outside any GPUI borrow — the safe context the hide-path docs require.
-#[cfg(target_os = "macos")]
-extern "C" fn tahoe_glass_backdrop_order_out_window(
-    this: &objc::runtime::Object,
-    _: objc::runtime::Sel,
-) {
-    // SAFETY: main thread; standard NSWindow methods, nil-checked.
-    unsafe {
-        let this_id = this as *const objc::runtime::Object as id;
-        let window: id = msg_send![this_id, window];
-        if window == nil {
-            return;
-        }
-        let _: () = msg_send![window, orderOut: nil];
-        let _: () = msg_send![window, setAlphaValue: 1.0f64];
-        logging::log("PANEL", "Glass exit: window ordered out after fade");
     }
 }
 
@@ -3188,15 +3157,6 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
         ),
     );
 
-    // A show during the exit fade must cancel the pending deferred orderOut,
-    // or it would fire mid-appear and vanish the window.
-    let _: () = msg_send![
-        class!(NSObject),
-        cancelPreviousPerformRequestsWithTarget: glass_view
-        selector: sel!(orderOutOwnWindow)
-        object: nil
-    ];
-
     // Alpha BEFORE geometry: the extreme calibration frame must never be
     // displayed above the visible-entry start alpha.
     let _: () = msg_send![window, setAlphaValue: tuning.start_alpha];
@@ -3518,111 +3478,6 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
             (tuning.alpha_finish_duration * 1_000_000_000.0).round() as u64,
         ),
     );
-}
-
-/// Spotlight-style exit: an extremely fast fade with a slight outward
-/// growth, then a deferred `orderOut:` via `orderOutOwnWindow` on the glass
-/// view (raw run loop — outside any GPUI borrow, which the hide-path docs
-/// require). Returns true when it took over hiding; the caller must then
-/// skip its own `orderOut:`.
-///
-/// # Safety
-/// `window` must be a valid NSWindow on the main thread.
-#[cfg(target_os = "macos")]
-#[allow(dead_code)] // Reverted from the main hide path: deferring orderOut
-                    // livelocked the hotkey gesture listener. Kept for a future exit animation
-                    // that runs above the synchronous hide layer.
-unsafe fn animate_tahoe_glass_disappearance(
-    window: id,
-    log_target: &str,
-    window_name: &str,
-) -> bool {
-    use cocoa::foundation::{NSPoint, NSRect, NSSize};
-
-    if !(tahoe_native_glass_composition_available()
-        && crate::theme::get_cached_theme().is_vibrancy_enabled())
-    {
-        return false;
-    }
-    let morph_enabled = crate::theme::get_cached_theme()
-        .get_opacity()
-        .glass_morph_duration
-        .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION)
-        >= 0.02;
-    if !morph_enabled {
-        return false;
-    }
-    let content_view: id = msg_send![window, contentView];
-    if content_view == nil {
-        return false;
-    }
-    let glass_view: id = msg_send![content_view, viewWithTag: TAHOE_GLASS_BACKDROP_TAG];
-    if glass_view == nil {
-        return false;
-    }
-    let visible: bool = msg_send![window, isVisible];
-    if !visible {
-        return false;
-    }
-    let frame: NSRect = msg_send![window, frame];
-    if frame.size.width < 40.0 || frame.size.height < 40.0 {
-        return false;
-    }
-
-    // Hiding during the appear settle must cancel the pending bounce, or it
-    // would re-frame the window mid-fade.
-    let _: () = msg_send![
-        class!(NSObject),
-        cancelPreviousPerformRequestsWithTarget: glass_view
-        selector: sel!(settleOwnWindowFrame)
-        object: nil
-    ];
-
-    // Slight outward growth while fading — Spotlight's exit reads as a very
-    // fast "release" of the glass.
-    let grow_x = frame.size.width * 0.025;
-    let grow_y = frame.size.height * 0.025;
-    let grown = NSRect::new(
-        NSPoint::new(frame.origin.x - grow_x, frame.origin.y - grow_y),
-        NSSize::new(
-            frame.size.width + grow_x * 2.0,
-            frame.size.height + grow_y * 2.0,
-        ),
-    );
-
-    let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
-    let ctx: id = msg_send![class!(NSAnimationContext), currentContext];
-    let _: () = msg_send![ctx, setDuration: 0.11f64];
-    let _: () = msg_send![ctx, setAllowsImplicitAnimation: true];
-    if let Some(timing_class) = objc::runtime::Class::get("CAMediaTimingFunction") {
-        let name = tahoe_ns_string("easeIn");
-        if name != nil {
-            let timing: id = msg_send![timing_class, functionWithName: name];
-            if timing != nil {
-                let _: () = msg_send![ctx, setTimingFunction: timing];
-            }
-        }
-    }
-    let animator: id = msg_send![window, animator];
-    let _: () = msg_send![animator, setFrame: grown display: true];
-    let _: () = msg_send![animator, setAlphaValue: 0.0f64];
-    let _: () = msg_send![class!(NSAnimationContext), endGrouping];
-
-    let _: () = msg_send![
-        glass_view,
-        performSelector: sel!(orderOutOwnWindow)
-        withObject: nil
-        afterDelay: 0.13f64
-    ];
-
-    logging::log(
-        log_target,
-        &format!(
-            "{}: spotlight exit fade started (0.11s, orderOut deferred)",
-            window_name
-        ),
-    );
-    true
 }
 
 #[cfg(target_os = "macos")]

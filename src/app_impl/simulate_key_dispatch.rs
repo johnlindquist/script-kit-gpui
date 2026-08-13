@@ -745,7 +745,16 @@ impl ScriptListApp {
                                         false,
                                         false,
                                     );
-                                    platform::defer_hide_main_window(ctx);
+                                    let visibility_generation =
+                                        script_kit_gpui::main_window_visibility_generation();
+                                    view.defer_calibrated_main_window_hide(
+                                        ctx,
+                                        visibility_generation,
+                                        None,
+                                        MainWindowPostHide::PreserveState {
+                                            reason: "simulate_key_escape_hide",
+                                        },
+                                    );
                                 }
                             }
                             _ => {
