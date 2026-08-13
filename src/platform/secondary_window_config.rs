@@ -103,10 +103,28 @@ struct GlassMorphTuning {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MainFooterEntryDefocusScope {
+    PerCapsule,
+}
+
+#[cfg(target_os = "macos")]
+impl MainFooterEntryDefocusScope {
+    fn log_name(self) -> &'static str {
+        match self {
+            Self::PerCapsule => "per_capsule",
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct MainFooterEntryMaterialPolicy {
     target_alpha: f64,
     enroll_in_content_fade: bool,
+    defocus_scope: MainFooterEntryDefocusScope,
+    /// Radius applied independently to every clipped NSGlassEffectView
+    /// capsule; never apply this value to the footer container or hints host.
     defocus_radius: f64,
 }
 
@@ -115,7 +133,8 @@ fn main_footer_entry_material_policy() -> MainFooterEntryMaterialPolicy {
     MainFooterEntryMaterialPolicy {
         target_alpha: 1.0,
         enroll_in_content_fade: false,
-        defocus_radius: 0.0,
+        defocus_scope: MainFooterEntryDefocusScope::PerCapsule,
+        defocus_radius: glass_main_entry_blur_radius(),
     }
 }
 
@@ -2281,9 +2300,10 @@ unsafe fn ramp_entry_defocus(target_view: id, duration: f64, radius: f64, log_ta
     // window, filtering the contentView layer blurs across the 8pt transparent
     // footer gutter and fills it, which the exit metrics catch as "transparent
     // footer gutter was not preserved". Main therefore passes its glass
-    // backdrop, which is already laid out to EXCLUDE that gutter
-    // (`TahoeBackdropLayout::ContentAboveDetachedFooter`). The floating footer
-    // is its own window with no gutter, so it passes its own content view.
+    // backdrop, which is already laid out to EXCLUDE that gutter. Main-window
+    // footer onset never passes its gap-spanning container here: footer_popup
+    // returns only rounded NSGlassEffectView capsule layers. Detached reusable
+    // windows may still pass their own bounded content view.
     if target_view == nil {
         return bail("no_target_view");
     }
@@ -2352,16 +2372,15 @@ unsafe fn ramp_entry_defocus(target_view: id, duration: f64, radius: f64, log_ta
 #[cfg(target_os = "macos")]
 unsafe fn clear_exit_dematerialize_blur(window: id) {
     let content_view: id = msg_send![window, contentView];
-    if content_view == nil {
-        return;
+    if content_view != nil {
+        let layer: id = msg_send![content_view, layer];
+        if layer != nil {
+            let nil_id: id = nil;
+            let _: () = msg_send![layer, setFilters: nil_id];
+            let _: () = msg_send![layer, removeAllAnimations];
+        }
     }
-    let layer: id = msg_send![content_view, layer];
-    if layer == nil {
-        return;
-    }
-    let nil_id: id = nil;
-    let _: () = msg_send![layer, setFilters: nil_id];
-    let _: () = msg_send![layer, removeAllAnimations];
+    crate::footer_popup::clear_main_window_footer_entry_capsule_effects(window);
 }
 
 /// Spotlight-style exit dematerialize for the main window, measured from a
@@ -3479,25 +3498,22 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
             content_targets.push((child as usize, alpha));
         }
     }
-    // The same-host floating footer is neither a GPUI content root (it is
-    // hosted in an NSGlassEffectContainerView, which the loop above skips) nor
-    // part of the glass backdrop (which stops above the 8pt gutter), so it was
-    // the one surface that never faded or defocused with the rest of the
-    // window. Enrol it explicitly so the whole main surface materializes as one
-    // object.
+    // The same-host footer container stays OUT of the GPUI content fade.
+    // It participates only through the owning NSWindow's frame and alpha;
+    // per-capsule defocus is installed below on clipped NSGlassEffectView
+    // layers, never on this gap-spanning alpha target.
     let footer_entry_policy = main_footer_entry_material_policy();
-    let footer_entry_target = crate::footer_popup::main_window_footer_entry_target(window);
-    if footer_entry_target != nil {
-        let alpha: f64 = msg_send![footer_entry_target, alphaValue];
+    let footer_entry_alpha_target =
+        crate::footer_popup::main_window_footer_entry_alpha_target(window);
+    if footer_entry_alpha_target != nil {
+        let alpha: f64 = msg_send![footer_entry_alpha_target, alphaValue];
         if alpha > 0.001 || !footer_entry_policy.enroll_in_content_fade {
-            // Match the NSWindow's material-safe visible floor rather than
-            // disappearing completely. The footer is present from the first
-            // stage frame, then resolves 0.85 -> 1.0 with the shared content
-            // fade while the defocus supplies the stronger materialization.
-            let _: () =
-                msg_send![footer_entry_target, setAlphaValue: footer_entry_policy.target_alpha];
+            let _: () = msg_send![
+                footer_entry_alpha_target,
+                setAlphaValue: footer_entry_policy.target_alpha
+            ];
             if footer_entry_policy.enroll_in_content_fade {
-                content_targets.push((footer_entry_target as usize, alpha));
+                content_targets.push((footer_entry_alpha_target as usize, alpha));
             }
         }
     }
@@ -3531,11 +3547,8 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
             },
         );
     }
-    // Entry defocus: resolve the whole window out of an 8pt blur across the
-    // FULL entry (onset + tail), so the material and geometry both arrive
-    // from softness instead of snapping in already sharp. Installed here —
-    // after the exit-blur cancel at the top of this function, which clears
-    // every layer filter.
+    // Entry defocus: the main backdrop resolves inside the material prefix;
+    // popup and secondary surfaces keep the historical full-entry ramp.
     let entry_blur_duration = surface.entry_blur_duration(tuning);
     let entry_blur_radius = ramp_entry_defocus(
         glass_view,
@@ -3543,18 +3556,35 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
         surface.entry_blur_radius(),
         log_target,
     );
-    // Defocus the footer on the same ramp. It is its own view tree with no
-    // gutter beneath it, so unlike the main content view it is safe to filter
-    // directly — which also means the BUTTONS actually blur, where the main
-    // backdrop had almost no detail to lose.
-    let footer_blur_radius =
-        if footer_entry_target != nil && footer_entry_policy.defocus_radius > 0.0 {
-            ramp_entry_defocus(
-                footer_entry_target,
-                tuning.total_entry_duration(),
-                glass_entry_blur_radius(),
+
+    // Footer onset parity is PER CAPSULE. Each NSGlassEffectView layer clips
+    // its own 12pt -> 0 ramp to its rounded bounds, so transparent gaps and
+    // desktop seams never enter the filter sample. A partially installed ramp
+    // reports radius 0 and mismatched counts, making the receipt fail closed.
+    let footer_capsules = if surface == GlassEntrySurface::Main {
+        crate::footer_popup::main_window_footer_entry_capsules(window)
+    } else {
+        Vec::new()
+    };
+    let footer_blur_duration = tuning.material_onset_duration;
+    let footer_capsule_count = footer_capsules.len();
+    let mut footer_blurred_capsule_count = 0usize;
+    if footer_entry_policy.defocus_radius > 0.0 {
+        for capsule in footer_capsules {
+            let installed_radius = ramp_entry_defocus(
+                capsule,
+                footer_blur_duration,
+                footer_entry_policy.defocus_radius,
                 log_target,
-            )
+            );
+            if installed_radius == footer_entry_policy.defocus_radius {
+                footer_blurred_capsule_count += 1;
+            }
+        }
+    }
+    let footer_blur_radius =
+        if footer_capsule_count > 0 && footer_blurred_capsule_count == footer_capsule_count {
+            footer_entry_policy.defocus_radius
         } else {
             0.0
         };
@@ -3573,10 +3603,14 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
     logging::log(
         log_target,
         &format!(
-            "event=native_glass_entry_onset primitive=material_parameters supported={} entry_blur_radius={:.2} entry_blur_to_radius=0.00 footer_blur_radius={:.2} footer_enrolled={} entry_blur_duration_ns={} onset_start_width_scale={:.6} tail_start_width_scale={:.6} onset_geometry_duration_ns={} from_style=clear to_style=regular duration_ns={} content_root_count={} content_hold_ns={} content_fade_ns={} window_alpha={:.2}",
+            "event=native_glass_entry_onset primitive=material_parameters supported={} entry_blur_radius={:.2} entry_blur_to_radius=0.00 footer_blur_radius={:.2} footer_blur_to_radius=0.00 footer_blur_scope={} footer_blur_duration_ns={} footer_capsule_count={} footer_blurred_capsule_count={} footer_enrolled={} entry_blur_duration_ns={} onset_start_width_scale={:.6} tail_start_width_scale={:.6} onset_geometry_duration_ns={} from_style=clear to_style=regular duration_ns={} content_root_count={} content_hold_ns={} content_fade_ns={} window_alpha={:.2}",
             onset_supported,
             entry_blur_radius,
             footer_blur_radius,
+            footer_entry_policy.defocus_scope.log_name(),
+            (footer_blur_duration * 1_000_000_000.0).round() as u64,
+            footer_capsule_count,
+            footer_blurred_capsule_count,
             footer_entry_policy.enroll_in_content_fade,
             (entry_blur_duration * 1_000_000_000.0).round() as u64,
             onset_start.size.width / final_frame.size.width,
@@ -4830,7 +4864,13 @@ mod secondary_window_config_tests {
         let policy = super::main_footer_entry_material_policy();
         assert_eq!(policy.target_alpha, 1.0);
         assert!(!policy.enroll_in_content_fade);
-        assert_eq!(policy.defocus_radius, 0.0);
+        assert_eq!(
+            policy.defocus_scope,
+            super::MainFooterEntryDefocusScope::PerCapsule
+        );
+        assert_eq!(policy.defocus_scope.log_name(), "per_capsule");
+        assert_eq!(policy.defocus_radius, super::glass_main_entry_blur_radius());
+        assert_eq!(super::GLASS_MAIN_ENTRY_BLUR_RADIUS, 12.0);
     }
 
     #[cfg(target_os = "macos")]
@@ -5091,6 +5131,16 @@ mod secondary_window_config_tests {
         assert!(
             (super::GlassEntrySurface::Main.entry_blur_duration(tuning) - 0.044).abs() < epsilon
         );
+        let footer = super::main_footer_entry_material_policy();
+        assert_eq!(
+            footer.defocus_scope,
+            super::MainFooterEntryDefocusScope::PerCapsule
+        );
+        assert_eq!(
+            footer.defocus_radius,
+            super::GlassEntrySurface::Main.entry_blur_radius()
+        );
+        assert!((tuning.material_onset_duration - 0.044).abs() < epsilon);
         assert!((tuning.total_entry_duration() - 0.149).abs() < epsilon);
 
         for surface in [

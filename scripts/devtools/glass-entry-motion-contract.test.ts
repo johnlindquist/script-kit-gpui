@@ -70,7 +70,7 @@ const mainTailFrames = [
 const NEW_MAIN_LOG =
   "event=glass_morph window=Main window variant=window_frame phase=enter duration=0.10s inset=0.006 start_alpha=0.85 start_alpha_bits=3feb333333333333 settle_duration_ns=104999996 configured_at_host_time_ns=1 expected_settle_deadline_ns=104999997 frames=759x480->740x480->750x480 start_scale_x=1.012000 start_scale_y=1.000000 squish_scale_x=0.987000 squish_scale_y=1.000000 phase1_ns=34999999 hold_ns=0 phase2_ns=69999998 alpha_phase1_target=0.990000 alpha_ramp_ns=18000000 alpha_finish_ns=26000000 geometry_curve=easeOut rebound_curve=easeInEaseOut alpha_curve=easeOut";
 const NEW_MAIN_ONSET_LOG =
-  "event=native_glass_entry_onset primitive=material_parameters supported=true entry_blur_radius=12.00 entry_blur_to_radius=0.00 footer_blur_radius=0.00 footer_enrolled=false entry_blur_duration_ns=44000000 onset_start_width_scale=1.030500 tail_start_width_scale=1.012000 onset_geometry_duration_ns=18000000 from_style=clear to_style=regular duration_ns=44000000 content_root_count=4 content_hold_ns=0 content_fade_ns=44000000 window_alpha=0.85";
+  "event=native_glass_entry_onset primitive=material_parameters supported=true entry_blur_radius=12.00 entry_blur_to_radius=0.00 footer_blur_radius=12.00 footer_blur_to_radius=0.00 footer_blur_scope=per_capsule footer_blur_duration_ns=44000000 footer_capsule_count=4 footer_blurred_capsule_count=4 footer_enrolled=false entry_blur_duration_ns=44000000 onset_start_width_scale=1.030500 tail_start_width_scale=1.012000 onset_geometry_duration_ns=18000000 from_style=clear to_style=regular duration_ns=44000000 content_root_count=4 content_hold_ns=0 content_fade_ns=44000000 window_alpha=0.85";
 
 describe("visible-tail glass entry motion contract", () => {
   test("accepts the predicted main visible-tail frames", () => {
@@ -185,13 +185,17 @@ describe("visible-tail glass entry motion contract", () => {
 });
 
 describe("native soft-materialize onset receipt", () => {
-  test("accepts the measured main onset and footer isolation", () => {
+  test("accepts measured main onset with clipped per-capsule footer parity", () => {
     const result = analyzeOnsetReceipt([NEW_MAIN_ONSET_LOG]);
     expect(result.errors).toEqual([]);
     expect(result.entryBlurRadius).toBe(12);
     expect(result.onsetStartWidthScale).toBe(1.0305);
     expect(result.tailStartWidthScale).toBe(1.012);
-    expect(result.footerBlurRadius).toBe(0);
+    expect(result.footerBlurRadius).toBe(12);
+    expect(result.footerBlurToRadius).toBe(0);
+    expect(result.footerBlurScope).toBe("per_capsule");
+    expect(result.footerBlurDurationNs).toBe(44_000_000);
+    expect(result.footerBlurredCapsuleCount).toBe(result.footerCapsuleCount);
     expect(result.footerEnrolled).toBe(false);
     expect(result.pass).toBe(true);
   });
@@ -208,13 +212,21 @@ describe("native soft-materialize onset receipt", () => {
     expect(result.errors.some((error) => error.startsWith("onset_start_width_scale="))).toBe(true);
   });
 
-  test("rejects independent footer blur or content-fade enrollment", () => {
+  test("rejects stale zero, container scope, partial coverage, or content fade", () => {
     const stale = NEW_MAIN_ONSET_LOG
-      .replace("footer_blur_radius=0.00", "footer_blur_radius=8.00")
+      .replace("footer_blur_radius=12.00", "footer_blur_radius=0.00")
+      .replace("footer_blur_scope=per_capsule", "footer_blur_scope=container")
+      .replace("footer_blur_duration_ns=44000000", "footer_blur_duration_ns=149000000")
+      .replace("footer_blurred_capsule_count=4", "footer_blurred_capsule_count=3")
       .replace("footer_enrolled=false", "footer_enrolled=true");
     const result = analyzeOnsetReceipt([stale]);
     expect(result.pass).toBe(false);
     expect(result.errors.some((error) => error.startsWith("footer_blur_radius="))).toBe(true);
+    expect(result.errors).toContain("footer_blur_scope=container must be per_capsule");
+    expect(result.errors.some((error) => error.startsWith("footer_blur_duration_ns="))).toBe(true);
+    expect(
+      result.errors.some((error) => error.startsWith("footer_blurred_capsule_count=")),
+    ).toBe(true);
     expect(result.errors).toContain("footer_enrolled=true must be false");
   });
 });

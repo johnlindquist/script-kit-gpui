@@ -145,7 +145,12 @@ function validBundle(runOffset = 0): SpotlightSyncBundle {
             supported: true,
             entryBlurRadius: onsetBlurRadius,
             entryBlurToRadius: 0,
-            footerBlurRadius: 0,
+            footerBlurRadius: onsetBlurRadius,
+            footerBlurToRadius: 0,
+            footerBlurScope: "per_capsule",
+            footerBlurDurationNs: 44_000_000,
+            footerCapsuleCount: 2,
+            footerBlurredCapsuleCount: 2,
             footerEnrolled: false,
             entryBlurDurationNs: 44_000_000,
             onsetStartWidthScale: onsetWidthScale,
@@ -245,7 +250,12 @@ describe("Spotlight-sync filmstrip contract", () => {
       expect(grade.coverage.capsuleIds).toEqual([LEFT, RIGHT]);
       expect(grade.measurements.onset).toMatchObject({
         entryBlurToRadius: 0,
-        footerBlurRadius: 0,
+        footerBlurRadius: 12 + runOffset * 0.02,
+        footerBlurToRadius: 0,
+        footerBlurScope: "per_capsule",
+        footerBlurDurationNs: 44_000_000,
+        footerCapsuleCount: 2,
+        footerBlurredCapsuleCount: 2,
         footerEnrolled: false,
       });
       expect(grade.measurements.entry[0]?.capsules[0]?.geometry).toHaveProperty(
@@ -313,25 +323,31 @@ describe("Spotlight-sync filmstrip contract", () => {
   }));
 });
 
-test("rejects independent footer onset effects", () => {
+test("rejects stale, container-scoped, or incomplete footer onset defocus", () => {
   const bundle = clonedBundle();
   const onset = scenario(bundle, "main-entry").nativeGlassOnset as JsonRecord;
-  onset.footerBlurRadius = 8;
+  onset.footerBlurRadius = 0;
+  onset.footerBlurScope = "container";
+  onset.footerBlurDurationNs = 149_000_000;
+  onset.footerBlurredCapsuleCount = 1;
   onset.footerEnrolled = true;
   onset.pass = false;
   onset.errors = ["footer effects"];
   const grade = gradeSpotlightSyncBundle(bundle);
   expect(grade.disposition).toBe("EVALUABLE_FAIL");
-  expect(grade.failures).toContainEqual(expect.objectContaining({
-    kind: "product",
-    phase: "entry",
-    metric: "entry.onset.footerBlurRadius",
-  }));
-  expect(grade.failures).toContainEqual(expect.objectContaining({
-    kind: "product",
-    phase: "entry",
-    metric: "entry.onset.footerEnrolled",
-  }));
+  for (const metric of [
+    "entry.onset.footerBlurRadius",
+    "entry.onset.footerBlurScope",
+    "entry.onset.footerBlurDurationMs",
+    "entry.onset.footerBlurredCapsuleCount",
+    "entry.onset.footerEnrolled",
+  ]) {
+    expect(grade.failures).toContainEqual(expect.objectContaining({
+      kind: "product",
+      phase: "entry",
+      metric,
+    }));
+  }
 });
 
 test("names the exact entry frame and capsule for a brightness excursion", () => {

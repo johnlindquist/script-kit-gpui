@@ -3931,22 +3931,53 @@ unsafe fn remove_reusable_window_footer_host(ns_window: id) {
 }
 
 #[cfg(target_os = "macos")]
-/// The native footer view that should participate in the main window's entry
-/// choreography, or `nil` when no same-host footer is installed.
-///
-/// The floating footer buttons live in the main NSWindow but OUTSIDE both
-/// surfaces the entry animates: the glass backdrop (which is laid out to stop
-/// above the 8pt gutter) and the GPUI content roots (whose collection loop
-/// deliberately skips `NSGlassEffectContainerView`, which is exactly what the
-/// glass-mode footer is hosted in). The result is buttons that sit at full
-/// alpha and full sharpness from the first frame while everything above them
-/// materializes — user report 2026-07-27: "why aren't the floating buttons
-/// fading/blurring too?".
-///
-/// Prefers the glass container (glass mode) and falls back to the plain footer
-/// host, so the caller animates the outermost footer surface in either mode.
+fn footer_identifier_is_entry_capsule(identifier: &str) -> bool {
+    identifier == FOOTER_LEFT_INFO_CAPSULE_ID
+        || (identifier.starts_with(FOOTER_HINT_CAPSULE_ID_PREFIX)
+            && !identifier.starts_with(FOOTER_HINT_CAPSULE_CONTENT_ID_PREFIX))
+}
+
 #[cfg(target_os = "macos")]
-pub(crate) unsafe fn main_window_footer_entry_target(ns_window: id) -> id {
+unsafe fn collect_main_window_footer_entry_capsules(view: id, capsules: &mut Vec<id>) {
+    use objc::{msg_send, sel, sel_impl};
+
+    if view == nil {
+        return;
+    }
+    let is_glass_capsule = appkit_view_identifier(view)
+        .as_deref()
+        .is_some_and(footer_identifier_is_entry_capsule)
+        && objc::runtime::Class::get("NSGlassEffectView")
+            .map(|glass_class| {
+                let is_glass: cocoa::base::BOOL = msg_send![view, isKindOfClass: glass_class];
+                is_glass == YES
+            })
+            .unwrap_or(false);
+    if is_glass_capsule {
+        capsules.push(view);
+        return;
+    }
+
+    let subviews: id = msg_send![view, subviews];
+    if subviews == nil {
+        return;
+    }
+    let count: usize = msg_send![subviews, count];
+    for index in 0..count {
+        let child: id = msg_send![subviews, objectAtIndex: index];
+        collect_main_window_footer_entry_capsules(child, capsules);
+    }
+}
+
+/// The alpha-only native footer target for the main-window entry, or `nil`
+/// when no same-host footer is installed.
+///
+/// The outer container may inherit the owning NSWindow's alpha and geometry,
+/// but it must NEVER receive an entry layer filter: it spans the transparent
+/// inter-capsule gaps. Defocus targets are returned separately by
+/// [`main_window_footer_entry_capsules`].
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn main_window_footer_entry_alpha_target(ns_window: id) -> id {
     use objc::{msg_send, sel, sel_impl};
 
     if ns_window == nil {
@@ -3961,6 +3992,42 @@ pub(crate) unsafe fn main_window_footer_entry_target(ns_window: id) -> id {
         return container;
     }
     find_subview_by_identifier(content_view, FOOTER_EFFECT_ID)
+}
+
+/// Return only the clipped NSGlassEffectView capsules that may receive the
+/// main window's onset defocus. The footer container, hints host, capsule
+/// content views, state layers, and transparent gaps are excluded by a
+/// closed-world identifier and class check.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn main_window_footer_entry_capsules(ns_window: id) -> Vec<id> {
+    let root = main_window_footer_entry_alpha_target(ns_window);
+    if root == nil {
+        return Vec::new();
+    }
+    let mut capsules = Vec::new();
+    collect_main_window_footer_entry_capsules(root, &mut capsules);
+    capsules
+}
+
+/// Cancel and clear an in-flight per-capsule entry defocus. This is called by
+/// the same exit-supersession path that clears the main backdrop filter, so a
+/// rapid re-show cannot leave stale capsule filters or ramps behind.
+#[cfg(target_os = "macos")]
+pub(crate) unsafe fn clear_main_window_footer_entry_capsule_effects(ns_window: id) {
+    use objc::{msg_send, sel, sel_impl};
+
+    let nil_filters: id = nil;
+    let animation_key = ns_string("entryBlurRamp");
+    for capsule in main_window_footer_entry_capsules(ns_window) {
+        let layer: id = msg_send![capsule, layer];
+        if layer == nil {
+            continue;
+        }
+        let _: () = msg_send![layer, setFilters: nil_filters];
+        if animation_key != nil {
+            let _: () = msg_send![layer, removeAnimationForKey: animation_key];
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -6930,6 +6997,27 @@ mod footer_layout_tests {
     fn native_glass_capsules_use_the_shared_open_gap() {
         assert_eq!(footer_hint_item_gap(true, 2.0), 6.0);
         assert_eq!(footer_hint_item_gap(false, 2.0), 2.0);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn entry_defocus_targets_only_clipped_capsule_views() {
+        for identifier in [
+            "script-kit-footer-capsule-footer-action:actions",
+            "script-kit-footer-capsule-footer-action:run",
+            super::FOOTER_LEFT_INFO_CAPSULE_ID,
+        ] {
+            assert!(super::footer_identifier_is_entry_capsule(identifier));
+        }
+        for identifier in [
+            super::FOOTER_GLASS_CONTAINER_ID,
+            super::FOOTER_HINTS_ID,
+            "script-kit-footer-capsule-content-footer-action:actions",
+            "script-kit-footer-state-layer-footer-action:actions",
+            super::FOOTER_LEFT_INFO_CAPSULE_CONTENT_ID,
+        ] {
+            assert!(!super::footer_identifier_is_entry_capsule(identifier));
+        }
     }
 
     #[cfg(target_os = "macos")]

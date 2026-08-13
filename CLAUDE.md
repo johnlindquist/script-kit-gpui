@@ -154,7 +154,10 @@ against `CleanShot 2026-07-24 at 09.18.40.mp4`):
   onset defocus raised to `12pt → 0` resolved across the `44ms` prefix
   (`GLASS_MAIN_ONSET_START_WIDTH_SCALE`, `GLASS_MAIN_ONSET_GEOMETRY_DURATION`,
   `GLASS_MAIN_ENTRY_BLUR_RADIUS`; popups/secondary keep the shared `8pt`
-  full-entry ramp, and the floating footer keeps ZERO independent blur).
+  full-entry ramp. Each floating footer `NSGlassEffectView` capsule uses the
+  same main `12pt → 0` defocus across `44ms`, applied per capsule with
+  `masksToBounds`; the footer container, hints host, and transparent
+  inter-capsule gaps remain filter-free).
   NSWindow alpha below 0.85 still exposes desktop pixels, so the sub-0.85
   presence prefix remains deliberately omitted — the wider+blurrier first
   photon at the 0.85 floor is the safe reproduction. Height participation
@@ -190,6 +193,7 @@ Owning sources and anti-drift evidence:
 
 - defaults: `src/theme/opacity.rs`;
 - native physics/lifecycle: `src/platform/secondary_window_config.rs`;
+- clipped footer capsule inventory: `src/footer_popup.rs`;
 - named production fixture:
   `scripts/agentic/fixtures/glass-motion-calibration-theme.json`;
 - geometry envelope:

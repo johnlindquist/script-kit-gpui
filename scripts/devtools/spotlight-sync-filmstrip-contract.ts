@@ -55,6 +55,12 @@ export const SPOTLIGHT_SYNC_CONTRACT = {
     entryBlurDurationMs: MAIN_GLASS_ENTRY_EXPECTATION.entryBlurDurationMs,
     entryBlurDurationToleranceMs: 1,
     footerBlurRadius: MAIN_GLASS_ENTRY_EXPECTATION.footerBlurRadius,
+    footerBlurRadiusTolerance: 0.05,
+    footerBlurToRadius: MAIN_GLASS_ENTRY_EXPECTATION.footerBlurToRadius,
+    footerBlurScope: MAIN_GLASS_ENTRY_EXPECTATION.footerBlurScope,
+    footerBlurDurationMs: MAIN_GLASS_ENTRY_EXPECTATION.footerBlurDurationMs,
+    footerBlurDurationToleranceMs: 1,
+    minimumFooterCapsuleCount: MAIN_GLASS_ENTRY_EXPECTATION.footerMinimumCapsuleCount,
     footerEnrolled: MAIN_GLASS_ENTRY_EXPECTATION.footerEnrolled,
     // Upper edge 0.995: a 35ms compression sampled at damage-driven ~60Hz can
     // land its deepest frame at ~0.9947 (measured across the 2026-08-13
@@ -365,12 +371,18 @@ function gradeEntryOnset(failures: SpotlightFailure[], scenario: JsonRecord): Js
     const match = line.match(new RegExp(`(?:^| )${key}=(true|false)(?= |$)`));
     return match ? match[1] === "true" : null;
   };
+  const lineText = (key: string): string | null => {
+    const match = line.match(new RegExp(`(?:^| )${key}=([A-Za-z0-9_-]+)(?= |$)`));
+    return match ? match[1] : null;
+  };
   const numberField = (field: string, logKey: string) =>
     receipt[field] == null
       ? lineNumber(logKey)
       : num(receipt[field]) ?? lineNumber(logKey);
   const booleanField = (field: string, logKey: string) =>
     typeof receipt[field] === "boolean" ? receipt[field] as boolean : lineBoolean(logKey);
+  const textField = (field: string, logKey: string) =>
+    typeof receipt[field] === "string" ? receipt[field] as string : lineText(logKey);
 
   const values = {
     supported: booleanField("supported", "supported"),
@@ -385,6 +397,14 @@ function gradeEntryOnset(failures: SpotlightFailure[], scenario: JsonRecord): Js
     ),
     windowAlpha: numberField("windowAlpha", "window_alpha"),
     footerBlurRadius: numberField("footerBlurRadius", "footer_blur_radius"),
+    footerBlurToRadius: numberField("footerBlurToRadius", "footer_blur_to_radius"),
+    footerBlurScope: textField("footerBlurScope", "footer_blur_scope"),
+    footerBlurDurationNs: numberField("footerBlurDurationNs", "footer_blur_duration_ns"),
+    footerCapsuleCount: numberField("footerCapsuleCount", "footer_capsule_count"),
+    footerBlurredCapsuleCount: numberField(
+      "footerBlurredCapsuleCount",
+      "footer_blurred_capsule_count",
+    ),
     footerEnrolled: booleanField("footerEnrolled", "footer_enrolled"),
   };
   const expected = SPOTLIGHT_SYNC_CONTRACT.entry;
@@ -458,9 +478,94 @@ function gradeEntryOnset(failures: SpotlightFailure[], scenario: JsonRecord): Js
     values.footerBlurRadius,
     "entry.onset.footerBlurRadius",
     expected.footerBlurRadius,
-    0.01,
-    "footer capsules regained an independent entry blur",
+    expected.footerBlurRadiusTolerance,
+    "footer capsules did not begin with the main backdrop's measured defocus",
   );
+  if (
+    values.footerBlurRadius !== null
+    && values.entryBlurRadius !== null
+    && Math.abs(values.footerBlurRadius - values.entryBlurRadius) > 0.001
+  ) {
+    product(
+      failures,
+      "entry",
+      "entry.onset.footerBlurParity",
+      values.footerBlurRadius,
+      values.entryBlurRadius,
+      "footer capsule and main-backdrop onset radii diverged",
+    );
+  }
+  checkNumber(
+    values.footerBlurToRadius,
+    "entry.onset.footerBlurToRadius",
+    expected.footerBlurToRadius,
+    0.01,
+    "footer capsule defocus did not decay to the settled zero-radius state",
+  );
+  if (values.footerBlurScope === null) {
+    observer(
+      failures,
+      "entry",
+      "entry.onset.footerBlurScope",
+      null,
+      expected.footerBlurScope,
+      "native onset receipt lacks the footer blur scope discriminator",
+    );
+  } else if (values.footerBlurScope !== expected.footerBlurScope) {
+    product(
+      failures,
+      "entry",
+      "entry.onset.footerBlurScope",
+      values.footerBlurScope,
+      expected.footerBlurScope,
+      "footer blur was applied to a gap-spanning surface instead of clipped capsules",
+    );
+  }
+  checkNumber(
+    values.footerBlurDurationNs,
+    "entry.onset.footerBlurDurationMs",
+    expected.footerBlurDurationMs * 1_000_000,
+    expected.footerBlurDurationToleranceMs * 1_000_000,
+    "footer capsule defocus did not resolve inside the material-onset prefix",
+  );
+  if (values.footerCapsuleCount === null) {
+    observer(
+      failures,
+      "entry",
+      "entry.onset.footerCapsuleCount",
+      null,
+      `>= ${expected.minimumFooterCapsuleCount}`,
+      "native onset receipt lacks the discovered capsule count",
+    );
+  } else if (values.footerCapsuleCount < expected.minimumFooterCapsuleCount) {
+    product(
+      failures,
+      "entry",
+      "entry.onset.footerCapsuleCount",
+      values.footerCapsuleCount,
+      `>= ${expected.minimumFooterCapsuleCount}`,
+      "entry onset did not discover any clipped footer capsules",
+    );
+  }
+  if (values.footerBlurredCapsuleCount === null) {
+    observer(
+      failures,
+      "entry",
+      "entry.onset.footerBlurredCapsuleCount",
+      null,
+      values.footerCapsuleCount,
+      "native onset receipt lacks the successfully blurred capsule count",
+    );
+  } else if (values.footerBlurredCapsuleCount !== values.footerCapsuleCount) {
+    product(
+      failures,
+      "entry",
+      "entry.onset.footerBlurredCapsuleCount",
+      values.footerBlurredCapsuleCount,
+      values.footerCapsuleCount,
+      "not every discovered footer capsule received the clipped onset defocus",
+    );
+  }
   if (values.footerEnrolled !== expected.footerEnrolled) {
     product(
       failures,

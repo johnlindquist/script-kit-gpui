@@ -55,7 +55,11 @@ export const MAIN_GLASS_ENTRY_EXPECTATION = {
   entryBlurRadius: 12,
   entryBlurToRadius: 0,
   entryBlurDurationMs: 44,
-  footerBlurRadius: 0,
+  footerBlurRadius: 12,
+  footerBlurToRadius: 0,
+  footerBlurScope: "per_capsule",
+  footerBlurDurationMs: 44,
+  footerMinimumCapsuleCount: 1,
   footerEnrolled: false,
   direction: "shrink-in",
 } as const;
@@ -68,6 +72,8 @@ export const ACTIONS_GLASS_ENTRY_EXPECTATION = {
   extremeWidthScale: 1.013,
   entryBlurRadius: 8,
   entryBlurDurationMs: 149,
+  footerBlurRadius: 0,
+  footerMinimumCapsuleCount: 0,
   direction: "grow-in",
 } as const;
 
@@ -262,6 +268,11 @@ function parseBooleanField(line: string, key: string): boolean | null {
   return match ? match[1] === "true" : null;
 }
 
+function parseTextField(line: string, key: string): string | null {
+  const match = line.match(new RegExp(`(?:^| )${key}=([A-Za-z0-9_-]+)(?= |$)`));
+  return match ? match[1] : null;
+}
+
 export function analyzeOnsetReceipt(
   logLines: string[],
   expectation: GlassEntryExpectation = MAIN_GLASS_ENTRY_EXPECTATION,
@@ -277,6 +288,11 @@ export function analyzeOnsetReceipt(
       entryBlurRadius: null,
       entryBlurToRadius: null,
       footerBlurRadius: null,
+      footerBlurToRadius: null,
+      footerBlurScope: null,
+      footerBlurDurationNs: null,
+      footerCapsuleCount: null,
+      footerBlurredCapsuleCount: null,
       footerEnrolled: null,
       entryBlurDurationNs: null,
       onsetStartWidthScale: null,
@@ -299,6 +315,11 @@ export function analyzeOnsetReceipt(
     entryBlurRadius: parseExactField(line, "entry_blur_radius"),
     entryBlurToRadius: parseExactField(line, "entry_blur_to_radius"),
     footerBlurRadius: parseExactField(line, "footer_blur_radius"),
+    footerBlurToRadius: parseExactField(line, "footer_blur_to_radius"),
+    footerBlurScope: parseTextField(line, "footer_blur_scope"),
+    footerBlurDurationNs: parseExactField(line, "footer_blur_duration_ns"),
+    footerCapsuleCount: parseExactField(line, "footer_capsule_count"),
+    footerBlurredCapsuleCount: parseExactField(line, "footer_blurred_capsule_count"),
     footerEnrolled: parseBooleanField(line, "footer_enrolled"),
     entryBlurDurationNs: parseExactField(line, "entry_blur_duration_ns"),
     onsetStartWidthScale: parseExactField(line, "onset_start_width_scale"),
@@ -358,7 +379,45 @@ export function analyzeOnsetReceipt(
   check("content_hold_ns", receipt.contentHoldNs, expectation.contentHoldMs * 1_000_000, 1_000_000);
   check("content_fade_ns", receipt.contentFadeNs, expectation.contentFadeMs * 1_000_000, 1_000_000);
   check("window_alpha", receipt.windowAlpha, expectation.startAlpha, 0.001);
-  check("footer_blur_radius", receipt.footerBlurRadius, expectation.footerBlurRadius, 0.01);
+  check("footer_blur_radius", receipt.footerBlurRadius, expectation.footerBlurRadius, 0.05);
+  if (
+    receipt.footerBlurRadius !== null
+    && receipt.entryBlurRadius !== null
+    && Math.abs(receipt.footerBlurRadius - receipt.entryBlurRadius) > 0.001
+    && expectation.footerMinimumCapsuleCount > 0
+  ) {
+    errors.push(
+      `footer_blur_radius=${receipt.footerBlurRadius} must equal entry_blur_radius=${receipt.entryBlurRadius}`,
+    );
+  }
+  check("footer_blur_to_radius", receipt.footerBlurToRadius, expectation.footerBlurToRadius, 0.01);
+  if (receipt.footerBlurScope !== expectation.footerBlurScope) {
+    errors.push(
+      `footer_blur_scope=${receipt.footerBlurScope} must be ${expectation.footerBlurScope}`,
+    );
+  }
+  check(
+    "footer_blur_duration_ns",
+    receipt.footerBlurDurationNs,
+    expectation.footerBlurDurationMs * 1_000_000,
+    1_000_000,
+  );
+  if (
+    receipt.footerCapsuleCount === null
+    || receipt.footerCapsuleCount < expectation.footerMinimumCapsuleCount
+  ) {
+    errors.push(
+      `footer_capsule_count=${receipt.footerCapsuleCount} must be >= ${expectation.footerMinimumCapsuleCount}`,
+    );
+  }
+  if (
+    receipt.footerBlurredCapsuleCount === null
+    || receipt.footerBlurredCapsuleCount !== receipt.footerCapsuleCount
+  ) {
+    errors.push(
+      `footer_blurred_capsule_count=${receipt.footerBlurredCapsuleCount} must equal footer_capsule_count=${receipt.footerCapsuleCount}`,
+    );
+  }
   if (receipt.footerEnrolled !== expectation.footerEnrolled) {
     errors.push(
       `footer_enrolled=${receipt.footerEnrolled} must be ${expectation.footerEnrolled}`,
