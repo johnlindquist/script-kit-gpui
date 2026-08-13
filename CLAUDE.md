@@ -140,7 +140,12 @@ against `CleanShot 2026-07-24 at 09.18.40.mp4`):
   `44ms`, ending exactly at tail start (2026-08-13 content-timing retune:
   the 57fps Spotlight reference shows content faintly present from frame 1,
   and the prior 26ms hold produced readable empty-body frames once the
-  native footer stopped enrolling in the content fade). Total entry `149ms`
+  native footer stopped enrolling in the content fade). **2026-08-13
+  empty-window retune (user report: "the main window starts with an
+  'empty' window"):** content roots seed at `0.21 ×` their natural alpha —
+  Spotlight's measured first-photon presence (~21% of settled) — never at
+  `0.0`, then fade to full (`GLASS_ENTRY_CONTENT_START_ALPHA`,
+  `SCRIPT_KIT_GLASS_CONTENT_START` override). Total entry `149ms`
   = onset + tail (Oracle session `glass-entry-onset-v2`, measured from
   `CleanShot 2026-07-27 at 10.08.42.mp4`);
 - entry inset `0.006` per side, producing a main shrink-in
@@ -156,8 +161,13 @@ against `CleanShot 2026-07-24 at 09.18.40.mp4`):
   `GLASS_MAIN_ENTRY_BLUR_RADIUS`; popups/secondary keep the shared `8pt`
   full-entry ramp. Each floating footer `NSGlassEffectView` capsule uses the
   same main `12pt → 0` defocus across `44ms`, applied per capsule with
-  `masksToBounds`; the footer container, hints host, and transparent
-  inter-capsule gaps remain filter-free).
+  `masksToBounds`, AND — 2026-08-13 capsule material parity, user report:
+  the buttons "don't match the blur of the main window" — the same
+  Clear→Regular + tint material ramp as the main backdrop across the `44ms`
+  prefix, with each capsule's own foreground contentView joining the shared
+  content fade at the `0.21` presence floor; the footer container, hints
+  host, and transparent inter-capsule gaps remain filter-free and never
+  fade).
   NSWindow alpha below 0.85 still exposes desktop pixels, so the sub-0.85
   presence prefix remains deliberately omitted — the wider+blurrier first
   photon at the 0.85 floor is the safe reproduction. Height participation

@@ -121,11 +121,24 @@ impl MainFooterEntryDefocusScope {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct MainFooterEntryMaterialPolicy {
     target_alpha: f64,
+    /// The gap-spanning footer CONTAINER never joins the content fade — a
+    /// translucent container would mix desktop pixels through the
+    /// inter-capsule gaps (the measured 2026-08-12 capsule-fade defect).
     enroll_in_content_fade: bool,
     defocus_scope: MainFooterEntryDefocusScope,
     /// Radius applied independently to every clipped NSGlassEffectView
     /// capsule; never apply this value to the footer container or hints host.
     defocus_radius: f64,
+    /// Each capsule runs the SAME Clear→Regular + tint material ramp as the
+    /// main backdrop across the onset prefix (2026-08-13 parity retune, user
+    /// report: the capsules "don't match the blur of the main window" — the
+    /// material ramp, not the layer defocus, is the visible bloom).
+    material_onset_ramp: bool,
+    /// Each capsule's own foreground contentView joins the shared content
+    /// fade at the content presence floor, so labels bloom in with the main
+    /// content instead of popping in crisp. This is PER-CAPSULE foreground
+    /// alpha, never the container (see enroll_in_content_fade).
+    foreground_content_fade: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -135,6 +148,8 @@ fn main_footer_entry_material_policy() -> MainFooterEntryMaterialPolicy {
         enroll_in_content_fade: false,
         defocus_scope: MainFooterEntryDefocusScope::PerCapsule,
         defocus_radius: glass_main_entry_blur_radius(),
+        material_onset_ramp: true,
+        foreground_content_fade: true,
     }
 }
 
@@ -685,6 +700,31 @@ fn glass_entry_content_fade_duration() -> f64 {
     }
     GLASS_ENTRY_CONTENT_FADE_DURATION
         .min(GLASS_MATERIAL_ONSET_DURATION - GLASS_ENTRY_CONTENT_HOLD_DURATION)
+}
+
+/// First-photon content presence floor (2026-08-13 empty-window retune,
+/// user report: "the main window starts with an 'empty' window").
+///
+/// The 57fps Spotlight reference measures the bar's content at ~21% of its
+/// settled presence in the very first visible frame — content is never
+/// truly absent, it blooms in WITH the material. Seeding the GPUI content
+/// roots at 0.0 reproduced an "empty stage" first photon instead; this floor
+/// starts every held content root at `0.21 × its natural alpha` so the body
+/// is faintly readable from photon 1, then the existing 44ms fade carries it
+/// to full presence.
+#[cfg(target_os = "macos")]
+const GLASS_ENTRY_CONTENT_START_ALPHA: f64 = 0.21;
+
+/// Same live override contract as `glass_entry_content_fade_duration`,
+/// scoped to the content presence floor: `SCRIPT_KIT_GLASS_CONTENT_START=0.4`
+/// (fraction of natural alpha, 0 restores the pre-2026-08-13 empty seed).
+#[cfg(target_os = "macos")]
+fn glass_entry_content_start_alpha() -> f64 {
+    std::env::var("SCRIPT_KIT_GLASS_CONTENT_START")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        .unwrap_or(GLASS_ENTRY_CONTENT_START_ALPHA)
 }
 
 #[cfg(target_os = "macos")]
@@ -3464,8 +3504,11 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
         let _: () = msg_send![class!(NSAnimationContext), endGrouping];
     }
 
-    // Hold GPUI content roots (never the contentView or the glass itself)
-    // at alpha 0 until T=53ms; transparent GPUI pixels expose the glass.
+    // Seed GPUI content roots (never the contentView or the glass itself) at
+    // the Spotlight-measured first-photon presence floor: content is faintly
+    // readable from photon 1 and blooms to full over the content fade.
+    // Transparent GPUI pixels expose the glass, never bare desktop.
+    let content_start_alpha = glass_entry_content_start_alpha();
     let mut content_targets: Vec<(usize, f64)> = Vec::new();
     let subviews: id = msg_send![content_view, subviews];
     if subviews != nil {
@@ -3494,7 +3537,7 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
             if alpha <= 0.001 {
                 continue;
             }
-            let _: () = msg_send![child, setAlphaValue: 0.0f64];
+            let _: () = msg_send![child, setAlphaValue: alpha * content_start_alpha];
             content_targets.push((child as usize, alpha));
         }
     }
@@ -3518,6 +3561,98 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
         }
     }
     let content_root_count = content_targets.len();
+
+    // ── Footer capsule material parity (2026-08-13 retune, user report: the
+    // floating buttons "don't match the blur of the main window"). Three
+    // per-capsule effects, all clipped to each rounded NSGlassEffectView:
+    //   1. the SAME 12pt→0 defocus as the main backdrop (installed below);
+    //   2. the SAME Clear→Regular + tint material ramp — this ramp, not the
+    //      defocus, is the bloom the eye reads on the main stage;
+    //   3. the capsule's foreground contentView joins the shared content fade
+    //      at the presence floor, so labels bloom in instead of popping crisp.
+    // The gap-spanning container/hints host never receives any of these.
+    let footer_capsules = if surface == GlassEntrySurface::Main {
+        crate::footer_popup::main_window_footer_entry_capsules(window)
+    } else {
+        Vec::new()
+    };
+    let footer_blur_duration = tuning.material_onset_duration;
+    let footer_capsule_count = footer_capsules.len();
+    let mut footer_blurred_capsule_count = 0usize;
+    let mut footer_material_ramp_count = 0usize;
+    let mut footer_foreground_fade_count = 0usize;
+    for capsule in footer_capsules {
+        if footer_entry_policy.defocus_radius > 0.0 {
+            let installed_radius = ramp_entry_defocus(
+                capsule,
+                footer_blur_duration,
+                footer_entry_policy.defocus_radius,
+                log_target,
+            );
+            if installed_radius == footer_entry_policy.defocus_radius {
+                footer_blurred_capsule_count += 1;
+            }
+        }
+        if footer_entry_policy.material_onset_ramp && onset_supported {
+            let capsule_style_supported: bool =
+                msg_send![capsule, respondsToSelector: sel!(setStyle:)];
+            let capsule_tint_supported: bool =
+                msg_send![capsule, respondsToSelector: sel!(tintColor)];
+            if capsule_style_supported && capsule_tint_supported {
+                // Capture the capsule's resolved production material, seed
+                // Clear/untinted with implicit actions disabled, then run one
+                // onset-length animation group back — the exact main-backdrop
+                // choreography, scoped to this capsule.
+                let final_capsule_style: isize = msg_send![capsule, style];
+                let final_capsule_tint: id = msg_send![capsule, tintColor];
+                let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+                let seed_ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+                let _: () = msg_send![seed_ctx, setDuration: 0.0f64];
+                let _: () = msg_send![capsule, setStyle: 1isize]; // Clear
+                let nil_color: id = nil;
+                let _: () = msg_send![capsule, setTintColor: nil_color];
+                let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+                let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+                let ramp_ctx: id = msg_send![class!(NSAnimationContext), currentContext];
+                let _: () = msg_send![ramp_ctx, setDuration: tuning.material_onset_duration];
+                let _: () = msg_send![ramp_ctx, setAllowsImplicitAnimation: true];
+                let curve = timing_function_with_control_points(
+                    GLASS_MATERIAL_ONSET_C1.0,
+                    GLASS_MATERIAL_ONSET_C1.1,
+                    GLASS_MATERIAL_ONSET_C2.0,
+                    GLASS_MATERIAL_ONSET_C2.1,
+                );
+                if curve != nil {
+                    let _: () = msg_send![ramp_ctx, setTimingFunction: curve];
+                }
+                let capsule_animator: id = msg_send![capsule, animator];
+                let _: () = msg_send![capsule_animator, setStyle: final_capsule_style];
+                if final_capsule_tint != nil {
+                    let _: () = msg_send![capsule_animator, setTintColor: final_capsule_tint];
+                }
+                let _: () = msg_send![class!(NSAnimationContext), endGrouping];
+                footer_material_ramp_count += 1;
+            }
+        }
+        if footer_entry_policy.foreground_content_fade {
+            let foreground: id = msg_send![capsule, contentView];
+            if foreground != nil {
+                let alpha: f64 = msg_send![foreground, alphaValue];
+                if alpha > 0.001 {
+                    let _: () = msg_send![foreground, setAlphaValue: alpha * content_start_alpha];
+                    content_targets.push((foreground as usize, alpha));
+                    footer_foreground_fade_count += 1;
+                }
+            }
+        }
+    }
+    let footer_blur_radius =
+        if footer_capsule_count > 0 && footer_blurred_capsule_count == footer_capsule_count {
+            footer_entry_policy.defocus_radius
+        } else {
+            0.0
+        };
+
     if let Ok(mut guard) = GLASS_ENTRY_CONTENT_TARGETS.lock() {
         guard.insert(window as usize, content_targets);
     }
@@ -3557,37 +3692,6 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
         log_target,
     );
 
-    // Footer onset parity is PER CAPSULE. Each NSGlassEffectView layer clips
-    // its own 12pt -> 0 ramp to its rounded bounds, so transparent gaps and
-    // desktop seams never enter the filter sample. A partially installed ramp
-    // reports radius 0 and mismatched counts, making the receipt fail closed.
-    let footer_capsules = if surface == GlassEntrySurface::Main {
-        crate::footer_popup::main_window_footer_entry_capsules(window)
-    } else {
-        Vec::new()
-    };
-    let footer_blur_duration = tuning.material_onset_duration;
-    let footer_capsule_count = footer_capsules.len();
-    let mut footer_blurred_capsule_count = 0usize;
-    if footer_entry_policy.defocus_radius > 0.0 {
-        for capsule in footer_capsules {
-            let installed_radius = ramp_entry_defocus(
-                capsule,
-                footer_blur_duration,
-                footer_entry_policy.defocus_radius,
-                log_target,
-            );
-            if installed_radius == footer_entry_policy.defocus_radius {
-                footer_blurred_capsule_count += 1;
-            }
-        }
-    }
-    let footer_blur_radius =
-        if footer_capsule_count > 0 && footer_blurred_capsule_count == footer_capsule_count {
-            footer_entry_policy.defocus_radius
-        } else {
-            0.0
-        };
     let _: () = msg_send![
         glass_view,
         performSelector: sel!(revealOwnWindowEntryContent)
@@ -3603,7 +3707,7 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
     logging::log(
         log_target,
         &format!(
-            "event=native_glass_entry_onset primitive=material_parameters supported={} entry_blur_radius={:.2} entry_blur_to_radius=0.00 footer_blur_radius={:.2} footer_blur_to_radius=0.00 footer_blur_scope={} footer_blur_duration_ns={} footer_capsule_count={} footer_blurred_capsule_count={} footer_enrolled={} entry_blur_duration_ns={} onset_start_width_scale={:.6} tail_start_width_scale={:.6} onset_geometry_duration_ns={} from_style=clear to_style=regular duration_ns={} content_root_count={} content_hold_ns={} content_fade_ns={} window_alpha={:.2}",
+            "event=native_glass_entry_onset primitive=material_parameters supported={} entry_blur_radius={:.2} entry_blur_to_radius=0.00 footer_blur_radius={:.2} footer_blur_to_radius=0.00 footer_blur_scope={} footer_blur_duration_ns={} footer_capsule_count={} footer_blurred_capsule_count={} footer_material_ramp_count={} footer_foreground_fade_count={} footer_enrolled={} entry_blur_duration_ns={} onset_start_width_scale={:.6} tail_start_width_scale={:.6} onset_geometry_duration_ns={} from_style=clear to_style=regular duration_ns={} content_root_count={} content_hold_ns={} content_fade_ns={} content_start_alpha={:.2} window_alpha={:.2}",
             onset_supported,
             entry_blur_radius,
             footer_blur_radius,
@@ -3611,6 +3715,8 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
             (footer_blur_duration * 1_000_000_000.0).round() as u64,
             footer_capsule_count,
             footer_blurred_capsule_count,
+            footer_material_ramp_count,
+            footer_foreground_fade_count,
             footer_entry_policy.enroll_in_content_fade,
             (entry_blur_duration * 1_000_000_000.0).round() as u64,
             onset_start.size.width / final_frame.size.width,
@@ -3620,6 +3726,7 @@ unsafe fn animate_tahoe_glass_appearance_profiled(
             content_root_count,
             (tuning.content_hold_duration * 1_000_000_000.0).round() as u64,
             (tuning.content_fade_duration * 1_000_000_000.0).round() as u64,
+            content_start_alpha,
             tuning.start_alpha,
         ),
     );
@@ -4841,13 +4948,13 @@ mod secondary_window_config_tests {
         assert!((tuning.phase1_alpha_target - 0.99).abs() < epsilon);
         assert!((tuning.alpha_ramp_duration - 0.018).abs() < epsilon);
         assert!((tuning.alpha_finish_duration - 0.026).abs() < epsilon);
-        // Material onset prefix (glass-entry-onset-v2): 88ms Clear→Regular
-        // ramp before the unchanged 210ms tail — 298ms total, matching the
-        // measured Spotlight first-photon→settled span. Content holds 53ms
-        // then fades 35ms, ending exactly at tail start.
+        // Material onset prefix (glass-entry-onset-v2, 2x tempo): 44ms
+        // Clear→Regular ramp before the 105ms tail — 149ms total. Content
+        // fades from the first photon (2026-08-13 content-timing retune):
+        // hold 0ms, fade 44ms, ending exactly at tail start.
         assert!((tuning.material_onset_duration - 0.044).abs() < epsilon);
-        assert!((tuning.content_hold_duration - 0.026).abs() < epsilon);
-        assert!((tuning.content_fade_duration - 0.018).abs() < epsilon);
+        assert!((tuning.content_hold_duration - 0.0).abs() < epsilon);
+        assert!((tuning.content_fade_duration - 0.044).abs() < epsilon);
         assert!((tuning.visible_tail_duration() - 0.105).abs() < epsilon);
         assert!((tuning.total_entry_duration() - 0.149).abs() < epsilon);
         assert_eq!(tuning.visible_tail_start_delay_ms(), 44);
@@ -4863,6 +4970,8 @@ mod secondary_window_config_tests {
     fn main_footer_entry_inherits_window_material_without_independent_effects() {
         let policy = super::main_footer_entry_material_policy();
         assert_eq!(policy.target_alpha, 1.0);
+        // The gap-spanning CONTAINER never fades (desktop pixels would mix
+        // through inter-capsule gaps — the 2026-08-12 defect)…
         assert!(!policy.enroll_in_content_fade);
         assert_eq!(
             policy.defocus_scope,
@@ -4871,6 +4980,15 @@ mod secondary_window_config_tests {
         assert_eq!(policy.defocus_scope.log_name(), "per_capsule");
         assert_eq!(policy.defocus_radius, super::glass_main_entry_blur_radius());
         assert_eq!(super::GLASS_MAIN_ENTRY_BLUR_RADIUS, 12.0);
+        // …but each clipped capsule materializes exactly like the main
+        // backdrop (2026-08-13 parity retune): the Clear→Regular + tint ramp
+        // across the onset prefix, with its own foreground contentView
+        // joining the shared content fade at the presence floor.
+        assert!(policy.material_onset_ramp);
+        assert!(policy.foreground_content_fade);
+        let epsilon = 1e-9;
+        assert!((super::GLASS_ENTRY_CONTENT_START_ALPHA - 0.21).abs() < epsilon);
+        assert!((super::glass_entry_content_start_alpha() - 0.21).abs() < epsilon);
     }
 
     #[cfg(target_os = "macos")]

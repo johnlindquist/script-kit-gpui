@@ -52,6 +52,9 @@ export const MAIN_GLASS_ENTRY_EXPECTATION = {
   alphaFinishMs: 26,
   contentHoldMs: 0,
   contentFadeMs: 44,
+  // 2026-08-13 empty-window retune: content roots seed at Spotlight's
+  // measured first-photon presence (~21% of settled) instead of alpha 0.
+  contentStartAlpha: 0.21,
   entryBlurRadius: 12,
   entryBlurToRadius: 0,
   entryBlurDurationMs: 44,
@@ -61,6 +64,10 @@ export const MAIN_GLASS_ENTRY_EXPECTATION = {
   footerBlurDurationMs: 44,
   footerMinimumCapsuleCount: 1,
   footerEnrolled: false,
+  // 2026-08-13 capsule parity retune: every capsule runs the main backdrop's
+  // Clear→Regular + tint ramp and fades its own foreground contentView.
+  footerMaterialRamp: true,
+  footerForegroundFade: true,
   direction: "shrink-in",
 } as const;
 
@@ -74,6 +81,8 @@ export const ACTIONS_GLASS_ENTRY_EXPECTATION = {
   entryBlurDurationMs: 149,
   footerBlurRadius: 0,
   footerMinimumCapsuleCount: 0,
+  footerMaterialRamp: false,
+  footerForegroundFade: false,
   direction: "grow-in",
 } as const;
 
@@ -293,6 +302,8 @@ export function analyzeOnsetReceipt(
       footerBlurDurationNs: null,
       footerCapsuleCount: null,
       footerBlurredCapsuleCount: null,
+      footerMaterialRampCount: null,
+      footerForegroundFadeCount: null,
       footerEnrolled: null,
       entryBlurDurationNs: null,
       onsetStartWidthScale: null,
@@ -302,6 +313,7 @@ export function analyzeOnsetReceipt(
       onsetDurationNs: null,
       contentHoldNs: null,
       contentFadeNs: null,
+      contentStartAlpha: null,
       windowAlpha: null,
       errors: ["native onset receipt is missing"],
       pass: false,
@@ -320,6 +332,8 @@ export function analyzeOnsetReceipt(
     footerBlurDurationNs: parseExactField(line, "footer_blur_duration_ns"),
     footerCapsuleCount: parseExactField(line, "footer_capsule_count"),
     footerBlurredCapsuleCount: parseExactField(line, "footer_blurred_capsule_count"),
+    footerMaterialRampCount: parseExactField(line, "footer_material_ramp_count"),
+    footerForegroundFadeCount: parseExactField(line, "footer_foreground_fade_count"),
     footerEnrolled: parseBooleanField(line, "footer_enrolled"),
     entryBlurDurationNs: parseExactField(line, "entry_blur_duration_ns"),
     onsetStartWidthScale: parseExactField(line, "onset_start_width_scale"),
@@ -329,6 +343,7 @@ export function analyzeOnsetReceipt(
     onsetDurationNs: parseExactField(line, "duration_ns"),
     contentHoldNs: parseExactField(line, "content_hold_ns"),
     contentFadeNs: parseExactField(line, "content_fade_ns"),
+    contentStartAlpha: parseExactField(line, "content_start_alpha"),
     windowAlpha: parseExactField(line, "window_alpha"),
   };
   const errors: string[] = [];
@@ -422,6 +437,34 @@ export function analyzeOnsetReceipt(
     errors.push(
       `footer_enrolled=${receipt.footerEnrolled} must be ${expectation.footerEnrolled}`,
     );
+  }
+  check(
+    "content_start_alpha",
+    receipt.contentStartAlpha,
+    expectation.contentStartAlpha ?? 0.21,
+    0.005,
+  );
+  if (expectation.footerMaterialRamp && expectation.footerMinimumCapsuleCount > 0) {
+    // Capsule material parity: EVERY capsule must run the Clear→Regular ramp
+    // and fade its own foreground — a partial install is a fail, not a skip.
+    if (
+      receipt.footerMaterialRampCount === null
+      || receipt.footerMaterialRampCount !== receipt.footerCapsuleCount
+    ) {
+      errors.push(
+        `footer_material_ramp_count=${receipt.footerMaterialRampCount} must equal footer_capsule_count=${receipt.footerCapsuleCount}`,
+      );
+    }
+  }
+  if (expectation.footerForegroundFade && expectation.footerMinimumCapsuleCount > 0) {
+    if (
+      receipt.footerForegroundFadeCount === null
+      || receipt.footerForegroundFadeCount !== receipt.footerCapsuleCount
+    ) {
+      errors.push(
+        `footer_foreground_fade_count=${receipt.footerForegroundFadeCount} must equal footer_capsule_count=${receipt.footerCapsuleCount}`,
+      );
+    }
   }
 
   return { ...receipt, errors, pass: errors.length === 0 };

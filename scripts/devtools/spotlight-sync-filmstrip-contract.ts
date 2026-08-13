@@ -62,6 +62,14 @@ export const SPOTLIGHT_SYNC_CONTRACT = {
     footerBlurDurationToleranceMs: 1,
     minimumFooterCapsuleCount: MAIN_GLASS_ENTRY_EXPECTATION.footerMinimumCapsuleCount,
     footerEnrolled: MAIN_GLASS_ENTRY_EXPECTATION.footerEnrolled,
+    // 2026-08-13 capsule parity + empty-window retune: every capsule runs the
+    // main backdrop's Clear→Regular material ramp and fades its own
+    // foreground; content roots seed at Spotlight's ~21% first-photon
+    // presence instead of alpha 0.
+    footerMaterialRamp: MAIN_GLASS_ENTRY_EXPECTATION.footerMaterialRamp,
+    footerForegroundFade: MAIN_GLASS_ENTRY_EXPECTATION.footerForegroundFade,
+    contentStartAlpha: MAIN_GLASS_ENTRY_EXPECTATION.contentStartAlpha,
+    contentStartAlphaTolerance: 0.005,
     // Upper edge 0.995: a 35ms compression sampled at damage-driven ~60Hz can
     // land its deepest frame at ~0.9947 (measured across the 2026-08-13
     // corpus) while the true inter-frame extreme still reaches 0.987. A
@@ -405,6 +413,15 @@ function gradeEntryOnset(failures: SpotlightFailure[], scenario: JsonRecord): Js
       "footerBlurredCapsuleCount",
       "footer_blurred_capsule_count",
     ),
+    footerMaterialRampCount: numberField(
+      "footerMaterialRampCount",
+      "footer_material_ramp_count",
+    ),
+    footerForegroundFadeCount: numberField(
+      "footerForegroundFadeCount",
+      "footer_foreground_fade_count",
+    ),
+    contentStartAlpha: numberField("contentStartAlpha", "content_start_alpha"),
     footerEnrolled: booleanField("footerEnrolled", "footer_enrolled"),
   };
   const expected = SPOTLIGHT_SYNC_CONTRACT.entry;
@@ -576,6 +593,55 @@ function gradeEntryOnset(failures: SpotlightFailure[], scenario: JsonRecord): Js
       "footer capsules regained independent content-fade enrollment",
     );
   }
+  if (expected.footerMaterialRamp) {
+    if (values.footerMaterialRampCount === null) {
+      observer(
+        failures,
+        "entry",
+        "entry.onset.footerMaterialRampCount",
+        null,
+        values.footerCapsuleCount,
+        "native onset receipt lacks the capsule material-ramp count",
+      );
+    } else if (values.footerMaterialRampCount !== values.footerCapsuleCount) {
+      product(
+        failures,
+        "entry",
+        "entry.onset.footerMaterialRampCount",
+        values.footerMaterialRampCount,
+        values.footerCapsuleCount,
+        "not every footer capsule ran the main backdrop's Clear→Regular material ramp",
+      );
+    }
+  }
+  if (expected.footerForegroundFade) {
+    if (values.footerForegroundFadeCount === null) {
+      observer(
+        failures,
+        "entry",
+        "entry.onset.footerForegroundFadeCount",
+        null,
+        values.footerCapsuleCount,
+        "native onset receipt lacks the capsule foreground-fade count",
+      );
+    } else if (values.footerForegroundFadeCount !== values.footerCapsuleCount) {
+      product(
+        failures,
+        "entry",
+        "entry.onset.footerForegroundFadeCount",
+        values.footerForegroundFadeCount,
+        values.footerCapsuleCount,
+        "not every footer capsule foreground joined the shared content fade",
+      );
+    }
+  }
+  checkNumber(
+    values.contentStartAlpha,
+    "entry.onset.contentStartAlpha",
+    expected.contentStartAlpha,
+    expected.contentStartAlphaTolerance,
+    "content roots did not seed at Spotlight's measured first-photon presence floor",
+  );
   const [alphaLow, alphaHigh] = expected.firstAlpha;
   if (values.windowAlpha === null) {
     observer(
@@ -966,12 +1032,27 @@ function validateColorCoverage(
       // capsule itself is fully present — measured 2026-08-13: left-info
       // median stayed 0.0208 pre/post wide-start restoration while p10 fell
       // 0.0178 → 0.003 purely from seam sampling. The median gate remains the
-      // washout catch on every comparable frame.
+      // washout catch on every comparable frame EXCEPT materializing entry
+      // frames: since the 2026-08-13 capsule material parity retune, every
+      // capsule runs the main backdrop's Clear→Regular ramp across the 44ms
+      // prefix, so low boundary contrast while the window alpha is still at
+      // the 0.85 prefix floor is the AUTHORIZED bloom, not washout (measured:
+      // left-info median 0.0123 at entry seq 2 on a healthy build). The
+      // prefix holds alpha at 0.85 and the tail immediately ramps toward
+      // 0.99, so alpha ≥ 0.9 is the first provably post-materialize frame.
       const settledEntryFrame = phase === "entry" && frame.phase === "settled";
+      const materializingEntryFrame = phase === "entry"
+        && frame.phase !== "settled"
+        && alpha !== null
+        && alpha < 0.9;
       const boundaryChecks: Array<[string, number | null, number, string]> = [
-        ["medianBoundaryLuminanceDifference", num(capsule.medianBoundaryLuminanceDifference),
-          presence.minimumMedianBoundaryLuminanceDifference,
-          "capsule median boundary contrast did not establish its rendered region"],
+        ...(materializingEntryFrame
+          ? []
+          : ([
+            ["medianBoundaryLuminanceDifference", num(capsule.medianBoundaryLuminanceDifference),
+              presence.minimumMedianBoundaryLuminanceDifference,
+              "capsule median boundary contrast did not establish its rendered region"],
+          ] as Array<[string, number | null, number, string]>)),
         ...(settledEntryFrame
           ? ([
             ["p10BoundaryLuminanceDifference", num(capsule.p10BoundaryLuminanceDifference),
