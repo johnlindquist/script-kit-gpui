@@ -170,6 +170,146 @@ fn persist_script_error_agent_chat_context_bundle_in_dir(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScriptErrorToastOpenMode {
+    Default,
+    TextEditor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScriptErrorToastActionTarget {
+    id: &'static str,
+    label: &'static str,
+    path: std::path::PathBuf,
+    open_mode: ScriptErrorToastOpenMode,
+}
+
+fn script_error_toast_action_targets(
+    log_path: &std::path::Path,
+    script_path: &str,
+) -> Vec<ScriptErrorToastActionTarget> {
+    let mut targets = Vec::new();
+
+    if log_path.is_file() {
+        targets.push(ScriptErrorToastActionTarget {
+            id: "open-logs",
+            label: "Open Logs",
+            path: log_path.to_path_buf(),
+            open_mode: ScriptErrorToastOpenMode::Default,
+        });
+    }
+
+    let script_path = std::path::PathBuf::from(script_path);
+    if script_path.is_file() {
+        targets.push(ScriptErrorToastActionTarget {
+            id: "edit-script",
+            label: "Edit Script",
+            path: script_path,
+            open_mode: ScriptErrorToastOpenMode::TextEditor,
+        });
+    }
+
+    targets
+}
+
+fn open_script_error_toast_target(target: &ScriptErrorToastActionTarget) -> std::io::Result<()> {
+    let edit_as_text = target.open_mode == ScriptErrorToastOpenMode::TextEditor;
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = std::process::Command::new("open");
+        if edit_as_text {
+            command.arg("-t");
+        }
+        command.arg(&target.path).spawn().map(|_| ())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = edit_as_text;
+        std::process::Command::new("xdg-open")
+            .arg(&target.path)
+            .spawn()
+            .map(|_| ())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = edit_as_text;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(&target.path)
+            .spawn()
+            .map(|_| ())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (target, edit_as_text);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "opening script error recovery targets is unsupported on this platform",
+        ))
+    }
+}
+
+fn build_script_error_toast(
+    error_message: String,
+    details_text: Option<String>,
+    script_path: &str,
+    log_path: &std::path::Path,
+    theme: &crate::theme::Theme,
+) -> Toast {
+    let mut toast = Toast::error(error_message, theme)
+        .details_opt(details_text.clone())
+        .duration_ms(Some(TOAST_CRITICAL_MS));
+
+    if let Some(trace) = details_text {
+        toast = toast.action(ToastAction::new(
+            "copy-error",
+            "Copy Error",
+            Box::new(move |_, _, _| {
+                use arboard::Clipboard;
+
+                if let Ok(mut clipboard) = Clipboard::new() {
+                    let _ = clipboard.set_text(trace.clone());
+                    tracing::info!(category = "UI", "Error copied to clipboard");
+                }
+            }),
+        ));
+    }
+
+    for target in script_error_toast_action_targets(log_path, script_path) {
+        let action_id = target.id;
+        let action_label = target.label;
+        let target_for_callback = target.clone();
+        toast = toast.action(ToastAction::new(
+            action_id,
+            action_label,
+            Box::new(move |_, _, _| {
+                if let Err(error) = open_script_error_toast_target(&target_for_callback) {
+                    tracing::warn!(
+                        category = "UI",
+                        action_id = target_for_callback.id,
+                        path = %target_for_callback.path.display(),
+                        error = %error,
+                        "Failed to open script error recovery target"
+                    );
+                } else {
+                    tracing::info!(
+                        category = "UI",
+                        action_id = target_for_callback.id,
+                        path = %target_for_callback.path.display(),
+                        "Opened script error recovery target"
+                    );
+                }
+            }),
+        ));
+    }
+
+    toast
+}
+
 impl ScriptListApp {
     fn script_error_agent_chat_view_entity(
         &self,
@@ -311,5 +451,92 @@ impl ScriptListApp {
         });
 
         stage_result
+    }
+}
+
+#[cfg(test)]
+mod script_error_toast_action_tests {
+    use super::*;
+
+    fn unique_test_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "script-kit-script-error-toast-{label}-{}",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    #[test]
+    fn existing_targets_append_copy_open_logs_and_edit_script_actions() {
+        let root = unique_test_dir("existing");
+        std::fs::create_dir_all(&root).expect("create script-error toast test directory");
+        let log_path = root.join("script-kit-gpui.jsonl");
+        let script_path = root.join("failed-script.ts");
+        std::fs::write(&log_path, "{}\n").expect("write test log");
+        std::fs::write(&script_path, "throw new Error('boom')\n").expect("write test script");
+        let script_path_string = script_path.to_string_lossy().into_owned();
+
+        let targets = script_error_toast_action_targets(&log_path, &script_path_string);
+        assert_eq!(
+            targets,
+            vec![
+                ScriptErrorToastActionTarget {
+                    id: "open-logs",
+                    label: "Open Logs",
+                    path: log_path.clone(),
+                    open_mode: ScriptErrorToastOpenMode::Default,
+                },
+                ScriptErrorToastActionTarget {
+                    id: "edit-script",
+                    label: "Edit Script",
+                    path: script_path,
+                    open_mode: ScriptErrorToastOpenMode::TextEditor,
+                },
+            ]
+        );
+
+        let toast = build_script_error_toast(
+            "boom".to_string(),
+            Some("trace".to_string()),
+            &script_path_string,
+            &log_path,
+            &crate::theme::Theme::default(),
+        );
+        let actions = toast
+            .get_actions()
+            .iter()
+            .map(|action| (action.id.as_str(), action.label.as_ref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actions,
+            vec![
+                ("copy-error", "Copy Error"),
+                ("open-logs", "Open Logs"),
+                ("edit-script", "Edit Script"),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_file_targets_leave_copy_error_as_the_only_action() {
+        let root = unique_test_dir("missing");
+        let log_path = root.join("missing-log.jsonl");
+        let script_path = root.join("missing-script.ts");
+        let script_path_string = script_path.to_string_lossy().into_owned();
+
+        let toast = build_script_error_toast(
+            "boom".to_string(),
+            Some("trace".to_string()),
+            &script_path_string,
+            &log_path,
+            &crate::theme::Theme::default(),
+        );
+        let actions = toast
+            .get_actions()
+            .iter()
+            .map(|action| (action.id.as_str(), action.label.as_ref()))
+            .collect::<Vec<_>>();
+        assert_eq!(actions, vec![("copy-error", "Copy Error")]);
     }
 }

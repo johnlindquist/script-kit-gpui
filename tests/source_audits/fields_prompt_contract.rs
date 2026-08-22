@@ -4,16 +4,40 @@
 //! it must keep array-by-order SDK response semantics and must not fall back to
 //! the old coming-soon path.
 
-use super::read_source as read;
+use super::{function_body, read_source as read};
 
 const FORM_PROMPT_PATH: &str = "src/form_prompt.rs";
 const PROMPT_HANDLER_PATH: &str = "src/prompt_handler/mod.rs";
+const PROMPT_MESSAGE_ROUTE_PATH: &str = "src/prompt_handler/message_route.rs";
 const COLLECT_ELEMENTS_PATH: &str = "src/app_layout/collect_elements.rs";
 const STDIN_SIMULATE_KEY_PATH: &str = "src/main_entry/runtime_stdin_match_simulate_key.rs";
 const SIMULATE_KEY_DISPATCH_PATH: &str = "src/app_impl/simulate_key_dispatch.rs";
 
 #[test]
 fn fields_protocol_routes_to_real_form_prompt_state() {
+    let route = read(PROMPT_MESSAGE_ROUTE_PATH);
+    let conversion = function_body(&route, "convert_protocol_prompt_message")
+        .expect("convert_protocol_prompt_message implementation must exist");
+    let fields_arm = conversion
+        .split("Message::Fields")
+        .nth(1)
+        .and_then(|rest| rest.split("Message::Term").next())
+        .expect("convert_protocol_prompt_message must include a fields arm before term");
+    assert!(
+        fields_arm.contains("PromptMessage::ShowFields"),
+        "Message::Fields must route every conversion source to ShowFields"
+    );
+    for forbidden in [
+        "FieldsComingSoon",
+        "PromptConversionSource::InteractiveSession",
+        "PromptConversionSource::Sessionless",
+    ] {
+        assert!(
+            !fields_arm.contains(forbidden),
+            "Message::Fields must not split conversion sources through {forbidden}"
+        );
+    }
+
     let handler = read(PROMPT_HANDLER_PATH);
     assert!(
         handler.contains("FormPromptState::from_fields"),

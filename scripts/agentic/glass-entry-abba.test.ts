@@ -9,7 +9,7 @@
 // this one. Run from the repo root: bun test scripts/agentic/glass-entry-abba.test.ts
 
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -116,6 +116,10 @@ sleep 300
       ...process.env,
       PATH: `${stubs}:${process.env.PATH ?? ""}`,
       STUB_LOG: stubLog,
+      // The legacy-contract tests exercise the runner's downstream behavior;
+      // they opt in through the screen-takeover gate deliberately. The gate
+      // itself is locked by its own refusal test below.
+      SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "1",
       ...overrides,
     },
   };
@@ -266,5 +270,23 @@ describe("legacyPairV1 shell runner contract", () => {
     for (const row of rows) {
       expect(row.eligible).toBe(false);
     }
+  });
+
+  test("screen-takeover gate: without the opt-in the runner refuses before doing anything", () => {
+    // Owner-requested disable (2026-08-13): the runner launches the app over
+    // a full-screen rainbow backdrop. Without the explicit opt-in it must
+    // exit BEFORE compiling the fixture, launching any process, or writing
+    // run artifacts.
+    const harness = makeHarness({ SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0" });
+    const { exitCode, stderr } = runScript(harness, [
+      "--warmups",
+      "0",
+      "--blocks",
+      "1",
+    ]);
+    expect(exitCode).toBe(3);
+    expect(stderr).toContain("SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER=1");
+    expect(readFileSync(harness.stubLog, "utf8").trim()).toBe("");
+    expect(existsSync(join(harness.out, "runs.jsonl"))).toBe(false);
   });
 });

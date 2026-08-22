@@ -895,6 +895,8 @@ fn launcher_generic_no_results_spec(filter_text: &str) -> InfoStateSpec {
             .detail("Examples: type:script · type:scriptlet · shortcut:cmd+k"),
             InfoGuidanceItem::syntax(";todo", "launcher-syntax-capture", "Capture instead")
                 .detail("Examples: ;todo · ;note"),
+            InfoGuidanceItem::shortcut("⌘N", "launcher-create-script", "Create a script")
+                .detail("Start a new automation in your scripts folder."),
             InfoGuidanceItem::shortcut("⌘↵", "launcher-ask-agent-chat", "Ask Agent Chat")
                 .detail("Turn this search into a script request."),
         ]))
@@ -1755,6 +1757,23 @@ mod tests {
         assert!(generic.contains("type:script"));
         assert!(generic.contains("shortcut:cmd+k"));
         assert!(generic.contains("Ask Agent Chat"));
+    }
+
+    #[test]
+    fn launcher_generic_no_results_offers_create_script_shortcut_without_old_prose() {
+        let spec = launcher_empty_or_no_results_spec("zzz", false);
+        let snapshot = spec.semantic_snapshot();
+
+        assert!(snapshot.cues.iter().any(|cue| {
+            cue.cue_kind == "shortcut"
+                && cue.cue_text == "⌘N"
+                && cue.canonical_shortcut.as_deref() == Some("cmd+n")
+                && cue.action_id == Some("launcher-create-script")
+        }));
+
+        let copy = format!("{spec:?}");
+        assert!(copy.contains("Create a script"));
+        assert!(!copy.contains("Press ⌘N to create a new script"));
     }
 
     #[test]

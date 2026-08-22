@@ -234,6 +234,16 @@ toggle probes with `SCRIPT_KIT_TEST_STATUS=1` and the named calibration fixture.
 An `INVALID_INTERFERENCE` receipt means rerun when input is quiet; it is not a
 product failure and must not be converted into a green result.
 
+**Rainbow-backdrop capture sessions are DISABLED by owner request
+(2026-08-13).** The full-screen backdrop fixture
+(`scripts/agentic/macos-glass-background-fixture.swift`) and every probe that
+launches the app over it — `glass-motion-contrast.ts --all`/`--mode locked`,
+`glass-smoke-study.ts` live capture, and `glass-entry-abba.sh` — refuse to run
+(fail closed) unless `SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER=1` is set. These runs
+cover the operator's screen and drive real input; only set the opt-in for a
+deliberate, user-approved capture session. Do not weaken or work around the
+gate; `glass-smoke-study.ts --dry-run` and all grade-only paths stay available.
+
 ## Agent Chat Entry Context Contract
 
 Launcher-sourced Agent Chat opens stage the currently selected launcher row as a context chip (and pre-fill the composer with its `@cmd:` mention) UNLESS the entry request suppresses the focused part. The default selection on a fresh launcher is a real, resolvable row (`first_selectable_index` — a Brain Inbox capture, a flow, a script), so any "just open a clean chat" affordance wired through the default entry silently inherits it. This bit us on 2026-07-10: main-hotkey double-tap opened Agent Chat with the first row attached as if deliberately chosen.

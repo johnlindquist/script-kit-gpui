@@ -37,6 +37,14 @@ done
 [ -x "$A_BINARY" ] || { echo "missing A binary: $A_BINARY" >&2; exit 2; }
 [ -x "$B_BINARY" ] || { echo "missing B binary: $B_BINARY" >&2; exit 2; }
 [ -n "$OUT" ] || { echo "--out required" >&2; exit 2; }
+
+# Disabled by owner request (2026-08-13): this study launches the app over a
+# full-screen saturated-stripes (rainbow) backdrop and drives it — a complete
+# screen takeover. Opt in only for a deliberate, supervised capture session.
+if [ "${SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER:-0}" != "1" ]; then
+  echo "glass-entry-abba.sh disabled: it launches Script Kit over a full-screen rainbow backdrop (screen takeover). Set SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER=1 to run deliberately." >&2
+  exit 3
+fi
 mkdir -p "$OUT"
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"

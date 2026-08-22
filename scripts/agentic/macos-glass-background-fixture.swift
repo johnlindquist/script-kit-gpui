@@ -364,6 +364,21 @@ private final class FixtureDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// Disabled by owner request (2026-08-13): this helper covers the ENTIRE
+// screen with an opaque backdrop (the saturated-stripes mode is the rainbow
+// wall) so probes can launch a Script Kit debug session over it — a full
+// screen takeover on the operator's machine. It refuses to run unless the
+// operator deliberately opts in for a supervised capture session.
+if ProcessInfo.processInfo.environment["SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER"] != "1" {
+    fputs(
+        "macos-glass-background-fixture disabled: it draws a full-screen backdrop "
+            + "(screen takeover) for glass capture sessions. "
+            + "Set SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER=1 to run deliberately.\n",
+        stderr
+    )
+    exit(77)
+}
+
 private let arguments = parseArguments()
 private let application = NSApplication.shared
 application.setActivationPolicy(.accessory)

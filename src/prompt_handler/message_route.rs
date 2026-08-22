@@ -21,7 +21,7 @@ enum PromptConversionSource {
 
 fn convert_protocol_prompt_message(
     message: crate::protocol::Message,
-    source: PromptConversionSource,
+    _source: PromptConversionSource,
 ) -> Result<PromptMessage, crate::protocol::Message> {
     match message {
         Message::Arg {
@@ -63,17 +63,11 @@ fn convert_protocol_prompt_message(
             id,
             fields,
             actions,
-        } => match source {
-            PromptConversionSource::InteractiveSession => Ok(PromptMessage::FieldsComingSoon {
-                id,
-                field_count: fields.len(),
-            }),
-            PromptConversionSource::Sessionless => Ok(PromptMessage::ShowFields {
-                id,
-                fields,
-                actions,
-            }),
-        },
+        } => Ok(PromptMessage::ShowFields {
+            id,
+            fields,
+            actions,
+        }),
         Message::Term {
             id,
             command,

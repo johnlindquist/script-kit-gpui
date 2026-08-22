@@ -1,11 +1,11 @@
 mod prompt_handler_message_tests {
     use super::{
         build_script_error_agent_chat_prompt, build_script_error_report_markdown,
-        classify_prompt_message_route, escape_windows_cmd_open_target,
-        persist_script_error_agent_chat_context_bundle_in_dir, prompt_coming_soon_warning,
-        prompt_message_from_protocol_message, resolve_ai_start_chat_provider,
-        should_restore_main_window_after_script_exit, unhandled_message_warning,
-        PromptMessageRoute,
+        classify_prompt_message_route, convert_protocol_prompt_message,
+        escape_windows_cmd_open_target, persist_script_error_agent_chat_context_bundle_in_dir,
+        prompt_coming_soon_warning, prompt_message_from_protocol_message,
+        resolve_ai_start_chat_provider, should_restore_main_window_after_script_exit,
+        unhandled_message_warning, PromptConversionSource, PromptMessageRoute,
     };
     use crate::ai::providers::OpenAiProvider;
     use crate::PromptMessage;
@@ -40,25 +40,41 @@ mod prompt_handler_message_tests {
     }
 
     #[test]
-    fn test_fields_protocol_message_converts_to_show_fields() {
-        let message = crate::protocol::Message::Fields {
-            id: "fields-id".to_string(),
-            fields: Vec::new(),
-            actions: None,
-        };
+    fn fields_protocol_message_converts_to_show_fields_for_every_source() {
+        fn assert_show_fields(source: PromptConversionSource) {
+            let message = crate::protocol::Message::Fields {
+                id: "fields-id".to_string(),
+                fields: Vec::new(),
+                actions: Some(Vec::new()),
+            };
 
-        let Some(PromptMessage::ShowFields {
-            id,
-            fields,
-            actions,
-        }) = prompt_message_from_protocol_message(message)
-        else {
-            panic!("Message::Fields must convert to PromptMessage::ShowFields");
-        };
+            let converted = match convert_protocol_prompt_message(message, source) {
+                Ok(converted) => converted,
+                Err(_) => panic!("Message::Fields from {source:?} must be handled as a prompt"),
+            };
+            let PromptMessage::ShowFields {
+                id,
+                fields,
+                actions,
+            } = converted
+            else {
+                panic!(
+                    "Message::Fields from {source:?} must convert to PromptMessage::ShowFields"
+                );
+            };
 
-        assert_eq!(id, "fields-id");
-        assert!(fields.is_empty());
-        assert!(actions.is_none());
+            assert_eq!(id, "fields-id");
+            assert!(fields.is_empty());
+            let actions = actions.expect("ShowFields must preserve the actions option");
+            assert!(actions.is_empty());
+        }
+
+        for source in [
+            PromptConversionSource::InteractiveSession,
+            PromptConversionSource::Sessionless,
+        ] {
+            assert_show_fields(source);
+        }
     }
 
     #[test]

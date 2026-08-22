@@ -816,6 +816,24 @@ async function main(): Promise<number> {
     console.log(JSON.stringify({ status: "DRY_RUN", ...summary }, null, 2));
     return storage.pass ? 0 : 2;
   }
+  // Disabled by owner request (2026-08-13): live capture launches the app
+  // over a full-screen backdrop fixture (saturated-stripes = the rainbow
+  // wall) — a complete screen takeover. --dry-run stays available; any
+  // capture run requires a deliberate opt-in.
+  if (process.env.SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER !== "1") {
+    console.log(
+      JSON.stringify(
+        {
+          status: "BLOCKED_ENVIRONMENT",
+          error:
+            "glass smoke study disabled: live capture launches Script Kit over a full-screen backdrop fixture (screen takeover). Set SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER=1 to run deliberately.",
+        },
+        null,
+        2,
+      ),
+    );
+    return 2;
+  }
   if (!storage.pass) {
     console.log(
       JSON.stringify({ status: "BLOCKED_ENVIRONMENT", storage }, null, 2),

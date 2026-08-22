@@ -2558,28 +2558,14 @@ impl ScriptListApp {
                 // Also create in-app toast with expandable details (for when window is visible)
                 // Use stderr_output if available, otherwise use stack_trace
                 let details_text = stderr_output.clone().or_else(|| stack_trace.clone());
-                let toast = Toast::error(error_message.clone(), &self.theme)
-                    .details_opt(details_text.clone())
-                    .duration_ms(Some(TOAST_CRITICAL_MS)); // 10 seconds for errors
-
-                // Add copy button action if we have stderr/stack trace
-                let toast = if let Some(ref trace) = details_text {
-                    let trace_clone = trace.clone();
-                    toast.action(ToastAction::new(
-                        "copy-error",
-                        "Copy Error",
-                        Box::new(move |_, _, _| {
-                            // Copy to clipboard
-                            use arboard::Clipboard;
-                            if let Ok(mut clipboard) = Clipboard::new() {
-                                let _ = clipboard.set_text(trace_clone.clone());
-                                tracing::info!(category = "UI", "Error copied to clipboard");
-                            }
-                        }),
-                    ))
-                } else {
-                    toast
-                };
+                let log_path = script_kit_gpui::scriptlet_cache::get_log_file_path();
+                let toast = build_script_error_toast(
+                    error_message.clone(),
+                    details_text,
+                    &script_path,
+                    &log_path,
+                    &self.theme,
+                );
 
                 // Log suggestions if present
                 if !suggestions.is_empty() {

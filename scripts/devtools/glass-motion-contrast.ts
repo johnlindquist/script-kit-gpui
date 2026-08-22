@@ -457,6 +457,19 @@ async function main() {
     ? resolve(explicitReceiptPath, "..")
     : requestedOutput;
   const mode = has("--all") ? "all" : value("--mode", "red")!;
+  // Disabled by owner request (2026-08-13): the locked-treatment cells cover
+  // the screen with the saturated-stripes (rainbow) backdrop fixture and
+  // launch the app over it — a complete screen takeover. Fail closed BEFORE
+  // any app process or fixture launches.
+  if (
+    (mode === "all" || mode === "locked")
+    && process.env.SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER !== "1"
+  ) {
+    console.error(
+      "glass-motion-contrast --mode all/locked disabled: it launches Script Kit over a full-screen rainbow backdrop (screen takeover). Set SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER=1 to run deliberately.",
+    );
+    process.exit(3);
+  }
   const policyTintFloor = Number(value("--policy-tint-floor", "0.35"));
   const policyVeilAlpha = Number(value("--policy-veil-alpha", "0.80"));
   const policyId = value(

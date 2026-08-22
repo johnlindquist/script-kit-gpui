@@ -174,77 +174,37 @@ fn chat_window_options(inherit_bounds: Option<gpui::Bounds<gpui::Pixels>>) -> Wi
     }
 }
 
-/// Open (or focus) the detached Agent Chat Chat window with a placeholder.
-pub fn open_chat_window(cx: &mut App) -> anyhow::Result<()> {
-    // If already open, just focus it
-    let existing = {
-        let slot = CHAT_WINDOW.get_or_init(|| Mutex::new(None));
-        slot.lock().ok().and_then(|g| g.as_ref().map(|s| s.handle))
-    };
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChatWindowOpenRoute {
+    ActivateExisting,
+    SpawnRealThread,
+}
 
-    if existing.is_some() {
-        activate_chat_window(cx);
-        return Ok(());
+fn chat_window_open_route(is_open: bool) -> ChatWindowOpenRoute {
+    if is_open {
+        ChatWindowOpenRoute::ActivateExisting
+    } else {
+        ChatWindowOpenRoute::SpawnRealThread
     }
+}
 
-    let window_bounds = chat_window_bounds(None);
-    let automation_bounds = automation_bounds_from_window_bounds(window_bounds);
-    let handle = cx.open_window(chat_window_options(None), |window, cx| {
-        window.on_window_should_close(cx, |window, cx| {
-            let wb = window.window_bounds();
-            crate::window_state::save_window_from_gpui(
-                crate::window_state::WindowRole::AgentChat,
-                wb,
-            );
-            let slot = CHAT_WINDOW.get_or_init(|| Mutex::new(None));
-            if let Ok(mut g) = slot.lock() {
-                if let Some(state) = g.take() {
-                    if let Some(ref id) = state.automation_id {
-                        crate::windows::remove_runtime_window_handle(id);
-                        crate::windows::remove_automation_window(id);
-                    }
-                }
-            }
-            if crate::platform::begin_gpui_window_exit_dematerialize(
-                window,
-                "AGENT_CHAT",
-                "Agent Chat",
-            ) {
-                crate::platform::remove_gpui_window_after_glass_exit_from_app(window, cx);
-                false
-            } else {
-                true
-            }
-        });
-        let view = cx.new(ChatWindowPlaceholder::new);
-        let focus_handle = view.read(cx).focus_handle.clone();
-        window.focus(&focus_handle, cx);
-        view
-    })?;
-
-    let any_handle: AnyWindowHandle = handle.into();
-    let automation_id = "agentChatDetached:placeholder".to_string();
-
-    // Store the handle (placeholder has no AgentChatView entity)
-    {
-        let slot = CHAT_WINDOW.get_or_init(|| Mutex::new(None));
-        if let Ok(mut g) = slot.lock() {
-            *g = Some(ChatWindowState {
-                handle: any_handle,
-                view_entity: None,
-                automation_id: Some(automation_id.clone()),
-            });
+/// Open (or focus) the detached Agent Chat window with a real Pi thread.
+pub fn open_chat_window(cx: &mut App) -> anyhow::Result<()> {
+    match chat_window_open_route(is_chat_window_open()) {
+        ChatWindowOpenRoute::ActivateExisting => {
+            activate_chat_window(cx);
+            Ok(())
+        }
+        ChatWindowOpenRoute::SpawnRealThread => {
+            let thread = super::hosted::spawn_hosted_thread(
+                None,
+                super::AgentChatLaunchRequirements::default(),
+                cx,
+            )
+            .map_err(|error| anyhow::anyhow!(error))?;
+            open_chat_window_with_thread(thread, None, cx)
         }
     }
-
-    // Register the exact runtime handle so simulateGpuiEvent can target
-    // this window by its automation ID without collapsing to WindowRole.
-    crate::windows::upsert_runtime_window_handle(&automation_id, any_handle);
-    upsert_agent_chat_detached_automation_window(&automation_id, automation_bounds);
-    configure_agent_chat_vibrancy(cx);
-
-    tracing::info!("agent_chat_window_opened");
-    Ok(())
 }
 
 /// Open the detached Agent Chat Chat window with an existing AgentChatThread entity.
@@ -1778,64 +1738,19 @@ fn configure_agent_chat_vibrancy(cx: &mut App) {
 #[cfg(not(target_os = "macos"))]
 fn configure_agent_chat_vibrancy(_cx: &mut App) {}
 
-/// Minimal placeholder view for the detached chat window.
-struct ChatWindowPlaceholder {
-    focus_handle: gpui::FocusHandle,
-}
+#[cfg(test)]
+mod tests {
+    use super::{chat_window_open_route, ChatWindowOpenRoute};
 
-impl ChatWindowPlaceholder {
-    fn new(cx: &mut gpui::Context<Self>) -> Self {
-        Self {
-            focus_handle: cx.focus_handle(),
-        }
-    }
-}
-
-impl gpui::Render for ChatWindowPlaceholder {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        cx: &mut gpui::Context<Self>,
-    ) -> impl gpui::IntoElement {
-        use gpui::{div, prelude::*, rgb};
-        let theme = crate::theme::get_cached_theme();
-
-        div()
-            .track_focus(&self.focus_handle)
-            .on_key_down(
-                cx.listener(|_this, event: &gpui::KeyDownEvent, _window, cx| {
-                    let key = event.keystroke.key.as_str();
-                    let close_requested = (event.keystroke.modifiers.platform
-                        && key.eq_ignore_ascii_case("w"))
-                        || crate::ui_foundation::is_key_escape(key);
-                    if close_requested {
-                        cx.stop_propagation();
-                        cx.defer(|cx| {
-                            close_chat_window(cx);
-                        });
-                    }
-                }),
-            )
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .child(div().text_base().opacity(0.7).child("Agent Chat Window"))
-            .child(
-                div()
-                    .pt(px(8.0))
-                    .text_sm()
-                    .opacity(0.45)
-                    .child("Detached chat \u{2014} full implementation coming soon"),
-            )
-            .child(
-                div()
-                    .pt(px(4.0))
-                    .text_xs()
-                    .opacity(0.35)
-                    .text_color(rgb(theme.colors.accent.selected))
-                    .child("\u{2318}W to close"),
-            )
+    #[test]
+    fn bare_detached_open_never_routes_to_a_coming_soon_info_state() {
+        assert_eq!(
+            chat_window_open_route(false),
+            ChatWindowOpenRoute::SpawnRealThread
+        );
+        assert_eq!(
+            chat_window_open_route(true),
+            ChatWindowOpenRoute::ActivateExisting
+        );
     }
 }

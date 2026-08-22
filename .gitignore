@@ -120,4 +120,5 @@ scripts/devtools/bin/
 /runs/
 /.fusion-runs/
 tests/__pycache__/
+scripts/agentic/__pycache__/
 scripts/agentic/fixtures/flow-ux-project/.mdflow/.cache/
