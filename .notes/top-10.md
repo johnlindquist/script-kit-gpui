@@ -1000,6 +1000,12 @@ offline receipts until their real producers are run again.
     shared roots, and artifact destinations were also followed silently.
     Eight disposable-workspace cases proved all six traversal identities and
     both external-symlink escapes reached fake Cargo despite the pool lock.
+18. Cargo command aliases and external subcommands were dispatched before
+    their actual expanded operation was known: `t -- --ignored`, `r --bin
+    script-kit-gpui`, the repository's own `test-serial` alias, and arbitrary
+    installed plugins bypassed the explicit reviewed test/run boundaries.
+    `cargo doc --open` also retained an unguarded browser/focus side effect.
+    Five fake-Cargo mutations reproduced these remaining command-owner gaps.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1141,7 +1147,7 @@ offline receipts until their real producers are run again.
    state, pool, exit status, elapsed seconds, and before/after free space.
    Direct, inline, and file-based `--config` overrides fail before pool
    creation because they can replace effective job counts and target
-   ownership. The fake-Cargo behavior suite passes **86 cases and 351
+   ownership. The fake-Cargo behavior suite passes **91 cases and 366
    assertions** without building Rust or opening the application.
    `SCRIPT_KIT_AGENT_TIMINGS=1` emits Cargo's real critical-path HTML plus a
    fail-closed machine-readable summary of actual hot units, duplicate
@@ -1163,7 +1169,9 @@ offline receipts until their real producers are run again.
    integration selectors, ignored-test flags, `system-tests`, and
    `--all-features` fail before touching any build pool. `cargo run` accepts
    only the non-GUI `export_design_tokens` owner; application binaries and
-   live benchmarks are refused. Existing actual ignored system-input,
+   live benchmarks are refused. Browser-opening documentation, built-in
+   Cargo aliases, repo-local aliases, and arbitrary external subcommands
+   cannot escape those reviewed command owners. Existing actual ignored system-input,
    clipboard, Settings, and paid-provider tests can therefore never be
    activated accidentally. Named reviewed integrations, library filters,
    domain packages, and the standalone exporter remain behavior-proven.
@@ -1234,7 +1242,7 @@ offline receipts until their real producers are run again.
     across 37 files in 16.39s**, without the previous repository scan or load
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
-    separately passes all **86 fake-Cargo cases / 351 assertions** plus
+    separately passes all **91 fake-Cargo cases / 366 assertions** plus
     **seven direct release-owner/proof-gate cases / 20 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
