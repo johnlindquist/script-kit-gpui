@@ -135,6 +135,7 @@ const REQUIRED_BUILD_SAFETY_OWNERS = [
   "scripts/agentic/agent-cargo.sh",
   "scripts/agentic/cargo-cache-locks.sh",
   "scripts/agentic/cargo-build-policy.test.ts",
+  "scripts/agentic/reuse-rust-test-binary.sh",
 ] as const;
 
 const REQUIRED_FOCUSED_FIXTURES = {

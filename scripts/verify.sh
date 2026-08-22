@@ -152,6 +152,7 @@ require_clean_source_identity() {
     scripts/agentic/agent-cargo.sh
     scripts/agentic/cargo-cache-locks.sh
     scripts/agentic/cargo-build-policy.test.ts
+    scripts/agentic/reuse-rust-test-binary.sh
     scripts/agentic/cargo-timings-summary.ts
     scripts/agentic/cargo-timings-summary.test.ts
     scripts/agentic/quick-ai-latency-bench.test.ts
