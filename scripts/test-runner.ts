@@ -68,7 +68,7 @@
  * =============================================================================
  */
 
-import { readdir } from 'node:fs/promises';
+import { readdir, realpath } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 
 import { spawn } from 'bun';
@@ -467,6 +467,14 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
   };
 }
 
+async function protectedSystemInputOwner(testPath: string): Promise<string | null> {
+  const requestedName = basename(testPath);
+  if (SYSTEM_INPUT_TESTS.has(requestedName)) return requestedName;
+
+  const canonicalName = basename(await realpath(testPath));
+  return SYSTEM_INPUT_TESTS.has(canonicalName) ? canonicalName : null;
+}
+
 async function findTestFiles(specificTest?: string): Promise<string[]> {
   if (specificTest) {
     const testPath = specificTest.startsWith('/')
@@ -475,9 +483,10 @@ async function findTestFiles(specificTest?: string): Promise<string[]> {
         ? join(PROJECT_ROOT, specificTest)
         : join(TESTS_DIR, specificTest);
 
-    if (SYSTEM_INPUT_TESTS.has(basename(testPath)) && !INCLUDE_SYSTEM) {
+    const protectedOwner = INCLUDE_SYSTEM ? null : await protectedSystemInputOwner(testPath);
+    if (protectedOwner) {
       throw new Error(
-        `Refusing system-input test ${basename(testPath)} without --include-system.`,
+        `Refusing system-input test ${protectedOwner} without --include-system.`,
       );
     }
 
@@ -495,7 +504,15 @@ async function findTestFiles(specificTest?: string): Promise<string[]> {
     // unless --include-system is passed
     if (!INCLUDE_SYSTEM) {
       const before = testFiles.length;
-      testFiles = testFiles.filter(f => !SYSTEM_INPUT_TESTS.has(f));
+      const reviewedFiles = await Promise.all(
+        testFiles.map(async (file) => ({
+          file,
+          protectedOwner: await protectedSystemInputOwner(join(TESTS_DIR, file)),
+        })),
+      );
+      testFiles = reviewedFiles
+        .filter(({ protectedOwner }) => protectedOwner === null)
+        .map(({ file }) => file);
       if (testFiles.length < before) {
         log(`Skipping ${before - testFiles.length} system-input test(s) (use --include-system to include)`);
       }

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { copyFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 const projectRoot = resolve(import.meta.dir, "../..");
 const runnerPath = resolve(projectRoot, "scripts/test-runner.ts");
@@ -124,6 +126,25 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
     expect(result.exitCode).not.toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("Refusing system-input test test-system.ts");
+  });
+
+  test("a harmless-looking symlink cannot bypass the system-input exclusion", async () => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-sdk-symlink-"));
+    const protectedFixture = join(root, "test-system.ts");
+    const disguisedFixture = join(root, "ordinary-sdk-case.ts");
+    try {
+      // The synthetic protected target never performs actual OS input, so the
+      // regression remains safe even while demonstrating the former bypass.
+      copyFileSync(fixturePath, protectedFixture);
+      symlinkSync(protectedFixture, disguisedFixture);
+      const result = await runFixture("safety-env", [], disguisedFixture);
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("Refusing system-input test test-system.ts");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("runner overrides inherited screen, input, and live-AI opt-ins", async () => {
