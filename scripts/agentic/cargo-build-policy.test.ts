@@ -214,6 +214,70 @@ describe("bounded Cargo builds", () => {
     expect(readFileSync(workspace.capture, "utf8")).toContain("storage_stress=0\n");
   });
 
+  test("agent-scoped verification rejects inherited desktop permissions before Cargo runs", () => {
+    for (const permission of [
+      "SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER",
+      "SCRIPT_KIT_ALLOW_NATIVE_INPUT",
+      "SCRIPT_KIT_ALLOW_SCREEN_CAPTURE",
+      "SCRIPT_KIT_ALLOW_VISIBLE_PROBES",
+      "SCRIPT_KIT_ALLOW_LIVE_AI",
+      "SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH",
+    ]) {
+      const workspace = fixture();
+      const result = Bun.spawnSync(
+        ["/bin/bash", join(scripts, "..", "agent-check.sh"), "--quick"],
+        {
+          env: { ...workspace.env, [permission]: "1" },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+
+      expect(result.exitCode).toBe(78);
+      expect(result.stderr.toString()).toContain(permission);
+      expect(existsSync(workspace.capture)).toBe(false);
+    }
+  });
+
+  test("agent-scoped verification owns safe child permissions and reviews only bounded Rust targets", () => {
+    const workspace = fixture();
+    writeFileSync(join(workspace.bin, "rg"), '#!/bin/bash\nprintf "src/ai/reliability.rs\\n"\n');
+    chmodSync(join(workspace.bin, "rg"), 0o755);
+    writeFileSync(
+      join(workspace.bin, "cargo"),
+      '#!/bin/bash\nprintf "args=%s noninteractive=%s takeover=%s input=%s capture=%s visible=%s live_ai=%s app=%s search=%s storage=%s\\n" "$*" "$SCRIPT_KIT_NONINTERACTIVE" "$SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER" "$SCRIPT_KIT_ALLOW_NATIVE_INPUT" "$SCRIPT_KIT_ALLOW_SCREEN_CAPTURE" "$SCRIPT_KIT_ALLOW_VISIBLE_PROBES" "$SCRIPT_KIT_ALLOW_LIVE_AI" "$SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH" "$SCRIPT_KIT_SEARCH_FULL_STRESS" "$SCRIPT_KIT_STORAGE_FULL_STRESS" >> "$CARGO_POLICY_CAPTURE"\n',
+    );
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(scripts, "..", "agent-check.sh"), "src/ai/reliability.rs"],
+      {
+        env: {
+          ...workspace.env,
+          SCRIPT_KIT_NONINTERACTIVE: "0",
+          SCRIPT_KIT_SEARCH_FULL_STRESS: "1",
+          SCRIPT_KIT_STORAGE_FULL_STRESS: "1",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    const invocations = readFileSync(workspace.capture, "utf8").trim().split("\n");
+    expect(invocations).toHaveLength(5);
+    expect(invocations.map((line) => line.split(" noninteractive=")[0])).toEqual([
+      "args=check --locked --lib --bin script-kit-gpui",
+      "args=test --locked --lib reliability",
+      "args=clippy --locked --lib --no-deps -- -D warnings",
+      "args=test --locked --lib",
+      "args=test --locked -p sk-clipboard -p sk-protocol -p sk-storage",
+    ]);
+    for (const invocation of invocations) {
+      expect(invocation).toContain(
+        "noninteractive=1 takeover=0 input=0 capture=0 visible=0 live_ai=0 app=0 search=0 storage=0",
+      );
+    }
+  });
+
   test("uses two workers, a persistent sandbox-safe shader cache, timings, and a truthful receipt", () => {
     const workspace = fixture();
     const result = run(

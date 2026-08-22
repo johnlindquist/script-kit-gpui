@@ -140,6 +140,29 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+for unsafe_setting in \
+  SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER \
+  SCRIPT_KIT_ALLOW_NATIVE_INPUT \
+  SCRIPT_KIT_ALLOW_SCREEN_CAPTURE \
+  SCRIPT_KIT_ALLOW_VISIBLE_PROBES \
+  SCRIPT_KIT_ALLOW_LIVE_AI \
+  SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH; do
+  if [[ "${!unsafe_setting:-0}" == "1" ]]; then
+    echo "[agent-check] REFUSED unsafe setting ${unsafe_setting}=1; agent verification must remain nonintrusive" >&2
+    exit 78
+  fi
+done
+
+export SCRIPT_KIT_NONINTERACTIVE=1
+export SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER=0
+export SCRIPT_KIT_ALLOW_NATIVE_INPUT=0
+export SCRIPT_KIT_ALLOW_SCREEN_CAPTURE=0
+export SCRIPT_KIT_ALLOW_VISIBLE_PROBES=0
+export SCRIPT_KIT_ALLOW_LIVE_AI=0
+export SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=0
+export SCRIPT_KIT_SEARCH_FULL_STRESS=0
+export SCRIPT_KIT_STORAGE_FULL_STRESS=0
+
 START_TIME="$(date +%s)"
 CARGO_WRAPPER="./scripts/agentic/agent-cargo.sh"
 
@@ -159,7 +182,8 @@ else
   echo "Changed files: none provided (running full default verification)"
 fi
 
-if ! run_step "agent-cargo check" "$CARGO_WRAPPER" check; then
+if ! run_step "agent-cargo check --locked --lib --bin script-kit-gpui" \
+  "$CARGO_WRAPPER" check --locked --lib --bin script-kit-gpui; then
   TOTAL_TIME="$(( $(date +%s) - START_TIME ))"
   echo ""
   echo "=== RESULT: FAIL ($(format_duration "$TOTAL_TIME")) ==="
@@ -186,7 +210,8 @@ if [[ "${#RELATED_FILTERS[@]}" -gt 0 ]]; then
   echo ""
   echo "Related test filters (fast feedback): ${RELATED_FILTERS[*]}"
   for filter in "${RELATED_FILTERS[@]}"; do
-    if ! run_step "agent-cargo test ${filter}" "$CARGO_WRAPPER" test "$filter"; then
+    if ! run_step "agent-cargo test --locked --lib ${filter}" \
+      "$CARGO_WRAPPER" test --locked --lib "$filter"; then
       TOTAL_TIME="$(( $(date +%s) - START_TIME ))"
       echo ""
       echo "=== RESULT: FAIL ($(format_duration "$TOTAL_TIME")) ==="
@@ -198,14 +223,23 @@ else
   echo "No related test filters discovered from changed files."
 fi
 
-if ! run_step "agent-cargo clippy --all-targets -- -D warnings" "$CARGO_WRAPPER" clippy --all-targets -- -D warnings; then
+if ! run_step "agent-cargo clippy --locked --lib --no-deps -- -D warnings" \
+  "$CARGO_WRAPPER" clippy --locked --lib --no-deps -- -D warnings; then
   TOTAL_TIME="$(( $(date +%s) - START_TIME ))"
   echo ""
   echo "=== RESULT: FAIL ($(format_duration "$TOTAL_TIME")) ==="
   exit 1
 fi
 
-if ! run_step "agent-cargo test" "$CARGO_WRAPPER" test; then
+if ! run_step "agent-cargo test --locked --lib" "$CARGO_WRAPPER" test --locked --lib; then
+  TOTAL_TIME="$(( $(date +%s) - START_TIME ))"
+  echo ""
+  echo "=== RESULT: FAIL ($(format_duration "$TOTAL_TIME")) ==="
+  exit 1
+fi
+
+if ! run_step "agent-cargo test --locked -p sk-clipboard -p sk-protocol -p sk-storage" \
+  "$CARGO_WRAPPER" test --locked -p sk-clipboard -p sk-protocol -p sk-storage; then
   TOTAL_TIME="$(( $(date +%s) - START_TIME ))"
   echo ""
   echo "=== RESULT: FAIL ($(format_duration "$TOTAL_TIME")) ==="
