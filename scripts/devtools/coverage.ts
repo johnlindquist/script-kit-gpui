@@ -275,6 +275,95 @@ const mainWindowPrimitiveIds = [
   "devtools.act",
 ] as const;
 
+const launcherOwnedSurfaceProfiles: CoverageProfile[] = [
+  {
+    id: "clipboard-history",
+    name: "Clipboard History",
+    variant: "ClipboardHistoryView",
+    renderer: "src/render_builtins/clipboard.rs",
+    privacy: "clipboard entry redaction and selection ownership",
+  },
+  {
+    id: "browser-history",
+    name: "Browser History",
+    variant: "BrowserHistoryView",
+    renderer: "src/render_builtins/browser_history.rs",
+    privacy: "private URL/title redaction and browser entry ownership",
+  },
+  {
+    id: "notes-browse",
+    name: "Notes Browse",
+    variant: "NotesBrowseView",
+    renderer: "src/render_builtins/notes_browse.rs",
+    privacy: "private note content and stable search selection",
+  },
+  {
+    id: "file-search",
+    name: "File Search",
+    variant: "FileSearchView",
+    renderer: "src/render_builtins/file_search.rs",
+    privacy: "private file paths and stable filesystem row ownership",
+  },
+  {
+    id: "day-page",
+    name: "Day Page",
+    variant: "DayPage",
+    renderer: "src/main_sections/day_page_view.rs",
+    privacy: "private markdown, draft preservation, and editor ownership",
+  },
+  {
+    id: "current-app-commands",
+    name: "Current App Commands",
+    variant: "CurrentAppCommandsView",
+    renderer: "src/render_builtins/current_app_commands.rs",
+    privacy: "private automation queries and selected app command identity",
+  },
+  {
+    id: "agent-chat-history",
+    name: "Agent Chat History",
+    variant: "AgentChatHistoryView",
+    renderer: "src/render_builtins/agent_chat_history.rs",
+    privacy: "private conversation index and selected saved session identity",
+  },
+  {
+    id: "webcam",
+    name: "Webcam",
+    variant: "WebcamView",
+    renderer: "src/prompts/webcam.rs",
+    privacy: "camera permission/startup state and private capture actions",
+  },
+].map(({ id, name, variant, renderer, privacy }) => ({
+  id,
+  name,
+  status: "partial" as const,
+  domains: ["targets", "elements", "layout", "input", "investigation"],
+  sourceFiles: [
+    renderer,
+    "src/app_layout/collect_elements.rs",
+    "src/app_layout/build_layout_info.rs",
+  ],
+  features: ["surface-owned renderer", "target-scoped semantic projection", privacy],
+  shortcuts: ["Escape", "Enter", "ArrowUp", "ArrowDown"],
+  supportedNow: [
+    `${name} production renderer`,
+    `${name} target-scoped semantic element projection`,
+    `${name} target-scoped layout and surface identity`,
+  ],
+  missingRuntimePrimitives: [
+    `${name} fresh target-scoped runtime receipt`,
+    `${name} observed selected/focused element and safe cleanup`,
+  ],
+  regressionRecipeRole:
+    `Keep ${name} fixtures as regression guards only after exact-target runtime evidence exists.`,
+  availablePrimitiveIds: [...mainWindowPrimitiveIds],
+  bindingSelectors: [{
+    relation: "Direct" as const,
+    priority: 100,
+    appViewVariants: [variant],
+    hostKinds: ["MainWindow"],
+  }],
+}));
+
 export const coverageProfiles: CoverageProfile[] = [
   {
     id: "agent-chat",
@@ -726,6 +815,7 @@ export const coverageProfiles: CoverageProfile[] = [
       { relation: "Direct", priority: 100, appViewVariants: ["DictationHistoryView"], hostKinds: ["MainWindow"] },
     ],
   },
+  ...launcherOwnedSurfaceProfiles,
 ];
 
 export function coverageProfileById(id: string): CoverageProfile | undefined {

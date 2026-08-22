@@ -118,4 +118,37 @@ describe("fail-closed coverage ownership registry", () => {
       "redacted transcript fingerprint",
     );
   });
+
+  test("high-traffic launcher surfaces name their real renderer and semantic owners without claiming runtime proof", () => {
+    const expectedOwners = [
+      ["clipboard-history", "ClipboardHistoryView", "src/render_builtins/clipboard.rs"],
+      ["browser-history", "BrowserHistoryView", "src/render_builtins/browser_history.rs"],
+      ["notes-browse", "NotesBrowseView", "src/render_builtins/notes_browse.rs"],
+      ["file-search", "FileSearchView", "src/render_builtins/file_search.rs"],
+      ["day-page", "DayPage", "src/main_sections/day_page_view.rs"],
+      ["current-app-commands", "CurrentAppCommandsView", "src/render_builtins/current_app_commands.rs"],
+      ["agent-chat-history", "AgentChatHistoryView", "src/render_builtins/agent_chat_history.rs"],
+      ["webcam", "WebcamView", "src/prompts/webcam.rs"],
+    ] as const;
+
+    for (const [id, variant, renderer] of expectedOwners) {
+      const profile = coverageProfileById(id);
+      expect(profile?.status).toBe("partial");
+      expect(profile?.sourceFiles).toEqual([
+        renderer,
+        "src/app_layout/collect_elements.rs",
+        "src/app_layout/build_layout_info.rs",
+      ]);
+      expect(profile?.bindingSelectors).toContainEqual({
+        relation: "Direct",
+        priority: 100,
+        appViewVariants: [variant],
+        hostKinds: ["MainWindow"],
+      });
+      const report = buildCoverageReport({ surface: id });
+      expect(report.evidenceClass).toBe("STATIC_INVENTORY");
+      expect(report.runtimeProof.provenSurfaceCount).toBe(0);
+    }
+    expect(validateCoverageProfiles(coverageProfiles)).toEqual([]);
+  });
 });

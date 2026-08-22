@@ -69,6 +69,36 @@ describe("executable PF-009 surface coverage binding inventory", () => {
     expect(receipt.summary.freshDirectRuntimeProofCount).toBe(0);
   });
 
+  test("eight high-traffic surfaces use exact production owners instead of inherited host coverage", async () => {
+    const pipeline = await runBindingsPipeline();
+    const expected = [
+      ["ClipboardHistoryView", "clipboard-history"],
+      ["BrowserHistoryView", "browser-history"],
+      ["NotesBrowseView", "notes-browse"],
+      ["FileSearchView", "file-search"],
+      ["DayPage", "day-page"],
+      ["CurrentAppCommandsView", "current-app-commands"],
+      ["AgentChatHistoryView", "agent-chat-history"],
+      ["WebcamView", "webcam"],
+    ] as const;
+
+    for (const [variant, owner] of expected) {
+      const matches = pipeline.build.set.bindings.filter(
+        (binding) => binding.appViewVariant === variant,
+      );
+      expect(matches.length).toBeGreaterThan(0);
+      for (const binding of matches) {
+        expect(binding.profileId).toBe(owner);
+        expect(binding.relation).toBe("Direct");
+        expect(binding.evidenceGrade).toBe("Direct");
+        expect(binding.profileStatus).toBe("partial");
+      }
+    }
+
+    const receipt = await passingInventory();
+    expect(receipt.summary.freshDirectRuntimeProofCount).toBe(0);
+  });
+
   test("missing owner validation or failed negative controls cannot pass", async () => {
     const invalidOwners = await passingInventory();
     invalidOwners.profileRegistry.validationErrorCount = 1;

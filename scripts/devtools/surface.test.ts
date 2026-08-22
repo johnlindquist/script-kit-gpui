@@ -21,7 +21,7 @@ test("generated surface inventory includes every AI recovery host", () => {
     contractKindCount: 37,
     contractMappingCount: 54,
     uniqueAppViewVariantCount: 53,
-    runtimeCoverageProfileCount: 11,
+    runtimeCoverageProfileCount: 19,
     orientationAliasCount: 5,
   });
   expect(report.featureMapSource).toEqual({
@@ -64,9 +64,9 @@ test("coverage reports runtime profiles as a separate inventory namespace", () =
     validatesSourceOwners: true,
   });
   expect(report.inventoryNamespaces).toEqual({
-    runtimeCoverageProfileCount: 11,
-    selectedRuntimeCoverageProfileCount: 11,
-    statusCounts: { supported: 0, partial: 11, missing: 0, planned: 0 },
+    runtimeCoverageProfileCount: 19,
+    selectedRuntimeCoverageProfileCount: 19,
+    statusCounts: { supported: 0, partial: 19, missing: 0, planned: 0 },
     note: "Runtime coverage profiles are not contract kinds, contract mappings, unique AppView variants, or orientation aliases.",
   });
 });
