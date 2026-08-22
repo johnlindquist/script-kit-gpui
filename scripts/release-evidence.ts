@@ -131,6 +131,7 @@ const REQUIRED_SDK_SAFETY_OWNERS = [
 ] as const;
 
 const REQUIRED_BUILD_SAFETY_OWNERS = [
+  "scripts/agent-check.sh",
   "scripts/agentic/agent-cargo.sh",
   "scripts/agentic/cargo-cache-locks.sh",
   "scripts/agentic/cargo-build-policy.test.ts",

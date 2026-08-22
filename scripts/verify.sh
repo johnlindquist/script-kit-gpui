@@ -147,6 +147,7 @@ require_clean_source_identity() {
     scripts/devtools/glass-lifecycle-filmstrip.test.ts
     scripts/devtools/rapid-toggle-stress.test.ts
     scripts/devtools/test-status.ts
+    scripts/agent-check.sh
     scripts/agentic/session.sh
     scripts/agentic/agent-cargo.sh
     scripts/agentic/cargo-cache-locks.sh

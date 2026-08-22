@@ -2232,6 +2232,7 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/devtools/test-status.ts",
     "scripts/devtools/state-ownership.test.ts",
     "scripts/devtools/generated-byte-compare.test.ts",
+    "scripts/agent-check.sh",
     "scripts/agentic/session.sh",
     "scripts/agentic/agent-cargo.sh",
     "scripts/agentic/cargo-cache-locks.sh",
