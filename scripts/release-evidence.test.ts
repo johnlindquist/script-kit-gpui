@@ -2146,7 +2146,7 @@ describe("nonintrusive executed Rust verification", () => {
   test("compile-only remains an explicitly named optional preflight", () => {
     const result = runVerify(["--only", "test-compile"]);
     expect(result.exitCode).toBe(0);
-    expect(result.cargoLog).toContain("test --no-run --locked");
+    expect(result.cargoLog).toContain("test --no-run --locked --lib");
   });
 
   test("a failing Rust behavior test propagates its failure to the release gate", () => {

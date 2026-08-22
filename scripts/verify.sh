@@ -383,7 +383,7 @@ run_phase() {
       run_step "test" "$CARGO_CMD" test --locked --lib
       ;;
     test-compile)
-      run_step "test-compile" "$CARGO_CMD" test --no-run --locked
+      run_step "test-compile" "$CARGO_CMD" test --no-run --locked --lib
       ;;
     domain-tests)
       run_step "domain-tests" "$CARGO_CMD" test --locked -p sk-clipboard -p sk-protocol -p sk-storage
