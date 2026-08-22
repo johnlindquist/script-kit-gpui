@@ -972,10 +972,14 @@ offline receipts until their real producers are run again.
    now also live in `crates/sk-protocol/src/search_contract.rs`, with their
    original app paths retained as compatibility adapters. Seven stale-query,
    duplicate-worker, cross-provider, and exact-generation regressions moved
-   out of the 15,000-case app harness; the expanded protocol domain executes
-   **58 passing cases in 0.03s** without GPUI, Metal, Whisper, or ONNX.
-   The complete domain inventory is now **82 cases**: nine Clipboard,
-   58 Protocol, and 15 Storage behaviors.
+   out of the 15,000-case app harness. The complete **984-line Unicode-aware
+   sentence-query matcher** and its **19 existing word-boundary, stopword,
+   ranking, prefix, metadata, and truthful-highlight regressions** then moved
+   into `crates/sk-protocol/src/sentence_search.rs` with every app-facing
+   import preserved. The expanded protocol domain executes **77 passing
+   cases in 0.03s** without GPUI, Metal, Whisper, or ONNX. The complete
+   domain inventory is now **101 cases**: nine Clipboard, 77 Protocol, and
+   15 Storage behaviors.
 2. **Separate test optimization from interactive rendering.** Keep every
    existing frame-sensitive dev dependency at `-O2`; explicitly compile
    correctness-test dependencies and vendored GPUI crates at `-O0`. Release
@@ -1810,6 +1814,9 @@ misleading highlights.
   worker, query-generation coordinator, and stale-completion lifecycle;
   `src/scripts/root_search_contract.rs` preserves app-service adapters and
   the existing app-facing compatibility path
+- `crates/sk-protocol/src/sentence_search.rs` for pure Unicode-aware
+  natural-language matching, proximity, evidence, and truthful highlights;
+  `src/scripts/search/sentence.rs` preserves its existing compatibility path
 - `src/main_sections/root_search_store.rs`
 - `src/app_impl/filtering_cache.rs` and filter-input handlers
 - `src/clipboard_history/cache.rs`, `src/dictation/history.rs`, and
@@ -1835,8 +1842,11 @@ misleading highlights.
    Reuse the actual GPUI-free coordinator and source-owned worker in
    `crates/sk-protocol/src/search_contract.rs`: their seven real generation,
    cancellation, exact-query, and stale-worker regressions execute directly
-   in the 58-case protocol crate. `src/scripts/root_search_contract.rs`
-   retains the app-dependent Notes/Todos/Brain adapters and compatibility
+   in the protocol crate. The full pure sentence matcher and 19 Unicode,
+   stopword, exact-word, live-prefix, ranking, and highlight regressions also
+   execute in that same **77-case GPUI-free crate**.
+   `src/scripts/root_search_contract.rs` and `src/scripts/search/sentence.rs`
+   retain the app-dependent Notes/Todos/Brain adapters and compatibility
    re-exports. The GPUI-bearing `RootSearchStore` remains binary-owned; its
    old binary-local tests are still excluded by `Cargo.toml`'s `test = false`.
 3. Reuse `CommandDescriptor` identity and capability metadata from Program 01
