@@ -256,7 +256,7 @@ export_artifacts() {
       --profile)
         if (( i + 1 < argc )); then
           profile_dir="${args[$((i + 1))]}"
-          [[ "$profile_dir" == "dev" ]] && profile_dir="debug"
+          [[ "$profile_dir" == "dev" || "$profile_dir" == "test" ]] && profile_dir="debug"
         fi
         ;;
     esac

@@ -128,6 +128,40 @@ describe("bounded Cargo builds", () => {
     });
   });
 
+  test("exports a cheap correctness-profile binary from Cargo's actual debug directory", () => {
+    const workspace = fixture();
+    const binary = join(
+      workspace.root,
+      "target-agent",
+      "pools",
+      "agent-debug",
+      "debug",
+      "export_design_tokens",
+    );
+    mkdirSync(join(workspace.root, "target-agent", "pools", "agent-debug", "debug"), {
+      recursive: true,
+    });
+    writeFileSync(binary, "#!/bin/sh\nprintf 'real-exporter\\n'\n");
+    chmodSync(binary, 0o755);
+
+    const result = run(
+      "agent-cargo.sh",
+      ["build", "--profile", "test", "--bin", "export_design_tokens"],
+      { ...workspace.env, SCRIPT_KIT_AGENT_ARTIFACT_NAME: "consistency-gov005" },
+    );
+    const exported = join(
+      workspace.root,
+      "target-agent",
+      "artifacts",
+      "consistency-gov005",
+      "export_design_tokens",
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain(`artifact bin=export_design_tokens path=${exported}`);
+    expect(readFileSync(exported, "utf8")).toBe(readFileSync(binary, "utf8"));
+  });
+
   test("fails before launching Cargo when the available disk floor is impossible", () => {
     const workspace = fixture();
     const result = run("agent-cargo.sh", ["check", "--lib"], {
