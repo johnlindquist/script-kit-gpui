@@ -39,7 +39,7 @@ function fixture() {
   writeFileSync(
     join(bin, "cargo"),
     `#!/bin/bash
-printf 'jobs=%s\\ntest_threads=%s\\nsearch_stress=%s\\nstorage_stress=%s\\nmodule=%s\\nwrapper=%s\\nsocket=%s\\nargs=' "$CARGO_BUILD_JOBS" "\${RUST_TEST_THREADS:-}" "\${SCRIPT_KIT_SEARCH_FULL_STRESS:-}" "\${SCRIPT_KIT_STORAGE_FULL_STRESS:-}" "$SCRIPT_KIT_METAL_MODULE_CACHE_DIR" "\${RUSTC_WRAPPER:-}" "\${SCCACHE_SERVER_UDS:-}" > "$CARGO_POLICY_CAPTURE"
+printf 'jobs=%s\\ntest_threads=%s\\nnoninteractive=%s\\nsearch_stress=%s\\nstorage_stress=%s\\nmodule=%s\\nwrapper=%s\\nsocket=%s\\nargs=' "$CARGO_BUILD_JOBS" "\${RUST_TEST_THREADS:-}" "\${SCRIPT_KIT_NONINTERACTIVE:-}" "\${SCRIPT_KIT_SEARCH_FULL_STRESS:-}" "\${SCRIPT_KIT_STORAGE_FULL_STRESS:-}" "$SCRIPT_KIT_METAL_MODULE_CACHE_DIR" "\${RUSTC_WRAPPER:-}" "\${SCCACHE_SERVER_UDS:-}" > "$CARGO_POLICY_CAPTURE"
 printf '%s ' "$@" >> "$CARGO_POLICY_CAPTURE"
 printf '\\n' >> "$CARGO_POLICY_CAPTURE"
 `,
@@ -421,6 +421,58 @@ describe("bounded Cargo builds", () => {
     expect(readFileSync(isolated.capture, "utf8")).toContain("storage_stress=0\n");
   });
 
+  test("direct agent Cargo defaults to noninteractive heavyweight-stress isolation", () => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", ["test", "--lib"], {
+      ...workspace.env,
+      SCRIPT_KIT_NONINTERACTIVE: "",
+      SCRIPT_KIT_SEARCH_FULL_STRESS: "1",
+      SCRIPT_KIT_STORAGE_FULL_STRESS: "1",
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(workspace.capture, "utf8")).toContain("noninteractive=1\n");
+    expect(readFileSync(workspace.capture, "utf8")).toContain("search_stress=0\n");
+    expect(readFileSync(workspace.capture, "utf8")).toContain("storage_stress=0\n");
+  });
+
+  test("noninteractive agent Cargo rejects dangerous inherited desktop permissions before startup", () => {
+    for (const permission of [
+      "SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER",
+      "SCRIPT_KIT_ALLOW_NATIVE_INPUT",
+      "SCRIPT_KIT_ALLOW_SCREEN_CAPTURE",
+      "SCRIPT_KIT_ALLOW_VISIBLE_PROBES",
+      "SCRIPT_KIT_ALLOW_LIVE_AI",
+      "SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH",
+    ]) {
+      const workspace = fixture();
+      const result = run("agent-cargo.sh", ["test", "--lib"], {
+        ...workspace.env,
+        SCRIPT_KIT_NONINTERACTIVE: "1",
+        [permission]: "1",
+      });
+
+      expect(result.status).toBe(64);
+      expect(result.stderr).toContain(permission);
+      expect(existsSync(workspace.capture)).toBe(false);
+    }
+  });
+
+  test.each(["yes", "2", "interactive"])(
+    "refuses malformed noninteractive safety policy %s before Cargo runs",
+    (policy) => {
+      const workspace = fixture();
+      const result = run("agent-cargo.sh", ["test", "--lib"], {
+        ...workspace.env,
+        SCRIPT_KIT_NONINTERACTIVE: policy,
+      });
+
+      expect(result.status).toBe(64);
+      expect(result.stderr).toContain("SCRIPT_KIT_NONINTERACTIVE must be 0 or 1");
+      expect(existsSync(workspace.capture)).toBe(false);
+    },
+  );
+
   test("explicit lower worker limits remain valid and bound the Rust test harness", () => {
     const workspace = fixture();
     const result = run("agent-cargo.sh", ["test", "--lib", "--jobs", "1"], {
@@ -440,11 +492,15 @@ describe("bounded Cargo builds", () => {
       ...workspace.env,
       SCRIPT_KIT_NONINTERACTIVE: "0",
       SCRIPT_KIT_AGENT_MAX_JOBS: "4",
+      SCRIPT_KIT_ALLOW_NATIVE_INPUT: "1",
+      SCRIPT_KIT_SEARCH_FULL_STRESS: "1",
     });
 
     expect(result.status).toBe(0);
+    expect(readFileSync(workspace.capture, "utf8")).toContain("noninteractive=0\n");
     expect(readFileSync(workspace.capture, "utf8")).toContain("jobs=4\n");
     expect(readFileSync(workspace.capture, "utf8")).toContain("test_threads=4\n");
+    expect(readFileSync(workspace.capture, "utf8")).toContain("search_stress=1\n");
   });
 
   test("exports a cheap correctness-profile binary from Cargo's actual debug directory", () => {

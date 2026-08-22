@@ -54,10 +54,32 @@ validate_worker_count() {
   (( value <= ceiling )) || worker_failure "${label}=${value} exceeds the ${ceiling}-worker safety ceiling"
 }
 
+noninteractive_mode="${SCRIPT_KIT_NONINTERACTIVE:-1}"
+case "$noninteractive_mode" in
+  0|1) ;;
+  *) worker_failure "SCRIPT_KIT_NONINTERACTIVE must be 0 or 1; got ${noninteractive_mode}" ;;
+esac
+export SCRIPT_KIT_NONINTERACTIVE="$noninteractive_mode"
+
+if [[ "$noninteractive_mode" == "1" ]]; then
+  for unsafe_setting in \
+    SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER \
+    SCRIPT_KIT_ALLOW_NATIVE_INPUT \
+    SCRIPT_KIT_ALLOW_SCREEN_CAPTURE \
+    SCRIPT_KIT_ALLOW_VISIBLE_PROBES \
+    SCRIPT_KIT_ALLOW_LIVE_AI \
+    SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH; do
+    if [[ "${!unsafe_setting:-0}" == "1" ]]; then
+      worker_failure "noninteractive agent Cargo refuses ${unsafe_setting}=1"
+    fi
+    export "${unsafe_setting}=0"
+  done
+fi
+
 max_workers="${SCRIPT_KIT_AGENT_MAX_JOBS:-2}"
 [[ "$max_workers" =~ ^[1-9][0-9]*$ ]] \
   || worker_failure "SCRIPT_KIT_AGENT_MAX_JOBS must be a positive whole worker count; got ${max_workers}"
-if [[ "${SCRIPT_KIT_NONINTERACTIVE:-0}" == "1" && "$max_workers" -gt 2 ]]; then
+if [[ "$noninteractive_mode" == "1" && "$max_workers" -gt 2 ]]; then
   worker_failure "noninteractive builds cannot exceed two workers; got SCRIPT_KIT_AGENT_MAX_JOBS=${max_workers}"
 fi
 
@@ -111,7 +133,7 @@ done
 
 export CARGO_BUILD_JOBS="$compiler_workers"
 export RUST_TEST_THREADS="$test_workers"
-if [[ "${SCRIPT_KIT_NONINTERACTIVE:-0}" == "1" ]]; then
+if [[ "$noninteractive_mode" == "1" ]]; then
   export SCRIPT_KIT_SEARCH_FULL_STRESS=0
   export SCRIPT_KIT_STORAGE_FULL_STRESS=0
 fi
