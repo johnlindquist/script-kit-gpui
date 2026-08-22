@@ -350,6 +350,71 @@ describe("bounded Cargo builds", () => {
     expect(existsSync(workspace.capture)).toBe(false);
   });
 
+  test.each([
+    ["test", "--lib", "--", "--ignored"],
+    ["test", "--lib", "--", "--include-ignored"],
+    ["test", "--lib", "--features", "system-tests"],
+    ["test", "--lib", "--features=ocr,system-tests"],
+    ["test", "--lib", "-F", "script-kit-gpui/system-tests"],
+    ["test", "--lib", "-Fsystem-tests"],
+    ["test", "--lib", "--all-features"],
+    ["test", "--lib", "--tests"],
+    ["test", "--lib", "--all-targets"],
+    ["nextest", "run", "--lib", "--run-ignored", "all"],
+    ["nextest", "run", "--lib", "--run-ignored=all"],
+  ])("refuses unsafe system/ignored test activation %j before Cargo runs", (...unsafeArgs) => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", unsafeArgs, workspace.env);
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("noninteractive agent Cargo refuses unsafe test selection");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test.each([
+    ["test"],
+    ["test", "--locked"],
+    ["test", "privacy"],
+    ["test", "-p", "script-kit-gpui"],
+    ["nextest", "run"],
+  ])("refuses unreviewed blanket Rust test discovery %j before Cargo runs", (...unscopedArgs) => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", unscopedArgs, workspace.env);
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("requires an explicit reviewed --lib, --test, or safe domain package");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test.each([
+    ["run"],
+    ["run", "--bin", "script-kit-gpui"],
+    ["run", "--bin=liquid-glass-demo"],
+    ["bench"],
+  ])("refuses application launch or live benchmark %j before Cargo runs", (...launchArgs) => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", launchArgs, workspace.env);
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("noninteractive agent Cargo refuses application launch or live benchmarks");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test.each([
+    ["test", "--locked", "--lib"],
+    ["test", "--locked", "--test", "protocol_batch"],
+    ["test", "-p", "sk-protocol"],
+    ["test", "--package=sk-storage"],
+    ["nextest", "run", "--lib"],
+    ["run", "--bin", "export_design_tokens"],
+  ])("preserves explicitly reviewed app, domain, and exporter command %j", (...reviewedArgs) => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", reviewedArgs, workspace.env);
+
+    expect(result.status).toBe(0);
+    expect(existsSync(workspace.capture)).toBe(true);
+  });
+
   test("refuses inherited compiler and Rust-test worker bypasses before Cargo runs", () => {
     for (const [variable, value] of [
       ["CARGO_BUILD_JOBS", "48"],

@@ -89,6 +89,102 @@ test_workers="${RUST_TEST_THREADS:-$compiler_workers}"
 validate_worker_count "$test_workers" "RUST_TEST_THREADS" "$max_workers"
 
 requested_args=("$@")
+
+if [[ "$noninteractive_mode" == "1" ]]; then
+  cargo_subcommand="${requested_args[0]:-}"
+  case "$cargo_subcommand" in
+    run)
+      reviewed_exporter=0
+      for (( command_index=1; command_index<${#requested_args[@]}; command_index++ )); do
+        case "${requested_args[$command_index]}" in
+          --bin)
+            (( command_index + 1 < ${#requested_args[@]} )) \
+              || worker_failure "noninteractive agent Cargo refuses application launch or live benchmarks"
+            command_index=$((command_index + 1))
+            [[ "${requested_args[$command_index]}" == "export_design_tokens" ]] \
+              || worker_failure "noninteractive agent Cargo refuses application launch or live benchmarks"
+            reviewed_exporter=1
+            ;;
+          --bin=*)
+            [[ "${requested_args[$command_index]#--bin=}" == "export_design_tokens" ]] \
+              || worker_failure "noninteractive agent Cargo refuses application launch or live benchmarks"
+            reviewed_exporter=1
+            ;;
+        esac
+      done
+      (( reviewed_exporter == 1 )) \
+        || worker_failure "noninteractive agent Cargo refuses application launch or live benchmarks"
+      ;;
+    bench)
+      worker_failure "noninteractive agent Cargo refuses application launch or live benchmarks"
+      ;;
+    test|nextest)
+      reviewed_app_target=0
+      reviewed_domain_target=0
+      unreviewed_package=0
+      for (( command_index=1; command_index<${#requested_args[@]}; command_index++ )); do
+        argument="${requested_args[$command_index]}"
+        package_name=""
+        feature_selection=""
+        case "$argument" in
+          --ignored|--ignored=*|--include-ignored|--include-ignored=*|--run-ignored|--run-ignored=*|--all-features|--tests|--all-targets|--bins|--examples)
+            worker_failure "noninteractive agent Cargo refuses unsafe test selection: ${argument}"
+            ;;
+          --lib|--test|--test=*)
+            reviewed_app_target=1
+            ;;
+          -p|--package)
+            (( command_index + 1 < ${#requested_args[@]} )) \
+              || worker_failure "noninteractive agent Cargo requires an explicit reviewed --lib, --test, or safe domain package"
+            command_index=$((command_index + 1))
+            package_name="${requested_args[$command_index]}"
+            ;;
+          --package=*)
+            package_name="${argument#--package=}"
+            ;;
+          -p*)
+            package_name="${argument#-p}"
+            package_name="${package_name#=}"
+            ;;
+          --features|-F)
+            (( command_index + 1 < ${#requested_args[@]} )) \
+              || worker_failure "noninteractive agent Cargo refuses unsafe test selection: ${argument}"
+            command_index=$((command_index + 1))
+            feature_selection="${requested_args[$command_index]}"
+            ;;
+          --features=*)
+            feature_selection="${argument#--features=}"
+            ;;
+          -F*)
+            feature_selection="${argument#-F}"
+            feature_selection="${feature_selection#=}"
+            ;;
+        esac
+
+        if [[ -n "$package_name" ]]; then
+          case "$package_name" in
+            sk-clipboard|sk-protocol|sk-storage) reviewed_domain_target=1 ;;
+            *) unreviewed_package=1 ;;
+          esac
+        fi
+
+        if [[ -n "$feature_selection" ]]; then
+          IFS=', ' read -r -a requested_features <<< "$feature_selection"
+          for selected_feature in "${requested_features[@]}"; do
+            if [[ "$selected_feature" == "system-tests" || "$selected_feature" == */system-tests ]]; then
+              worker_failure "noninteractive agent Cargo refuses unsafe test selection: ${selected_feature}"
+            fi
+          done
+        fi
+      done
+
+      if (( reviewed_app_target == 0 && (reviewed_domain_target == 0 || unreviewed_package == 1) )); then
+        worker_failure "noninteractive agent Cargo requires an explicit reviewed --lib, --test, or safe domain package"
+      fi
+      ;;
+  esac
+fi
+
 for (( worker_arg_index=0; worker_arg_index<${#requested_args[@]}; worker_arg_index++ )); do
   argument="${requested_args[$worker_arg_index]}"
   worker_value=""
