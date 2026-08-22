@@ -956,7 +956,7 @@ offline receipts until their real producers are run again.
 
 ### Ten implemented improvements and their verification contracts
 
-1. **Extract GPUI-free persistence ownership.** `crates/sk-storage` now owns
+1. **Extract GPUI-free persistence and search ownership.** `crates/sk-storage` now owns
    atomic writes, private directories/files, safe JSONL, symlink refusal, and
    collision-proof exports; `src/atomic_file.rs` preserves all app-facing
    paths. `cargo tree -p sk-storage` contains only `libc`, `tempfile`, `uuid`,
@@ -967,8 +967,15 @@ offline receipts until their real producers are run again.
    **15/15 domain suite**, including a real concurrent no-tearing regression,
    now finishes its behavior in **0.64s**; the former 12,000-write stress
    workload requires explicit `SCRIPT_KIT_STORAGE_FULL_STRESS=1`. The normal
-   release domain lane now executes **75/75 passing app-independent cases**:
-   nine Clipboard, 51 Protocol, and all 15 Storage behaviors.
+   release domain lane initially executed **75/75 passing app-independent
+   cases**. The pure provider coordinator and source-owned refresh lifecycle
+   now also live in `crates/sk-protocol/src/search_contract.rs`, with their
+   original app paths retained as compatibility adapters. Seven stale-query,
+   duplicate-worker, cross-provider, and exact-generation regressions moved
+   out of the 15,000-case app harness; the expanded protocol domain executes
+   **58 passing cases in 0.03s** without GPUI, Metal, Whisper, or ONNX.
+   The complete domain inventory is now **82 cases**: nine Clipboard,
+   58 Protocol, and 15 Storage behaviors.
 2. **Separate test optimization from interactive rendering.** Keep every
    existing frame-sensitive dev dependency at `-O2`; explicitly compile
    correctness-test dependencies and vendored GPUI crates at `-O0`. Release
@@ -1799,8 +1806,10 @@ misleading highlights.
 ### Primary ownership
 
 - `src/scripts/types.rs`, `src/scripts/grouping.rs`, and `src/scripts/search/`
-- `src/scripts/root_search_contract.rs` for the shared source-owned worker,
-  query-generation, stale-completion, and exact-snapshot lifecycle
+- `crates/sk-protocol/src/search_contract.rs` for the pure source-owned
+  worker, query-generation coordinator, and stale-completion lifecycle;
+  `src/scripts/root_search_contract.rs` preserves app-service adapters and
+  the existing app-facing compatibility path
 - `src/main_sections/root_search_store.rs`
 - `src/app_impl/filtering_cache.rs` and filter-input handlers
 - `src/clipboard_history/cache.rs`, `src/dictation/history.rs`, and
@@ -1823,11 +1832,13 @@ misleading highlights.
    selection keys, and `MatchEvidence`. Map `SearchQuery`, `ProviderRequest`,
    `ProviderGeneration`, `SearchCandidate`, `RankingEvidence`, and
    `SearchSnapshot` semantics onto those owners before adding new types.
-   Reuse the already-extracted library-testable pure owner in
-   `src/scripts/root_search_contract.rs`: its 11 real
-   `root_search_store_tests` cases execute under the library target. The
-   GPUI-bearing `RootSearchStore` itself remains binary-owned, and its old
-   binary-local tests are still excluded by `Cargo.toml`'s `test = false`.
+   Reuse the actual GPUI-free coordinator and source-owned worker in
+   `crates/sk-protocol/src/search_contract.rs`: their seven real generation,
+   cancellation, exact-query, and stale-worker regressions execute directly
+   in the 58-case protocol crate. `src/scripts/root_search_contract.rs`
+   retains the app-dependent Notes/Todos/Brain adapters and compatibility
+   re-exports. The GPUI-bearing `RootSearchStore` remains binary-owned; its
+   old binary-local tests are still excluded by `Cargo.toml`'s `test = false`.
 3. Reuse `CommandDescriptor` identity and capability metadata from Program 01
    instead of duplicating source IDs, actions, aliases, and permissions.
 4. Build immutable provider indexes in the background; publish complete
