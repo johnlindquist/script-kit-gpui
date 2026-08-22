@@ -114,6 +114,14 @@ const REQUIRED_PROOF_SUITES = [
   "tests/sdk/runner-safety.test.ts",
 ] as const;
 
+const REQUIRED_OPERATOR_SAFETY_OWNERS = [
+  "scripts/agentic/session.sh",
+  "scripts/devtools/driver.ts",
+  "scripts/devtools/lib/client.ts",
+  "scripts/devtools/lib/operator-safety.ts",
+  "scripts/devtools/test-status.ts",
+] as const;
+
 const REQUIRED_FOCUSED_FIXTURES = {
   "first-run-fixtures": "setup::tests::test_fresh_install_seeds_canonical_menu_syntax_handlers",
   "permissions-fixtures": "permissions_wizard::tests::test_snapshot_missing_required",
@@ -1535,6 +1543,7 @@ function requiredCleanReleaseSourceOwners(repositoryRoot: string): string[] {
     owners.includes("scripts/verify.sh") &&
     owners.includes("scripts/release-evidence.ts") &&
     REQUIRED_PROOF_SUITES.every((suite) => owners.includes(suite)) &&
+    REQUIRED_OPERATOR_SAFETY_OWNERS.every((owner) => owners.includes(owner)) &&
     RELEASE_INTEGRATION_SUITES.every((suite) => owners.includes(`tests/${suite}.rs`)),
   "publishable release evidence has an invalid or incomplete canonical source-owner inventory");
   return owners;

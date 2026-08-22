@@ -90,6 +90,7 @@ require_clean_source_identity() {
     scripts/devtools/consistency.test.ts
     scripts/devtools/surfaces.ts
     scripts/devtools/coverage.ts
+    scripts/devtools/driver.ts
     scripts/devtools/surface.test.ts
     scripts/devtools/surfaces-bindings.test.ts
     scripts/devtools/actions-projection.test.ts
@@ -105,6 +106,7 @@ require_clean_source_identity() {
     scripts/devtools/coverage.test.ts
     scripts/devtools/runtime-coverage.test.ts
     scripts/devtools/performance-contract.test.ts
+    scripts/devtools/lib/client.ts
     scripts/devtools/lib/operator-safety.ts
     scripts/devtools/lib/privacy.ts
     scripts/devtools/lib/evidence-class.ts
@@ -132,6 +134,8 @@ require_clean_source_identity() {
     scripts/devtools/glass-entry-motion-contract.test.ts
     scripts/devtools/glass-lifecycle-filmstrip.test.ts
     scripts/devtools/rapid-toggle-stress.test.ts
+    scripts/devtools/test-status.ts
+    scripts/agentic/session.sh
     scripts/agentic/cargo-build-policy.test.ts
     scripts/agentic/cargo-timings-summary.ts
     scripts/agentic/cargo-timings-summary.test.ts
