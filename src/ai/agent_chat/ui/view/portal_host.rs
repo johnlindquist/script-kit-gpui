@@ -178,12 +178,16 @@ impl AgentChatView {
         self.close_history_popup_for_owner_transition("portal_session_staged", true, cx);
         self.attach_menu_open = false;
 
+        let safe_query = crate::logging::log_private_user_value(&contract.query);
+        let safe_replace_label = crate::logging::log_private_user_value(&replace_label);
         tracing::info!(
             target: "script_kit::agent_chat",
             event = "agent_chat_portal_contract_staged",
             kind = ?contract.portal_kind,
-            query = %contract.query,
-            replace_label = %replace_label,
+            query_bytes = safe_query.raw_bytes,
+            query_sha256 = %safe_query.sha256,
+            replace_label_bytes = safe_replace_label.raw_bytes,
+            replace_label_sha256 = %safe_replace_label.sha256,
         );
 
         self.sync_agent_chat_popup_windows_from_cached_parent(cx);
@@ -197,8 +201,13 @@ impl AgentChatView {
     ) {
         use crate::ai::context_mentions::part_to_inline_token;
 
-        let inline_token =
+        let base_token =
             part_to_inline_token(&part).unwrap_or_else(|| format!("@{}", part.label()));
+        let inline_token = crate::spine::attach::unique_context_attachment_token(
+            &base_token,
+            &part,
+            &self.typed_mention_aliases,
+        );
         let should_claim_inline_ownership = self.should_claim_inline_mention_ownership(&part, cx);
         let current_text = self.live_thread().read(cx).input.text().to_string();
         let replacement = format!("{inline_token} ");
@@ -226,11 +235,13 @@ impl AgentChatView {
                 (next_text, next_cursor, false)
             };
 
+        let safe_token = crate::logging::log_private_user_value(&inline_token);
         tracing::info!(
             target: "script_kit::agent_chat",
             event = "agent_chat_portal_reentry_applied",
             exact_match,
-            new_token = %inline_token,
+            new_token_bytes = safe_token.raw_bytes,
+            new_token_sha256 = %safe_token.sha256,
             portal_kind = ?pending_portal_session
                 .as_ref()
                 .map(|session| session.contract.portal_kind),
@@ -380,10 +391,12 @@ impl AgentChatView {
                 .unwrap_or(AgentChatPortalSessionState::Active);
         }
         if portal_kind == crate::ai::context_selector::types::ContextPortalKind::AgentChatHistory {
+            let safe_query = crate::logging::log_private_user_value(&query);
             tracing::info!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_history_portal_query_staged",
-                query = %query,
+                query_bytes = safe_query.raw_bytes,
+                query_sha256 = %safe_query.sha256,
             );
         }
         cx.defer(move |cx| {

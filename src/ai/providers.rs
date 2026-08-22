@@ -56,6 +56,69 @@ fn extract_api_error_message(body: &str) -> Option<String> {
     None
 }
 
+fn safe_provider_diagnostic_detail(raw: &str) -> String {
+    super::reliability::redact_diagnostic(raw)
+        .copyable_detail
+        .unwrap_or_else(|| "Provider diagnostic details were redacted".to_string())
+}
+
+fn provider_http_failure_message(status: u16, provider_name: &str, body: &str) -> String {
+    let error_detail = extract_api_error_message(body);
+
+    match status {
+        401 => {
+            let detail = error_detail.unwrap_or_else(|| "Invalid or missing API key".to_string());
+            format!(
+                "{} authentication failed: {}",
+                provider_name,
+                safe_provider_diagnostic_detail(&simplify_auth_error(&detail))
+            )
+        }
+        403 => {
+            let detail = error_detail.unwrap_or_else(|| "Access denied".to_string());
+            format!(
+                "{} access denied: {}",
+                provider_name,
+                safe_provider_diagnostic_detail(&detail)
+            )
+        }
+        404 => {
+            let detail = error_detail.unwrap_or_else(|| "Model or endpoint not found".to_string());
+            format!(
+                "{}: {}",
+                provider_name,
+                safe_provider_diagnostic_detail(&detail)
+            )
+        }
+        429 => {
+            let detail = error_detail.unwrap_or_else(|| "Too many requests".to_string());
+            format!(
+                "{} rate limited: {}",
+                provider_name,
+                safe_provider_diagnostic_detail(&detail)
+            )
+        }
+        500..=599 => {
+            let detail = error_detail.unwrap_or_else(|| "Server error".to_string());
+            format!(
+                "{} server error ({}): {}",
+                provider_name,
+                status,
+                safe_provider_diagnostic_detail(&detail)
+            )
+        }
+        _ => {
+            let detail = error_detail.unwrap_or_else(|| body.to_string());
+            format!(
+                "{} error (HTTP {}): {}",
+                provider_name,
+                status,
+                safe_provider_diagnostic_detail(&detail)
+            )
+        }
+    }
+}
+
 /// Handle HTTP response and return an error if status is not 2xx.
 ///
 /// Reads the error body and extracts a user-friendly message.
@@ -73,45 +136,14 @@ fn handle_http_response(
     let mut body = response.into_body();
     let body_str = body.read_to_string().unwrap_or_default();
 
-    // Try to extract a meaningful error message
-    let error_detail = extract_api_error_message(&body_str);
-
-    // Build user-friendly error message based on status code
-    let user_message = match status {
-        401 => {
-            let detail = error_detail.unwrap_or_else(|| "Invalid or missing API key".to_string());
-            format!(
-                "{} authentication failed: {}",
-                provider_name,
-                simplify_auth_error(&detail)
-            )
-        }
-        403 => {
-            let detail = error_detail.unwrap_or_else(|| "Access denied".to_string());
-            format!("{} access denied: {}", provider_name, detail)
-        }
-        404 => {
-            let detail = error_detail.unwrap_or_else(|| "Model or endpoint not found".to_string());
-            format!("{}: {}", provider_name, detail)
-        }
-        429 => {
-            let detail = error_detail.unwrap_or_else(|| "Too many requests".to_string());
-            format!("{} rate limited: {}", provider_name, detail)
-        }
-        500..=599 => {
-            let detail = error_detail.unwrap_or_else(|| "Server error".to_string());
-            format!("{} server error ({}): {}", provider_name, status, detail)
-        }
-        _ => {
-            let detail = error_detail.unwrap_or_else(|| body_str.clone());
-            format!("{} error (HTTP {}): {}", provider_name, status, detail)
-        }
-    };
+    let user_message = provider_http_failure_message(status, provider_name, &body_str);
+    let diagnostic = super::reliability::redact_diagnostic(&body_str);
 
     tracing::warn!(
         status = status,
         provider = provider_name,
-        raw_error = %body_str,
+        diagnostic_fingerprint = %diagnostic.fingerprint.0,
+        response_bytes = body_str.len(),
         "API request failed"
     );
 
@@ -188,6 +220,7 @@ fn send_json_with_retry(
                 return Ok(response);
             }
             Err(error) => {
+                let diagnostic = super::reliability::redact_diagnostic(&error.to_string());
                 if should_retry_transport_error(&error) && attempt < HTTP_MAX_ATTEMPTS {
                     let delay = retry_delay_for_attempt(attempt);
                     tracing::warn!(
@@ -196,7 +229,7 @@ fn send_json_with_retry(
                         operation = operation,
                         attempt,
                         max_attempts = HTTP_MAX_ATTEMPTS,
-                        error = %error,
+                        diagnostic_fingerprint = %diagnostic.fingerprint.0,
                         retry_in_ms = delay.as_millis() as u64,
                         "Retrying AI API request after transient transport error"
                     );
@@ -204,7 +237,10 @@ fn send_json_with_retry(
                     continue;
                 }
 
-                return Err(anyhow!(error)).context(format!(
+                let safe_detail = diagnostic.copyable_detail.unwrap_or_else(|| {
+                    "Provider transport diagnostic details were redacted".to_string()
+                });
+                return Err(anyhow!(safe_detail)).context(format!(
                     "{} request failed (attempted={} attempt={}/{})",
                     provider_name, operation, attempt, HTTP_MAX_ATTEMPTS
                 ));
@@ -378,6 +414,14 @@ impl ProviderMessage {
 
 /// Callback type for streaming responses.
 pub type StreamCallback = Box<dyn Fn(String) -> bool + Send + Sync>;
+
+fn forward_unstreamed_claude_response(
+    response: &str,
+    streamed_chunk_count: usize,
+    on_chunk: &StreamCallback,
+) -> bool {
+    streamed_chunk_count > 0 || on_chunk(response.to_string())
+}
 
 /// Trait defining the interface for AI providers.
 ///
@@ -1913,22 +1957,13 @@ impl ClaudeCodeProvider {
         let mut cmd = Command::new(&self.claude_path);
 
         // ASSISTANT MODE: Disable all coding features, act as a helpful assistant
-        // Full isolation via --setting-sources "" prevents loading project/local settings.
-        // We extract credential fields from ~/.claude/settings.json and merge them
-        // into --settings so the CLI can authenticate.
+        // Full isolation prevents project settings from loading. Credentials stay
+        // in the child environment; inline `--settings` contains no auth data.
         cmd.arg("--setting-sources").arg("");
-
-        let mut merged_settings = super::session::read_user_credential_settings();
-        if let Some(obj) = merged_settings.as_object_mut() {
-            obj.insert("disableAllHooks".to_string(), serde_json::json!(true));
-            obj.insert(
-                "permissions".to_string(),
-                serde_json::json!({"allow": ["WebSearch", "WebFetch", "Read"]}),
-            );
-        }
-        let settings_json = serde_json::to_string(&merged_settings)
-            .unwrap_or_else(|_| r#"{"disableAllHooks":true}"#.to_string());
-        cmd.arg("--settings").arg(&settings_json);
+        let launch_auth = super::session::apply_safe_claude_launch_settings(
+            &mut cmd,
+            &super::session::read_user_credential_settings(),
+        )?;
 
         // Only allow safe, non-destructive tools
         cmd.arg("--tools").arg("WebSearch, WebFetch, Read");
@@ -1967,10 +2002,8 @@ impl ClaudeCodeProvider {
 
         // System prompt - use provided or default to helpful assistant
         // Note: System prompt is only applied on new sessions; resumed sessions use the original
-        let effective_system_prompt = system_prompt
-            .filter(|sp| !sp.trim().is_empty())
-            .unwrap_or("You are a helpful AI assistant");
-        cmd.arg("--system-prompt").arg(effective_system_prompt);
+        let system_prompt_transport =
+            super::session::prepare_private_claude_system_prompt(&mut cmd, system_prompt)?;
 
         // Clear CLAUDECODE env var so the spawned CLI doesn't think it's a nested session
         cmd.env_remove("CLAUDECODE");
@@ -1982,10 +2015,14 @@ impl ClaudeCodeProvider {
         tracing::debug!(
             session_id = %session_id,
             model_id = %model_id,
+            credential_env_count = launch_auth.credential_env_count,
+            api_key_configured = launch_auth.api_key_configured,
+            oauth_token_configured = launch_auth.oauth_token_configured,
             "Spawning Claude Code CLI"
         );
 
         let mut child = cmd.spawn().context("Failed to spawn `claude` CLI")?;
+        system_prompt_transport.deliver_after_spawn(&mut child)?;
 
         // Drain stderr in a separate thread to prevent deadlock
         // Use Arc<Mutex<>> to capture stderr content for error reporting
@@ -1997,7 +2034,12 @@ impl ClaudeCodeProvider {
                 for line in reader.lines().map_while(Result::ok) {
                     // Log stderr for debugging (but don't spam)
                     if !line.trim().is_empty() {
-                        tracing::trace!(stderr = %line, "Claude CLI stderr");
+                        let diagnostic = super::reliability::redact_diagnostic(&line);
+                        tracing::trace!(
+                            diagnostic_fingerprint = %diagnostic.fingerprint.0,
+                            stderr_bytes = line.len(),
+                            "Claude CLI stderr"
+                        );
                         // Capture stderr for error messages
                         if let Ok(mut content) = stderr_capture.lock() {
                             if !content.is_empty() {
@@ -2019,7 +2061,7 @@ impl ClaudeCodeProvider {
             let msg = Self::make_user_message_json(user_prompt);
             let line = serde_json::to_string(&msg)?;
 
-            tracing::trace!(message = %line, "Sending to Claude CLI stdin");
+            tracing::trace!(message_bytes = line.len(), "Sending to Claude CLI stdin");
 
             stdin.write_all(line.as_bytes())?;
             stdin.write_all(b"\n")?;
@@ -2046,7 +2088,12 @@ impl ClaudeCodeProvider {
                 Ok(v) => v,
                 Err(_) => {
                     // Ignore non-JSON lines (e.g., debug output)
-                    tracing::trace!(line = %line, "Non-JSON line from Claude CLI");
+                    let diagnostic = super::reliability::redact_diagnostic(&line);
+                    tracing::trace!(
+                        diagnostic_fingerprint = %diagnostic.fingerprint.0,
+                        stdout_bytes = line.len(),
+                        "Non-JSON line from Claude CLI"
+                    );
                     continue;
                 }
             };
@@ -2117,7 +2164,10 @@ impl ClaudeCodeProvider {
                             })
                             .or_else(|| v.get("errors").and_then(|e| e.as_str()))
                             .unwrap_or("Unknown error");
-                        return Err(anyhow!("Claude Code error: {}", error_msg));
+                        return Err(anyhow!(
+                            "Claude Code error: {}",
+                            safe_provider_diagnostic_detail(error_msg)
+                        ));
                     }
                     if let Some(r) = v.get("result").and_then(|x| x.as_str()) {
                         final_result = Some(r.to_string());
@@ -2142,8 +2192,10 @@ impl ClaudeCodeProvider {
             if stderr_msg.is_empty() {
                 return Err(anyhow!("`claude` CLI exited with status: {}", status));
             } else {
+                let diagnostic = super::reliability::redact_diagnostic(&stderr_msg);
                 tracing::error!(
-                    stderr = %stderr_msg,
+                    diagnostic_fingerprint = %diagnostic.fingerprint.0,
+                    stderr_bytes = stderr_msg.len(),
                     status = %status,
                     "Claude CLI failed with stderr output"
                 );
@@ -2158,11 +2210,11 @@ impl ClaudeCodeProvider {
                     "Claude Code CLI is not installed".to_string()
                 } else {
                     // Strip common prefixes like "Error: " for cleaner display
-                    stderr_msg
+                    let detail = stderr_msg
                         .trim()
                         .strip_prefix("Error: ")
-                        .unwrap_or(stderr_msg.trim())
-                        .to_string()
+                        .unwrap_or(stderr_msg.trim());
+                    safe_provider_diagnostic_detail(detail)
                 };
                 return Err(anyhow!("{}", clean_msg));
             }
@@ -2174,7 +2226,7 @@ impl ClaudeCodeProvider {
             "Claude Code CLI request completed"
         );
 
-        Ok(final_result.unwrap_or_default())
+        super::session::completed_claude_response(final_result)
     }
 }
 
@@ -2274,22 +2326,39 @@ impl AiProvider for ClaudeCodeProvider {
                         chunk_len = chunk.len(),
                         "Persistent session chunk received"
                     );
-                    let _ = on_chunk(chunk.to_string());
+                    on_chunk(chunk.to_string())
                 },
             ) {
                 Ok(result) => {
+                    let total_chunks = chunk_count.load(std::sync::atomic::Ordering::Relaxed);
+                    if !forward_unstreamed_claude_response(&result, total_chunks, &on_chunk) {
+                        return Ok(());
+                    }
                     tracing::info!(
                         session_id = %effective_session_id,
-                        total_chunks = chunk_count.load(std::sync::atomic::Ordering::Relaxed),
+                        total_chunks,
                         result_len = result.len(),
                         "Persistent session message completed"
                     );
                     return Ok(());
                 }
                 Err(e) => {
+                    if super::session::is_claude_session_cancelled(&e) {
+                        tracing::info!(
+                            session_id = %effective_session_id,
+                            "Persistent Claude request cancelled without retry"
+                        );
+                        return Ok(());
+                    }
+
+                    let total_chunks = chunk_count.load(std::sync::atomic::Ordering::Relaxed);
+                    if !super::session::should_retry_claude_session_failure(&e, total_chunks) {
+                        return Err(e);
+                    }
+                    let diagnostic = super::reliability::redact_diagnostic(&e.to_string());
                     tracing::warn!(
                         session_id = %effective_session_id,
-                        error = %e,
+                        diagnostic_fingerprint = %diagnostic.fingerprint.0,
                         "Persistent session failed, falling back to spawn-per-message"
                     );
                     // Fall through to spawn-per-message
@@ -2468,6 +2537,82 @@ impl Default for ProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_provider_custom_system_prompt_uses_private_shared_descriptor_transport() {
+        let hostile_prompt = "provider-private-system-prompt-canary Bearer provider-private-token";
+        let mut command = std::process::Command::new("claude-not-launched");
+        let _transport = super::super::session::prepare_private_claude_system_prompt(
+            &mut command,
+            Some(hostile_prompt),
+        )
+        .expect("provider uses the shared anonymous prompt pipe");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(args[0], "--system-prompt-file");
+        assert!(args[1].starts_with("/dev/fd/"));
+        assert!(args
+            .iter()
+            .all(|argument| !argument.contains("provider-private")));
+        assert!(!format!("{command:?}").contains("provider-private"));
+        assert!(command.get_envs().all(|(key, value)| {
+            !key.to_string_lossy().contains("provider-private")
+                && value.is_none_or(|value| !value.to_string_lossy().contains("provider-private"))
+        }));
+    }
+
+    #[test]
+    fn claude_provider_launch_keeps_hostile_credential_canaries_out_of_arguments() {
+        let api_key = "provider-private-api-key-canary";
+        let oauth_token = "provider-private-oauth-token-canary";
+        let mut command = std::process::Command::new("claude-not-launched");
+        let summary = super::super::session::apply_safe_claude_launch_settings(
+            &mut command,
+            &serde_json::json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": api_key,
+                    "CLAUDE_CODE_OAUTH_TOKEN": oauth_token,
+                },
+                "apiKeyHelper": "provider-private-helper-canary",
+                "oauthAccount": {"emailAddress": "provider-private-account-canary"},
+            }),
+        )
+        .expect("existing explicit credentials safely replace unsupported metadata");
+
+        let args: Vec<_> = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        for canary in [
+            api_key,
+            oauth_token,
+            "provider-private-helper-canary",
+            "provider-private-account-canary",
+        ] {
+            assert!(args.iter().all(|argument| !argument.contains(canary)));
+            assert!(!format!("{summary:?}").contains(canary));
+        }
+
+        let environment: std::collections::HashMap<_, _> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(environment["ANTHROPIC_API_KEY"], api_key);
+        assert_eq!(environment["CLAUDE_CODE_OAUTH_TOKEN"], oauth_token);
+        assert!(summary.api_key_configured);
+        assert!(summary.oauth_token_configured);
+    }
 
     #[test]
     fn test_provider_message_constructors() {
@@ -2855,6 +3000,41 @@ mod tests {
     }
 
     #[test]
+    fn provider_http_failure_messages_redact_credentials_and_private_paths() {
+        let body = serde_json::json!({
+            "error": {
+                "type": "authentication_error",
+                "message": "Invalid credentials token=sk-private-token Authorization: Bearer sk-private-bearer /Users/private-project/secrets"
+            }
+        })
+        .to_string();
+
+        for status in [401, 403, 404, 429, 500, 418] {
+            let message = provider_http_failure_message(status, "Example Provider", &body);
+            assert!(message.contains("Example Provider"));
+            assert!(!message.contains("sk-private-token"));
+            assert!(!message.contains("sk-private-bearer"));
+            assert!(!message.contains("/Users/private-project"));
+        }
+
+        let auth_message = provider_http_failure_message(401, "Example Provider", &body);
+        assert!(auth_message.contains("authentication failed"));
+        let rate_message = provider_http_failure_message(429, "Example Provider", &body);
+        assert!(rate_message.contains("rate limited"));
+    }
+
+    #[test]
+    fn provider_diagnostic_copy_preserves_recovery_reason_without_exposing_secrets() {
+        let detail = safe_provider_diagnostic_detail(
+            "Sign in required api_key=sk-provider-secret /Users/private-person/config.json",
+        );
+
+        assert!(detail.contains("Sign in required"));
+        assert!(!detail.contains("sk-provider-secret"));
+        assert!(!detail.contains("/Users/private-person"));
+    }
+
+    #[test]
     fn test_simplify_auth_error_vercel_oidc() {
         let detail = "Error verifying OIDC token\nThe AI Gateway OIDC authentication token...";
         let result = simplify_auth_error(detail);
@@ -3032,6 +3212,46 @@ mod tests {
         assert_eq!(json["type"], "user");
         assert_eq!(json["message"]["role"], "user");
         assert_eq!(json["message"]["content"], "Hello, Claude!");
+    }
+
+    #[test]
+    fn claude_final_only_response_is_delivered_once_without_duplicating_streamed_answers() {
+        let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let captured = std::sync::Arc::clone(&delivered);
+        let callback: StreamCallback = Box::new(move |chunk| {
+            captured
+                .lock()
+                .expect("capture private response")
+                .push(chunk);
+            true
+        });
+
+        assert!(forward_unstreamed_claude_response(
+            "private final-only answer",
+            0,
+            &callback
+        ));
+        assert!(forward_unstreamed_claude_response(
+            "private already-streamed answer",
+            3,
+            &callback
+        ));
+        assert_eq!(
+            *delivered.lock().expect("inspect captured private answer"),
+            vec!["private final-only answer".to_string()]
+        );
+
+        let cancelled: StreamCallback = Box::new(|_| false);
+        assert!(!forward_unstreamed_claude_response(
+            "private cancelled answer",
+            0,
+            &cancelled
+        ));
+        assert!(forward_unstreamed_claude_response(
+            "private already-streamed answer",
+            1,
+            &cancelled
+        ));
     }
 
     #[test]

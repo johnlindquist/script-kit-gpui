@@ -95,6 +95,13 @@ type AgentChatFooterActionHandler = std::sync::Arc<dyn Fn(&mut Window, &mut App)
 type AgentChatProfileSelectionHandler = std::sync::Arc<dyn Fn(String, &mut App) + 'static>;
 type AgentChatEscalationHandler = std::sync::Arc<dyn Fn(String, &mut App) + 'static>;
 type AgentChatHostAppHandler = std::sync::Arc<dyn Fn(&mut App) + 'static>;
+type AgentChatHostContextStageOutcome = Result<
+    (
+        crate::ai::staged_context::StageContextItemOutcome,
+        crate::ai::staged_context::ContextItemId,
+    ),
+    String,
+>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FocusedTextMiniAction {
@@ -2597,50 +2604,64 @@ text_style.text_inset_left,
                 .iter()
                 .find(|command| command.handler == handler)
         };
+        let shortcut_command = |handler| {
+            command(handler).and_then(|binding| {
+                binding
+                    .descriptor
+                    .shortcut
+                    .map(|shortcut| (&binding.descriptor, shortcut))
+            })
+        };
         let mut buttons = Vec::new();
 
         match thread.status {
             AgentChatThreadStatus::Streaming => {
-                let descriptor = &command(
+                if let Some((descriptor, shortcut)) = shortcut_command(
                     crate::components::conversation_actions::AgentChatConversationCommand::Stop,
-                )
-                .expect("streaming Agent Chat binds Stop")
-                .descriptor;
-                buttons.push(AgentChatFooterButtonSpec {
-                    action: FooterAction::Stop,
-                    key: descriptor.shortcut.expect("Stop has a shortcut"),
-                    label: descriptor.label,
-                    selected: false,
-                    enabled: descriptor.availability.is_enabled(),
-                    disabled_reason: descriptor.availability.disabled_reason(),
-                });
+                ) {
+                    buttons.push(AgentChatFooterButtonSpec {
+                        action: FooterAction::Stop,
+                        key: shortcut,
+                        label: descriptor.label,
+                        selected: false,
+                        enabled: descriptor.availability.is_enabled(),
+                        disabled_reason: descriptor.availability.disabled_reason(),
+                    });
+                } else {
+                    tracing::error!(
+                        "Streaming Agent Chat has no routable Stop footer command and shortcut"
+                    );
+                }
             }
             AgentChatThreadStatus::WaitingForPermission => {
-                let descriptor = &command(
+                if let Some((descriptor, shortcut)) = shortcut_command(
                     crate::components::conversation_actions::AgentChatConversationCommand::Send,
-                )
-                .expect("permission-waiting Agent Chat binds disabled Send")
-                .descriptor;
-                buttons.push(AgentChatFooterButtonSpec {
-                    action: FooterAction::Run,
-                    key: descriptor.shortcut.expect("Send has a shortcut"),
-                    label: descriptor.label,
-                    selected: false,
-                    enabled: descriptor.availability.is_enabled(),
-                    disabled_reason: descriptor.availability.disabled_reason(),
-                });
+                ) {
+                    buttons.push(AgentChatFooterButtonSpec {
+                        action: FooterAction::Run,
+                        key: shortcut,
+                        label: descriptor.label,
+                        selected: false,
+                        enabled: descriptor.availability.is_enabled(),
+                        disabled_reason: descriptor.availability.disabled_reason(),
+                    });
+                } else {
+                    tracing::error!(
+                        "Permission-waiting Agent Chat has no truthful disabled Send footer command"
+                    );
+                }
             }
             AgentChatThreadStatus::Idle | AgentChatThreadStatus::Error => {
-                if let Some(retry) = command(
+                if let Some((descriptor, shortcut)) = shortcut_command(
                     crate::components::conversation_actions::AgentChatConversationCommand::Retry,
                 ) {
                     buttons.push(AgentChatFooterButtonSpec {
                         action: FooterAction::Retry,
-                        key: retry.descriptor.shortcut.expect("Retry has a shortcut"),
-                        label: retry.descriptor.label,
+                        key: shortcut,
+                        label: descriptor.label,
                         selected: false,
-                        enabled: retry.descriptor.availability.is_enabled(),
-                        disabled_reason: retry.descriptor.availability.disabled_reason(),
+                        enabled: descriptor.availability.is_enabled(),
+                        disabled_reason: descriptor.availability.disabled_reason(),
                     });
                 }
                 let input = thread.input.text();
@@ -2654,15 +2675,12 @@ text_style.text_inset_left,
                         enabled: true,
                         disabled_reason: None,
                     });
-                } else {
-                    let descriptor = &command(
-                        crate::components::conversation_actions::AgentChatConversationCommand::Send,
-                    )
-                    .expect("idle Agent Chat binds Send")
-                    .descriptor;
+                } else if let Some((descriptor, shortcut)) = shortcut_command(
+                    crate::components::conversation_actions::AgentChatConversationCommand::Send,
+                ) {
                     buttons.push(AgentChatFooterButtonSpec {
                         action: FooterAction::Run,
-                        key: descriptor.shortcut.expect("Send has a shortcut"),
+                        key: shortcut,
                         label: if attach_picker_active {
                             "Attach"
                         } else {
@@ -2676,6 +2694,10 @@ text_style.text_inset_left,
                             descriptor.availability.disabled_reason()
                         },
                     });
+                } else {
+                    tracing::error!(
+                        "Idle Agent Chat has no routable Send footer command and shortcut"
+                    );
                 }
             }
         }
@@ -4995,10 +5017,12 @@ text_style.text_inset_left,
         };
         self.pasted_image_tokens.push(token.clone());
         self.typed_mention_aliases.insert(token.token, part);
+        let safe_label = crate::logging::log_private_user_value(&token.label);
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_clipboard_image_pasted",
-            label = %token.label,
+            label_bytes = safe_label.raw_bytes,
+            label_sha256 = %safe_label.sha256,
             width = image_data.width,
             height = image_data.height,
             size_bytes = png_bytes.len(),
@@ -5391,11 +5415,16 @@ text_style.text_inset_left,
                 std::fs::write(&path, markdown)
                     .map_err(|error| format!("Write export failed: {error}"))?;
                 if let Err(error) = crate::platform::reveal_in_finder(&path) {
+                    let safe_path =
+                        crate::logging::log_private_user_value(&path.display().to_string());
+                    let safe_error = crate::logging::log_private_user_value(&error.to_string());
                     tracing::warn!(
                         target: "script_kit::agent_chat",
                         event = "agent_chat_export_reveal_failed",
-                        path = %path.display(),
-                        error = %error,
+                        path_bytes = safe_path.raw_bytes,
+                        path_sha256 = %safe_path.sha256,
+                        error_bytes = safe_error.raw_bytes,
+                        error_sha256 = %safe_error.sha256,
                     );
                 }
                 Ok(path)
@@ -5473,10 +5502,12 @@ text_style.text_inset_left,
             menu.selected_index.min(entries.len().saturating_sub(1))
         };
 
+        let safe_query = crate::logging::log_private_user_value(&menu.query);
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_history_popup_snapshot_built",
-            query = %menu.query,
+            query_bytes = safe_query.raw_bytes,
+            query_sha256 = %safe_query.sha256,
             hit_count = menu.hits.len(),
             visible_count = entries.len(),
             selected_index,
@@ -5535,11 +5566,11 @@ text_style.text_inset_left,
                     parent_automation_id,
                 });
             }
-            let lifetime = self
-                .history_popup_lifetime
-                .as_ref()
-                .expect("history popup lifetime should exist for visible menu")
-                .clone();
+            let Some(lifetime) = self.history_popup_lifetime.as_ref().cloned() else {
+                tracing::error!("Agent Chat history popup lost its registered lifetime");
+                self.mark_history_popup_closed(cx);
+                return;
+            };
             if let Err(error) = crate::ai::agent_chat::ui::history_popup::sync_history_popup_window(
                 cx,
                 crate::ai::agent_chat::ui::history_popup::AgentChatHistoryPopupRequest {
@@ -5829,13 +5860,17 @@ text_style.text_inset_left,
             );
         });
 
+        let safe_path = crate::logging::log_private_user_value(&display_path);
+        let safe_label = crate::logging::log_private_user_value(&label);
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_history_attachment_added",
             session_id = %session_id,
             mode = ?mode,
-            path = %display_path,
-            label = %label,
+            path_bytes = safe_path.raw_bytes,
+            path_sha256 = %safe_path.sha256,
+            label_bytes = safe_label.raw_bytes,
+            label_sha256 = %safe_label.sha256,
         );
 
         cx.notify();
@@ -5854,10 +5889,12 @@ text_style.text_inset_left,
         if !self.capabilities(cx).history {
             return false;
         }
+        let safe_query = crate::logging::log_private_user_value(&query);
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_history_portal_opened",
-            query = %query,
+            query_bytes = safe_query.raw_bytes,
+            query_sha256 = %safe_query.sha256,
             hit_count = hits.len(),
         );
         self.attach_menu_open = false;
@@ -6084,32 +6121,23 @@ text_style.text_inset_left,
         cx: &mut Context<Self>,
     ) -> crate::components::conversation_actions::ConversationCommandExecution {
         use crate::components::conversation_actions::{
-            ActiveWorkDismissal, ConversationCommandExecution, ConversationDismissDecision,
-            ConversationDismissFacts, ConversationDismissTrigger, ConversationOverlayFacts,
-            ConversationOverlayKind,
+            ConversationCommandExecution, ConversationDismissDecision, ConversationDismissTrigger,
+            ConversationOverlayFacts, ConversationOverlayKind,
         };
 
-        let response_in_progress = matches!(
-            self.live_thread().read(cx).status,
-            AgentChatThreadStatus::Streaming
-        );
-        let decision = crate::components::conversation_actions::resolve_conversation_dismissal(
-            ConversationDismissFacts {
-                overlays: ConversationOverlayFacts {
+        let decision =
+            crate::components::conversation_actions::resolve_agent_chat_conversation_dismissal(
+                self.conversation_command_facts(cx),
+                ConversationOverlayFacts {
                     blocking_modal_open: self.permission_options_open,
                     actions_open: crate::actions::is_actions_window_open(),
                     attachment_portal_open: self.pending_portal_session.is_some(),
                     composer_picker_open: self.has_escape_dismissible_popup(),
                 },
-                response_in_progress,
-                // Both embedded and detached surfaces fail closed until a
-                // behavior proof demonstrates a strong owner after host removal.
-                active_work: ActiveWorkDismissal::RequiresExplicitStop,
-            },
-            trigger,
-        );
+                trigger,
+            );
 
-        let execution = match decision {
+        match decision {
             ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::BlockingModal) => {
                 self.permission_options_open = false;
                 cx.notify();
@@ -6153,29 +6181,21 @@ text_style.text_inset_left,
                 }
                 ConversationCommandExecution::Executed
             }
-        };
-        execution
+        }
     }
 
     pub(crate) fn allow_native_close_request(&mut self, cx: &mut Context<Self>) -> bool {
         use crate::components::conversation_actions::{
-            ActiveWorkDismissal, ConversationDismissDecision, ConversationDismissFacts,
-            ConversationDismissTrigger, ConversationOverlayFacts, ConversationOverlayKind,
+            ConversationDismissDecision, ConversationDismissTrigger, ConversationOverlayFacts,
+            ConversationOverlayKind,
         };
-        let response_in_progress = matches!(
-            self.live_thread().read(cx).status,
-            AgentChatThreadStatus::Streaming
-        );
-        match crate::components::conversation_actions::resolve_conversation_dismissal(
-            ConversationDismissFacts {
-                overlays: ConversationOverlayFacts {
-                    blocking_modal_open: self.permission_options_open,
-                    actions_open: crate::actions::is_actions_window_open(),
-                    attachment_portal_open: self.pending_portal_session.is_some(),
-                    composer_picker_open: self.has_escape_dismissible_popup(),
-                },
-                response_in_progress,
-                active_work: ActiveWorkDismissal::RequiresExplicitStop,
+        match crate::components::conversation_actions::resolve_agent_chat_conversation_dismissal(
+            self.conversation_command_facts(cx),
+            ConversationOverlayFacts {
+                blocking_modal_open: self.permission_options_open,
+                actions_open: crate::actions::is_actions_window_open(),
+                attachment_portal_open: self.pending_portal_session.is_some(),
+                composer_picker_open: self.has_escape_dismissible_popup(),
             },
             ConversationDismissTrigger::CloseButton,
         ) {
@@ -6330,11 +6350,18 @@ text_style.text_inset_left,
             _ => None,
         };
         self.apply_composer_picker_transition(transition, cx);
+        let safe_query = crate::logging::log_private_user_value(
+            trigger
+                .as_ref()
+                .map(|trigger| trigger.query.as_str())
+                .unwrap_or(""),
+        );
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_composer_picker_dismissed",
             trigger = ?trigger.as_ref().map(|trigger| trigger.trigger),
-            query = %trigger.as_ref().map(|trigger| trigger.query.as_str()).unwrap_or(""),
+            query_bytes = safe_query.raw_bytes,
+            query_sha256 = %safe_query.sha256,
         );
         true
     }
@@ -7359,11 +7386,15 @@ text_style.text_inset_left,
                 focused_text_mini_active && focused_text_input_locked;
 
             if new_ready != this.ready_script_path {
+                let safe_path = new_ready.as_ref().map(|path| {
+                    crate::logging::log_private_user_value(&path.display().to_string())
+                });
                 tracing::info!(
                     target: "script_kit::footer_popup",
                     event = "agent_chat_generated_script_ready_state_changed",
                     ready = new_ready.is_some(),
-                    path = ?new_ready,
+                    path_bytes = ?safe_path.as_ref().map(|value| value.raw_bytes),
+                    path_sha256 = ?safe_path.as_ref().map(|value| value.sha256.as_str()),
                 );
                 this.ready_script_path = new_ready;
             }
@@ -7542,10 +7573,12 @@ text_style.text_inset_left,
         session_policy: crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy,
         cx: &mut Context<Self>,
     ) -> Self {
+        let safe_title = crate::logging::log_private_user_value(state.title.as_ref());
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_setup_surface_rendered",
-            title = %state.title,
+            title_bytes = safe_title.raw_bytes,
+            title_sha256 = %safe_title.sha256,
             session_policy = ?session_policy,
         );
         let noop_blink = cx.spawn(async move |_this, _cx| {});
@@ -8038,12 +8071,17 @@ text_style.text_inset_left,
             return false;
         };
 
+        let safe_query = crate::logging::log_private_user_value(&contract.query);
+        let safe_label =
+            crate::logging::log_private_user_value(&contract.replacement.preview_label());
         tracing::info!(
             target: "script_kit::agent_chat",
             event = "agent_chat_focused_mention_portal_open",
             kind = ?contract.portal_kind,
-            query = %contract.query,
-            replace_label = %contract.replacement.preview_label(),
+            query_bytes = safe_query.raw_bytes,
+            query_sha256 = %safe_query.sha256,
+            replace_label_bytes = safe_label.raw_bytes,
+            replace_label_sha256 = %safe_label.sha256,
         );
 
         self.open_portal_contract(contract, cx)
@@ -8738,14 +8776,18 @@ text_style.text_inset_left,
             self.register_inline_owned_context_part(inline_token.clone(), part);
         }
 
+        let safe_token = crate::logging::log_private_user_value(&inline_token);
+        let safe_context_item_id = crate::logging::log_private_user_value(staged.1.as_str());
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_host_primary_context_staged_preserving_composer",
             source,
-            token = %inline_token,
+            token_bytes = safe_token.raw_bytes,
+            token_sha256 = %safe_token.sha256,
             token_already_owned,
             outcome = ?staged.0,
-            context_item_id = %staged.1.as_str(),
+            context_item_id_bytes = safe_context_item_id.raw_bytes,
+            context_item_id_sha256 = %safe_context_item_id.sha256,
         );
         cx.notify();
         Ok(staged)
@@ -8782,18 +8824,7 @@ text_style.text_inset_left,
         items: Vec<crate::ai::staged_context::StagedContextItem>,
         source: &'static str,
         cx: &mut Context<Self>,
-    ) -> Result<
-        Vec<
-            Result<
-                (
-                    crate::ai::staged_context::StageContextItemOutcome,
-                    crate::ai::staged_context::ContextItemId,
-                ),
-                String,
-            >,
-        >,
-        String,
-    > {
+    ) -> Result<Vec<AgentChatHostContextStageOutcome>, String> {
         if self.is_setup_mode() {
             return Err("Agent Chat is in setup mode".to_string());
         }
@@ -9441,26 +9472,22 @@ text_style.text_inset_left,
                             None => Vec::new(),
                         }
                     }
-                    crate::spine::catalog_subsearch::ContextSubsearchSource::Scripts => {
-                        vec![Self::agent_chat_spine_pending_subsearch_section(
-                            "scripts",
-                            "@scripts:",
-                            "file-code",
+                    source @ (crate::spine::catalog_subsearch::ContextSubsearchSource::Scripts
+                    | crate::spine::catalog_subsearch::ContextSubsearchSource::Scriptlets
+                    | crate::spine::catalog_subsearch::ContextSubsearchSource::Skills) => {
+                        match crate::ai::context_selector::composer_catalog_subsearch_section(
+                            source,
                             rich_query,
-                        )]
-                    }
-                    crate::spine::catalog_subsearch::ContextSubsearchSource::Scriptlets => {
-                        vec![Self::agent_chat_spine_pending_subsearch_section(
-                            "scriptlets",
-                            "@scriptlets:",
-                            "file-code",
-                            rich_query,
-                        )]
-                    }
-                    crate::spine::catalog_subsearch::ContextSubsearchSource::Skills => {
-                        vec![Self::agent_chat_spine_pending_subsearch_section(
-                            "skills", "@skills:", "sparkles", rich_query,
-                        )]
+                            segment_index,
+                            segment_byte_range,
+                        ) {
+                            Some(section) => {
+                                vec![Self::agent_chat_rich_shared_subsearch_section(
+                                    section, rich_query,
+                                )]
+                            }
+                            None => Vec::new(),
+                        }
                     }
                 };
             }
@@ -9743,6 +9770,7 @@ text_style.text_inset_left,
     fn agent_chat_rich_subsearch_alias(
         &self,
         token: &str,
+        resolution_id: &str,
     ) -> Option<crate::ai::message_parts::AiContextPart> {
         let projection = self.composer_spine.input.projection.as_ref()?;
         let crate::spine::SpineSegmentKind::ContextMention {
@@ -9756,37 +9784,16 @@ text_style.text_inset_left,
             context_type,
             sub_query.as_deref(),
         )?;
-        let section =
-            crate::spine::attach::composer_subsearch_section(source, rich_query, 0, 0..0)?;
-        section.rows.into_iter().find_map(|row| match row.alias {
-            Some((alias_token, part)) if alias_token == token => Some(part),
-            _ => None,
-        })
-    }
-
-    fn agent_chat_spine_pending_subsearch_section(
-        kind: &str,
-        prefix: &str,
-        icon: &str,
-        query: &str,
-    ) -> SpineListSection {
-        let trimmed = query.trim();
-        let title = if trimmed.is_empty() {
-            format!("{prefix} search")
-        } else {
-            format!("{prefix}{trimmed}")
-        };
-        SpineListSection {
-            id: SharedString::from(format!("agent_chat-spine-section-subsearch:{kind}")),
-            title: SharedString::from(title),
-            subtitle: Some(SharedString::from(prefix.to_string())),
-            icon: Some(SharedString::from(icon.to_string())),
-            rows: vec![Self::agent_chat_spine_hint_row(
-                "Coming soon",
-                "Rich search for this source is not wired yet",
-                Some(icon),
-            )],
-        }
+        let section = crate::spine::attach::composer_subsearch_section(source, rich_query, 0, 0..0)
+            .or_else(|| {
+                crate::ai::context_selector::composer_catalog_subsearch_section(
+                    source,
+                    rich_query,
+                    0,
+                    0..0,
+                )
+            })?;
+        crate::spine::attach::composer_subsearch_alias_for_resolution(section, token, resolution_id)
     }
 
     fn agent_chat_spine_hint_row(title: &str, subtitle: &str, icon: Option<&str>) -> SpineListRow {
@@ -10019,7 +10026,7 @@ text_style.text_inset_left,
                         .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or(&full_path);
-                    let token = format!(
+                    let base_token = format!(
                         "@file:{}",
                         crate::spine::catalog_subsearch::escape_ref_component(basename),
                     );
@@ -10027,6 +10034,11 @@ text_style.text_inset_left,
                         path: full_path,
                         label: resolution_label.as_ref().to_string(),
                     };
+                    let token = crate::spine::attach::unique_context_attachment_token(
+                        &base_token,
+                        &part,
+                        &self.typed_mention_aliases,
+                    );
                     self.typed_mention_aliases.insert(token.clone(), part);
                     let ok = self.replace_agent_chat_spine_segment(
                         segment_index,
@@ -10070,11 +10082,18 @@ text_style.text_inset_left,
                             cx.notify();
                         });
                         self.sync_inline_mentions(cx);
+                        let safe_flow =
+                            crate::logging::log_private_user_value(resolution_label.as_ref());
+                        let safe_path = crate::logging::log_private_user_value(
+                            &flow_path.display().to_string(),
+                        );
                         tracing::info!(
                             target: "script_kit::agent_chat",
                             event = "agent_chat_flow_search_staged_flow",
-                            flow = %resolution_label.as_ref(),
-                            path = %flow_path.display(),
+                            flow_bytes = safe_flow.raw_bytes,
+                            flow_sha256 = %safe_flow.sha256,
+                            path_bytes = safe_path.raw_bytes,
+                            path_sha256 = %safe_path.sha256,
                         );
                     }
                     return ok;
@@ -10106,17 +10125,25 @@ text_style.text_inset_left,
                     return ok;
                 }
                 // Shared-resolver sources (notes, browser history, dictation,
-                // chat history, calendar, notifications): register the alias
-                // so sync_inline_mentions stages the real content, exactly
-                // like the main window's spine_mention_aliases path.
-                if let Some(part) = self.agent_chat_rich_subsearch_alias(replacement.as_ref()) {
+                // chat history, calendar, notifications, scripts, scriptlets,
+                // skills): match BOTH friendly token and canonical identity
+                // so duplicate plugin labels cannot attach the wrong content.
+                let mut resolved_replacement = replacement.as_ref().to_string();
+                if let Some(part) = self
+                    .agent_chat_rich_subsearch_alias(replacement.as_ref(), resolution_id.as_ref())
+                {
+                    resolved_replacement = crate::spine::attach::unique_context_attachment_token(
+                        replacement.as_ref(),
+                        &part,
+                        &self.typed_mention_aliases,
+                    );
                     self.typed_mention_aliases
-                        .insert(replacement.as_ref().to_string(), part);
+                        .insert(resolved_replacement.clone(), part);
                 }
                 let ok = self.replace_agent_chat_spine_segment(
                     segment_index,
                     segment_byte_range,
-                    replacement.as_ref(),
+                    &resolved_replacement,
                     trailing_space,
                     cx,
                 );
@@ -12008,7 +12035,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
     /// a ghost-opacity chip containing the label and a × dismiss button.
     #[allow(dead_code)]
     fn render_pending_context_chips(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use crate::ai::context_mentions::visible_context_chip_indices;
+        use crate::ai::context_mentions::visible_context_chip_indices_with_aliases;
 
         let (parts, input_text) = {
             let thread = self.live_thread().read(cx);
@@ -12024,7 +12051,11 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                 .into_any_element();
         }
 
-        let chip_indices = visible_context_chip_indices(&input_text, &parts);
+        let chip_indices = visible_context_chip_indices_with_aliases(
+            &input_text,
+            &parts,
+            &self.typed_mention_aliases,
+        );
         let chip_parts: Vec<(usize, &AiContextPart)> = chip_indices
             .into_iter()
             .filter_map(|ix| parts.get(ix).map(|part| (ix, part)))
@@ -13568,12 +13599,14 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                             selected_index,
                             items.len(),
                         );
+                        let safe_query = crate::logging::log_private_user_value(&query);
                         tracing::info!(
                             target: "script_kit::tab_ai",
                             event = "agent_chat_composer_picker_refreshed",
                             layout = "inline_dropdown",
                             ?trigger,
-                            query = %query,
+                            query_bytes = safe_query.raw_bytes,
+                            query_sha256 = %safe_query.sha256,
                             item_count = items.len(),
                             selected_index,
                             live_command_count = available_commands.len(),
@@ -13817,13 +13850,17 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
 
         let trigger_str = session.trigger.label();
 
+        let safe_item_id = crate::logging::log_private_user_value(item.id.as_ref());
+        let safe_item_label = crate::logging::log_private_user_value(item.label.as_ref());
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "agent_chat_picker_item_accepted",
             trigger = ?session.trigger,
             submit,
-            item_id = %item.id,
-            item_label = %item.label,
+            item_id_bytes = safe_item_id.raw_bytes,
+            item_id_sha256 = %safe_item_id.sha256,
+            item_label_bytes = safe_item_label.raw_bytes,
+            item_label_sha256 = %safe_item_label.sha256,
         );
 
         // Record accepted item for telemetry / getAgentChatState queries.
@@ -13936,9 +13973,15 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                             Self::caret_after_replacement(&session.trigger_range, &command_text);
                         let part =
                             build_skill_context_part(skill_id, "Claude Code", skill_id, skill_path);
+                        let safe_skill = crate::logging::log_private_user_value(skill_id);
+                        let safe_path = crate::logging::log_private_user_value(
+                            &skill_path.display().to_string(),
+                        );
                         tracing::info!(
-                            skill_id = %skill_id,
-                            path = %skill_path.display(),
+                            skill_id_bytes = safe_skill.raw_bytes,
+                            skill_id_sha256 = %safe_skill.sha256,
+                            path_bytes = safe_path.raw_bytes,
+                            path_sha256 = %safe_path.sha256,
                             "agent_chat_slash_claude_skill_selected"
                         );
                         if let Some(ref mut accepted) = self.last_accepted_item {
@@ -14056,11 +14099,15 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                 };
                 let inline_text = crate::ai::context_mentions::part_to_inline_token(&file_part)
                     .unwrap_or_else(|| format!("@file:{path_text}"));
+                let safe_path = crate::logging::log_private_user_value(&path_text);
+                let safe_inline_text = crate::logging::log_private_user_value(&inline_text);
                 tracing::info!(
                     target: "script_kit::tab_ai",
                     event = "agent_chat_inline_file_token_inserted",
-                    path = %path_text,
-                    inline_text = %inline_text,
+                    path_bytes = safe_path.raw_bytes,
+                    path_sha256 = %safe_path.sha256,
+                    inline_text_bytes = safe_inline_text.raw_bytes,
+                    inline_text_sha256 = %safe_inline_text.sha256,
                 );
                 (file_part, inline_text, false)
             }
@@ -14153,11 +14200,13 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                         item.label.as_ref(),
                     )
                 });
+                let safe_inline_text = crate::logging::log_private_user_value(&inline_text);
                 tracing::info!(
                     target: "script_kit::tab_ai",
                     event = "agent_chat_inline_portal_result_inserted",
                     portal_kind = ?payload.portal_kind,
-                    inline_text = %inline_text,
+                    inline_text_bytes = safe_inline_text.raw_bytes,
+                    inline_text_sha256 = %safe_inline_text.sha256,
                 );
                 (part, inline_text, false)
             }
@@ -14237,33 +14286,44 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
 
         if allow_inline_sync {
             if let Some(token) = part_to_inline_token(&part) {
+                let safe_token = crate::logging::log_private_user_value(&token);
                 if should_claim_inline_ownership {
                     self.inline_owned_context_tokens.insert(token.clone());
                     tracing::info!(
                         target: "script_kit::tab_ai",
                         event = "agent_chat_inline_mention_ownership_claimed",
-                        token = %token,
-                        item_id = %item.id,
-                        item_label = %item.label,
+                        token_bytes = safe_token.raw_bytes,
+                        token_sha256 = %safe_token.sha256,
+                        item_id_bytes = safe_item_id.raw_bytes,
+                        item_id_sha256 = %safe_item_id.sha256,
+                        item_label_bytes = safe_item_label.raw_bytes,
+                        item_label_sha256 = %safe_item_label.sha256,
                     );
                 } else {
                     tracing::info!(
                         target: "script_kit::tab_ai",
                         event = "agent_chat_inline_mention_ownership_preserved_existing_attachment",
-                        token = %token,
-                        item_id = %item.id,
-                        item_label = %item.label,
+                        token_bytes = safe_token.raw_bytes,
+                        token_sha256 = %safe_token.sha256,
+                        item_id_bytes = safe_item_id.raw_bytes,
+                        item_id_sha256 = %safe_item_id.sha256,
+                        item_label_bytes = safe_item_label.raw_bytes,
+                        item_label_sha256 = %safe_item_label.sha256,
                     );
                 }
             }
             self.sync_inline_mentions(cx);
         } else {
+            let safe_source = crate::logging::log_private_user_value(part.source());
             tracing::info!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_picker_context_attached_from_slash",
-                item_id = %item.id,
-                item_label = %item.label,
-                source = %part.source(),
+                item_id_bytes = safe_item_id.raw_bytes,
+                item_id_sha256 = %safe_item_id.sha256,
+                item_label_bytes = safe_item_label.raw_bytes,
+                item_label_sha256 = %safe_item_label.sha256,
+                source_bytes = safe_source.raw_bytes,
+                source_sha256 = %safe_source.sha256,
             );
             cx.notify();
         }
@@ -14294,18 +14354,15 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
         accent_color: u32,
         aliases: &std::collections::HashMap<String, AiContextPart>,
     ) -> Vec<TextHighlightRange> {
-        use crate::ai::context_mentions::{
-            parse_inline_context_mentions_with_aliases, part_to_inline_token,
-        };
-
-        let attached_tokens: HashSet<String> = attached_parts
-            .iter()
-            .filter_map(part_to_inline_token)
-            .collect();
+        use crate::ai::context_mentions::parse_inline_context_mentions_with_aliases;
 
         parse_inline_context_mentions_with_aliases(text, aliases)
             .into_iter()
-            .filter(|mention| attached_tokens.contains(&mention.canonical_token))
+            .filter(|mention| {
+                attached_parts
+                    .iter()
+                    .any(|part| part.has_same_attachment_owner(&mention.part))
+            })
             .map(|mention| TextHighlightRange {
                 start: mention.range.start,
                 end: mention.range.end,
@@ -15167,10 +15224,13 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
             super::setup_state::AgentChatSetupAction::OpenCatalog => {
                 match crate::ai::agent_chat::ui::open_agent_chat_agents_catalog_in_editor() {
                     Ok(path) => {
+                        let safe_path =
+                            crate::logging::log_private_user_value(&path.display().to_string());
                         tracing::info!(
                             target: "script_kit::tab_ai",
                             event = "agent_chat_setup_open_catalog_requested",
-                            path = %path.display(),
+                            path_bytes = safe_path.raw_bytes,
+                            path_sha256 = %safe_path.sha256,
                         );
                     }
                     Err(error) => {
@@ -15454,7 +15514,8 @@ impl AgentChatView {
         tracing::info!(
             target: "script_kit::agent_chat_telemetry",
             event = "agent_chat_key_routed",
-            key = %key,
+            key_bytes = key.len(),
+            key_is_single_character = key.chars().count() == 1,
             route = ?telemetry_args.route,
             picker_open,
             permission_active = telemetry_args.permission_active,
@@ -15462,7 +15523,7 @@ impl AgentChatView {
             cursor_after = telemetry_args.cursor_after,
             caused_submit = telemetry_args.caused_submit,
             consumed = telemetry_args.consumed,
-            telemetry_json = %telemetry_json,
+            telemetry_bytes = telemetry_json.len(),
         );
     }
 
@@ -15495,28 +15556,42 @@ impl AgentChatView {
         // Record into test probe ring buffer.
         self.record_picker_accept(telemetry.clone());
         let telemetry_json = serde_json::to_string(&telemetry).unwrap_or_default();
+        let safe_item_label = crate::logging::log_private_user_value(item_label);
+        let safe_item_id = crate::logging::log_private_user_value(item_id);
+        let safe_telemetry = crate::logging::log_private_user_value(&telemetry_json);
         tracing::info!(
             target: "script_kit::agent_chat_telemetry",
             event = "agent_chat_picker_item_accepted",
             trigger = %trigger,
-            item_label = %item_label,
-            item_id = %item_id,
+            item_label_bytes = safe_item_label.raw_bytes,
+            item_label_sha256 = %safe_item_label.sha256,
+            item_id_bytes = safe_item_id.raw_bytes,
+            item_id_sha256 = %safe_item_id.sha256,
             accepted_via_key = %accepted_via_key,
             cursor_after,
             caused_submit,
-            telemetry_json = %telemetry_json,
+            telemetry_bytes = safe_telemetry.raw_bytes,
+            telemetry_sha256 = %safe_telemetry.sha256,
         );
 
         // Emit a single consolidated interaction trace log event.
         if let Some(ref trace) = self.test_probe.last_interaction_trace {
+            let safe_accepted_label = trace
+                .accepted_label
+                .as_deref()
+                .map(crate::logging::log_private_user_value);
             tracing::info!(
                 target: "script_kit::agent_chat_telemetry",
                 event = "agent_chat_interaction_trace",
-                trace.key = %trace.key,
+                trace.key_bytes = trace.key.len(),
+                trace.key_is_single_character = trace.key.chars().count() == 1,
                 trace.route = %trace.route,
                 trace.picker_open_before = trace.picker_open_before,
                 trace.accepted_via_key = ?trace.accepted_via_key,
-                trace.accepted_label = ?trace.accepted_label,
+                trace.accepted_label_bytes =
+                    ?safe_accepted_label.as_ref().map(|value| value.raw_bytes),
+                trace.accepted_label_sha256 =
+                    ?safe_accepted_label.as_ref().map(|value| value.sha256.as_str()),
                 trace.cursor_before = trace.cursor_before,
                 trace.cursor_after = trace.cursor_after,
                 trace.caused_submit = trace.caused_submit,
@@ -16966,8 +17041,16 @@ impl Render for AgentChatView {
                     "The profile selector is unavailable in this chat",
                 )
             };
-            let zone = MainViewContextZoneSpec::try_new(cwd, None, model)
-                .expect("Agent Chat context-zone identities are unique");
+            let zone = match MainViewContextZoneSpec::try_new(cwd, None, model) {
+                Ok(zone) => zone,
+                Err(error) => {
+                    tracing::error!(
+                        error,
+                        "Agent Chat context-zone identity contract rejected its header chips"
+                    );
+                    return root.child(input).into_any_element();
+                }
+            };
             let view = cx.entity().downgrade();
             let handler: crate::components::main_view_chrome::SemanticChipActionHandler =
                 std::rc::Rc::new(move |invocation, window, cx| {

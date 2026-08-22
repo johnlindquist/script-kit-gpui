@@ -36,6 +36,7 @@ pub(crate) mod context_selector;
 pub(crate) mod context_selector_row;
 pub(crate) mod conversations;
 pub(crate) mod current_app_automation_memory;
+pub mod entry_contract;
 pub(crate) mod explicit_target_handoff;
 pub mod focused_text;
 pub(crate) mod harness;

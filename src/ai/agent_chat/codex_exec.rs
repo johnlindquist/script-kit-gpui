@@ -1,8 +1,7 @@
 //! Cold, one-shot Codex exec adapter used only by the hidden Quick AI profile.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -75,6 +74,244 @@ struct ActiveExecTurn {
     cancel_requested: Arc<AtomicBool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuickAiStartupCleanupPlan {
+    terminate_owned_group: bool,
+    remove_owned_scratch: bool,
+    release_active_turn: bool,
+}
+
+fn plan_quick_ai_startup_cleanup(
+    expected_generation: u64,
+    active_generation: Option<u64>,
+    owns_child: bool,
+    cleanup_verified: bool,
+    worker_owns_process: bool,
+) -> QuickAiStartupCleanupPlan {
+    if worker_owns_process {
+        return QuickAiStartupCleanupPlan {
+            terminate_owned_group: false,
+            remove_owned_scratch: false,
+            release_active_turn: false,
+        };
+    }
+
+    QuickAiStartupCleanupPlan {
+        terminate_owned_group: owns_child && !cleanup_verified,
+        remove_owned_scratch: cleanup_verified,
+        release_active_turn: cleanup_verified && active_generation == Some(expected_generation),
+    }
+}
+
+fn release_owned_quick_ai_turn(
+    turns: &mut HashMap<String, ActiveExecTurn>,
+    ui_thread_id: &str,
+    generation: u64,
+    cleanup_verified: bool,
+) -> bool {
+    let active_generation = turns.get(ui_thread_id).map(|turn| turn.generation);
+    let plan = plan_quick_ai_startup_cleanup(
+        generation,
+        active_generation,
+        false,
+        cleanup_verified,
+        false,
+    );
+    if plan.release_active_turn {
+        turns.remove(ui_thread_id);
+        return true;
+    }
+    false
+}
+
+struct QuickAiStartupGuard {
+    active_turns: Arc<Mutex<HashMap<String, ActiveExecTurn>>>,
+    ui_thread_id: String,
+    generation: u64,
+    scratch: Option<PathBuf>,
+    child: Option<Child>,
+    registration: Option<crate::process_manager::ChildRegistration>,
+    pgid: Option<i32>,
+    worker_owns_process: bool,
+}
+
+struct QuickAiWorkerOwnership {
+    child: Child,
+    registration: crate::process_manager::ChildRegistration,
+    scratch: PathBuf,
+}
+
+impl QuickAiStartupGuard {
+    fn reserve(
+        active_turns: Arc<Mutex<HashMap<String, ActiveExecTurn>>>,
+        ui_thread_id: String,
+        generation: u64,
+        cancel_requested: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        {
+            let mut turns = active_turns
+                .lock()
+                .map_err(|_| anyhow!("quick_ai_active_turn_lock_poisoned"))?;
+            if turns.contains_key(&ui_thread_id) {
+                bail!("quick_ai_turn_already_active");
+            }
+            turns.insert(
+                ui_thread_id.clone(),
+                ActiveExecTurn {
+                    generation,
+                    pid: 0,
+                    pgid: 0,
+                    cancel_requested,
+                },
+            );
+        }
+
+        Ok(Self {
+            active_turns,
+            ui_thread_id,
+            generation,
+            scratch: None,
+            child: None,
+            registration: None,
+            pgid: None,
+            worker_owns_process: false,
+        })
+    }
+
+    fn adopt_child(
+        &mut self,
+        child: Child,
+        registration: crate::process_manager::ChildRegistration,
+        pgid: i32,
+    ) -> Result<()> {
+        let pid = child.id();
+        self.child = Some(child);
+        self.registration = Some(registration);
+        self.pgid = Some(pgid);
+
+        let mut turns = self
+            .active_turns
+            .lock()
+            .map_err(|_| anyhow!("quick_ai_active_turn_lock_poisoned"))?;
+        let Some(turn) = turns.get_mut(&self.ui_thread_id) else {
+            bail!("quick_ai_startup_reservation_missing");
+        };
+        if turn.generation != self.generation {
+            bail!("quick_ai_startup_reservation_replaced");
+        }
+        turn.pid = pid;
+        turn.pgid = pgid;
+        Ok(())
+    }
+
+    fn child_mut(&mut self) -> Result<&mut Child> {
+        self.child
+            .as_mut()
+            .ok_or_else(|| anyhow!("quick_ai_startup_child_missing"))
+    }
+
+    fn transfer_to_worker(mut self) -> Option<QuickAiWorkerOwnership> {
+        match (
+            self.child.take(),
+            self.registration.take(),
+            self.scratch.take(),
+        ) {
+            (Some(child), Some(registration), Some(scratch)) => {
+                self.worker_owns_process = true;
+                Some(QuickAiWorkerOwnership {
+                    child,
+                    registration,
+                    scratch,
+                })
+            }
+            (child, registration, scratch) => {
+                self.child = child;
+                self.registration = registration;
+                self.scratch = scratch;
+                None
+            }
+        }
+    }
+}
+
+impl Drop for QuickAiStartupGuard {
+    fn drop(&mut self) {
+        if self.worker_owns_process {
+            return;
+        }
+
+        let active_generation = self
+            .active_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&self.ui_thread_id)
+            .map(|turn| turn.generation);
+        let initial_plan = plan_quick_ai_startup_cleanup(
+            self.generation,
+            active_generation,
+            self.child.is_some(),
+            false,
+            false,
+        );
+        let cleanup_verified = if initial_plan.terminate_owned_group {
+            match (self.child.as_mut(), self.pgid) {
+                (Some(child), Some(pgid))
+                    if pgid > 0 && u32::try_from(pgid).ok() == Some(child.id()) =>
+                {
+                    terminate_and_reap_process_group(child, pgid, QUICK_AI_FAST_TEARDOWN)
+                        .is_ok_and(|report| report.child_reaped && !report.process_group_alive)
+                }
+                _ => false,
+            }
+        } else {
+            self.child.is_none()
+        };
+        let plan = plan_quick_ai_startup_cleanup(
+            self.generation,
+            active_generation,
+            self.child.is_some(),
+            cleanup_verified,
+            false,
+        );
+
+        if plan.remove_owned_scratch {
+            if let Some(path) = self.scratch.take() {
+                if let Err(error) = std::fs::remove_dir_all(&path) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        let safe_error = crate::logging::log_private_user_value(&error.to_string());
+                        tracing::warn!(
+                            target: "script_kit::quick_ai",
+                            event = "quick_ai_startup_scratch_cleanup_failed",
+                            generation = self.generation,
+                            error_bytes = safe_error.raw_bytes,
+                            error_sha256 = %safe_error.sha256,
+                        );
+                    }
+                }
+            }
+        }
+
+        if plan.release_active_turn {
+            let mut turns = self
+                .active_turns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            release_owned_quick_ai_turn(
+                &mut turns,
+                &self.ui_thread_id,
+                self.generation,
+                cleanup_verified,
+            );
+        } else if !cleanup_verified {
+            tracing::error!(
+                target: "script_kit::quick_ai",
+                event = "quick_ai_startup_cleanup_unverified",
+                generation = self.generation,
+            );
+        }
+    }
+}
+
 impl CodexQuickAiExecConnection {
     pub(crate) fn new(spec: CodexQuickAiExecSpec) -> Self {
         Self {
@@ -113,15 +350,13 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
             }
             let query = extract_zero_context_query(&request, &self.spec.selected_model_id)?;
             let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-            {
-                let turns = self
-                    .active_turns
-                    .lock()
-                    .map_err(|_| anyhow!("quick_ai_active_turn_lock_poisoned"))?;
-                if turns.contains_key(&request.ui_thread_id) {
-                    bail!("quick_ai_turn_already_active")
-                }
-            }
+            let cancel_requested = Arc::new(AtomicBool::new(false));
+            let mut startup = QuickAiStartupGuard::reserve(
+                Arc::clone(&self.active_turns),
+                request.ui_thread_id.clone(),
+                generation,
+                cancel_requested.clone(),
+            )?;
 
             let run_id = format!(
                 "quick-ai-{}-{generation}-{}",
@@ -154,11 +389,12 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
             std::fs::create_dir(&turn_cwd).with_context(|| {
                 format!("quick_ai_turn_cwd_create_failed:{}", turn_cwd.display())
             })?;
+            startup.scratch = Some(turn_cwd.clone());
             trace.write("scratch_prepared", json!({}));
 
             let mut command = build_codex_exec_command(&self.spec, &turn_cwd, &query)?;
             trace.write("spawn_started", json!({}));
-            let mut child = command.spawn().with_context(|| {
+            let child = command.spawn().with_context(|| {
                 format!("quick_ai_codex_spawn_failed:{}", self.spec.binary.display())
             })?;
             let pid = child.id();
@@ -167,15 +403,17 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                 pid,
                 &self.spec.binary.to_string_lossy(),
             );
-            let stdout = child
+            startup.adopt_child(child, registration, pgid)?;
+            let stdout = startup
+                .child_mut()?
                 .stdout
                 .take()
                 .context("quick_ai_codex_stdout_unavailable")?;
-            let stderr = child
+            let stderr = startup
+                .child_mut()?
                 .stderr
                 .take()
                 .context("quick_ai_codex_stderr_unavailable")?;
-            let cancel_requested = Arc::new(AtomicBool::new(false));
             trace.write(
                 "spawned",
                 json!({
@@ -194,7 +432,7 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                     "inputBlockCount": 1,
                     "textBlockCount": 1,
                     "imageBlockCount": 0,
-                    "querySha256": sha256_hex(&query),
+                    "querySha256": crate::logging::log_private_user_value(&query).sha256,
                     "queryChars": query.chars().count(),
                     "pid": pid,
                     "pgid": pgid,
@@ -228,23 +466,18 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
             let (event_tx, event_rx) = async_channel::bounded(EVENT_CHANNEL_CAPACITY);
             let active_turns = Arc::clone(&self.active_turns);
             let ui_thread_id = request.ui_thread_id;
-            let scratch = turn_cwd;
-            self.active_turns
-                .lock()
-                .map_err(|_| anyhow!("quick_ai_active_turn_lock_poisoned"))?
-                .insert(
-                    ui_thread_id.clone(),
-                    ActiveExecTurn {
-                        generation,
-                        pid,
-                        pgid,
-                        cancel_requested: cancel_requested.clone(),
-                    },
-                );
             let work_deadline = self.spec.work_deadline;
             std::thread::Builder::new()
                 .name(format!("quick-ai-turn-{generation}"))
                 .spawn(move || {
+                    let Some(QuickAiWorkerOwnership {
+                        mut child,
+                        registration,
+                        scratch,
+                    }) = startup.transfer_to_worker()
+                    else {
+                        return;
+                    };
                     let _registration = registration;
                     let mut accumulator = CodexExecTurnAccumulator::new(run_id.clone());
                     let deadline = turn_started + work_deadline;
@@ -327,7 +560,7 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                                         trace.write(
                                             "answer_candidate",
                                             json!({
-                                                "answerSha256": sha256_hex(&answer.rendered),
+                                                "answerSha256": private_trace_fingerprint(&answer.rendered),
                                                 "answerChars": answer.rendered.chars().count(),
                                                 "sourceCount": answer.source_count,
                                             }),
@@ -397,7 +630,8 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                         "teardown",
                         serde_json::to_value(&teardown).unwrap_or(Value::Null),
                     );
-                    if !teardown.child_reaped || teardown.process_group_alive {
+                    let cleanup_verified = teardown.child_reaped && !teardown.process_group_alive;
+                    if !cleanup_verified {
                         stop_reason = QuickAiTurnStop::Failed(CodexTurnFailure::protocol(
                             "quick_ai_codex_process_teardown_incomplete",
                         ));
@@ -409,13 +643,15 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                             teardown.exit_code, teardown.exit_signal
                         )));
                     }
-                    let _ = std::fs::remove_dir_all(&scratch);
-                    if let Ok(mut turns) = active_turns.lock() {
-                        if turns
-                            .get(&ui_thread_id)
-                            .is_some_and(|turn| turn.generation == generation)
-                        {
-                            turns.remove(&ui_thread_id);
+                    if cleanup_verified {
+                        let _ = std::fs::remove_dir_all(&scratch);
+                        if let Ok(mut turns) = active_turns.lock() {
+                            release_owned_quick_ai_turn(
+                                &mut turns,
+                                &ui_thread_id,
+                                generation,
+                                true,
+                            );
                         }
                     }
 
@@ -1489,7 +1725,7 @@ fn emit_successful_events(
         trace.write(
             "final_answer_selected",
             json!({
-                "answerSha256": sha256_hex(answer),
+                "answerSha256": private_trace_fingerprint(answer),
                 "answerChars": answer.chars().count(),
                 "answerUrls": http_urls_in_text(answer),
                 // `unvisited-validated-schema-source` is the ordinary case, and
@@ -1856,12 +2092,8 @@ impl TraceSink {
         if let (Some(target), Some(fields)) = (record.as_object_mut(), details.as_object()) {
             target.extend(fields.clone());
         }
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{record}");
-        }
+        let line = record.to_string();
+        let _ = crate::atomic_file::append_private_observability_record(path, line.as_bytes());
     }
 }
 
@@ -1893,7 +2125,7 @@ fn trace_event_for_protocol(trace: &TraceSink, event: &CodexExecEvent) {
                     "nativeLifecyclePhase": native_lifecycle_phase,
                     "actionClass": action_class,
                     "actionOrdinal": trace.web_action_ordinal(&item.id),
-                    "querySha256": sha256_hex(&item.query),
+                    "querySha256": crate::logging::log_private_user_value(&item.query).sha256,
                     "queryChars": item.query.chars().count(),
                 }),
             );
@@ -1921,19 +2153,22 @@ fn trace_event_for_protocol(trace: &TraceSink, event: &CodexExecEvent) {
             item: CodexItem::AgentMessage { id: _, text },
         } => trace.write(
             "agent_message_buffered",
-            json!({"textSha256": sha256_hex(text), "textChars": text.chars().count()}),
+            json!({"textSha256": private_trace_fingerprint(text), "textChars": text.chars().count()}),
         ),
         CodexExecEvent::Item {
             item: CodexItem::Forbidden { id: _, item_type },
             ..
         } => trace.write(
             "forbidden_item",
-            json!({"itemTypeSha256": sha256_hex(item_type)}),
+            json!({"itemTypeSha256": private_trace_fingerprint(item_type)}),
         ),
         CodexExecEvent::Item {
             item: CodexItem::Diagnostic { id: _, message },
             ..
-        } => trace.write("diagnostic", json!({"messageSha256": sha256_hex(message)})),
+        } => trace.write(
+            "diagnostic",
+            json!({"messageSha256": private_trace_fingerprint(message)}),
+        ),
         _ => {}
     }
 }
@@ -1942,10 +2177,97 @@ fn sha256_hex(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
+fn private_trace_fingerprint(value: &str) -> String {
+    crate::logging::log_private_user_value(value).sha256
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ai::agent_chat::content::{ImageContent, TextContent};
+
+    fn fake_active_startup(generation: u64) -> ActiveExecTurn {
+        ActiveExecTurn {
+            generation,
+            pid: 42,
+            pgid: 42,
+            cancel_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn startup_failure_requires_exact_generation_cleanup() {
+        let pending = plan_quick_ai_startup_cleanup(7, Some(7), true, false, false);
+        assert!(pending.terminate_owned_group);
+        assert!(!pending.remove_owned_scratch);
+        assert!(!pending.release_active_turn);
+
+        let verified = plan_quick_ai_startup_cleanup(7, Some(7), true, true, false);
+        assert!(!verified.terminate_owned_group);
+        assert!(verified.remove_owned_scratch);
+        assert!(verified.release_active_turn);
+    }
+
+    #[test]
+    fn failed_startup_never_blocks_retry_after_verified_cleanup() {
+        let mut turns = HashMap::from([("chat".to_owned(), fake_active_startup(4))]);
+
+        assert!(!release_owned_quick_ai_turn(&mut turns, "chat", 4, false));
+        assert!(turns.contains_key("chat"));
+        assert!(release_owned_quick_ai_turn(&mut turns, "chat", 4, true));
+        assert!(!turns.contains_key("chat"));
+
+        turns.insert("chat".to_owned(), fake_active_startup(5));
+        assert_eq!(turns.get("chat").map(|turn| turn.generation), Some(5));
+    }
+
+    #[test]
+    fn stale_startup_cleanup_cannot_remove_newer_turn() {
+        let mut turns = HashMap::from([("chat".to_owned(), fake_active_startup(8))]);
+
+        assert!(!release_owned_quick_ai_turn(&mut turns, "chat", 7, true));
+        assert_eq!(turns.get("chat").map(|turn| turn.generation), Some(8));
+    }
+
+    #[test]
+    fn worker_ownership_transfer_disarms_startup_cleanup() {
+        let plan = plan_quick_ai_startup_cleanup(7, Some(7), true, false, true);
+
+        assert!(!plan.terminate_owned_group);
+        assert!(!plan.remove_owned_scratch);
+        assert!(!plan.release_active_turn);
+    }
+
+    #[test]
+    fn startup_reservation_is_atomic_and_releases_before_retry() {
+        let turns = Arc::new(Mutex::new(HashMap::new()));
+        let first = QuickAiStartupGuard::reserve(
+            Arc::clone(&turns),
+            "chat".to_owned(),
+            7,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("first pure reservation succeeds");
+
+        assert!(QuickAiStartupGuard::reserve(
+            Arc::clone(&turns),
+            "chat".to_owned(),
+            8,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .is_err());
+
+        drop(first);
+        assert!(turns.lock().unwrap().is_empty());
+
+        let retry = QuickAiStartupGuard::reserve(
+            Arc::clone(&turns),
+            "chat".to_owned(),
+            9,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(retry.is_ok());
+    }
 
     fn accumulator() -> CodexExecTurnAccumulator {
         CodexExecTurnAccumulator::new("test".to_string())
@@ -2335,13 +2657,151 @@ mod tests {
             "safe-run".to_string(),
             Instant::now(),
         );
-        let event = parse_codex_exec_line(r#"{"type":"item.started","item":{"id":"provider-secret-id","type":"web_search","action":{"type":"search","query":"private query text"}}}"#).unwrap();
+        let event = parse_codex_exec_line(r#"{"type":"item.started","item":{"id":"provider-secret-id","type":"web_search","query":"private query text","action":{"type":"search","query":"private query text"}}}"#).unwrap();
         trace_event_for_protocol(&trace, &event);
         let output = std::fs::read_to_string(trace_path).unwrap();
         assert!(!output.contains("provider-secret-id"));
         assert!(!output.contains("private query text"));
+        assert!(!output.contains(&sha256_hex("private query text")));
+        assert!(
+            output.contains(&crate::logging::log_private_user_value("private query text").sha256)
+        );
         assert!(!output.contains("\"action\":"));
         assert!(output.contains("\"actionOrdinal\":1"));
+    }
+
+    #[test]
+    fn codex_quick_ai_trace_query_fingerprints_cannot_be_guessed_from_typed_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("private-trace.ndjson");
+        let trace = TraceSink::new(
+            Some(trace_path.clone()),
+            "private-query-run".to_string(),
+            Instant::now(),
+        );
+
+        for (index, query) in ["private-secre", "private-secret"].into_iter().enumerate() {
+            let line = serde_json::json!({
+                "type": "item.started",
+                "item": {
+                    "id": format!("provider-item-{index}"),
+                    "type": "web_search",
+                    "query": query,
+                    "action": { "type": "search", "query": query },
+                },
+            });
+            let event = parse_codex_exec_line(&line.to_string()).unwrap();
+            trace_event_for_protocol(&trace, &event);
+        }
+
+        let output = std::fs::read_to_string(trace_path).unwrap();
+        let records = output
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|record| record["event"] == "native_web_action")
+            .collect::<Vec<_>>();
+
+        assert_eq!(records.len(), 2);
+        for (record, query) in records.iter().zip(["private-secre", "private-secret"]) {
+            let actual = record["querySha256"].as_str().unwrap();
+            assert_eq!(actual, crate::logging::log_private_user_value(query).sha256);
+            assert_ne!(actual, sha256_hex(query));
+            assert!(!output.contains(query));
+        }
+        assert_ne!(records[0]["querySha256"], records[1]["querySha256"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_quick_ai_trace_private_files_repair_legacy_permissions_before_append() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("isolated Quick AI trace fixture");
+        let path = directory.path().join("quick.ndjson");
+        let trace = TraceSink::new(Some(path.clone()), "private-run".into(), Instant::now());
+        trace.write("start_turn_entered", json!({}));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        trace.write("first_protocol_event", json!({}));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_quick_ai_trace_private_files_reject_symlinks_without_touching_foreign_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("isolated Quick AI trace symlink fixture");
+        let external = directory.path().join("foreign.txt");
+        let planted = directory.path().join("quick.ndjson");
+        std::fs::write(&external, "foreign trace must remain untouched").unwrap();
+        symlink(&external, &planted).unwrap();
+
+        let trace = TraceSink::new(Some(planted.clone()), "private-run".into(), Instant::now());
+        trace.write("start_turn_entered", json!({}));
+
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap(),
+            "foreign trace must remain untouched"
+        );
+        assert!(std::fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn codex_quick_ai_trace_private_model_and_diagnostic_fingerprints_cannot_be_guessed() {
+        let directory = tempfile::tempdir().expect("isolated Quick AI private trace fixture");
+        let path = directory.path().join("quick.ndjson");
+        let trace = TraceSink::new(Some(path.clone()), "private-run".into(), Instant::now());
+        let answer = "my private assistant answer";
+        let diagnostic = "my private provider diagnostic";
+
+        for line in [
+            json!({
+                "type": "item.completed",
+                "item": { "id": "answer", "type": "agent_message", "text": answer },
+            }),
+            json!({
+                "type": "item.completed",
+                "item": { "id": "failure", "type": "error", "message": diagnostic },
+            }),
+        ] {
+            let event = parse_codex_exec_line(&line.to_string()).unwrap();
+            trace_event_for_protocol(&trace, &event);
+        }
+
+        let output = std::fs::read_to_string(path).unwrap();
+        let records = output
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        for (event, field, secret) in [
+            ("agent_message_buffered", "textSha256", answer),
+            ("diagnostic", "messageSha256", diagnostic),
+        ] {
+            let record = records
+                .iter()
+                .find(|record| record["event"] == event)
+                .unwrap();
+            let actual = record[field].as_str().unwrap();
+            assert_eq!(
+                actual,
+                crate::logging::log_private_user_value(secret).sha256
+            );
+            assert_ne!(actual, sha256_hex(secret));
+            assert!(!output.contains(secret));
+            assert!(!output.contains(&sha256_hex(secret)));
+        }
     }
 
     #[test]

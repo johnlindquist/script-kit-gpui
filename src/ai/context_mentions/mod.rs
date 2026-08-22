@@ -48,10 +48,14 @@ pub(crate) fn parse_context_mentions(raw_content: &str) -> ParsedContextMentions
 
     for line in raw_content.lines() {
         if let Some(part) = parse_context_mention_line(line) {
+            let safe_directive = crate::logging::log_private_user_value(line.trim());
+            let safe_label = crate::logging::log_private_user_value(part.label());
             tracing::info!(
                 target: "ai",
-                directive = line.trim(),
-                label = part.label(),
+                directive_bytes = safe_directive.raw_bytes,
+                directive_sha256 = %safe_directive.sha256,
+                label_bytes = safe_label.raw_bytes,
+                label_sha256 = %safe_label.sha256,
                 "context_mention_parsed"
             );
             parts.push(part);
@@ -378,29 +382,49 @@ pub fn parse_inline_context_mentions_with_aliases(
         // → literal @file:/path. Alias lookup must precede literal file
         // parsing so compact selected-file tokens like `@file:demo.rs`
         // keep resolving to their full attached path.
-        let part = resolve_builtin_mention_token(&span.token)
-            .or_else(|| parse_dictation_history_mention(&span.token))
-            .or_else(|| aliases.get(&span.token).cloned())
-            .or_else(|| parse_file_mention(&span.token));
+        let (part, alias_backed) = if let Some(part) = resolve_builtin_mention_token(&span.token) {
+            (part, false)
+        } else if let Some(part) = parse_dictation_history_mention(&span.token) {
+            (part, false)
+        } else if let Some(part) = aliases.get(&span.token) {
+            (part.clone(), true)
+        } else if let Some(part) = parse_file_mention(&span.token) {
+            (part, false)
+        } else {
+            continue;
+        };
 
-        if let Some(part) = part {
-            let canonical_token =
-                part_to_inline_token(&part).unwrap_or_else(|| span.token.to_string());
-            tracing::info!(
-                target: "ai",
-                event = "inline_context_token_resolved",
-                token = %span.token,
-                canonical_token = %canonical_token,
-                source = %part.source(),
-                label = %part.label(),
-            );
-            out.push(InlineContextMention {
-                range: span.range,
-                token: span.token,
-                canonical_token,
-                part,
-            });
-        }
+        // Alias keys retain exact selected-owner identity: both plugin skill
+        // paths can end in SKILL.md, but @skills:Deploy and
+        // @skills:Deploy-2 must remain independently owned. Built-in aliases
+        // such as @context still normalize to their canonical @here token.
+        let canonical_token = if alias_backed {
+            span.token.to_string()
+        } else {
+            part_to_inline_token(&part).unwrap_or_else(|| span.token.to_string())
+        };
+        let safe_token = crate::logging::log_private_user_value(&span.token);
+        let safe_canonical_token = crate::logging::log_private_user_value(&canonical_token);
+        let safe_source = crate::logging::log_private_user_value(part.source());
+        let safe_label = crate::logging::log_private_user_value(part.label());
+        tracing::info!(
+            target: "ai",
+            event = "inline_context_token_resolved",
+            token_bytes = safe_token.raw_bytes,
+            token_sha256 = %safe_token.sha256,
+            canonical_token_bytes = safe_canonical_token.raw_bytes,
+            canonical_token_sha256 = %safe_canonical_token.sha256,
+            source_bytes = safe_source.raw_bytes,
+            source_sha256 = %safe_source.sha256,
+            label_bytes = safe_label.raw_bytes,
+            label_sha256 = %safe_label.sha256,
+        );
+        out.push(InlineContextMention {
+            range: span.range,
+            token: span.token,
+            canonical_token,
+            part,
+        });
     }
     out
 }
@@ -556,10 +580,12 @@ fn provider_backed_mention_available(
 fn resolve_builtin_mention_token(trimmed: &str) -> Option<AiContextPart> {
     let kind = crate::ai::context_contract::ContextAttachmentKind::from_mention_line(trimmed)?;
     if !provider_backed_mention_available(kind) {
+        let safe_token = crate::logging::log_private_user_value(trimmed);
         tracing::info!(
             target: "ai",
             event = "inline_context_token_skipped_provider_unavailable",
-            token = %trimmed,
+            token_bytes = safe_token.raw_bytes,
+            token_sha256 = %safe_token.sha256,
             kind = ?kind,
         );
         return None;
@@ -621,7 +647,8 @@ pub(crate) use sync::{
     build_inline_mention_sync_plan, build_inline_mention_sync_plan_with_aliases,
     caret_after_replacement, remove_inline_mention_at_cursor,
     remove_inline_mention_at_cursor_with_aliases, replace_text_in_char_range,
-    should_claim_inline_mention_ownership, visible_context_chip_indices, InlineMentionSyncPlan,
+    should_claim_inline_mention_ownership, visible_context_chip_indices_with_aliases,
+    InlineMentionSyncPlan,
 };
 
 #[cfg(test)]

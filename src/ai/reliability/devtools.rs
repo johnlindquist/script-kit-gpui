@@ -3,13 +3,14 @@ use crate::protocol::{
     AiReliabilityPreservationSnapshot, AiReliabilityRetrySnapshot, AiReliabilityStateSnapshot,
     AiReliabilityTransitionSnapshot, AutomationWindowKind,
 };
+use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use sk_protocol::ai_reliability::{
     AiFailure, AiFailureKind, AiOperationState, AiPhase, AiSelectionState, AiSurfaceIdentity,
     DiagnosticAvailability, PreservationReceipt, RecoveryRole,
 };
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 static FIXTURES: OnceLock<Mutex<HashMap<String, AiReliabilityStateSnapshot>>> = OnceLock::new();
 
@@ -22,10 +23,7 @@ pub(crate) fn set_ai_reliability_fixture(
     fixture_id: &str,
 ) -> Result<AiReliabilityStateSnapshot, String> {
     let snapshot = ai_reliability_fixture_snapshot(fixture_id)?;
-    fixtures()
-        .lock()
-        .expect("AI reliability fixture mutex poisoned")
-        .insert(window_id.into(), snapshot.clone());
+    fixtures().lock().insert(window_id.into(), snapshot.clone());
     Ok(snapshot)
 }
 
@@ -35,7 +33,6 @@ pub(crate) fn ai_reliability_snapshot_for_target(
 ) -> AiReliabilityStateSnapshot {
     fixtures()
         .lock()
-        .expect("AI reliability fixture mutex poisoned")
         .get(window_id)
         .cloned()
         .unwrap_or_else(|| AiReliabilityStateSnapshot::ready(surface_for_kind(kind)))
@@ -44,11 +41,7 @@ pub(crate) fn ai_reliability_snapshot_for_target(
 pub(crate) fn ai_reliability_fixture_for_target(
     window_id: &str,
 ) -> Option<AiReliabilityStateSnapshot> {
-    fixtures()
-        .lock()
-        .expect("AI reliability fixture mutex poisoned")
-        .get(window_id)
-        .cloned()
+    fixtures().lock().get(window_id).cloned()
 }
 
 /// Project the live provider-independent state machine into the redacted

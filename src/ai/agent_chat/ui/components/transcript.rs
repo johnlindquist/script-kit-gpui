@@ -55,6 +55,12 @@ enum PendingActivityPlacement {
     EmptyAssistantRow(usize),
 }
 
+struct AssistantMessageRuntime {
+    ui_variant: AgentChatUiVariant,
+    show_pending_activity: bool,
+    thread_status: AgentChatThreadStatus,
+}
+
 fn pending_activity_placement(
     messages: &[AgentChatThreadMessage],
     pending: bool,
@@ -931,15 +937,17 @@ impl AgentChatTranscript {
                 on_fork_edit_message,
             ),
             AgentChatThreadMessageRole::Assistant => Self::render_assistant_message(
-                ui_variant,
+                AssistantMessageRuntime {
+                    ui_variant,
+                    show_pending_activity,
+                    thread_status,
+                },
                 msg,
                 colors,
                 &theme,
                 text_view_state,
                 presentation,
                 style_def,
-                show_pending_activity,
-                thread_status,
             ),
             AgentChatThreadMessageRole::Thought => Self::render_collapsible_block(
                 msg,
@@ -1168,16 +1176,19 @@ impl AgentChatTranscript {
     }
 
     fn render_assistant_message(
-        ui_variant: AgentChatUiVariant,
+        runtime: AssistantMessageRuntime,
         msg: &AgentChatThreadMessage,
         _colors: &PromptColors,
         _theme: &crate::theme::Theme,
         text_view_state: &gpui::Entity<TextViewState>,
         presentation: AgentChatTranscriptPresentation,
         style_def: &AgentChatStyleDef,
-        show_pending_activity: bool,
-        thread_status: AgentChatThreadStatus,
     ) -> gpui::AnyElement {
+        let AssistantMessageRuntime {
+            ui_variant,
+            show_pending_activity,
+            thread_status,
+        } = runtime;
         let content = if show_pending_activity {
             Self::render_pending_activity(_theme, style_def)
         } else {

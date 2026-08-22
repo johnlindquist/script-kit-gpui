@@ -169,7 +169,8 @@ impl HelperClient {
                 for line in reader.lines() {
                     let Ok(line) = line else { break; };
                     let Ok(response) = serde_json::from_str::<HelperResponse>(&line) else {
-                        tracing::warn!(target: "script_kit::ghost_text", line = %line, "ignored malformed ghost llm helper stdout line");
+                        let diagnostic = crate::ai::reliability::redact_diagnostic(&line);
+                        tracing::warn!(target: "script_kit::ghost_text", diagnostic_fingerprint = %diagnostic.fingerprint.0, stdout_bytes = line.len(), "ignored malformed ghost llm helper stdout line");
                         continue;
                     };
                     let sender = reader_pending.lock().ok().and_then(|mut pending| pending.remove(&response.id));

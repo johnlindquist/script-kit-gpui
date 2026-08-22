@@ -1,10 +1,11 @@
+use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use sk_protocol::ai_reliability::{
     DiagnosticAvailability, DiagnosticDescriptor, DiagnosticId, DiagnosticRedaction,
     DiagnosticVisibility, Fingerprint,
 };
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::OnceLock;
 
 const MAX_DIAGNOSTIC_BYTES: usize = 2_048;
 const ALLOWLISTED_JSON_KEYS: [&str; 7] = [
@@ -16,6 +17,8 @@ const ALLOWLISTED_JSON_KEYS: [&str; 7] = [
     "component",
     "error",
 ];
+type DiagnosticRedactionRules = Vec<(regex::Regex, &'static str)>;
+static DIAGNOSTIC_REDACTION_RULES: OnceLock<Option<DiagnosticRedactionRules>> = OnceLock::new();
 
 /// Safe secondary detail retained for Copy Details.
 ///
@@ -43,10 +46,7 @@ impl DiagnosticVault {
         } else {
             DiagnosticAvailability::FingerprintOnly
         };
-        self.entries
-            .lock()
-            .expect("diagnostic vault mutex poisoned")
-            .insert(id.clone(), diagnostic.clone());
+        self.entries.lock().insert(id.clone(), diagnostic.clone());
         DiagnosticDescriptor {
             id,
             fingerprint: diagnostic.fingerprint,
@@ -61,21 +61,18 @@ impl DiagnosticVault {
     }
 
     pub fn get(&self, id: &DiagnosticId) -> Option<RedactedDiagnostic> {
-        self.entries
-            .lock()
-            .expect("diagnostic vault mutex poisoned")
-            .get(id)
-            .cloned()
+        self.entries.lock().get(id).cloned()
     }
 }
 
 pub fn redact_diagnostic(raw: &str) -> RedactedDiagnostic {
     let fingerprint = Fingerprint(hex_sha256(raw));
-    let allowlisted = serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|value| allowlist_json(&value))
-        .and_then(|value| serde_json::to_string(&value).ok())
-        .unwrap_or_else(|| raw.to_string());
+    let allowlisted = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => allowlist_json(&value)
+            .and_then(|value| serde_json::to_string(&value).ok())
+            .unwrap_or_else(|| "[REDACTED]".to_string()),
+        Err(_) => raw.to_string(),
+    };
     let redacted = redact_secrets_and_paths(&allowlisted);
     let compact = redacted.trim();
     let suppressed = compact.is_empty() || contains_only_secret_placeholder(compact);
@@ -131,19 +128,48 @@ fn redact_secrets_and_paths(input: &str) -> String {
         output = output.replace(&home, "~");
     }
 
-    let patterns = [
-        r#"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;"}]+"#,
-        r#"(?i)(cookie\s*[:=]\s*)[^\r\n,;"}]+"#,
-        r#"(?i)((?:api[_-]?key|token|secret)\s*[:=]\s*)["']?[^"'\s,;}]+["']?"#,
-        r#"(?i)("(?:api[_-]?key|token|secret|authorization|cookie)"\s*:\s*)"[^"]*""#,
-    ];
-    for pattern in patterns {
-        let regex = regex::Regex::new(pattern).expect("static redaction regex must compile");
-        output = regex.replace_all(&output, "${1}[REDACTED]").into_owned();
-    }
-    for home_pattern in [r#"/Users/[^/\s"\\]+"#, r#"/home/[^/\s"\\]+"#] {
-        let regex = regex::Regex::new(home_pattern).expect("static home-path regex must compile");
-        output = regex.replace_all(&output, "~").into_owned();
+    let rules = DIAGNOSTIC_REDACTION_RULES.get_or_init(|| {
+        [
+            (
+                r#"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;"}]+"#,
+                "${1}[REDACTED]",
+            ),
+            (r#"(?i)(bearer\s+)[^\s,;"}]+"#, "${1}[REDACTED]"),
+            (
+                r#"(?i)(cookie\s*[:=]\s*)[^\r\n,;"}]+"#,
+                "${1}[REDACTED]",
+            ),
+            (
+                r#"(?i)((?:api[_-]?key|token|secret|password|passwd|passphrase|credential)\s*[:=]\s*)["']?[^"'\s,;}]+["']?"#,
+                "${1}[REDACTED]",
+            ),
+            (
+                r#"(?i)("(?:api[_-]?key|token|secret|password|passwd|passphrase|credential|authorization|cookie)"\s*:\s*)"[^"]*""#,
+                "${1}[REDACTED]",
+            ),
+            (
+                r#"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----"#,
+                "[REDACTED]",
+            ),
+            (
+                r#"(?i)\b(?:sk-(?:proj-[a-z0-9_-]{8,}|ant-api\d{2}-[a-z0-9_-]{8,}|[a-z0-9_-]{20,})|gsk_[a-z0-9_-]{8,}|gh[pousr]_[a-z0-9_]{8,}|github_pat_[a-z0-9_]{8,}|xox[baprs]-[a-z0-9-]{8,}|AIza[a-z0-9_-]{20,})\b"#,
+                "[REDACTED]",
+            ),
+            (r#"/Users/[^/\s"\\]+"#, "~"),
+            (r#"/home/[^/\s"\\]+"#, "~"),
+        ]
+        .into_iter()
+        .map(|(pattern, replacement)| {
+            regex::Regex::new(pattern).map(|regex| (regex, replacement))
+        })
+        .collect::<Result<DiagnosticRedactionRules, _>>()
+        .ok()
+    });
+    let Some(rules) = rules else {
+        return "[REDACTED]".to_string();
+    };
+    for (regex, replacement) in rules {
+        output = regex.replace_all(&output, *replacement).into_owned();
     }
     output
 }
@@ -168,11 +194,12 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
 }
 
 fn hex_sha256(value: &str) -> String {
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
     let bytes = Sha256::digest(value.as_bytes());
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        use std::fmt::Write;
-        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+        output.push(char::from(HEX_DIGITS[(byte >> 4) as usize]));
+        output.push(char::from(HEX_DIGITS[(byte & 0x0f) as usize]));
     }
     output
 }

@@ -84,8 +84,8 @@ impl CodexQuickAiExecLaunch {
 
 #[derive(Debug, Clone)]
 pub(crate) enum ResolvedQuickAiLaunch {
-    CodexExec(CodexQuickAiExecLaunch),
-    Pi(PiAgentChatLaunch),
+    CodexExec(Box<CodexQuickAiExecLaunch>),
+    Pi(Box<PiAgentChatLaunch>),
 }
 
 impl PiAgentChatLaunch {
@@ -281,7 +281,7 @@ pub(crate) fn resolve_quick_ai_launch(
         .map_err(anyhow::Error::msg)?;
     if profile.id == BUILTIN_QUICK_AI_PROFILE_ID {
         return CodexQuickAiExecLaunch::from_builtin_profile(profile)
-            .map(ResolvedQuickAiLaunch::CodexExec);
+            .map(|launch| ResolvedQuickAiLaunch::CodexExec(Box::new(launch)));
     }
     let mut profile = profile;
     if profile.pi_binary.is_none() {
@@ -289,7 +289,8 @@ pub(crate) fn resolve_quick_ai_launch(
             .map(crate::ai::agent_chat::pi::binary::expand_tilde_path)
             .or_else(crate::ai::agent_chat::pi::binary::default_pi_binary);
     }
-    PiAgentChatLaunch::from_profile(profile).map(ResolvedQuickAiLaunch::Pi)
+    PiAgentChatLaunch::from_profile(profile)
+        .map(|launch| ResolvedQuickAiLaunch::Pi(Box::new(launch)))
 }
 
 fn pi_model_selection_id(profile: &ResolvedAgentChatProfile) -> Option<String> {

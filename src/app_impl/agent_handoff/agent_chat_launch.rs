@@ -359,7 +359,7 @@ impl ScriptListApp {
             ) {
                 Ok(crate::ai::agent_chat::launch::ResolvedQuickAiLaunch::CodexExec(launch)) => {
                     self.open_tab_ai_codex_exec_view_from_launch(
-                        launch,
+                        *launch,
                         request,
                         capture_rx,
                         focused_part,
@@ -377,7 +377,7 @@ impl ScriptListApp {
                 }
                 Ok(crate::ai::agent_chat::launch::ResolvedQuickAiLaunch::Pi(pi_launch)) => {
                     self.open_tab_ai_pi_view_from_launch(
-                        pi_launch,
+                        *pi_launch,
                         request,
                         capture_rx,
                         focused_part,

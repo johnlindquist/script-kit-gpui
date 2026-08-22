@@ -14,7 +14,7 @@ use types::{
     PROFILE_TRIGGER_CHAR,
 };
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// Maximum number of file/folder results to include.
 const FILE_RESULTS_LIMIT: usize = 10;
@@ -100,12 +100,14 @@ pub(crate) fn context_selector_query_before_cursor(
 
     let trigger_char_idx = before_cursor[..trigger_pos].chars().count();
 
+    let safe_query = crate::logging::log_private_user_value(query);
     tracing::debug!(
         target: "ai",
         ?trigger,
         cursor,
         trigger_char_idx,
-        query = %query,
+        query_bytes = safe_query.raw_bytes,
+        query_sha256 = %safe_query.sha256,
         "context_selector_trigger_extracted"
     );
 
@@ -534,10 +536,12 @@ fn score_builtin_seed(
             best_score = 50;
             best_label_hits = label_fuzzy.unwrap_or_default();
             best_meta_hits = meta_fuzzy.unwrap_or_default();
+            let safe_query = crate::logging::log_private_user_value(query);
             tracing::debug!(
                 target: "ai",
                 kind = ?seed.kind,
-                query = %query,
+                query_bytes = safe_query.raw_bytes,
+                query_sha256 = %safe_query.sha256,
                 score = best_score,
                 label_hits = ?best_label_hits,
                 meta_hits = ?best_meta_hits,
@@ -613,10 +617,12 @@ fn extend_builtin_picker_items(
         inject_full_portal_fallback(&inline_query, items);
         return;
     } else if file_search_query(trigger, query).is_none() {
+        let safe_query = crate::logging::log_private_user_value(query);
         tracing::debug!(
             target: "ai",
             ?trigger,
-            query = %query,
+            query_bytes = safe_query.raw_bytes,
+            query_sha256 = %safe_query.sha256,
             "ai_context_selector_file_scan_skipped"
         );
     }
@@ -885,6 +891,97 @@ fn collect_terminal_history_inline_items(query: &str, items: &mut Vec<ContextSel
             meta_highlight_indices: Vec::new(),
         });
     }
+}
+
+#[derive(Default)]
+struct LauncherCatalogSnapshot {
+    scripts: Vec<Arc<crate::scripts::Script>>,
+    scriptlets: Vec<Arc<crate::scripts::Scriptlet>>,
+    skills: Vec<Arc<crate::plugins::PluginSkill>>,
+}
+
+#[derive(Default)]
+struct LauncherCatalogStore {
+    snapshot: RwLock<Arc<LauncherCatalogSnapshot>>,
+}
+
+impl LauncherCatalogStore {
+    fn snapshot(&self) -> Arc<LauncherCatalogSnapshot> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn publish(
+        &self,
+        scripts: &[Arc<crate::scripts::Script>],
+        scriptlets: &[Arc<crate::scripts::Scriptlet>],
+        skills: &[Arc<crate::plugins::PluginSkill>],
+    ) {
+        let snapshot = Arc::new(LauncherCatalogSnapshot {
+            scripts: scripts.to_vec(),
+            scriptlets: scriptlets.to_vec(),
+            skills: skills.to_vec(),
+        });
+        *self
+            .snapshot
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = snapshot;
+    }
+}
+
+fn launcher_catalog_store() -> &'static LauncherCatalogStore {
+    static STORE: OnceLock<LauncherCatalogStore> = OnceLock::new();
+    STORE.get_or_init(LauncherCatalogStore::default)
+}
+
+/// Publish the launcher's already-loaded catalogs as one coherent immutable snapshot.
+///
+/// Detached Agent Chat Spine searches never discover plugins, read files, or
+/// retain a stale process-lifetime catalog: the host republishes on refresh.
+pub(crate) fn publish_launcher_catalog(
+    scripts: &[Arc<crate::scripts::Script>],
+    scriptlets: &[Arc<crate::scripts::Scriptlet>],
+    skills: &[Arc<crate::plugins::PluginSkill>],
+) {
+    launcher_catalog_store().publish(scripts, scriptlets, skills);
+}
+
+/// Build the actual detached Agent Chat Spine attachment section from the
+/// host-owned immutable command snapshot, not from the retired picker.
+pub(crate) fn composer_catalog_subsearch_section(
+    source: crate::spine::catalog_subsearch::ContextSubsearchSource,
+    query: &str,
+    segment_index: usize,
+    segment_byte_range: std::ops::Range<usize>,
+) -> Option<crate::spine::attach::ComposerSubsearchSection> {
+    let snapshot = launcher_catalog_store().snapshot();
+    composer_catalog_subsearch_section_from_snapshot(
+        source,
+        query,
+        segment_index,
+        segment_byte_range,
+        &snapshot,
+    )
+}
+
+fn composer_catalog_subsearch_section_from_snapshot(
+    source: crate::spine::catalog_subsearch::ContextSubsearchSource,
+    query: &str,
+    segment_index: usize,
+    segment_byte_range: std::ops::Range<usize>,
+    snapshot: &LauncherCatalogSnapshot,
+) -> Option<crate::spine::attach::ComposerSubsearchSection> {
+    crate::spine::attach::composer_catalog_subsearch_section(
+        source,
+        query,
+        segment_index,
+        segment_byte_range,
+        &snapshot.scripts,
+        &snapshot.scriptlets,
+        &snapshot.skills,
+    )
 }
 
 fn inline_portal_scripts() -> &'static [Arc<crate::scripts::Script>] {
@@ -1396,11 +1493,19 @@ fn extend_agent_slash_command_items_with_payloads<'a, I>(
             match_query_chars_in_display_meta(query_lower, &meta_str).unwrap_or_default()
         };
 
+        let safe_item_id = crate::logging::log_private_user_value(&payload.stable_id());
+        let safe_name = crate::logging::log_private_user_value(name);
+        let safe_owner = crate::logging::log_private_user_value(&payload.owner_label());
+        let safe_meta = crate::logging::log_private_user_value(&meta_str);
         tracing::debug!(
-            item_id = %payload.stable_id(),
-            slash_name = %name,
-            owner = %payload.owner_label(),
-            meta = %meta_str,
+            item_id_bytes = safe_item_id.raw_bytes,
+            item_id_sha256 = %safe_item_id.sha256,
+            slash_name_bytes = safe_name.raw_bytes,
+            slash_name_sha256 = %safe_name.sha256,
+            owner_bytes = safe_owner.raw_bytes,
+            owner_sha256 = %safe_owner.sha256,
+            meta_bytes = safe_meta.raw_bytes,
+            meta_sha256 = %safe_meta.sha256,
             "agent_chat_slash_picker_entry_built"
         );
 
@@ -1445,17 +1550,22 @@ fn sort_picker_items(items: &mut [ContextSelectorRow]) {
     items.sort_by(|a, b| {
         let section_a = section_priority(&a.kind);
         let section_b = section_priority(&b.kind);
-        section_a.cmp(&section_b).then(b.score.cmp(&a.score))
+        section_a
+            .cmp(&section_b)
+            .then(b.score.cmp(&a.score))
+            .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
     });
 }
 
 /// Log the top ranked items for debugging.
 fn log_top_ranked_items(items: &[ContextSelectorRow]) {
     for (rank, item) in items.iter().enumerate().take(5) {
+        let safe_item_id = crate::logging::log_private_user_value(item.id.as_ref());
         tracing::debug!(
             target: "ai",
             rank,
-            item_id = %item.id,
+            item_id_bytes = safe_item_id.raw_bytes,
+            item_id_sha256 = %safe_item_id.sha256,
             score = item.score,
             label_hits = ?item.label_highlight_indices,
             meta_hits = ?item.meta_highlight_indices,
@@ -1479,10 +1589,12 @@ pub fn context_selector_rows(
     extend_builtin_picker_items(trigger, query, &query_lower, &mut items);
     sort_picker_items(&mut items);
 
+    let safe_query = crate::logging::log_private_user_value(query);
     tracing::debug!(
         target: "ai",
         ?trigger,
-        query = %query,
+        query_bytes = safe_query.raw_bytes,
+        query_sha256 = %safe_query.sha256,
         item_count = items.len(),
         "ai_context_selector_items_built"
     );
@@ -1517,9 +1629,11 @@ where
     extend_agent_slash_command_items(&query_lower, commands, &mut items);
     sort_picker_items(&mut items);
 
+    let safe_query = crate::logging::log_private_user_value(query);
     tracing::info!(
         target: "ai",
-        query = %query,
+        query_bytes = safe_query.raw_bytes,
+        query_sha256 = %safe_query.sha256,
         command_count,
         item_count = items.len(),
         "ai_context_selector_slash_items_built"
@@ -1547,9 +1661,11 @@ where
     extend_agent_slash_command_items_with_payloads(&query_lower, commands, &mut items);
     sort_picker_items(&mut items);
 
+    let safe_query = crate::logging::log_private_user_value(query);
     tracing::info!(
         target: "ai",
-        query = %query,
+        query_bytes = safe_query.raw_bytes,
+        query_sha256 = %safe_query.sha256,
         command_count,
         item_count = items.len(),
         "ai_context_selector_slash_items_built"
@@ -1588,11 +1704,18 @@ fn collect_file_items(dir: &std::path::Path, raw_query: &str, items: &mut Vec<Co
     let read_dir = match std::fs::read_dir(&search_dir) {
         Ok(rd) => rd,
         Err(error) => {
+            let safe_query = crate::logging::log_private_user_value(raw_query);
+            let safe_directory =
+                crate::logging::log_private_user_value(&search_dir.display().to_string());
+            let safe_error = crate::logging::log_private_user_value(&error.to_string());
             tracing::debug!(
                 target: "ai",
-                query = %raw_query,
-                dir = %search_dir.display(),
-                %error,
+                query_bytes = safe_query.raw_bytes,
+                query_sha256 = %safe_query.sha256,
+                directory_bytes = safe_directory.raw_bytes,
+                directory_sha256 = %safe_directory.sha256,
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
                 "ai_context_selector_file_scan_failed"
             );
             return;
@@ -1669,10 +1792,14 @@ fn collect_file_items(dir: &std::path::Path, raw_query: &str, items: &mut Vec<Co
         }
     }
 
+    let safe_query = crate::logging::log_private_user_value(raw_query);
+    let safe_directory = crate::logging::log_private_user_value(&search_dir.display().to_string());
     tracing::info!(
         target: "ai",
-        query = %raw_query,
-        dir = %search_dir.display(),
+        query_bytes = safe_query.raw_bytes,
+        query_sha256 = %safe_query.sha256,
+        directory_bytes = safe_directory.raw_bytes,
+        directory_sha256 = %safe_directory.sha256,
         file_count,
         folder_count,
         "ai_context_selector_file_scan_complete"
@@ -1761,5 +1888,238 @@ pub(crate) fn slash_command_no_match_row() -> ContextSelectorRow {
         score: 0,
         label_highlight_indices: Vec::new(),
         meta_highlight_indices: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod launcher_catalog_snapshot_tests {
+    use super::*;
+    use crate::spine::catalog_subsearch::ContextSubsearchSource;
+    use crate::spine::SpineListAction;
+
+    fn script(name: &str) -> Arc<crate::scripts::Script> {
+        Arc::new(crate::scripts::Script {
+            name: name.to_owned(),
+            path: std::path::PathBuf::from(format!("/synthetic/{name}.ts")),
+            plugin_id: "main".to_owned(),
+            ..crate::scripts::Script::default()
+        })
+    }
+
+    fn scriptlet(name: &str) -> Arc<crate::scripts::Scriptlet> {
+        Arc::new(crate::scripts::Scriptlet {
+            name: name.to_owned(),
+            description: Some(format!("Synthetic {name}")),
+            code: "// synthetic".to_owned(),
+            tool: "ts".to_owned(),
+            shortcut: None,
+            keyword: None,
+            group: None,
+            plugin_id: "main".to_owned(),
+            plugin_title: None,
+            file_path: Some(format!("/synthetic/scriptlets.md#{name}")),
+            command: Some(name.to_owned()),
+            alias: None,
+            icon: None,
+        })
+    }
+
+    fn skill(name: &str) -> Arc<crate::plugins::PluginSkill> {
+        Arc::new(crate::plugins::PluginSkill {
+            plugin_id: "synthetic".to_owned(),
+            plugin_title: "Synthetic".to_owned(),
+            skill_id: name.to_owned(),
+            path: std::path::PathBuf::from(format!("/synthetic/skills/{name}/SKILL.md")),
+            title: name.to_owned(),
+            description: format!("Synthetic {name}"),
+        })
+    }
+
+    fn section(
+        snapshot: &LauncherCatalogSnapshot,
+        source: ContextSubsearchSource,
+        query: &str,
+    ) -> crate::spine::attach::ComposerSubsearchSection {
+        composer_catalog_subsearch_section_from_snapshot(source, query, 3, 5..17, snapshot)
+            .expect("launcher command sources produce real composer sections")
+    }
+
+    #[test]
+    fn cold_launcher_catalog_is_empty_without_loading_or_discovery() {
+        let store = LauncherCatalogStore::default();
+        let snapshot = store.snapshot();
+
+        assert!(snapshot.scripts.is_empty());
+        assert!(snapshot.scriptlets.is_empty());
+        assert!(snapshot.skills.is_empty());
+        for source in [
+            ContextSubsearchSource::Scripts,
+            ContextSubsearchSource::Scriptlets,
+            ContextSubsearchSource::Skills,
+        ] {
+            assert!(section(&snapshot, source, "private query").rows.is_empty());
+        }
+    }
+
+    #[test]
+    fn published_launcher_catalog_resolves_all_three_real_composer_families() {
+        let store = LauncherCatalogStore::default();
+        let published_script = script("alpha-script");
+        let published_scriptlet = scriptlet("beta-scriptlet");
+        let published_skill = skill("gamma-skill");
+        store.publish(
+            std::slice::from_ref(&published_script),
+            std::slice::from_ref(&published_scriptlet),
+            std::slice::from_ref(&published_skill),
+        );
+
+        let snapshot = store.snapshot();
+        assert!(Arc::ptr_eq(&snapshot.scripts[0], &published_script));
+        assert!(Arc::ptr_eq(&snapshot.scriptlets[0], &published_scriptlet));
+        assert!(Arc::ptr_eq(&snapshot.skills[0], &published_skill));
+
+        for (source, query, label) in [
+            (
+                ContextSubsearchSource::Scripts,
+                "alpha-script",
+                "alpha-script",
+            ),
+            (
+                ContextSubsearchSource::Scriptlets,
+                "beta-scriptlet",
+                "beta-scriptlet",
+            ),
+            (ContextSubsearchSource::Skills, "gamma-skill", "gamma-skill"),
+        ] {
+            let result = section(&snapshot, source, query);
+            assert_eq!(result.rows.len(), 1);
+            assert_eq!(result.rows[0].row.title.as_ref(), label);
+            assert!(result.rows[0].alias.is_some());
+            match &result.rows[0].row.action {
+                SpineListAction::ResolveSegment {
+                    segment_index,
+                    segment_byte_range,
+                    resolution_source,
+                    ..
+                } => {
+                    assert_eq!(*segment_index, 3);
+                    assert_eq!(segment_byte_range, &(5..17));
+                    assert_eq!(resolution_source.as_ref(), source.prefix());
+                }
+                _ => panic!("catalog row did not resolve the actual composer segment"),
+            }
+        }
+    }
+
+    #[test]
+    fn launcher_catalog_replacement_exposes_added_edited_and_deleted_commands() {
+        let store = LauncherCatalogStore::default();
+        store.publish(&[script("old-script")], &[scriptlet("old-note")], &[]);
+        let previous = store.snapshot();
+
+        store.publish(
+            &[script("new-script")],
+            &[scriptlet("edited-note")],
+            &[skill("new-skill")],
+        );
+        let current = store.snapshot();
+
+        assert_eq!(previous.scripts[0].name, "old-script");
+        assert_eq!(previous.scriptlets[0].name, "old-note");
+        assert!(previous.skills.is_empty());
+        assert!(
+            section(&current, ContextSubsearchSource::Scripts, "old-script")
+                .rows
+                .is_empty()
+        );
+        assert_eq!(
+            section(&current, ContextSubsearchSource::Scripts, "new-script")
+                .rows
+                .len(),
+            1
+        );
+        assert!(
+            section(&current, ContextSubsearchSource::Scriptlets, "old-note")
+                .rows
+                .is_empty()
+        );
+        assert_eq!(
+            section(&current, ContextSubsearchSource::Scriptlets, "edited-note")
+                .rows
+                .len(),
+            1
+        );
+        assert_eq!(
+            section(&current, ContextSubsearchSource::Skills, "new-skill")
+                .rows
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn duplicate_launcher_skill_labels_attach_the_exact_selected_owner() {
+        let first = Arc::new(crate::plugins::PluginSkill {
+            plugin_id: "first-owner".to_owned(),
+            plugin_title: "First".to_owned(),
+            skill_id: "deploy".to_owned(),
+            path: std::path::PathBuf::from("/synthetic/first/deploy/SKILL.md"),
+            title: "Deploy".to_owned(),
+            description: String::new(),
+        });
+        let second = Arc::new(crate::plugins::PluginSkill {
+            plugin_id: "second-owner".to_owned(),
+            plugin_title: "Second".to_owned(),
+            skill_id: "deploy".to_owned(),
+            path: std::path::PathBuf::from("/synthetic/second/deploy/SKILL.md"),
+            title: "Deploy".to_owned(),
+            description: String::new(),
+        });
+        let store = LauncherCatalogStore::default();
+        store.publish(&[], &[], &[first, second]);
+        let snapshot = store.snapshot();
+        let projected = section(&snapshot, ContextSubsearchSource::Skills, "deploy");
+
+        assert_eq!(projected.rows.len(), 2);
+        for expected_path in [
+            "/synthetic/first/deploy/SKILL.md",
+            "/synthetic/second/deploy/SKILL.md",
+        ] {
+            let expected_identity = format!("skills/{expected_path}");
+            let alias = crate::spine::attach::composer_subsearch_alias_for_resolution(
+                section(&snapshot, ContextSubsearchSource::Skills, "deploy"),
+                "@skills:Deploy",
+                &expected_identity,
+            )
+            .expect("duplicate labels must resolve by their complete canonical identity");
+            match alias {
+                crate::ai::message_parts::AiContextPart::FilePath { path, .. } => {
+                    assert_eq!(path, expected_path)
+                }
+                _ => panic!("skill attachment did not retain its owning file"),
+            }
+        }
+        assert!(
+            crate::spine::attach::composer_subsearch_alias_for_resolution(
+                section(&snapshot, ContextSubsearchSource::Skills, "deploy"),
+                "@skills:Deploy",
+                "skills//synthetic/unknown/deploy/SKILL.md",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn launcher_catalog_ranking_keeps_existing_canonical_slash_tie_break() {
+        let forward =
+            slash_command_rows_with_descriptions("", [("zeta", "last"), ("alpha", "first")]);
+        let reverse =
+            slash_command_rows_with_descriptions("", [("alpha", "first"), ("zeta", "last")]);
+
+        let forward_ids: Vec<&str> = forward.iter().map(|row| row.id.as_ref()).collect();
+        let reverse_ids: Vec<&str> = reverse.iter().map(|row| row.id.as_ref()).collect();
+        assert_eq!(forward_ids, reverse_ids);
+        assert_eq!(forward[0].label.as_ref(), "alpha");
+        assert_eq!(forward[1].label.as_ref(), "zeta");
     }
 }

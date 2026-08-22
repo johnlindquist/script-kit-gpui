@@ -381,6 +381,12 @@ struct PreparedContextTransition {
     failures: Vec<(ContextItemId, AppFailureRecord)>,
 }
 
+#[derive(Clone, Copy)]
+struct PreparedTurnCommitOptions {
+    clear_composer: bool,
+    push_user_message: bool,
+}
+
 /// Resolved turn-scoped context blocks plus the receipt describing
 /// resolution outcomes for the current submit.
 struct ResolvedPendingContext {
@@ -1784,8 +1790,7 @@ impl AgentChatThread {
         blocks: Vec<ContentBlock>,
         attachments: Vec<AgentChatMessageAttachment>,
         context_transition: PreparedContextTransition,
-        clear_composer: bool,
-        push_user_message: bool,
+        commit: PreparedTurnCommitOptions,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         if self.context_transition_has_failed_primary(&context_transition) {
@@ -1854,7 +1859,7 @@ impl AgentChatThread {
         self.commit_context_after_runtime_start(&context_transition);
         self.store_prepared_turn_payload(display_text.clone(), blocks, attachments.clone());
 
-        if push_user_message {
+        if commit.push_user_message {
             let msg_id = self.alloc_id();
             let mut message = AgentChatThreadMessage::new(
                 msg_id,
@@ -1865,7 +1870,7 @@ impl AgentChatThread {
             self.messages.push(message);
             self.publish_sdk_new_message(msg_id, AgentChatThreadMessageRole::User, display_text);
         }
-        if clear_composer {
+        if commit.clear_composer {
             self.input.clear();
         }
         self.stream_started_at = Some(std::time::Instant::now());
@@ -1894,8 +1899,10 @@ impl AgentChatThread {
                 vec![ContentBlock::Text(TextContent::new(display_text))],
                 Vec::new(),
                 PreparedContextTransition::default(),
-                clear_composer,
-                true,
+                PreparedTurnCommitOptions {
+                    clear_composer,
+                    push_user_message: true,
+                },
                 cx,
             );
         }
@@ -1958,8 +1965,10 @@ impl AgentChatThread {
                                 prepared.blocks,
                                 prepared.attachments,
                                 prepared.context_transition,
-                                clear_composer,
-                                true,
+                                PreparedTurnCommitOptions {
+                                    clear_composer,
+                                    push_user_message: true,
+                                },
                                 cx,
                             ) {
                                 if error == "primary_context_unavailable" {
@@ -2100,8 +2109,10 @@ impl AgentChatThread {
             blocks,
             Vec::new(),
             context_transition,
-            true,
-            true,
+            PreparedTurnCommitOptions {
+                clear_composer: true,
+                push_user_message: true,
+            },
             cx,
         )
     }
@@ -4575,8 +4586,21 @@ impl AgentChatThread {
     }
 
     pub(crate) fn toggle_favorite_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
-        super::favorite_models::toggle_favorite_model_id(model_id);
-        cx.notify();
+        match super::favorite_models::toggle_favorite_model_id(model_id) {
+            Ok(_) => cx.notify(),
+            Err(error) => {
+                tracing::warn!(
+                    target: "script_kit::agent_chat",
+                    event = "agent_chat_favorite_model_save_failed",
+                    error_kind = ?error.kind(),
+                    diagnostic_fingerprint = %redacted_fingerprint(&error.to_string()),
+                );
+                self.push_system_message(
+                    "Couldn't update your favorite model. Check Script Kit's storage permissions and try again.",
+                    cx,
+                );
+            }
+        }
     }
 
     pub(crate) fn cycle_favorite_model(&mut self, cx: &mut Context<Self>) {

@@ -1,8 +1,8 @@
 use super::capabilities::{CapabilityEvidence, ExecutableIdentity};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sk_protocol::ai_reliability::{ClientKind, ModelId, ProviderId};
 use std::collections::{HashMap, VecDeque};
-use std::sync::RwLock;
 
 const MAX_CAPABILITY_RECORDS: usize = 256;
 
@@ -93,13 +93,7 @@ impl CapabilityCache {
         model_id: ModelId,
     ) -> CapabilityEvidence {
         let key = CapabilityCacheKey::new(&executable, provider_id, model_id);
-        let record = self
-            .state
-            .read()
-            .expect("capability cache poisoned")
-            .records
-            .get(&key)
-            .cloned();
+        let record = self.state.read().records.get(&key).cloned();
         CapabilityEvidence {
             executable,
             advertised_models: Vec::new(),
@@ -110,7 +104,7 @@ impl CapabilityCache {
     }
 
     pub fn persisted(&self) -> PersistedCapabilityRecords {
-        let state = self.state.read().expect("capability cache poisoned");
+        let state = self.state.read();
         PersistedCapabilityRecords {
             records: state
                 .records
@@ -124,15 +118,15 @@ impl CapabilityCache {
     }
 
     pub fn len(&self) -> usize {
-        self.state
-            .read()
-            .expect("capability cache poisoned")
-            .records
-            .len()
+        self.state.read().records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.state.read().records.is_empty()
     }
 
     fn insert(&self, record: CompatibilityRecord) -> CompatibilityRecord {
-        let mut state = self.state.write().expect("capability cache poisoned");
+        let mut state = self.state.write();
         if !state.records.contains_key(&record.key) {
             state.insertion_order.push_back(record.key.clone());
         }

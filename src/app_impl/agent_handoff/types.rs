@@ -42,9 +42,7 @@ pub(crate) enum AgentChatContextPolicy {
     },
     /// A plugin skill selected from the main menu. The specialized staging
     /// helper preserves slash-picker identity and cursor semantics.
-    PluginSkill {
-        skill: crate::plugins::PluginSkill,
-    },
+    PluginSkill { skill: crate::plugins::PluginSkill },
 }
 
 impl AgentChatContextPolicy {

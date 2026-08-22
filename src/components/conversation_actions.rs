@@ -23,6 +23,10 @@ use crate::designs::icon_variations::IconName;
 
 /// Closed command vocabulary shared by conversation footers, Actions, key
 /// routing, and semantic automation. Hosts bind only commands they can execute.
+#[allow(
+    dead_code,
+    reason = "Flow and launcher variants are constructed by the separately compiled application binary"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ConversationCommandId {
     Send,
@@ -55,6 +59,10 @@ pub(crate) enum ConfirmPolicy {
 
 /// Closed user-safe reasons for supported commands that cannot run right now.
 /// Callers cannot smuggle provider, adapter, path, or authored text into UI copy.
+#[allow(
+    dead_code,
+    reason = "Flow-specific refusal variants are constructed by the separately compiled application binary"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConversationCommandDisabledReason {
     TypeMessageFirst,
@@ -109,6 +117,45 @@ impl ConversationCommandAvailability {
             Self::Disabled { reason } => Some(reason.as_str()),
         }
     }
+
+    /// Project host-owned disabled facts without reclassifying user-facing
+    /// prose. Launcher, footer, Actions, and automation consumers preserve the
+    /// same closed reason and exact safe copy.
+    pub(crate) fn command_availability(self) -> sk_protocol::command_contract::CommandAvailability {
+        use sk_protocol::command_contract::{CommandAvailability, CommandUnavailableReason};
+
+        match self {
+            Self::Enabled => CommandAvailability::Ready,
+            Self::Disabled { reason } => CommandAvailability::Blocked {
+                reason: match reason {
+                    ConversationCommandDisabledReason::TypeMessageFirst => {
+                        CommandUnavailableReason::InputRequired
+                    }
+                    ConversationCommandDisabledReason::ContextStillPreparing => {
+                        CommandUnavailableReason::ContextPreparing
+                    }
+                    ConversationCommandDisabledReason::ResponseInProgress => {
+                        CommandUnavailableReason::ResponseInProgress
+                    }
+                    ConversationCommandDisabledReason::NoResponseRunning => {
+                        CommandUnavailableReason::NoResponseRunning
+                    }
+                    ConversationCommandDisabledReason::WaitingForPermission => {
+                        CommandUnavailableReason::PermissionPending
+                    }
+                    ConversationCommandDisabledReason::HiddenDraftMustBeResolved => {
+                        CommandUnavailableReason::DraftMustBeResolved
+                    }
+                    ConversationCommandDisabledReason::RuntimeAlreadyDetached => {
+                        CommandUnavailableReason::RuntimeDetached
+                    }
+                    ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal => {
+                        CommandUnavailableReason::ActiveWorkMustBeStopped
+                    }
+                },
+            },
+        }
+    }
 }
 
 /// The user gesture that asked a conversation host to leave its current
@@ -132,17 +179,12 @@ pub(crate) enum ConversationOverlayKind {
 
 /// Whether a host retains a strong, resumable owner for active work after its
 /// visible conversation surface is dismissed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActiveWorkDismissal {
     Survives,
+    /// Fail closed until the host proves active work survives dismissal.
+    #[default]
     RequiresExplicitStop,
-}
-
-impl Default for ActiveWorkDismissal {
-    fn default() -> Self {
-        // Fail closed. A host must explicitly prove that active work survives.
-        Self::RequiresExplicitStop
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -210,6 +252,27 @@ pub(crate) struct ConversationCommandDescriptor {
     pub(crate) availability: ConversationCommandAvailability,
     pub(crate) confirmation: ConfirmPolicy,
     pub(crate) semantic_action_id: &'static str,
+}
+
+impl ConversationCommandDescriptor {
+    /// Lossless bridge from the existing host-owned descriptor to the shared
+    /// app-independent command/action protocol.
+    pub(crate) fn command_action(&self) -> sk_protocol::command_contract::CommandAction {
+        use sk_protocol::command_contract::{CommandAction, CommandActionRole};
+
+        CommandAction {
+            id: self.semantic_action_id.to_owned(),
+            title: self.label.to_owned(),
+            shortcut: self.shortcut.map(ToOwned::to_owned),
+            role: match self.role {
+                ConversationCommandRole::Primary => CommandActionRole::Primary,
+                ConversationCommandRole::Secondary => CommandActionRole::Secondary,
+                ConversationCommandRole::Destructive => CommandActionRole::Destructive,
+            },
+            availability: self.availability.command_availability(),
+            requires_confirmation: self.confirmation == ConfirmPolicy::Required,
+        }
+    }
 }
 
 fn command_metadata(
@@ -393,11 +456,53 @@ pub(crate) struct AgentChatConversationCommandFacts {
     pub(crate) active_work: ActiveWorkDismissal,
 }
 
+impl AgentChatConversationCommandFacts {
+    const fn active_turn_in_progress(self) -> bool {
+        self.response_in_progress || self.waiting_for_permission
+    }
+
+    const fn active_turn_disabled_reason(self) -> Option<ConversationCommandDisabledReason> {
+        if self.waiting_for_permission {
+            Some(ConversationCommandDisabledReason::WaitingForPermission)
+        } else if self.response_in_progress {
+            Some(ConversationCommandDisabledReason::ResponseInProgress)
+        } else {
+            None
+        }
+    }
+}
+
+/// Preserve overlay-first dismissal while treating an unresolved permission
+/// request as active work. Pending approval cannot be stopped by the streaming
+/// handler, so its refusal must retain the actionable permission reason.
+pub(crate) fn resolve_agent_chat_conversation_dismissal(
+    facts: AgentChatConversationCommandFacts,
+    overlays: ConversationOverlayFacts,
+    trigger: ConversationDismissTrigger,
+) -> ConversationDismissDecision {
+    let decision = resolve_conversation_dismissal(
+        ConversationDismissFacts {
+            overlays,
+            response_in_progress: facts.active_turn_in_progress(),
+            active_work: facts.active_work,
+        },
+        trigger,
+    );
+
+    if facts.waiting_for_permission && matches!(decision, ConversationDismissDecision::Blocked(_)) {
+        ConversationDismissDecision::Blocked(
+            ConversationCommandDisabledReason::WaitingForPermission,
+        )
+    } else {
+        decision
+    }
+}
+
 pub(crate) fn agent_chat_conversation_commands(
     facts: AgentChatConversationCommandFacts,
 ) -> Vec<BoundConversationCommand<AgentChatConversationCommand>> {
     let mut commands = Vec::new();
-    if facts.response_in_progress {
+    if facts.response_in_progress && !facts.waiting_for_permission {
         commands.push(BoundConversationCommand::enabled(
             ConversationCommandId::Stop,
             AgentChatConversationCommand::Stop,
@@ -425,22 +530,28 @@ pub(crate) fn agent_chat_conversation_commands(
         });
     }
     if facts.retry_available {
-        commands.push(BoundConversationCommand::enabled(
-            ConversationCommandId::Retry,
-            AgentChatConversationCommand::Retry,
-        ));
+        commands.push(match facts.active_turn_disabled_reason() {
+            Some(reason) => BoundConversationCommand::disabled(
+                ConversationCommandId::Retry,
+                reason,
+                AgentChatConversationCommand::Retry,
+            ),
+            None => BoundConversationCommand::enabled(
+                ConversationCommandId::Retry,
+                AgentChatConversationCommand::Retry,
+            ),
+        });
     }
-    commands.push(if facts.response_in_progress {
-        BoundConversationCommand::disabled(
+    commands.push(match facts.active_turn_disabled_reason() {
+        Some(reason) => BoundConversationCommand::disabled(
             ConversationCommandId::NewConversation,
-            ConversationCommandDisabledReason::ResponseInProgress,
+            reason,
             AgentChatConversationCommand::NewConversation,
-        )
-    } else {
-        BoundConversationCommand::enabled(
+        ),
+        None => BoundConversationCommand::enabled(
             ConversationCommandId::NewConversation,
             AgentChatConversationCommand::NewConversation,
-        )
+        ),
     });
     if facts.has_response {
         commands.push(BoundConversationCommand::enabled(
@@ -450,12 +561,17 @@ pub(crate) fn agent_chat_conversation_commands(
     }
     if facts.dismiss_installed {
         commands.push(
-            if facts.response_in_progress
+            if facts.active_turn_in_progress()
                 && facts.active_work == ActiveWorkDismissal::RequiresExplicitStop
             {
+                let reason = if facts.waiting_for_permission {
+                    ConversationCommandDisabledReason::WaitingForPermission
+                } else {
+                    ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal
+                };
                 BoundConversationCommand::disabled(
                     ConversationCommandId::Close,
-                    ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal,
+                    reason,
                     AgentChatConversationCommand::Close,
                 )
             } else {
@@ -469,6 +585,10 @@ pub(crate) fn agent_chat_conversation_commands(
     commands
 }
 
+#[allow(
+    dead_code,
+    reason = "Flow command routing is consumed by separately compiled application surfaces"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FlowConversationCommand {
     Send,
@@ -483,6 +603,10 @@ pub(crate) enum FlowConversationCommand {
     TerminateRuntime,
 }
 
+#[allow(
+    dead_code,
+    reason = "Flow command facts are built by separately compiled application surfaces"
+)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlowConversationCommandFacts {
     pub(crate) response_in_progress: bool,
@@ -494,6 +618,10 @@ pub(crate) struct FlowConversationCommandFacts {
     pub(crate) runtime_attached: bool,
 }
 
+#[allow(
+    dead_code,
+    reason = "Flow footer bindings are consumed by the separately compiled application binary"
+)]
 pub(crate) fn flow_conversation_commands(
     response_in_progress: bool,
 ) -> Vec<BoundConversationCommand<FlowConversationCommand>> {
@@ -506,6 +634,10 @@ pub(crate) fn flow_conversation_commands(
     })
 }
 
+#[allow(
+    dead_code,
+    reason = "Flow Actions and semantic collectors are compiled into the application binary"
+)]
 pub(crate) fn flow_conversation_commands_for_facts(
     facts: FlowConversationCommandFacts,
 ) -> Vec<BoundConversationCommand<FlowConversationCommand>> {
@@ -774,6 +906,7 @@ pub(crate) fn match_conversation_command_shortcut<Handler: Copy>(
         .map(|command| (command.handler, command.descriptor.availability))
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_conversation_command_shortcut<Handler: Copy>(
     commands: &[BoundConversationCommand<Handler>],
     key: &str,
@@ -786,6 +919,7 @@ pub(crate) fn resolve_conversation_command_shortcut<Handler: Copy>(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn validate_conversation_command_bindings<Handler>(
     commands: &[BoundConversationCommand<Handler>],
 ) -> Result<(), &'static str> {
@@ -880,6 +1014,10 @@ pub(crate) enum TurnCopyRole {
     /// Thought, tool, system, and error rows. These carry diagnostics or
     /// internal state, not an answer the user asked for, so they never get a
     /// response-copy control.
+    #[allow(
+        dead_code,
+        reason = "non-answer classification is performed by binary-only launcher semantic collectors"
+    )]
     NonAnswer,
 }
 
@@ -1031,6 +1169,40 @@ mod conversation_actions_tests {
     }
 
     #[test]
+    fn shared_action_projection_preserves_every_typed_reason_without_reclassifying_copy() {
+        use sk_protocol::command_contract::CommandActionRole;
+
+        let reasons = [
+            ConversationCommandDisabledReason::TypeMessageFirst,
+            ConversationCommandDisabledReason::ContextStillPreparing,
+            ConversationCommandDisabledReason::ResponseInProgress,
+            ConversationCommandDisabledReason::NoResponseRunning,
+            ConversationCommandDisabledReason::WaitingForPermission,
+            ConversationCommandDisabledReason::HiddenDraftMustBeResolved,
+            ConversationCommandDisabledReason::RuntimeAlreadyDetached,
+            ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal,
+        ];
+        for reason in reasons {
+            let descriptor = conversation_command_descriptor(
+                ConversationCommandId::Send,
+                ConversationCommandAvailability::disabled(reason),
+            );
+            let action = descriptor.command_action();
+            assert_eq!(action.availability.safe_message(), Some(reason.as_str()));
+            assert!(!action.availability.is_executable());
+        }
+
+        let destructive = conversation_command_descriptor(
+            ConversationCommandId::DeleteConversation,
+            ConversationCommandAvailability::Enabled,
+        )
+        .command_action();
+        assert_eq!(destructive.role, CommandActionRole::Destructive);
+        assert!(destructive.requires_confirmation);
+        assert_eq!(destructive.id, "conversation.delete");
+    }
+
+    #[test]
     fn unsupported_commands_are_absent_from_host_bindings() {
         let chat_prompt = vec![
             BoundConversationCommand::enabled(ConversationCommandId::Send, "send"),
@@ -1082,6 +1254,212 @@ mod conversation_actions_tests {
             command.descriptor.id,
             ConversationCommandId::Background | ConversationCommandId::NewConversation
         )));
+    }
+
+    #[test]
+    fn permission_pending_turn_blocks_destructive_commands_without_advertising_fake_stop() {
+        for response_in_progress in [false, true] {
+            let commands = agent_chat_conversation_commands(AgentChatConversationCommandFacts {
+                response_in_progress,
+                waiting_for_permission: true,
+                composer_has_text: true,
+                retry_available: true,
+                has_response: true,
+                dismiss_installed: true,
+                ..Default::default()
+            });
+            validate_conversation_command_bindings(&commands).unwrap();
+
+            for handler in [
+                AgentChatConversationCommand::Send,
+                AgentChatConversationCommand::Retry,
+                AgentChatConversationCommand::NewConversation,
+                AgentChatConversationCommand::Close,
+            ] {
+                let command = commands
+                    .iter()
+                    .find(|command| command.handler == handler)
+                    .expect("supported command must retain its truthful unavailable state");
+                assert_eq!(
+                    command.descriptor.availability,
+                    ConversationCommandAvailability::disabled(
+                        ConversationCommandDisabledReason::WaitingForPermission
+                    ),
+                );
+            }
+
+            assert!(commands
+                .iter()
+                .all(|command| command.handler != AgentChatConversationCommand::Stop));
+            assert!(commands.iter().any(|command| {
+                command.handler == AgentChatConversationCommand::CopyLastResponse
+                    && command.descriptor.availability.is_enabled()
+            }));
+        }
+    }
+
+    #[test]
+    fn streaming_turn_preserves_real_stop_and_blocks_retry_new_and_close() {
+        let commands = agent_chat_conversation_commands(AgentChatConversationCommandFacts {
+            response_in_progress: true,
+            composer_has_text: true,
+            retry_available: true,
+            dismiss_installed: true,
+            ..Default::default()
+        });
+        validate_conversation_command_bindings(&commands).unwrap();
+
+        assert!(commands.iter().any(|command| {
+            command.handler == AgentChatConversationCommand::Stop
+                && command.descriptor.availability.is_enabled()
+        }));
+        assert!(commands
+            .iter()
+            .all(|command| command.handler != AgentChatConversationCommand::Send));
+
+        for handler in [
+            AgentChatConversationCommand::Retry,
+            AgentChatConversationCommand::NewConversation,
+        ] {
+            let command = commands
+                .iter()
+                .find(|command| command.handler == handler)
+                .unwrap();
+            assert_eq!(
+                command.descriptor.availability,
+                ConversationCommandAvailability::disabled(
+                    ConversationCommandDisabledReason::ResponseInProgress
+                ),
+            );
+        }
+
+        let close = commands
+            .iter()
+            .find(|command| command.handler == AgentChatConversationCommand::Close)
+            .unwrap();
+        assert_eq!(
+            close.descriptor.availability,
+            ConversationCommandAvailability::disabled(
+                ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal
+            ),
+        );
+    }
+
+    #[test]
+    fn idle_turn_keeps_send_retry_new_and_close_available() {
+        let commands = agent_chat_conversation_commands(AgentChatConversationCommandFacts {
+            composer_has_text: true,
+            retry_available: true,
+            dismiss_installed: true,
+            ..Default::default()
+        });
+        validate_conversation_command_bindings(&commands).unwrap();
+
+        for handler in [
+            AgentChatConversationCommand::Send,
+            AgentChatConversationCommand::Retry,
+            AgentChatConversationCommand::NewConversation,
+            AgentChatConversationCommand::Close,
+        ] {
+            let command = commands
+                .iter()
+                .find(|command| command.handler == handler)
+                .unwrap();
+            assert!(command.descriptor.availability.is_enabled());
+        }
+        assert!(commands
+            .iter()
+            .all(|command| command.handler != AgentChatConversationCommand::Stop));
+    }
+
+    #[test]
+    fn permission_pending_dismissal_preserves_overlay_precedence_and_fails_closed() {
+        let pending = AgentChatConversationCommandFacts {
+            waiting_for_permission: true,
+            dismiss_installed: true,
+            ..Default::default()
+        };
+        for trigger in [
+            ConversationDismissTrigger::BackButton,
+            ConversationDismissTrigger::CloseButton,
+            ConversationDismissTrigger::Escape,
+            ConversationDismissTrigger::CommandW,
+        ] {
+            assert_eq!(
+                resolve_agent_chat_conversation_dismissal(
+                    pending,
+                    ConversationOverlayFacts::default(),
+                    trigger,
+                ),
+                ConversationDismissDecision::Blocked(
+                    ConversationCommandDisabledReason::WaitingForPermission
+                ),
+            );
+
+            let precedence = [
+                (
+                    ConversationOverlayFacts {
+                        blocking_modal_open: true,
+                        actions_open: true,
+                        attachment_portal_open: true,
+                        composer_picker_open: true,
+                    },
+                    ConversationOverlayKind::BlockingModal,
+                ),
+                (
+                    ConversationOverlayFacts {
+                        actions_open: true,
+                        attachment_portal_open: true,
+                        composer_picker_open: true,
+                        ..Default::default()
+                    },
+                    ConversationOverlayKind::Actions,
+                ),
+                (
+                    ConversationOverlayFacts {
+                        attachment_portal_open: true,
+                        composer_picker_open: true,
+                        ..Default::default()
+                    },
+                    ConversationOverlayKind::AttachmentPortal,
+                ),
+                (
+                    ConversationOverlayFacts {
+                        composer_picker_open: true,
+                        ..Default::default()
+                    },
+                    ConversationOverlayKind::ComposerPicker,
+                ),
+            ];
+            for (overlays, expected) in precedence {
+                assert_eq!(
+                    resolve_agent_chat_conversation_dismissal(pending, overlays, trigger),
+                    ConversationDismissDecision::DismissOverlay(expected),
+                );
+            }
+        }
+
+        assert_eq!(
+            resolve_agent_chat_conversation_dismissal(
+                AgentChatConversationCommandFacts {
+                    response_in_progress: true,
+                    ..Default::default()
+                },
+                ConversationOverlayFacts::default(),
+                ConversationDismissTrigger::Escape,
+            ),
+            ConversationDismissDecision::Blocked(
+                ConversationCommandDisabledReason::ActiveWorkCannotSurviveDismissal
+            ),
+        );
+        assert_eq!(
+            resolve_agent_chat_conversation_dismissal(
+                AgentChatConversationCommandFacts::default(),
+                ConversationOverlayFacts::default(),
+                ConversationDismissTrigger::Escape,
+            ),
+            ConversationDismissDecision::DismissConversation,
+        );
     }
 
     #[test]

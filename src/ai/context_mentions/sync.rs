@@ -106,22 +106,27 @@ pub(crate) fn build_inline_mention_sync_plan_with_aliases(
         .iter()
         .enumerate()
         .filter_map(|(ix, part)| {
-            let token = super::part_to_inline_token(part)?;
-            (inline_owned_tokens.contains(&token) && !desired_tokens.contains(&token)).then_some(ix)
+            let owned_by_alias = aliases.iter().any(|(token, aliased_part)| {
+                aliased_part.has_same_attachment_owner(part) && inline_owned_tokens.contains(token)
+            });
+            let owned_by_canonical_token = super::part_to_inline_token(part)
+                .is_some_and(|token| inline_owned_tokens.contains(&token));
+            let remains_desired = desired_parts
+                .iter()
+                .any(|desired| desired.has_same_attachment_owner(part));
+            ((owned_by_alias || owned_by_canonical_token) && !remains_desired).then_some(ix)
         })
-        .collect();
-
-    // Parts for tokens that are in the text but not yet attached.
-    let existing_tokens: HashSet<String> = attached_parts
-        .iter()
-        .filter_map(super::part_to_inline_token)
         .collect();
 
     let mut added_parts = Vec::new();
     let mut added_tokens = Vec::new();
     for mention in &parsed {
-        if existing_tokens.contains(&mention.canonical_token)
-            || added_tokens.contains(&mention.canonical_token)
+        if attached_parts
+            .iter()
+            .any(|attached| attached.has_same_attachment_owner(&mention.part))
+            || added_parts
+                .iter()
+                .any(|added: &AiContextPart| added.has_same_attachment_owner(&mention.part))
         {
             continue;
         }
@@ -135,7 +140,7 @@ pub(crate) fn build_inline_mention_sync_plan_with_aliases(
         desired_count = desired_parts.len(),
         stale_count = stale_indices.len(),
         added_count = added_parts.len(),
-        desired_tokens = ?desired_tokens,
+        desired_token_count = desired_tokens.len(),
     );
 
     InlineMentionSyncPlan {
@@ -149,21 +154,36 @@ pub(crate) fn build_inline_mention_sync_plan_with_aliases(
 
 /// Return the indices of attached parts that should be shown as visible chips
 /// (i.e. those NOT already represented by an inline `@mention` token).
+#[cfg(test)]
 pub(crate) fn visible_context_chip_indices(
     text: &str,
     attached_parts: &[AiContextPart],
 ) -> Vec<usize> {
-    let inline_tokens: HashSet<String> = super::parse_inline_context_mentions(text)
-        .into_iter()
-        .map(|m| m.canonical_token)
-        .collect();
+    visible_context_chip_indices_with_aliases(
+        text,
+        attached_parts,
+        &std::collections::HashMap::new(),
+    )
+}
+
+/// Alias-aware chip visibility: a selected command/file represented inline
+/// must not also appear as a duplicate chip, even when its friendly token is
+/// intentionally suffixed to distinguish another plugin with the same name.
+pub(crate) fn visible_context_chip_indices_with_aliases(
+    text: &str,
+    attached_parts: &[AiContextPart],
+    aliases: &std::collections::HashMap<String, AiContextPart>,
+) -> Vec<usize> {
+    let inline_mentions = super::parse_inline_context_mentions_with_aliases(text, aliases);
 
     let indices: Vec<usize> = attached_parts
         .iter()
         .enumerate()
-        .filter_map(|(ix, part)| match super::part_to_inline_token(part) {
-            Some(token) if inline_tokens.contains(&token) => None,
-            _ => Some(ix),
+        .filter_map(|(ix, part)| {
+            (!inline_mentions
+                .iter()
+                .any(|mention| mention.part.has_same_attachment_owner(part)))
+            .then_some(ix)
         })
         .collect();
 

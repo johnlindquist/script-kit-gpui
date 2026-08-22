@@ -818,6 +818,101 @@ fn compact_file_alias_resolves_to_full_attached_path() {
     assert_eq!(parsed[0].canonical_token, token);
 }
 
+fn assert_distinct_owner_aliases_survive_parser_and_sync(
+    base_token: &str,
+    first: AiContextPart,
+    second: AiContextPart,
+) {
+    use std::collections::{HashMap, HashSet};
+
+    let second_token = format!("{base_token}-2");
+    let aliases = HashMap::from([
+        (base_token.to_string(), first.clone()),
+        (second_token.clone(), second.clone()),
+    ]);
+    let text = format!("Compare {base_token} {second_token}");
+    let parsed = parse_inline_context_mentions_with_aliases(&text, &aliases);
+
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].canonical_token, base_token);
+    assert_eq!(parsed[1].canonical_token, second_token);
+    assert_eq!(parsed[0].part, first);
+    assert_eq!(parsed[1].part, second);
+
+    let initial = super::sync::build_inline_mention_sync_plan_with_aliases(
+        &text,
+        &[],
+        &HashSet::new(),
+        &aliases,
+    );
+    assert_eq!(initial.added_parts, [first.clone(), second.clone()]);
+    assert_eq!(
+        initial.added_tokens,
+        [base_token.to_string(), second_token.clone()]
+    );
+
+    let owned: HashSet<String> = initial.added_tokens.iter().cloned().collect();
+    let attached = initial.added_parts;
+    let unchanged = super::sync::build_inline_mention_sync_plan_with_aliases(
+        &text, &attached, &owned, &aliases,
+    );
+    assert!(unchanged.added_parts.is_empty());
+    assert!(unchanged.stale_indices.is_empty());
+    assert!(
+        super::sync::visible_context_chip_indices_with_aliases(&text, &attached, &aliases)
+            .is_empty(),
+        "inline owner-backed selections must not also render duplicate context chips"
+    );
+
+    let removed_first = super::sync::build_inline_mention_sync_plan_with_aliases(
+        &second_token,
+        &attached,
+        &owned,
+        &aliases,
+    );
+    assert_eq!(removed_first.stale_indices, [0]);
+    assert!(removed_first.added_parts.is_empty());
+    assert!(removed_first.desired_tokens.contains(&second_token));
+    assert_eq!(
+        super::sync::visible_context_chip_indices_with_aliases(&second_token, &attached, &aliases,),
+        [0]
+    );
+}
+
+#[test]
+fn duplicate_skill_owner_aliases_remain_distinct_through_parser_and_sync() {
+    assert_distinct_owner_aliases_survive_parser_and_sync(
+        "@skills:Deploy",
+        AiContextPart::FilePath {
+            path: "/plugins/first/deploy/SKILL.md".to_string(),
+            label: "Deploy".to_string(),
+        },
+        AiContextPart::FilePath {
+            path: "/plugins/second/deploy/SKILL.md".to_string(),
+            label: "Deploy".to_string(),
+        },
+    );
+}
+
+#[test]
+fn duplicate_scriptlet_owner_aliases_remain_distinct_through_parser_and_sync() {
+    assert_distinct_owner_aliases_survive_parser_and_sync(
+        "@scriptlets:Deploy",
+        AiContextPart::TextBlock {
+            label: "Deploy".to_string(),
+            source: "spine:scriptlets:/plugins/first/deploy.md".to_string(),
+            text: "first owner's command".to_string(),
+            mime_type: None,
+        },
+        AiContextPart::TextBlock {
+            label: "Deploy".to_string(),
+            source: "spine:scriptlets:/plugins/second/deploy.md".to_string(),
+            text: "second owner's command".to_string(),
+            mime_type: None,
+        },
+    );
+}
+
 // ── Provider-backed mention gating ──────────────────────────────
 
 fn restore_env(key: &str, value: Option<std::ffi::OsString>) {

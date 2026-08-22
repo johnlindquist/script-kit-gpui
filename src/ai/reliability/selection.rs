@@ -6,7 +6,7 @@ use sk_protocol::ai_reliability::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectionDecision {
-    Ready(AiSelectionState),
+    Ready(Box<AiSelectionState>),
     ChooseCompatibleModel {
         requested: AiModelSelection,
         candidates: Vec<AiModelCandidate>,
@@ -21,7 +21,7 @@ pub fn decide_selection_change(
     command_id: sk_protocol::ai_reliability::CommandId,
 ) -> SelectionDecision {
     if current.effective.as_ref() == Some(&requested) {
-        return SelectionDecision::Ready(current.clone());
+        return SelectionDecision::Ready(Box::new(current.clone()));
     }
     if candidates.iter().any(|candidate| {
         requested.provider_id.as_ref() == Some(&candidate.provider_id)

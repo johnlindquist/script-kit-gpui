@@ -798,7 +798,7 @@ impl NotesApp {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(50))
                 .await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(entity) = this.upgrade() else {
                     return;
                 };
@@ -849,20 +849,20 @@ impl NotesApp {
     fn dispatch_notes_ai_handoff_to_main(
         payload: NotesAiHandoffPayload,
         cx: &mut Context<Self>,
-    ) -> Result<NotesAiMainHandoffOutcome, NotesAiMainHandoffFailure> {
+    ) -> Result<NotesAiMainHandoffOutcome, Box<NotesAiMainHandoffFailure>> {
         if crate::get_main_window_handle().is_none() {
-            return Err(NotesAiMainHandoffFailure::new(
+            return Err(Box::new(NotesAiMainHandoffFailure::new(
                 NotesAiHandoffError::MainWindowUnavailable,
                 "notes_main_window_handle_missing",
-            ));
+            )));
         }
         let Some(hook) = NOTES_AI_MAIN_HANDOFF_HOOK.get() else {
-            return Err(NotesAiMainHandoffFailure::new(
+            return Err(Box::new(NotesAiMainHandoffFailure::new(
                 NotesAiHandoffError::MainStagingFailed,
                 "notes_ai_handoff_hook_unregistered",
-            ));
+            )));
         };
-        hook(payload, cx)
+        hook(payload, cx).map_err(Box::new)
     }
 
     /// Record the redacted receipt (also projected into devtools state).

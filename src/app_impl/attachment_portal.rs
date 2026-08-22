@@ -222,7 +222,8 @@ impl ScriptListApp {
         tracing::info!(
             target: "script_kit::spine",
             event = "spine_attachment_portal_opened",
-            query = %query,
+            query_sha256 = %crate::logging::log_private_user_value(&query),
+            query_bytes = query.len(),
             return_width = ?self.attachment_portal_return_width,
         );
 
@@ -302,7 +303,8 @@ impl ScriptListApp {
         tracing::info!(
             target: "script_kit::spine",
             event = "spine_attachment_portal_segment_resolved",
-            token = %token,
+            token_sha256 = %crate::logging::log_private_user_value(&token),
+            token_bytes = token.len(),
         );
 
         self.filter_text = new_text.clone();
@@ -419,14 +421,16 @@ impl ScriptListApp {
             target: "script_kit::agent_chat",
             event = "attachment_portal_query_seeded_from_contract",
             kind = ?kind,
-            query = %portal_query,
+            query_sha256 = %crate::logging::log_private_user_value(&portal_query),
+            query_bytes = portal_query.len(),
         );
 
         tracing::info!(
             target: "script_kit::agent_chat",
             event = "attachment_portal_picker_query_resolved",
             kind = ?kind,
-            query = %portal_query,
+            query_sha256 = %crate::logging::log_private_user_value(&portal_query),
+            query_bytes = portal_query.len(),
         );
 
         if let Some(AppView::AgentChatView { entity }) = self.attachment_portal_return_view.as_ref()

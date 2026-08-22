@@ -307,7 +307,7 @@ pub fn ai_recovery_footer_hint_labels(
 pub fn render_ai_recovery_footer(
     plan: &RecoveryPresentationPlan,
     handlers: &AiRecoveryCardHandlers,
-    on_open_menu: Option<Rc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    on_open_menu: Option<AiRecoveryDismissHandler>,
 ) -> Option<AnyElement> {
     if plan.footer.is_none() && plan.menu.is_empty() && !plan.dismissible {
         return None;

@@ -9,10 +9,10 @@ mod agent_chat_setup;
 mod focused_text_entry;
 mod source_classification;
 mod types;
+use agent_chat_context_staging::materialize_selection_context_parts;
 pub(crate) use agent_chat_entry::{
     AgentChatEntryDispatch, AgentChatEntryOutcome, AgentChatSubmissionOutcome,
 };
-use agent_chat_context_staging::materialize_selection_context_parts;
 use source_classification::{
     app_view_to_prompt_type_str, build_tab_ai_apply_back_hint, detect_tab_ai_source_type,
     detect_tab_ai_source_type_early,
@@ -190,7 +190,8 @@ impl ScriptListApp {
             target: "script_kit::tab_ai",
             event = "agent_chat_profile_persisted",
             profile_id = %profile.id,
-            profile_name = %profile.name,
+            profile_name_sha256 = %crate::logging::log_private_user_value(&profile.name),
+            profile_name_bytes = profile.name.len(),
             backend = ?profile.backend,
         );
         self.refresh_agent_model_footer_labels();
@@ -796,11 +797,8 @@ impl ScriptListApp {
         } else {
             agent_chat_entry::AgentChatThreadTarget::CurrentHostEmbedded
         };
-        let request = agent_chat_entry::AgentChatEntryRequest::dictation_send(
-            text,
-            target,
-            ui_variant,
-        )?;
+        let request =
+            agent_chat_entry::AgentChatEntryRequest::dictation_send(text, target, ui_variant)?;
         Ok(self.open_agent_chat_from_entry_request(request, cx))
     }
 
@@ -825,11 +823,7 @@ impl ScriptListApp {
         }
     }
 
-    pub(crate) fn send_dictation_to_agent_chat(
-        &mut self,
-        text: String,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn send_dictation_to_agent_chat(&mut self, text: String, cx: &mut Context<Self>) {
         match agent_chat_entry::AgentChatEntryRequest::explicit_send(
             agent_chat_entry::AgentChatEntryOrigin::Dictation,
             text,
@@ -1101,7 +1095,8 @@ impl ScriptListApp {
             item_source = %target.source,
             item_kind = %target.kind,
             semantic_id = %target.semantic_id,
-            label = %label,
+            label_sha256 = %crate::logging::log_private_user_value(&label),
+            label_bytes = label.len(),
         );
 
         // Keep the request's context policy truthful (explicit actions target),
@@ -1233,7 +1228,8 @@ impl ScriptListApp {
             target: "script_kit::tab_ai",
             event = "tab_ai_context_part_agent_chat_open",
             source,
-            label = %part.label(),
+            label_sha256 = %crate::logging::log_private_user_value(part.label()),
+            label_bytes = part.label().len(),
         );
 
         let (ui_snapshot, invocation_receipt) = self.snapshot_tab_ai_ui(cx);
@@ -1318,7 +1314,8 @@ impl ScriptListApp {
             target: "script_kit::tab_ai",
             event = "quick_terminal_output_agent_chat_open",
             source = %part.source(),
-            label = %part.label(),
+            label_sha256 = %crate::logging::log_private_user_value(part.label()),
+            label_bytes = part.label().len(),
         );
         self.open_tab_ai_agent_chat_with_context_part(part, "quick_terminal_output", cx);
         true
@@ -1351,7 +1348,8 @@ impl ScriptListApp {
             target: "script_kit::tab_ai",
             event = "quick_terminal_portal_output_attached",
             source = %part.source(),
-            label = %part.label(),
+            label_sha256 = %crate::logging::log_private_user_value(part.label()),
+            label_bytes = part.label().len(),
         );
         self.close_attachment_portal_with_part(part, cx);
         true
@@ -1420,7 +1418,8 @@ impl ScriptListApp {
             tracing::info!(
                 target: "script_kit::tab_ai",
                 event = "script_list_clipboard_image_routed_to_agent_chat",
-                label = %label,
+                label_sha256 = %crate::logging::log_private_user_value(&label),
+                label_bytes = label.len(),
                 width = image_data.width,
                 height = image_data.height,
                 size_bytes = png_bytes.len(),
@@ -1454,7 +1453,8 @@ impl ScriptListApp {
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "script_list_large_paste_routed_to_agent_chat",
-            label = %token.label,
+            label_sha256 = %crate::logging::log_private_user_value(&token.label),
+            label_bytes = token.label.len(),
             char_count = token.text.chars().count(),
             line_count = token.text.lines().count().max(1),
         );
@@ -1484,10 +1484,11 @@ impl ScriptListApp {
             event = "agent_chat_skill_slash_selection_requested",
             plugin_id = %skill.plugin_id,
             skill_id = %skill.skill_id,
-            skill_title = %skill.title,
+            skill_title_sha256 = %crate::logging::log_private_user_value(&skill.title),
             owner,
-            path = %skill.path.display(),
-            slash_input = %command_text,
+            path_sha256 = %crate::logging::log_private_user_value(&skill.path.to_string_lossy()),
+            slash_input_sha256 = %crate::logging::log_private_user_value(&command_text),
+            slash_input_bytes = command_text.len(),
             "Opening Agent Chat with plugin skill staged as a slash selection"
         );
 
@@ -2262,7 +2263,7 @@ impl ScriptListApp {
     /// and triggers a snapshot rebuild. Returns `true` when the chord was
     /// consumed so the legacy Agent Chat route doesn't also fire.
     pub(crate) fn try_route_cmd_enter_to_menu_syntax_ai(&mut self, cx: &mut Context<Self>) -> bool {
-        use crate::menu_syntax::{MenuSyntaxActionState, builtin_schema};
+        use crate::menu_syntax::{builtin_schema, MenuSyntaxActionState};
         let raw = self.filter_text().to_string();
         let mode = &self.menu_syntax_mode;
         let pending = if let Some(invocation) = mode.capture_for(&raw) {
@@ -2305,7 +2306,8 @@ impl ScriptListApp {
         tracing::info!(
             target: "script_kit::menu_syntax_ai",
             event = "menu_syntax_ai_proposal_generated",
-            title = %pending.proposal.title,
+            title_sha256 = %crate::logging::log_private_user_value(&pending.proposal.title),
+            title_bytes = pending.proposal.title.len(),
             actionable = pending.proposal.is_actionable(),
             origin_target = ?pending.origin.target,
         );
@@ -2732,7 +2734,8 @@ impl ScriptListApp {
                     AppView::ScriptList => "ScriptList",
                     _ => "Other",
                 },
-                chip_label = %label,
+                chip_label_sha256 = %crate::logging::log_private_user_value(label),
+                chip_label_bytes = label.len(),
             );
             self.spawn_tab_ai_pre_switch_capture(&request)
         } else {
@@ -3278,9 +3281,15 @@ impl ScriptListApp {
                             target: "script_kit::tab_ai",
                             event = "pi_agent_chat_warm_started",
                             profile_id = %pi_launch.profile.id,
-                            warm_key = %pi_launch.warm_key,
-                            cwd = %pi_launch.cwd.display(),
-                            cwd_override = ?cwd_override,
+                            warm_key_sha256 = %crate::logging::log_private_user_value(
+                                &pi_launch.warm_key
+                            ),
+                            cwd_sha256 = %crate::logging::log_private_user_value(
+                                &pi_launch.cwd.to_string_lossy()
+                            ),
+                            cwd_override_sha256 = ?cwd_override.as_ref().map(|path| {
+                                crate::logging::log_private_user_value(&path.to_string_lossy())
+                            }),
                             generation = snapshot.generation,
                             state = ?snapshot.state,
                         );
@@ -3290,10 +3299,18 @@ impl ScriptListApp {
                             target: "script_kit::tab_ai",
                             event = "pi_agent_chat_warm_unavailable",
                             profile_id = %pi_launch.profile.id,
-                            warm_key = %pi_launch.warm_key,
-                            cwd = %pi_launch.cwd.display(),
-                            cwd_override = ?cwd_override,
-                            error = %error,
+                            warm_key_sha256 = %crate::logging::log_private_user_value(
+                                &pi_launch.warm_key
+                            ),
+                            cwd_sha256 = %crate::logging::log_private_user_value(
+                                &pi_launch.cwd.to_string_lossy()
+                            ),
+                            cwd_override_sha256 = ?cwd_override.as_ref().map(|path| {
+                                crate::logging::log_private_user_value(&path.to_string_lossy())
+                            }),
+                            error_sha256 = %crate::logging::log_private_user_value(
+                                &error.to_string()
+                            ),
                         );
                     }
                 }
@@ -3661,7 +3678,8 @@ impl ScriptListApp {
                 .is_none_or(|v| matches!(v, AppView::ScriptList)),
             has_pending_script_list_trigger = pending_script_list_trigger.is_some(),
             pending_script_list_trigger = ?pending_script_list_trigger,
-            filter_text = %self.filter_text,
+            filter_sha256 = %crate::logging::log_private_user_value(&self.filter_text),
+            filter_bytes = self.filter_text.len(),
             current_view = ?self.current_view,
         );
         let closing_quick_terminal = matches!(self.current_view, AppView::QuickTerminalView { .. });
@@ -3837,12 +3855,7 @@ impl ScriptListApp {
                     .pending_placeholder
                     .as_deref()
                     .unwrap_or(crate::ROOT_LAUNCHER_PLACEHOLDER);
-                self.restore_agent_chat_input_return_state(
-                    &origin.input,
-                    placeholder,
-                    window,
-                    cx,
-                );
+                self.restore_agent_chat_input_return_state(&origin.input, placeholder, window, cx);
             }
             AgentChatReturnRoute::Main(state) => {
                 self.tab_ai_harness_return_view = Some(state.view.clone());
@@ -3856,24 +3869,16 @@ impl ScriptListApp {
                 self.computed_filter_text = state.computed_filter_text.clone();
                 self.pending_placeholder = state.pending_placeholder.clone();
                 self.invalidate_grouped_cache();
-                let _ = self.restore_main_menu_selection_from_snapshot(
-                    state.interaction.selection.clone(),
-                );
+                let _ = self
+                    .restore_main_menu_selection_from_snapshot(state.interaction.selection.clone());
                 self.sync_list_state_for_filter_replacement(
-                    MainListReplacementPolicy::PreserveViewport(
-                        state.interaction.viewport.clone(),
-                    ),
+                    MainListReplacementPolicy::PreserveViewport(state.interaction.viewport.clone()),
                 );
                 let placeholder = state
                     .pending_placeholder
                     .as_deref()
                     .unwrap_or(crate::ROOT_LAUNCHER_PLACEHOLDER);
-                self.restore_agent_chat_input_return_state(
-                    &state.input,
-                    placeholder,
-                    window,
-                    cx,
-                );
+                self.restore_agent_chat_input_return_state(&state.input, placeholder, window, cx);
                 self.opened_from_main_menu = false;
                 cx.notify();
             }
@@ -4236,10 +4241,15 @@ impl ScriptListApp {
         }
         self.agent_chat_return_route = match origin {
             "source" => {
-                if matches!(self.agent_chat_return_route, AgentChatReturnRoute::Source(_)) {
+                if matches!(
+                    self.agent_chat_return_route,
+                    AgentChatReturnRoute::Source(_)
+                ) {
                     return Ok(());
                 }
-                return Err("Agent Chat source route was not captured by the real entry path".to_string());
+                return Err(
+                    "Agent Chat source route was not captured by the real entry path".to_string(),
+                );
             }
             "main" => {
                 let value = "c06-main-route".to_string();
@@ -4258,7 +4268,11 @@ impl ScriptListApp {
                 })
             }
             "direct" => AgentChatReturnRoute::Direct,
-            other => return Err(format!("unsupported Agent Chat return-route fixture {other:?}")),
+            other => {
+                return Err(format!(
+                    "unsupported Agent Chat return-route fixture {other:?}"
+                ))
+            }
         };
         cx.notify();
         Ok(())
@@ -5879,7 +5893,8 @@ impl ScriptListApp {
         let filename_stem = Self::tab_ai_default_save_name(&record);
         tracing::info!(
             event = "tab_ai_save_offer_state_set",
-            filename_stem = %filename_stem,
+            filename_stem_sha256 = %crate::logging::log_private_user_value(&filename_stem),
+            filename_stem_bytes = filename_stem.len(),
         );
         self.tab_ai_save_offer_state = Some(TabAiSaveOfferState {
             record,
@@ -5922,8 +5937,10 @@ impl ScriptListApp {
                 Err(error) => {
                     tracing::warn!(
                         event = "tab_ai_save_create_failed",
-                        error = %error,
-                        filename_stem = %state.filename_stem,
+                        error_sha256 = %crate::logging::log_private_user_value(&error.to_string()),
+                        filename_stem_sha256 = %crate::logging::log_private_user_value(
+                            &state.filename_stem
+                        ),
                     );
                     if let Some(save_state) = &mut self.tab_ai_save_offer_state {
                         save_state.error = Some(format!("Failed to save script: {error}").into());
@@ -5935,8 +5952,9 @@ impl ScriptListApp {
 
         tracing::info!(
             event = "tab_ai_script_saved",
-            filename_stem = %state.filename_stem,
-            path = %created_path.display(),
+            filename_stem_sha256 = %crate::logging::log_private_user_value(&state.filename_stem),
+            filename_stem_bytes = state.filename_stem.len(),
+            path_sha256 = %crate::logging::log_private_user_value(&created_path.to_string_lossy()),
         );
 
         let created_file_path = if created_path.is_absolute() {
@@ -6253,7 +6271,8 @@ impl ScriptListApp {
                         tracing::info!(
                             target: "tab_ai",
                             source_type = "ScriptListItem",
-                            script_path = %path_str,
+                            script_path_sha256 = %crate::logging::log_private_user_value(&path_str),
+                            script_path_bytes = path_str.len(),
                             "tab_ai_apply_back.script_saved"
                         );
                         self.toast_manager.push(

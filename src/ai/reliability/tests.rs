@@ -187,6 +187,71 @@ fn redactor_allowlists_json_masks_secrets_paths_and_bounds_output() {
 }
 
 #[test]
+fn redactor_suppresses_unallowlisted_json_without_falling_back_to_private_payloads() {
+    let private_payloads = [
+        serde_json::json!({
+            "prompt": "private customer conversation",
+            "password": "private-password",
+            "api_key": "sk-private-key"
+        })
+        .to_string(),
+        serde_json::json!([
+            { "prompt": "private customer conversation", "secret": "private-secret" }
+        ])
+        .to_string(),
+        serde_json::json!({
+            "message": { "prompt": "private customer conversation" }
+        })
+        .to_string(),
+    ];
+
+    for raw in private_payloads {
+        let redacted = redact_diagnostic(&raw);
+        assert!(redacted.suppressed);
+        assert!(redacted.copyable_detail.is_none());
+        assert_eq!(redacted.fingerprint.0.len(), 64);
+    }
+}
+
+#[test]
+fn redactor_masks_passwords_and_bare_bearer_credentials_in_provider_prose() {
+    let raw = "Sign in required password=private-password passphrase=private-phrase Bearer private-bearer sk-proj-private-key-material gsk_private_groq_token";
+    let detail = redact_diagnostic(raw)
+        .copyable_detail
+        .expect("the safe recovery reason remains available");
+
+    assert!(detail.contains("Sign in required"));
+    assert!(!detail.contains("private-password"));
+    assert!(!detail.contains("private-phrase"));
+    assert!(!detail.contains("private-bearer"));
+    assert!(!detail.contains("sk-proj-private-key-material"));
+    assert!(!detail.contains("gsk_private_groq_token"));
+}
+
+#[test]
+fn redactor_removes_complete_multiline_private_keys() {
+    let raw = "Key rejected -----BEGIN PRIVATE KEY-----\nprivate-secret-material\n-----END PRIVATE KEY----- while signing";
+    let detail = redact_diagnostic(raw)
+        .copyable_detail
+        .expect("the safe signing context remains available");
+
+    assert!(detail.contains("Key rejected"));
+    assert!(detail.contains("while signing"));
+    assert!(!detail.contains("BEGIN PRIVATE KEY"));
+    assert!(!detail.contains("private-secret-material"));
+}
+
+#[test]
+fn redactor_preserves_product_crate_names_that_are_not_provider_tokens() {
+    let raw = "Check crates/sk-protocol/src/command_contract.rs before running sk-protocol tests";
+    let detail = redact_diagnostic(raw)
+        .copyable_detail
+        .expect("product crate names contain no provider credentials");
+
+    assert_eq!(detail, raw);
+}
+
+#[test]
 fn primary_record_has_no_raw_payload_field_or_debug_leak() {
     let vault = DiagnosticVault::default();
     let raw = "unknown catastrophic detail with secret token=do-not-leak";

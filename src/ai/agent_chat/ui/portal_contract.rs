@@ -187,11 +187,13 @@ pub(crate) fn portal_target_from_part(part: &AiContextPart) -> Option<(ContextPo
         },
         AiContextPart::FilePath { label, .. } => {
             if crate::pasted_image::label_looks_like_pasted_image(label) {
+                let safe_label = crate::logging::log_private_user_value(label);
                 tracing::info!(
                     target: "script_kit::agent_chat",
                     event = "agent_chat_part_forced_preview_only",
                     reason = "pasted_image",
-                    label = %label,
+                    label_bytes = safe_label.raw_bytes,
+                    label_sha256 = %safe_label.sha256,
                 );
                 return None;
             }
@@ -376,11 +378,15 @@ pub(crate) fn intent_from_inline_token(
     replacement: AgentChatPortalReplacementTarget,
 ) -> Option<AgentChatPortalIntent> {
     if let Some(description) = preview_only_inline_token_description(token) {
+        let safe_token = crate::logging::log_private_user_value(token);
+        let safe_description = crate::logging::log_private_user_value(&description);
         tracing::info!(
             target: "script_kit::agent_chat",
             event = "agent_chat_inline_token_forced_preview_only",
-            token = %token,
-            description = %description,
+            token_bytes = safe_token.raw_bytes,
+            token_sha256 = %safe_token.sha256,
+            description_bytes = safe_description.raw_bytes,
+            description_sha256 = %safe_description.sha256,
         );
         return Some(AgentChatPortalIntent::PreviewOnly {
             description,

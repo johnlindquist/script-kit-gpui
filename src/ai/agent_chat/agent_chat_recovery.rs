@@ -6,10 +6,10 @@
 use std::path::Path;
 
 use sk_protocol::ai_reliability::{
-    transition, AiModelSelection, AiOperationEvent, AiOperationState, AiSelectionState,
-    AiSurfaceIdentity, AiWorkSnapshot, CapabilityDecision, Fingerprint, ModelId,
-    PreservationReceipt, ProfileId, ProviderId, RetryPolicy, SelectionOrigin, TurnRequestRef,
-    TurnRisk, WorkKey,
+    recovery_plan_for, transition, AiModelSelection, AiOperationEvent, AiOperationState, AiPhase,
+    AiSelectionState, AiSurfaceIdentity, AiWorkSnapshot, CapabilityDecision, Fingerprint,
+    InvalidTransition, ModelId, PreservationReceipt, ProfileId, ProgressSnapshot, ProviderId,
+    RetryPolicy, SelectionOrigin, TurnRequestRef, TurnRisk, WorkKey,
 };
 
 use crate::ai::reliability::{
@@ -63,8 +63,37 @@ pub(crate) fn warm_recovery_state(
         },
     );
     state.retry.manual_used = attempts.min(u8::MAX as u32) as u8;
-    state = transition(
-        state,
+    // The warm slot already classified this failure. Re-classifying its own
+    // safe copy would erase actionable auth/config/runtime recovery details.
+    let failure = failure.cloned().unwrap_or_else(|| {
+        provider_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Pi,
+            "warm prepare failed before reporting available models",
+        )
+    });
+    let recover_invalid_transition = |mut fallback: AiOperationState, error: InvalidTransition| {
+        tracing::error!(
+            ?error,
+            "Agent Chat warm recovery encountered an invalid state transition"
+        );
+        let typed_failure = failure.failure.clone();
+        let plan = recovery_plan_for(
+            &fallback.identity,
+            &typed_failure,
+            fallback.retry,
+            TurnRisk::ReadOnly,
+            &ProgressSnapshot::none(),
+        );
+        fallback.diagnostic = typed_failure.diagnostic.clone();
+        fallback.phase = AiPhase::AwaitingRecovery {
+            failure: typed_failure,
+            plan,
+        };
+        fallback
+    };
+
+    state = match transition(
+        state.clone(),
         AiOperationEvent::SubmitRequested {
             request: TurnRequestRef::from("agent-chat-warm-launch"),
             work: AiWorkSnapshot {
@@ -82,29 +111,24 @@ pub(crate) fn warm_recovery_state(
             },
             risk: TurnRisk::ReadOnly,
         },
-    )
-    .expect("ready warm recovery submit is valid")
-    .next;
-    state = transition(
-        state,
+    ) {
+        Ok(outcome) => outcome.next,
+        Err(error) => return recover_invalid_transition(state, error),
+    };
+    state = match transition(
+        state.clone(),
         AiOperationEvent::CapabilityResolved(CapabilityDecision::Compatible),
-    )
-    .expect("warm recovery capability transition is valid")
-    .next;
-    // S11: the warm slot already classified this failure. Re-classifying its
-    // own safe copy through the free-text provider classifier erased the
-    // typed kind (auth/config/runtime) and produced `Unknown`, which is why a
-    // "sign in required" warm failure rendered a generic card with no Sign In
-    // action. Only synthesize a record when the slot genuinely has none.
-    let failure = failure.cloned().unwrap_or_else(|| {
-        provider_failure(
-            sk_protocol::ai_reliability::ProtocolComponent::Pi,
-            "warm prepare failed before reporting available models",
-        )
-    });
-    transition(state, AiOperationEvent::Failed(failure.failure))
-        .expect("preflight warm failure is valid")
-        .next
+    ) {
+        Ok(outcome) => outcome.next,
+        Err(error) => return recover_invalid_transition(state, error),
+    };
+    match transition(
+        state.clone(),
+        AiOperationEvent::Failed(failure.failure.clone()),
+    ) {
+        Ok(outcome) => outcome.next,
+        Err(error) => recover_invalid_transition(state, error),
+    }
 }
 
 pub(crate) fn warm_recovery_spec(state: &AiOperationState) -> Option<AiRecoveryCardSpec> {

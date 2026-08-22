@@ -148,8 +148,7 @@ pub(crate) fn map_rpc_event_to_events(event: &Value) -> Vec<AgentChatEvent> {
             sk_protocol::ai_reliability::ProtocolComponent::Pi,
             get_str(event, "error")
                 .or_else(|| get_str(event, "message"))
-                .unwrap_or("Pi RPC event error")
-                .to_string(),
+                .unwrap_or("Pi RPC event error"),
         )],
         _ => Vec::new(),
     }

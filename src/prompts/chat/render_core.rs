@@ -80,20 +80,21 @@ impl ChatPrompt {
     fn conversation_footer_hints(&self) -> Vec<gpui::SharedString> {
         use crate::components::conversation_actions::ChatPromptConversationCommand;
         let commands = self.conversation_command_bindings();
-        let primary = commands
-            .iter()
-            .find(|command| {
-                matches!(
-                    command.handler,
-                    ChatPromptConversationCommand::Send | ChatPromptConversationCommand::Stop
-                )
-            })
-            .expect("ChatPrompt always binds Send or Stop");
+        let Some(primary) = commands.iter().find(|command| {
+            matches!(
+                command.handler,
+                ChatPromptConversationCommand::Send | ChatPromptConversationCommand::Stop
+            )
+        }) else {
+            tracing::error!("ChatPrompt has no routable Send or Stop command for its footer");
+            return Vec::new();
+        };
+        let Some(shortcut) = primary.descriptor.shortcut else {
+            tracing::error!("ChatPrompt primary footer command does not define a shortcut");
+            return Vec::new();
+        };
         crate::components::universal_prompt_hints_with_primary_key_label(
-            primary
-                .descriptor
-                .shortcut
-                .expect("ChatPrompt primary command has shortcut"),
+            shortcut,
             primary.descriptor.label,
         )
     }

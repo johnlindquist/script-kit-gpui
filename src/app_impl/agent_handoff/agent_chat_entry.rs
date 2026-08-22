@@ -227,16 +227,15 @@ impl AgentChatEntryRequest {
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
         context_policy: AgentChatContextPolicy,
     ) -> Self {
-        let intent = if ui_variant
-            == crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi
-        {
-            match seed_text {
-                Some(text) if !text.trim().is_empty() => AgentChatEntryIntent::Ask { text },
-                _ => AgentChatEntryIntent::Open { seed_text: None },
-            }
-        } else {
-            AgentChatEntryIntent::open(seed_text)
-        };
+        let intent =
+            if ui_variant == crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi {
+                match seed_text {
+                    Some(text) if !text.trim().is_empty() => AgentChatEntryIntent::Ask { text },
+                    _ => AgentChatEntryIntent::Open { seed_text: None },
+                }
+            } else {
+                AgentChatEntryIntent::open(seed_text)
+            };
         Self {
             request_id: next_agent_chat_entry_request_id(),
             origin: AgentChatEntryOrigin::MainLauncher,
@@ -302,13 +301,12 @@ impl AgentChatEntryRequest {
         ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
     ) -> Result<Self, &'static str> {
         let intent = AgentChatEntryIntent::send(text)?;
-        let context_policy = if ui_variant
-            == crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi
-        {
-            AgentChatContextPolicy::NoContext
-        } else {
-            AgentChatContextPolicy::SuppressFocused
-        };
+        let context_policy =
+            if ui_variant == crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi {
+                AgentChatContextPolicy::NoContext
+            } else {
+                AgentChatContextPolicy::SuppressFocused
+            };
         Ok(Self {
             request_id: next_agent_chat_entry_request_id(),
             origin: AgentChatEntryOrigin::Dictation,
@@ -350,10 +348,23 @@ impl AgentChatEntryRequest {
     /// as an `@cmd:` chip and pre-filled into the composer. The unit tests
     /// below lock the suppression policy; do not weaken them.
     pub(crate) fn quick_question() -> Self {
+        let policy = crate::ai::entry_contract::AiEntryPolicy::quick_question();
+        debug_assert!(policy.validate().is_ok());
+        let context_policy = match policy.context_admission {
+            crate::ai::entry_contract::AiContextAdmission::None => {
+                AgentChatContextPolicy::NoContext
+            }
+            crate::ai::entry_contract::AiContextAdmission::ExplicitOnly => {
+                AgentChatContextPolicy::SuppressFocused
+            }
+            crate::ai::entry_contract::AiContextAdmission::AmbientOrFocused => {
+                AgentChatContextPolicy::AmbientOrFocused
+            }
+        };
         Self::main_launcher_internal(
-            None,
+            policy.composer_seed,
             crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
-            AgentChatContextPolicy::NoContext,
+            context_policy,
         )
     }
 
@@ -472,17 +483,31 @@ impl ScriptListApp {
         };
         let text_staged = match plan.seed_text.as_deref() {
             None => true,
-            Some(seed) if plan.verb == AgentChatEntryVerb::Ask || plan.verb == AgentChatEntryVerb::Send => submitted,
+            Some(seed)
+                if plan.verb == AgentChatEntryVerb::Ask
+                    || plan.verb == AgentChatEntryVerb::Send =>
+            {
+                submitted
+            }
             Some(seed) => observed.state.input_text == seed,
         };
         let context_staged = observed.state.context_chip_count > plan.baseline.context_count;
-        let submission = if matches!(plan.verb, AgentChatEntryVerb::Ask | AgentChatEntryVerb::Send)
-        {
+        let submission = if matches!(
+            plan.verb,
+            AgentChatEntryVerb::Ask | AgentChatEntryVerb::Send
+        ) {
             if submitted {
                 AgentChatSubmissionOutcome::Accepted
-            } else if observed.state.status == "error" || observed.state.status == "setup" || timed_out {
+            } else if observed.state.status == "error"
+                || observed.state.status == "setup"
+                || timed_out
+            {
                 AgentChatSubmissionOutcome::Refused {
-                    reason_code: if timed_out { "entry_timeout" } else { "runtime_refused" },
+                    reason_code: if timed_out {
+                        "entry_timeout"
+                    } else {
+                        "runtime_refused"
+                    },
                 }
             } else {
                 return None;
@@ -832,8 +857,8 @@ impl ScriptListApp {
                 let supplements = supplemental_parts
                     .into_iter()
                     .enumerate()
-                    .map(|(index, part)| {
-                        crate::notes::window::ai_handoff::NotesHandoffAttachment {
+                    .map(
+                        |(index, part)| crate::notes::window::ai_handoff::NotesHandoffAttachment {
                             cart_item_id: format!("legacy-{index}"),
                             context_item: crate::ai::staged_context::StagedContextItem::pending(
                                 part,
@@ -841,8 +866,8 @@ impl ScriptListApp {
                                 crate::ai::staged_context::ContextRole::Supplemental,
                             ),
                             idempotency_key: format!("legacy-notes-entry-{index}"),
-                        }
-                    })
+                        },
+                    )
                     .collect();
                 self.open_tab_ai_agent_chat_for_notes_handoff(
                     primary,
@@ -946,15 +971,18 @@ impl ScriptListApp {
                 .collect(),
             Err(detail) => supplements
                 .into_iter()
-                .map(|attachment| {
-                    crate::notes::window::ai_handoff::NotesSupplementStageOutcome {
+                .map(
+                    |attachment| crate::notes::window::ai_handoff::NotesSupplementStageOutcome {
                         cart_item_id: attachment.cart_item_id,
                         idempotency_key: attachment.idempotency_key,
-                        outcome: crate::notes::window::ai_handoff::NotesContextStageOutcome::Failed {
-                            failure: crate::ai::reliability::context_unavailable_failure(&detail),
-                        },
-                    }
-                })
+                        outcome:
+                            crate::notes::window::ai_handoff::NotesContextStageOutcome::Failed {
+                                failure: crate::ai::reliability::context_unavailable_failure(
+                                    &detail,
+                                ),
+                            },
+                    },
+                )
                 .collect(),
         }
     }
@@ -1064,28 +1092,20 @@ impl ScriptListApp {
                 reusable
             };
             if reusable {
-                let primary_outcome = Self::notes_context_stage_outcome(entity.update(
-                    cx,
-                    |view, cx| {
+                let primary_outcome =
+                    Self::notes_context_stage_outcome(entity.update(cx, |view, cx| {
                         view.stage_primary_context_item_from_host_preserving_composer(
                             primary.clone(),
                             source,
                             cx,
                         )
-                    },
-                ));
+                    }));
                 let supplemental_outcomes = if primary_outcome.is_consumable() {
-                    Self::stage_notes_handoff_supplements(
-                        &entity,
-                        supplements,
-                        source,
-                        cx,
-                    )
+                    Self::stage_notes_handoff_supplements(&entity, supplements, source, cx)
                 } else {
                     Vec::new()
                 };
-                let destination_thread_id =
-                    Self::notes_handoff_destination_thread_id(&entity, cx);
+                let destination_thread_id = Self::notes_handoff_destination_thread_id(&entity, cx);
                 tracing::info!(
                     target: "script_kit::tab_ai",
                     event = "notes_handoff_main_staged",
@@ -1142,22 +1162,15 @@ impl ScriptListApp {
         };
 
         self.tab_ai_harness_return_view = Some(derived_return_origin);
-        let mut primary_outcome = Self::notes_context_stage_outcome(entity.update(
-            cx,
-            |view, cx| {
-                view.stage_primary_context_item_from_host_preserving_composer(
-                    primary,
-                    source,
-                    cx,
-                )
-            },
-        ));
+        let mut primary_outcome =
+            Self::notes_context_stage_outcome(entity.update(cx, |view, cx| {
+                view.stage_primary_context_item_from_host_preserving_composer(primary, source, cx)
+            }));
         // The fresh-open seam stages the same primary part while constructing
         // the first truthful frame. Its immediate duplicate is acceptance by
         // this request, not pre-existing destination context.
-        if let crate::notes::window::ai_handoff::NotesContextStageOutcome::Duplicate {
-            winner_id,
-        } = &primary_outcome
+        if let crate::notes::window::ai_handoff::NotesContextStageOutcome::Duplicate { winner_id } =
+            &primary_outcome
         {
             primary_outcome =
                 crate::notes::window::ai_handoff::NotesContextStageOutcome::Accepted {
@@ -1406,10 +1419,8 @@ mod quick_question_contract {
                 "{variant:?} launcher entry must not inherit the selected launcher row",
             );
         }
-        let quick_ai = AgentChatEntryRequest::main_launcher_with_variant(
-            None,
-            AgentChatUiVariant::QuickAi,
-        );
+        let quick_ai =
+            AgentChatEntryRequest::main_launcher_with_variant(None, AgentChatUiVariant::QuickAi);
         assert_eq!(
             quick_ai.context_policy,
             AgentChatContextPolicy::NoContext,
@@ -1437,7 +1448,10 @@ mod quick_question_contract {
             .expect("non-empty dictated text");
             assert_eq!(request.origin, AgentChatEntryOrigin::Dictation);
             assert_eq!(request.target, expected);
-            assert_eq!(request.context_policy, AgentChatContextPolicy::SuppressFocused);
+            assert_eq!(
+                request.context_policy,
+                AgentChatContextPolicy::SuppressFocused
+            );
             assert!(request.intent.requests_submission());
         }
 

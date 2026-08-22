@@ -202,7 +202,7 @@ pub struct ContextSelectorRow {
     /// The kind of item — determines how acceptance creates a context part.
     pub kind: ContextSelectorRowKind,
     /// Relevance score used for deterministic ranking (higher = better match).
-    /// Ties are broken by insertion order.
+    /// Equal section/score ties are broken by canonical stable row identity.
     pub score: u32,
     /// Indices into `label` that matched the query (for gold highlighting).
     pub label_highlight_indices: Vec<usize>,
