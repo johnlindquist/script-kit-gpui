@@ -24,6 +24,11 @@ export const CANONICAL_STATE_OWNERS = [
     ],
   },
   {
+    id: "domain-sentence-search",
+    path: "crates/sk-protocol/src/sentence_search.rs",
+    symbols: ["LongTextQuery", "LongTextMatchEvidence"],
+  },
+  {
     id: "launcher-result-model",
     path: "src/scripts/types.rs",
     symbols: ["SearchResult", "MatchEvidence"],
@@ -68,6 +73,7 @@ export const CANONICAL_STATE_OWNERS = [
 export const REQUIRED_STATE_REGISTRIES = [
   "crates/sk-protocol/src/lib.rs",
   "src/scripts/root_search_contract.rs",
+  "src/scripts/search/sentence.rs",
   "src/scripts/mod.rs",
   "src/config/mod.rs",
   "src/components/mod.rs",
@@ -251,7 +257,7 @@ export function auditStateOwnership(
   });
 
   const domainRegistry = code("crates/sk-protocol/src/lib.rs");
-  for (const module of ["command_contract", "search_contract"]) {
+  for (const module of ["command_contract", "search_contract", "sentence_search"]) {
     if (!hasModule(domainRegistry, module)) {
       failures.push(`missing-domain-module:${module}`);
     }
@@ -298,6 +304,10 @@ export function auditStateOwnership(
       failures.push(`coordinator-adapter-missing-domain-owner:${symbol}`);
     }
   }
+  const sentenceAdapter = code("src/scripts/search/sentence.rs");
+  if (!/\buse\s+sk_protocol\s*::\s*sentence_search\s*::\s*\*/.test(sentenceAdapter)) {
+    failures.push("sentence-adapter-missing-domain-owner");
+  }
   const hostStore = code("src/main_sections/root_search_store.rs");
   if (
     !/\bcrate\s*::\s*scripts\s*::\s*root_search_contract\s*::\s*RootProviderCoordinator\b/
@@ -323,6 +333,7 @@ export function auditStateOwnership(
   for (const domainPath of [
     "crates/sk-protocol/src/command_contract.rs",
     "crates/sk-protocol/src/search_contract.rs",
+    "crates/sk-protocol/src/sentence_search.rs",
   ]) {
     if (/\b(?:script_kit_gpui|crate\s*::\s*(?:scripts|components|main_sections))\b/.test(code(domainPath))) {
       failures.push(`domain-imports-application-owner:${domainPath}`);

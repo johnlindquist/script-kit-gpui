@@ -15,6 +15,9 @@ Migrated from the retired imps/ fleet (codex-imps runtime) on 2026-07-04.
   bounded worker lifecycle tickets, and the pure root provider coordinator.
   `src/scripts/root_search_contract.rs` retains app-service adapters and
   compatibility re-exports; focused search correctness stays GPUI-free.
+- `crates/sk-protocol/src/sentence_search.rs` owns the pure long-text query,
+  ranking, and evidence matcher plus its sentence-search regression suite.
+  `src/scripts/search/sentence.rs` retains the original app-facing imports.
 - `crates/sk-storage/src/lib.rs` owns atomic/private file persistence and its
   focused regression tests. `src/atomic_file.rs` temporarily re-exports that
   domain for existing app callers; storage tests must not depend on the app,

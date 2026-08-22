@@ -6,9 +6,9 @@
 //! and evidence-based highlighting (ranges are contiguous and start at word
 //! boundaries). See Oracle session `sentence-query-search-pivot`.
 
-use crate::scripts::search::sentence::{
-    compile_long_text_query, match_long_text_query, FieldClass, FieldVisibility, LongTextField,
-    LongTextFieldId, LongTextMatchTier, LongTextMode, QueryTermKind, RenderSlot,
+use super::{
+    FieldClass, FieldVisibility, LongTextField, LongTextFieldId, LongTextMatchTier, LongTextMode,
+    QueryTermKind, RenderSlot, compile_long_text_query, match_long_text_query,
 };
 
 fn title_field(text: &str) -> LongTextField<'_> {

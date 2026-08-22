@@ -13,6 +13,13 @@ This document defines the main user-facing UI surfaces and components in Script 
   [src/scripts/root_search_contract.rs](src/scripts/root_search_contract.rs)
   remains the application adapter and compatibility path; focused provider
   tests run in `sk-protocol` without GPUI, Metal, Whisper, or ONNX.
+- **Natural-language sentence search:**
+  [crates/sk-protocol/src/sentence_search.rs](crates/sk-protocol/src/sentence_search.rs)
+  owns Unicode-aware query compilation, complete-word/prefix matching,
+  low-information proximity, visible-versus-hidden ranking, and truthful
+  highlight evidence for Clipboard, Dictation, conversations, and launcher
+  rows. [src/scripts/search/sentence.rs](src/scripts/search/sentence.rs)
+  preserves every existing app import as a compatibility facade.
 - **Private atomic storage:** [crates/sk-storage/src/lib.rs](crates/sk-storage/src/lib.rs)
   owns durable atomic writes, owner-only file/directory permissions, no-follow
   targets, collision-safe exports, and private JSONL boundaries. The existing
