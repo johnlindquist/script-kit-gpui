@@ -953,6 +953,14 @@ offline receipts until their real producers are run again.
     spike even though the same bounded tests and their child processes were
     healthy. This exact Bun/macOS failure is independently documented by
     the upstream project; it was not an application regression.
+12. The actual release/workstation verifier defaulted to bare `cargo` even
+    after its agent wrapper acquired protected pool ownership, a 25-GiB disk
+    floor, bounded compiler/test workers, and stress-corpus isolation. A
+    disposable executable reproduced the bypass in **35ms**: local
+    `scripts/verify.sh --skip-bundle --only check` emitted
+    `check :: cargo check --locked` instead of entering the protected pool.
+    Explicit test executables and hosted runners also needed an independent
+    top-level resource boundary rather than relying on the wrapper alone.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1077,10 +1085,13 @@ offline receipts until their real producers are run again.
    limit must explicitly raise `SCRIPT_KIT_AGENT_MAX_JOBS`. Noninteractive
    child tests forcibly receive `SCRIPT_KIT_SEARCH_FULL_STRESS=0` and
    `SCRIPT_KIT_STORAGE_FULL_STRESS=0` even when a parent accidentally enabled
-   an expensive corpus. Every real receipt records both compiler and harness
-   worker counts, cache state, pool, exit status, elapsed seconds, and
-   before/after free space. The fake-Cargo behavior suite passes **32 cases
-   and 142 assertions** without building Rust or opening the application.
+   an expensive corpus. The real top-level release verifier independently
+   enforces the same two-worker ceiling and disables both expensive corpora
+   before launching even an explicitly overridden Cargo executable. Every
+   real receipt records both compiler and harness worker counts, cache
+   state, pool, exit status, elapsed seconds, and before/after free space.
+   The fake-Cargo behavior suite passes **38 cases and 173 assertions**
+   without building Rust or opening the application.
    `SCRIPT_KIT_AGENT_TIMINGS=1` emits Cargo's real critical-path HTML plus a
    fail-closed machine-readable summary of actual hot units, duplicate
    compilations, bounded concurrency, and specific next actions.
@@ -1098,9 +1109,16 @@ offline receipts until their real producers are run again.
 10. **Lock the contract into real behavior and release gates.** Dedicated
     low-cost Bun cases operate disposable fake pools, live/incomplete leases,
     missing/unusable sccache, disk starvation, stale/current harnesses,
-    optimized-vs-test profiles, and CI safety flags. The release verifier now
-    also refuses native-input/screen-capture overrides and includes the
-    storage domain plus build-policy tests in its normal verification lanes.
+    optimized-vs-test profiles, and CI safety flags. Local
+    `scripts/verify.sh` now routes through the protected agent wrapper by
+    default; only an actual hosted-runner identity carrying both `CI=true`
+    and `GITHUB_ACTIONS=true` preserves its separately isolated bare-Cargo
+    target. Either flag alone remains local and cannot bypass the wrapper.
+    Explicit Cargo overrides remain available to controlled fixtures, but
+    the verifier first enforces both worker ceilings and clears both stress
+    corpora. The verifier also refuses native-input/screen-capture overrides
+    and includes the storage domain plus build-policy tests in its normal
+    verification lanes.
     Publication additionally refuses a missing/untracked
     `agent-cargo.sh`, `cargo-cache-locks.sh`, or
     `cargo-build-policy.test.ts`; a green-looking proof receipt that omits
@@ -1143,11 +1161,16 @@ offline receipts until their real producers are run again.
     fixture, are mandatory release sources. The isolated SDK safety suite
     passes **19 cases and 57 assertions**; the actual two-worker SDK runner
     separately passes **215 cases, zero failures, and zero skips**.
-    The source-current full nonintrusive release lane then executed
-    **763 passing tests, zero failures, and 2,965 assertions across 37 files
-    in 16.39s**, without the previous repository scan or load spike. The
-    focused build/proof-contract lane separately passed **62 tests and 320
-    assertions in 0.77s**. None touches the operator's computer.
+    At the preceding committed checkpoint, the full nonintrusive release
+    lane executed **763 passing tests, zero failures, and 2,965 assertions
+    across 37 files in 16.39s**, without the previous repository scan or load
+    spike. Its focused build/proof-contract lane separately passed **62
+    tests and 320 assertions in 0.77s**. The subsequent verifier-only change
+    separately passes all **38 fake-Cargo cases / 173 assertions** plus
+    **four direct release-owner/proof-gate cases / 13 assertions**. The full
+    suite and real compiler were deliberately not rerun while workstation
+    free space remained below the enforced **25-GiB** build floor. None of
+    these checks touches the operator's computer.
 
 The measured post-deduplication build contained **985 total units instead of
 1,233**, rebuilt only **119 units instead of 1,228**, retained exactly two
