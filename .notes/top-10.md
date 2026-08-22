@@ -976,10 +976,20 @@ offline receipts until their real producers are run again.
    sentence-query matcher** and its **19 existing word-boundary, stopword,
    ranking, prefix, metadata, and truthful-highlight regressions** then moved
    into `crates/sk-protocol/src/sentence_search.rs` with every app-facing
-   import preserved. The expanded protocol domain executes **77 passing
-   cases in 0.03s** without GPUI, Metal, Whisper, or ONNX. The complete
-   domain inventory is now **101 cases**: nine Clipboard, 77 Protocol, and
-   15 Storage behaviors.
+   import preserved. A follow-up traced the launcher's latest-query
+   coalescer to `src/main.rs` only; Cargo explicitly disables tests for that
+   binary, so its four apparent scheduler regressions had never executed.
+   `crates/sk-protocol/src/filter_coalescer.rs` now owns the same pure
+   single-worker scheduler, all four formerly unreachable cases, and two new
+   stale-query/reset regressions. `src/filter_coalescer.rs` preserves the
+   exact binary-facing import; bounded governance fingerprints the domain
+   owner, compatibility adapter, and actual queue/take/reset consumer.
+   The expanded protocol domain executes **83 passing cases** without GPUI,
+   Metal, Whisper, or ONNX. The complete domain inventory is now **107
+   cases**: nine Clipboard, 83 Protocol, and 15 Storage behaviors. The actual
+   shipping binary compiled against the moved scheduler in **41.95s**, and
+   the strict zero-warning application-library release lint passed in
+   **24.31s**, each using exactly two workers and preserving the disk floor.
 2. **Separate test optimization from interactive rendering.** Keep every
    existing frame-sensitive dev dependency at `-O2`; explicitly compile
    correctness-test dependencies and vendored GPUI crates at `-O0`. Release
@@ -1083,8 +1093,8 @@ offline receipts until their real producers are run again.
     passes **19 cases and 57 assertions**; the actual two-worker SDK runner
     separately passes **215 cases, zero failures, and zero skips**.
     The source-current full nonintrusive release lane then executed
-    **726 passing tests, zero failures, and 2,813 assertions across 37 files
-    in 10.03s**, without the previous repository scan or load spike. The
+    **729 passing tests, zero failures, and 2,823 assertions across 37 files
+    in 10.96s**, without the previous repository scan or load spike. The
     focused build/proof-contract lane separately passed **62 tests and 320
     assertions in 0.77s**. None touches the operator's computer.
 
