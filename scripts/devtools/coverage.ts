@@ -384,6 +384,16 @@ export const coverageProfiles: CoverageProfile[] = [
     regressionRecipeRole: "Use recipes only for stable launcher regressions after direct measurements isolate the bug.",
     availablePrimitiveIds: [...mainWindowPrimitiveIds, "devtools.actions.inspect"],
     bindingSelectors: [
+      // The root ScriptList is owned by this profile's actual main-section
+      // sources. Naming that exact variant is truthful direct static ownership;
+      // it still cannot stand in for a fresh target-scoped runtime receipt.
+      {
+        relation: "Direct",
+        priority: 100,
+        contractKinds: ["ScriptList"],
+        appViewVariants: ["ScriptList"],
+        hostKinds: ["MainWindow"],
+      },
       // Host-wide Derived fallback for every ordinary Main-window mapping.
       // Exact profiles (agent-chat, chat-prompt, flow-*, dictation-history)
       // outrank this by priority; ties are invalid, never array-ordered.
@@ -678,16 +688,26 @@ export const coverageProfiles: CoverageProfile[] = [
   {
     id: "dictation-history",
     name: "Dictation History surface",
-    status: "planned",
+    status: "partial",
     domains: ["targets", "elements", "layout", "storage", "input", "screenshots", "accessibility"],
     sourceFiles: [
       "src/dictation/history.rs",
       "src/dictation/types.rs",
       "src/mcp_resources/mod.rs",
+      "src/render_builtins/dictation_history.rs",
+      "src/render_builtins/common.rs",
+      "src/app_layout/collect_elements.rs",
+      "src/app_layout/build_layout_info.rs",
     ],
     features: ["transcript rows", "search/filter", "preview", "redaction", "missing audio fallback", "selection reanchor", "portal attachment"],
     shortcuts: ["Enter", "Escape", "Tab", "ArrowUp", "ArrowDown"],
-    supportedNow: ["kit://dictation-history", "filterable surface architecture"],
+    supportedNow: [
+      "kit://dictation-history",
+      "filterable surface architecture",
+      "target-scoped Dictation History semantic row and load-more projection",
+      "target-scoped Dictation History split list/preview layout projection",
+      "target-scoped Dictation History selected-row and scroll-anchor state",
+    ],
     missingRuntimePrimitives: [
       "fixture dictation store identity",
       "transcript row generation",
@@ -697,10 +717,11 @@ export const coverageProfiles: CoverageProfile[] = [
       "scroll and selection anchor metrics",
     ],
     regressionRecipeRole: "Use history recipes to prevent privacy and selection regressions once resource receipts are first-class.",
-    availablePrimitiveIds: [
-      "devtools.targets.inspect",
-      "devtools.surface.inspect",
-    ],
+    // These generic producers already operate against any Main-window
+    // AppView. Dictation History has real semantic, split-layout, and scroll
+    // owners above; specialized store/privacy generation receipts remain
+    // honestly missing and the profile therefore stays partial.
+    availablePrimitiveIds: [...mainWindowPrimitiveIds],
     bindingSelectors: [
       { relation: "Direct", priority: 100, appViewVariants: ["DictationHistoryView"], hostKinds: ["MainWindow"] },
     ],

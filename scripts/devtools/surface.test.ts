@@ -66,7 +66,7 @@ test("coverage reports runtime profiles as a separate inventory namespace", () =
   expect(report.inventoryNamespaces).toEqual({
     runtimeCoverageProfileCount: 11,
     selectedRuntimeCoverageProfileCount: 11,
-    statusCounts: { supported: 0, partial: 10, missing: 0, planned: 1 },
+    statusCounts: { supported: 0, partial: 11, missing: 0, planned: 0 },
     note: "Runtime coverage profiles are not contract kinds, contract mappings, unique AppView variants, or orientation aliases.",
   });
 });

@@ -79,4 +79,43 @@ describe("fail-closed coverage ownership registry", () => {
     expect(report.runtimeProof.provenSurfaceCount).toBe(0);
     expect(report.registryValidation.errors).toEqual([]);
   });
+
+  test("launcher and Dictation History advertise their real direct owners without claiming runtime proof", () => {
+    const launcher = coverageProfileById("main");
+    const dictationHistory = coverageProfileById("dictation-history");
+
+    expect(launcher?.bindingSelectors).toContainEqual({
+      relation: "Direct",
+      priority: 100,
+      contractKinds: ["ScriptList"],
+      appViewVariants: ["ScriptList"],
+      hostKinds: ["MainWindow"],
+    });
+    expect(dictationHistory?.status).toBe("partial");
+    expect(dictationHistory?.sourceFiles).toEqual(
+      expect.arrayContaining([
+        "src/render_builtins/dictation_history.rs",
+        "src/render_builtins/common.rs",
+        "src/app_layout/collect_elements.rs",
+        "src/app_layout/build_layout_info.rs",
+      ]),
+    );
+    expect(dictationHistory?.availablePrimitiveIds).toEqual(
+      expect.arrayContaining([
+        "devtools.elements.snapshot",
+        "devtools.focus.inspect",
+        "devtools.keyboard.inspect",
+        "devtools.layout.measure",
+        "devtools.scroll.inspect",
+        "devtools.act",
+      ]),
+    );
+
+    const report = buildCoverageReport({ surface: "dictation-history" });
+    expect(report.evidenceClass).toBe("STATIC_INVENTORY");
+    expect(report.runtimeProof.provenSurfaceCount).toBe(0);
+    expect(report.surfaces[0]?.missingRuntimePrimitives).toContain(
+      "redacted transcript fingerprint",
+    );
+  });
 });

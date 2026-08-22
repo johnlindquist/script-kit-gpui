@@ -1217,7 +1217,7 @@ impl ScriptListApp {
                     .map(|page| page.rows)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|entry| format!("dictation-history:{}", entry.id))
+                    .map(|entry| entry.semantic_id())
                     .collect();
                 Some(self.active_tracked_list_scroll_receipt(
                     "dictation_history",

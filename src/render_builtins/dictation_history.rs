@@ -44,7 +44,7 @@ fn render_dictation_history_row(
         .description_opt(Some(ScriptListApp::dictation_history_meta(entry)))
         .selected(selected)
         .hovered(hovered)
-        .semantic_id(format!("dictation-history:{}", entry.id))
+        .semantic_id(entry.semantic_id())
         .main_menu_theme(main_menu_theme);
 
     div()

@@ -665,6 +665,12 @@ impl ScriptListApp {
                     *selected_index,
                     limit,
                 );
+                if let Some(page) = page.as_ref() {
+                    crate::dictation::apply_dictation_history_row_identities(
+                        &mut elements,
+                        &page.rows,
+                    );
+                }
                 if load_failed {
                     total_count += 1;
                     Self::push_limited_element(

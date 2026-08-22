@@ -83,6 +83,13 @@ pub fn delete_history_confirmation_body(pending_in_agent_chat: bool) -> &'static
 }
 
 impl DictationHistoryEntry {
+    /// One stable row identity shared by painting, semantic projection, and
+    /// scroll receipts. Transcript/preview text and transient list indexes
+    /// must never decide whether two receipts describe the same saved entry.
+    pub fn semantic_id(&self) -> String {
+        format!("dictation-history:{}", self.id)
+    }
+
     pub fn canonical_target(&self) -> Option<DictationTarget> {
         crate::dictation::parse_dictation_target_label(&self.target_id)
     }
@@ -105,6 +112,21 @@ impl DictationHistoryEntry {
 
     pub fn resource_uri(&self) -> String {
         format!("kit://dictation-history?id={}", self.id)
+    }
+}
+
+/// Reconcile target-scoped semantic projection with the exact entry owner
+/// used by the actual painted row and the active scroll receipt.
+pub fn apply_dictation_history_row_identities(
+    elements: &mut [crate::protocol::ElementInfo],
+    entries: &[DictationHistoryEntry],
+) {
+    let rows = elements
+        .iter_mut()
+        .filter(|element| element.element_type == crate::protocol::ElementType::Choice);
+    for (element, entry) in rows.zip(entries) {
+        element.semantic_id = entry.semantic_id();
+        element.source = Some("dictationHistory".to_string());
     }
 }
 
@@ -926,6 +948,68 @@ mod tests {
             crate::mcp_resources::clear_provider_json_slots();
             let _ = &self.tempdir;
         }
+    }
+
+    #[test]
+    fn dictation_history_semantic_projection_uses_stable_renderer_and_scroll_identity() {
+        fn entry(id: &str, transcript: &str) -> DictationHistoryEntry {
+            DictationHistoryEntry {
+                version: DICTATION_HISTORY_ENTRY_VERSION,
+                id: id.to_string(),
+                timestamp: "2026-08-22T12:00:00Z".to_string(),
+                transcript: transcript.to_string(),
+                preview: transcript.to_string(),
+                target_id: "notes".to_string(),
+                target_label_snapshot: "Notes".to_string(),
+                audio_duration_ms: 1000,
+            }
+        }
+
+        let first = entry("saved-entry-1", "first private spoken transcript");
+        let second = entry("saved-entry-2", "second private spoken transcript");
+        let mut elements = vec![
+            crate::protocol::ElementInfo::input(
+                "dictation-history-filter",
+                Some("private query"),
+                true,
+            ),
+            crate::protocol::ElementInfo::list("dictation-history", 2),
+            crate::protocol::ElementInfo::redacted_choice(
+                0,
+                &first.preview,
+                &first.preview,
+                false,
+                crate::protocol::ElementContentKind::UserContent,
+            ),
+            crate::protocol::ElementInfo::redacted_choice(
+                1,
+                &second.preview,
+                &second.preview,
+                true,
+                crate::protocol::ElementContentKind::UserContent,
+            ),
+        ];
+
+        apply_dictation_history_row_identities(&mut elements, &[first.clone(), second.clone()]);
+
+        assert_eq!(elements[2].semantic_id, first.semantic_id());
+        assert_eq!(elements[3].semantic_id, second.semantic_id());
+        assert_eq!(elements[3].selected, Some(true));
+        assert_eq!(elements[3].source.as_deref(), Some("dictationHistory"));
+        let serialized = serde_json::to_string(&elements).unwrap();
+        assert!(!serialized.contains("first private spoken transcript"));
+        assert!(!serialized.contains("second private spoken transcript"));
+        assert!(!serialized.contains("private query"));
+
+        let mut reordered = vec![crate::protocol::ElementInfo::redacted_choice(
+            0,
+            &second.preview,
+            &second.preview,
+            true,
+            crate::protocol::ElementContentKind::UserContent,
+        )];
+        apply_dictation_history_row_identities(&mut reordered, &[second.clone()]);
+        assert_eq!(reordered[0].semantic_id, second.semantic_id());
     }
 
     #[cfg(unix)]

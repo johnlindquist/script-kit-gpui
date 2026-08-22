@@ -45,11 +45,12 @@ pub use device::{
     DictationDeviceSelectionAction, DICTATION_SYSTEM_DEFAULT_DEVICE_VALUE,
 };
 pub use history::{
-    build_history_entry, delete_history_confirmation_body, delete_history_entry,
-    dictation_history_view_state, format_history_duration_ms, format_history_timestamp,
-    get_history_entry, hydrate_dictation_resource_from_history, load_history, load_history_result,
-    record_dictation_history, root_dictation_history_query_is_eligible, search_history,
-    search_history_page, search_root_dictation_history, search_root_dictation_history_cached,
+    apply_dictation_history_row_identities, build_history_entry, delete_history_confirmation_body,
+    delete_history_entry, dictation_history_view_state, format_history_duration_ms,
+    format_history_timestamp, get_history_entry, hydrate_dictation_resource_from_history,
+    load_history, load_history_result, record_dictation_history,
+    root_dictation_history_query_is_eligible, search_history, search_history_page,
+    search_root_dictation_history, search_root_dictation_history_cached,
     search_root_dictation_history_direct, DictationHistoryEntry, DictationHistoryPage,
     DictationHistorySearchField, DictationHistorySearchHit, DictationHistoryViewState,
     RootDictationHistorySearchHit, RootDictationHistorySectionOptions,
