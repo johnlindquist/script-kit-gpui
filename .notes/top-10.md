@@ -984,6 +984,16 @@ offline receipts until their real producers are run again.
     noninteractive values as valid. Existing release and scoped-agent guards
     hid the issue at their own entry points but did not protect the wrapper
     that project instructions explicitly require every agent to call.
+16. Real ignored Rust tests under `src/selected_text.rs`,
+    `src/platform/accessibility/clipboard.rs`, `src/text_injector.rs`, and
+    `src/ai/providers.rs` open System Settings, emit Cmd+C/Cmd+V/backspaces,
+    change frontmost selected text or the real clipboard, and contact paid
+    live providers. Noninteractive environment flags do not protect code
+    that never reads them. The wrapper still allowed `--ignored`,
+    `--include-ignored`, `system-tests`, `--all-features`, blanket
+    integration discovery, broad target selection, app-launching `cargo run`,
+    and live benchmarks; **20 disposable fake-process cases** reproduced the
+    actual activation routes before any correction.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1122,7 +1132,7 @@ offline receipts until their real producers are run again.
    state, pool, exit status, elapsed seconds, and before/after free space.
    Direct, inline, and file-based `--config` overrides fail before pool
    creation because they can replace effective job counts and target
-   ownership. The fake-Cargo behavior suite passes **52 cases and 253
+   ownership. The fake-Cargo behavior suite passes **78 cases and 325
    assertions** without building Rust or opening the application.
    `SCRIPT_KIT_AGENT_TIMINGS=1` emits Cargo's real critical-path HTML plus a
    fail-closed machine-readable summary of actual hot units, duplicate
@@ -1137,7 +1147,17 @@ offline receipts until their real producers are run again.
    correctness profile places named binaries in `debug/`; non-GUI proof
    tools can reuse cheap correctness-profile dependencies without losing a
    stable, source-identifiable artifact. A disposable real-binary behavior
-   test rejects the former incorrect `target/test/` lookup.
+   test rejects the former incorrect `target/test/` lookup. Direct
+   noninteractive Cargo test/nextest commands now require explicit `--lib`,
+   named `--test` suites, or reviewed `sk-clipboard` / `sk-protocol` /
+   `sk-storage` domain packages; blanket root/workspace discovery, broad
+   integration selectors, ignored-test flags, `system-tests`, and
+   `--all-features` fail before touching any build pool. `cargo run` accepts
+   only the non-GUI `export_design_tokens` owner; application binaries and
+   live benchmarks are refused. Existing actual ignored system-input,
+   clipboard, Settings, and paid-provider tests can therefore never be
+   activated accidentally. Named reviewed integrations, library filters,
+   domain packages, and the standalone exporter remain behavior-proven.
 10. **Lock the contract into real behavior and release gates.** Dedicated
     low-cost Bun cases operate disposable fake pools, live/incomplete leases,
     missing/unusable sccache, disk starvation, stale/current harnesses,
@@ -1205,8 +1225,10 @@ offline receipts until their real producers are run again.
     across 37 files in 16.39s**, without the previous repository scan or load
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
-    separately passes all **52 fake-Cargo cases / 253 assertions** plus
-    **five direct release-owner/proof-gate cases / 16 assertions**. The full
+    separately passes all **78 fake-Cargo cases / 325 assertions** plus
+    **seven direct release-owner/proof-gate cases / 20 assertions**. The
+    optional compile-only preflight now builds only the reviewed `--lib`
+    target; it does not silently discover every integration harness. The full
     suite and real compiler were deliberately not rerun while workstation
     free space remained below the enforced **25-GiB** build floor. None of
     these checks touches the operator's computer.
