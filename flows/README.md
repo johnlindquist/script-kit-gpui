@@ -18,6 +18,10 @@ Migrated from the retired imps/ fleet (codex-imps runtime) on 2026-07-04.
 - `crates/sk-protocol/src/sentence_search.rs` owns the pure long-text query,
   ranking, and evidence matcher plus its sentence-search regression suite.
   `src/scripts/search/sentence.rs` retains the original app-facing imports.
+- `crates/sk-protocol/src/filter_coalescer.rs` owns latest-query coalescing,
+  one-worker scheduling, clear updates, and stale-filter reset. The binary
+  imports the same public contract through `src/filter_coalescer.rs`; tests
+  execute in the domain crate instead of the disabled binary test target.
 - `crates/sk-storage/src/lib.rs` owns atomic/private file persistence and its
   focused regression tests. `src/atomic_file.rs` temporarily re-exports that
   domain for existing app callers; storage tests must not depend on the app,

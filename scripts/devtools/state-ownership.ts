@@ -29,6 +29,11 @@ export const CANONICAL_STATE_OWNERS = [
     symbols: ["LongTextQuery", "LongTextMatchEvidence"],
   },
   {
+    id: "domain-filter-coalescer",
+    path: "crates/sk-protocol/src/filter_coalescer.rs",
+    symbols: ["FilterCoalescer"],
+  },
+  {
     id: "launcher-result-model",
     path: "src/scripts/types.rs",
     symbols: ["SearchResult", "MatchEvidence"],
@@ -74,6 +79,7 @@ export const REQUIRED_STATE_REGISTRIES = [
   "crates/sk-protocol/src/lib.rs",
   "src/scripts/root_search_contract.rs",
   "src/scripts/search/sentence.rs",
+  "src/filter_coalescer.rs",
   "src/scripts/mod.rs",
   "src/config/mod.rs",
   "src/components/mod.rs",
@@ -87,6 +93,7 @@ export const REQUIRED_STATE_CONSUMERS = [
   "src/actions/builders/script_context.rs",
   "src/render_script_list/mod.rs",
   "src/app_impl/filtering_cache.rs",
+  "src/app_impl/filter_input_updates.rs",
 ] as const;
 
 export const REQUIRED_STATE_OWNERSHIP_PATHS = [
@@ -257,7 +264,12 @@ export function auditStateOwnership(
   });
 
   const domainRegistry = code("crates/sk-protocol/src/lib.rs");
-  for (const module of ["command_contract", "search_contract", "sentence_search"]) {
+  for (const module of [
+    "command_contract",
+    "filter_coalescer",
+    "search_contract",
+    "sentence_search",
+  ]) {
     if (!hasModule(domainRegistry, module)) {
       failures.push(`missing-domain-module:${module}`);
     }
@@ -308,6 +320,10 @@ export function auditStateOwnership(
   if (!/\buse\s+sk_protocol\s*::\s*sentence_search\s*::\s*\*/.test(sentenceAdapter)) {
     failures.push("sentence-adapter-missing-domain-owner");
   }
+  const coalescerAdapter = code("src/filter_coalescer.rs");
+  if (!hasGroupedSymbol(coalescerAdapter, "sk_protocol::filter_coalescer", "FilterCoalescer")) {
+    failures.push("filter-coalescer-adapter-missing-domain-owner");
+  }
   const hostStore = code("src/main_sections/root_search_store.rs");
   if (
     !/\bcrate\s*::\s*scripts\s*::\s*root_search_contract\s*::\s*RootProviderCoordinator\b/
@@ -322,6 +338,12 @@ export function auditStateOwnership(
   if (!hasGroupedSymbol(mainRegistry, "root_search_store", "RootSearchStore")) {
     failures.push("missing-binary-root-search-import");
   }
+  if (!hasModule(mainRegistry, "filter_coalescer")) {
+    failures.push("missing-binary-filter-coalescer-module");
+  }
+  if (!hasGroupedSymbol(mainRegistry, "crate::filter_coalescer", "FilterCoalescer")) {
+    failures.push("missing-binary-filter-coalescer-import");
+  }
 
   for (const [path, source] of codes) {
     for (const match of source.matchAll(
@@ -332,6 +354,7 @@ export function auditStateOwnership(
   }
   for (const domainPath of [
     "crates/sk-protocol/src/command_contract.rs",
+    "crates/sk-protocol/src/filter_coalescer.rs",
     "crates/sk-protocol/src/search_contract.rs",
     "crates/sk-protocol/src/sentence_search.rs",
   ]) {
@@ -425,6 +448,15 @@ export function auditStateOwnership(
         /\broot_search\s*\.\s*begin_provider_request\s*\(/,
         /\broot_search\s*\.\s*invalidate_provider_request\s*\(/,
         /\bsk_protocol\s*::\s*command_contract\s*::\s*CommandSource\b/,
+      ],
+    },
+    {
+      id: "filter-updates-canonical-coalescer-lifecycle",
+      path: "src/app_impl/filter_input_updates.rs",
+      patterns: [
+        /\bfilter_coalescer\s*\.\s*queue\s*\(/,
+        /\bfilter_coalescer\s*\.\s*take_latest\s*\(/,
+        /\bfilter_coalescer\s*\.\s*reset\s*\(/,
       ],
     },
   ];

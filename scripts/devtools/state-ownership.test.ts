@@ -13,12 +13,14 @@ function passingSources(): StateOwnershipSource[] {
   const sources: Record<string, string> = {
     "crates/sk-protocol/src/command_contract.rs":
       "pub enum CommandSource {} pub struct CommandIdentity; pub struct CommandDescriptor; pub enum CommandAvailability {}",
+    "crates/sk-protocol/src/filter_coalescer.rs":
+      "pub struct FilterCoalescer;",
     "crates/sk-protocol/src/search_contract.rs":
       "pub struct ProviderRequest; pub struct ProviderGenerationFence; pub struct RootOwnedProviderRefresh; pub struct RootOwnedProviderRefreshLifecycle; pub struct RootProviderCoordinator;",
     "crates/sk-protocol/src/sentence_search.rs":
       "pub struct LongTextQuery; pub struct LongTextMatchEvidence;",
     "crates/sk-protocol/src/lib.rs":
-      "pub mod command_contract; pub mod search_contract; pub mod sentence_search;",
+      "pub mod command_contract; pub mod filter_coalescer; pub mod search_contract; pub mod sentence_search;",
     "src/scripts/types.rs":
       "pub enum SearchResult {} pub struct MatchEvidence;",
     "src/scripts/command_contract.rs":
@@ -27,6 +29,8 @@ function passingSources(): StateOwnershipSource[] {
       "pub(crate) use sk_protocol::search_contract::{RootProviderCoordinator, RootOwnedProviderRefresh, RootOwnedProviderRefreshLifecycle};",
     "src/scripts/search/sentence.rs":
       "pub(crate) use sk_protocol::sentence_search::*;",
+    "src/filter_coalescer.rs":
+      "pub use sk_protocol::filter_coalescer::FilterCoalescer;",
     "src/scripts/mod.rs":
       "mod command_contract; pub(crate) mod root_search_contract; mod types; pub use self::types::{SearchResult, MatchEvidence};",
     "src/main_sections/root_search_store.rs":
@@ -46,7 +50,7 @@ function passingSources(): StateOwnershipSource[] {
     "src/list_item/mod.rs":
       "pub enum GroupedListItem {} pub struct GroupedListState; pub struct ListItem;",
     "src/main.rs":
-      "mod root_search_store; use root_search_store::RootSearchStore; mod list_item; mod footer_popup;",
+      "mod root_search_store; use root_search_store::RootSearchStore; mod filter_coalescer; use crate::filter_coalescer::FilterCoalescer; mod list_item; mod footer_popup;",
     "src/main_window_preflight/build.rs":
       "fn preflight() { app.redacted_command_receipt(); app.root_search.root_passive_frame(); }",
     "src/app_render/focused_info.rs":
@@ -57,6 +61,8 @@ function passingSources(): StateOwnershipSource[] {
       "fn render() { crate::list_item::ListItem::new(); app.main_window_primary_action_label(); crate::components::footer_chrome::render(); }",
     "src/app_impl/filtering_cache.rs":
       "fn filter() { app.root_search.begin_provider_request(sk_protocol::command_contract::CommandSource::BrowserTab); app.root_search.invalidate_provider_request(source); }",
+    "src/app_impl/filter_input_updates.rs":
+      "fn filter() { app.filter_coalescer.queue(value); app.filter_coalescer.take_latest(); app.filter_coalescer.reset(); }",
   };
   return REQUIRED_STATE_OWNERSHIP_PATHS.map((path) => ({
     path,
@@ -103,6 +109,24 @@ describe("GOV-001 canonical state ownership and sanctioned exceptions", () => {
     for (const path of REQUIRED_STATE_OWNERSHIP_PATHS) {
       expect(audit.sourceFingerprints[path]).toMatch(/^[a-f0-9]{64}$/);
     }
+  });
+
+  test("launcher filter scheduling is owned by the testable domain and consumed through its adapter", () => {
+    const audit = auditStateOwnership(passingSources());
+
+    expect(audit.owners).toContainEqual(
+      expect.objectContaining({
+        id: "domain-filter-coalescer",
+        path: "crates/sk-protocol/src/filter_coalescer.rs",
+      }),
+    );
+    expect(audit.consumers).toContainEqual(
+      expect.objectContaining({
+        id: "filter-updates-canonical-coalescer-lifecycle",
+        path: "src/app_impl/filter_input_updates.rs",
+        pass: true,
+      }),
+    );
   });
 
   test("bounded collection cannot invoke an injected external discovery runner", () => {

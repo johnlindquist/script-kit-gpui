@@ -3,6 +3,7 @@
 pub mod ai_reliability;
 pub mod command_contract;
 pub mod execution_contract;
+pub mod filter_coalescer;
 pub mod latency_contract;
 pub mod search_contract;
 mod semantic_id;

@@ -20,6 +20,12 @@ This document defines the main user-facing UI surfaces and components in Script 
   highlight evidence for Clipboard, Dictation, conversations, and launcher
   rows. [src/scripts/search/sentence.rs](src/scripts/search/sentence.rs)
   preserves every existing app import as a compatibility facade.
+- **Launcher filter coalescing:**
+  [crates/sk-protocol/src/filter_coalescer.rs](crates/sk-protocol/src/filter_coalescer.rs)
+  owns latest-query batching, single-worker scheduling, empty-query updates,
+  and stale-work reset. [src/filter_coalescer.rs](src/filter_coalescer.rs)
+  preserves the binary's existing import path; its behavior tests now run in
+  `sk-protocol` rather than the disabled application-binary test target.
 - **Private atomic storage:** [crates/sk-storage/src/lib.rs](crates/sk-storage/src/lib.rs)
   owns durable atomic writes, owner-only file/directory permissions, no-follow
   targets, collision-safe exports, and private JSONL boundaries. The existing
