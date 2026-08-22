@@ -258,6 +258,18 @@ Evidence in this checkpoint is intentionally time- and source-qualified:
   60 missing, zero stale/invalid/failed receipts, and zero auditor errors**.
   This verifies the safe DevTools/code-generation obligations, not the 29
   newest Rust regressions or any interactive runtime task.
+- A lightweight owner audit then promoted eight heavily used launcher
+  surfaces whose actual production renderer, semantic collector, and layout
+  owner were already present but hidden behind host-wide Derived coverage:
+  Clipboard History, Browser History, Notes Browse, File Search, Day Page,
+  Current App Commands, Agent Chat History, and Webcam. Exact AppView-bound
+  profiles now describe those real owners without claiming runtime behavior;
+  File Search legitimately covers two contract mappings. The refreshed
+  complete census is **37 kinds / 54 mappings / 53 variants / 19 profiles**,
+  with **16 Direct / 38 Derived / 0 Unsupported** and still **0/54 direct
+  runtime proofs**. Three inexpensive Bun suites execute **15 passing behavior
+  cases and 150 assertions**, including explicit anti-fabrication checks;
+  they do not launch the app, capture the screen/camera, or require Cargo.
 - The actual full library and application check completed successfully through
   the prescribed two-job Cargo wrapper. The main binary still reports eight
   preexisting binary-only unused-import warnings; the release-required
@@ -875,7 +887,7 @@ native-input, provider-backed, packaged, or genuinely painted requirement
 remains blocked until its separate explicit authorization and exact-artifact
 evidence exist; no synthetic fixture can discharge those obligations.
 
-The follow-up static surface inventory contains **7 Direct, 47 Derived, and
+The follow-up static surface inventory contains **16 Direct, 38 Derived, and
 0 Unsupported bindings**. Direct is a production-owner relation only:
 **0 of 54 surface mappings and 0 of 17 supported prompt families have a fresh
 direct runtime receipt**. Source-generation changes invalidate all 15 existing
@@ -2307,15 +2319,17 @@ mistaking source-text assertions or inherited host coverage for proof.
    mappings, variants, coverage profiles, and `Direct`/`Derived`/`Unsupported`
    classifications. A static `Direct` relation is not a runtime pass; record
    its profile status and the exact current runtime receipt separately.
-3. Preserve the real launcher and Dictation History direct selectors and
-   production `sourceFiles` entries; keep painted Dictation rows, semantic
-   projection, and tracked scrolling on the same actual row ID; and retain
-   behavior-oriented registry validation that refuses nonexistent, duplicate,
-   absolute, or escaping owner paths.
-4. Enumerate the **47 Derived mappings** that currently lack a direct profile
-   binding after promoting the genuine ScriptList and Dictation History
-   owners; separately enumerate all **54 mappings without fresh direct
-   runtime proof**, including the seven static Direct bindings. Rank both by
+3. Preserve the real launcher, Dictation History, Clipboard History, Browser
+   History, Notes Browse, File Search, Day Page, Current App Commands, Agent
+   Chat History, and Webcam direct selectors plus their actual production
+   renderer/semantic/layout `sourceFiles`; keep painted Dictation rows,
+   semantic projection, and tracked scrolling on the same actual row ID; and
+   retain behavior-oriented registry validation that refuses nonexistent,
+   duplicate, absolute, or escaping owner paths.
+4. Enumerate the **38 Derived mappings** that currently lack a direct profile
+   binding after promoting genuine production surface owners; separately
+   enumerate all **54 mappings without fresh direct runtime proof**, including
+   the 16 static Direct bindings. Rank both by
    user frequency, failure severity, state mutation, privacy exposure, and
    likelihood of interaction drift.
 5. Define the minimum direct receipt for every surface: exact target identity,
