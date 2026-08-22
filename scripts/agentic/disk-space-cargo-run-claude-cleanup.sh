@@ -81,6 +81,24 @@ if ge_float "$CURRENT_FREE" "$THRESHOLD_GIB"; then
     exit 0
 fi
 
+# Existing installed watcher binaries still invoke this legacy path. Make the
+# safe deterministic helper effective immediately without restarting a shared
+# LaunchAgent or spawning an unattended AI session on a busy machine.
+if [[ "${SCRIPT_KIT_ALLOW_CLEANUP_AGENT:-0}" != "1" ]]; then
+    log "running deterministic lock-safe cleanup directly; background AI delegation is disabled"
+    set +e
+    bash "$REPO_ROOT/scripts/agentic/disk-space-cargo-emergency-clean.sh" \
+        --apply \
+        --repo "$REPO_ROOT" \
+        --threshold-gib "$THRESHOLD_GIB" \
+        --target-free-gib "$TARGET_FREE_GIB" \
+        --state-dir "$STATE_DIR" \
+        --reason "$REASON"
+    status=$?
+    set -e
+    exit "$status"
+fi
+
 if [ ! -x "$CLAUDE_BIN" ]; then
     log "claude binary not executable: $CLAUDE_BIN"
     exit 127

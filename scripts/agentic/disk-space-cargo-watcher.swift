@@ -89,7 +89,7 @@ private func parseConfig() -> Config {
     config.repoRoot = normalizePath(config.repoRoot)
     config.stateDir = normalizePath(config.stateDir)
     if config.cleanupScript.isEmpty {
-        config.cleanupScript = "\(config.repoRoot)/scripts/agentic/disk-space-cargo-run-claude-cleanup.sh"
+        config.cleanupScript = "\(config.repoRoot)/scripts/agentic/disk-space-cargo-emergency-clean.sh"
     }
     config.cleanupScript = normalizePath(config.cleanupScript)
     return config
@@ -293,6 +293,8 @@ fileprivate final class DiskSpaceCargoWatcher {
         env["SCRIPT_KIT_WATCHER_STATE_DIR"] = config.stateDir
         env["SCRIPT_KIT_FREE_THRESHOLD_GIB"] = "\(config.thresholdGiB)"
         env["SCRIPT_KIT_TARGET_FREE_GIB"] = "\(config.targetFreeGiB)"
+        env["SCRIPT_KIT_ALLOW_SHARED_INCREMENTAL_EVICTION"] = "0"
+        env["SCRIPT_KIT_ALLOW_CLEANUP_AGENT"] = "0"
         return env
     }
 
@@ -342,6 +344,7 @@ fileprivate final class DiskSpaceCargoWatcher {
         process.currentDirectoryURL = URL(fileURLWithPath: config.repoRoot)
         process.arguments = [
             config.cleanupScript,
+            "--apply",
             "--repo", config.repoRoot,
             "--threshold-gib", "\(config.thresholdGiB)",
             "--target-free-gib", "\(config.targetFreeGiB)",
@@ -359,11 +362,11 @@ fileprivate final class DiskSpaceCargoWatcher {
                 self?.cleanupRunning = false
                 self?.cleanupProcess = nil
                 self?.log("cleanup process exited pid=\(terminated.processIdentifier) status=\(status)")
+                self?.writeLastTriggerEpoch(Date().timeIntervalSince1970)
                 if status == 0 {
-                    self?.writeLastTriggerEpoch(Date().timeIntervalSince1970)
+                    self?.log("deterministic lock-safe cleanup completed")
                 } else {
-                    self?.log("cleanup failed; launching fallback emergency clean")
-                    self?.launchFallbackCleanup(reason: reason)
+                    self?.log("lock-safe cleanup could not reach its disk target; active builds and warm caches remain protected")
                 }
             }
         }

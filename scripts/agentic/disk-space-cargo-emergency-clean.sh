@@ -30,6 +30,9 @@ PATH="/Users/johnlindquist/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/lo
 export PATH
 
 cd "$REPO_ROOT"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/agentic/cargo-cache-locks.sh
+source "${SCRIPT_ROOT}/cargo-cache-locks.sh"
 
 log() { echo "[cargo-clean] $(date '+%Y-%m-%dT%H:%M:%S%z') $*" >&2; }
 
@@ -84,129 +87,33 @@ run_prune() {
     fi
 }
 
-command_for_pid() { ps -o command= -p "$1" 2>/dev/null | head -n 1 || true; }
-comm_for_pid() {
-    local raw
-    raw="$(ps -o comm= -p "$1" 2>/dev/null | head -n 1 || true)"
-    basename "$raw" 2>/dev/null || printf "%s" "$raw"
-}
-
-pid_cwd_under_repo() {
-    local pid="$1"
-    local cwd
-    cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1 || true)"
-    case "$cwd" in
-        "$REPO_ROOT"|"$REPO_ROOT"/*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-collect_tree() {
-    local root="$1"
-    local child
-    echo "$root"
-    for child in $(pgrep -P "$root" 2>/dev/null || true); do
-        collect_tree "$child"
-    done
-}
-
-terminate_tree() {
-    local root="$1"
-    local why="$2"
-    local pids p cmd
-    [ -n "$root" ] || return 0
-    case "$root" in "$$"|"$PPID") return 0 ;; esac
-    if ! kill -0 "$root" 2>/dev/null; then return 0; fi
-    cmd="$(command_for_pid "$root")"
-    log "terminating pid=$root why=$why cmd=${cmd}"
-    pids="$(collect_tree "$root" | awk 'NF && !seen[$1]++' | sort -rn)"
-
-    if [ "$APPLY" != "1" ]; then
-        log "dry-run would TERM tree: $(echo "$pids" | tr '\n' ' ')"
-        return 0
-    fi
-
-    for p in $pids; do
-        case "$p" in "$$"|"$PPID") continue ;; esac
-        kill -TERM "$p" 2>/dev/null || true
-    done
-    sleep 4
-    for p in $pids; do
-        case "$p" in "$$"|"$PPID") continue ;; esac
-        if kill -0 "$p" 2>/dev/null; then
-            kill -KILL "$p" 2>/dev/null || true
-        fi
-    done
-}
-
-terminate_agent_lock_holders() {
-    local pid_file pid lock_name
-    shopt -s nullglob
-    for pid_file in "$REPO_ROOT"/target-agent/.locks/*.lock/pid; do
-        pid="$(tr -dc '0-9' < "$pid_file" || true)"
-        lock_name="$(basename "$(dirname "$pid_file")")"
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            terminate_tree "$pid" "target-agent lock holder $lock_name"
-        fi
-    done
-    shopt -u nullglob
-}
-
-should_kill_pid() {
-    local pid="$1" cmd comm
-    case "$pid" in "$$"|"$PPID") return 1 ;; esac
-    cmd="$(command_for_pid "$pid")"
-    [ -n "$cmd" ] || return 1
-    case "$cmd" in *disk-space-cargo*) return 1 ;; esac
-    comm="$(comm_for_pid "$pid")"
-
-    case "$cmd" in
-        *"$REPO_ROOT/dev.sh"*|*" ./dev.sh"*|*"scripts/agentic/dev-cycle.sh"*|*"scripts/agentic/agent-cargo.sh"*)
-            if pid_cwd_under_repo "$pid" || [[ "$cmd" == *"$REPO_ROOT"* ]]; then return 0; fi
-            ;;
-    esac
-    case "$comm" in
-        cargo-watch|cargo|rustc)
-            if pid_cwd_under_repo "$pid"; then return 0; fi
-            ;;
-    esac
-    case "$cmd" in
-        *"cargo watch"*)
-            if pid_cwd_under_repo "$pid" || [[ "$cmd" == *"$REPO_ROOT"* ]]; then return 0; fi
-            ;;
-    esac
-    return 1
-}
-
-discover_known_dev_cargo_pids() {
-    local pid
-    ps -axo pid= | while read -r pid; do
-        [ -n "$pid" ] || continue
-        if should_kill_pid "$pid"; then echo "$pid"; fi
-    done | sort -u
-}
-
-terminate_known_dev_cargo_processes() {
-    local pid
-    log "looking for Script Kit dev/cargo processes using repo"
-    for pid in $(discover_known_dev_cargo_pids); do
-        terminate_tree "$pid" "repo dev/cargo process"
-    done
-}
-
 emergency_delete_agent_targets() {
-    if [ ! -d target-agent ]; then return 0; fi
-    log "emergency deleting target-agent subdirectories except .locks"
-    if [ "$APPLY" = "1" ]; then
-        find target-agent -mindepth 1 -maxdepth 1 -type d ! -name ".locks" -print -exec rm -rf {} +
-        mkdir -p target-agent/pools target-agent/agents target-agent/.locks
-    else
-        find target-agent -mindepth 1 -maxdepth 1 -type d ! -name ".locks" -print
-    fi
+    local candidate
+    [[ -d target-agent ]] || return 0
+    log "emergency inspecting unlocked individual pools; active and warm pools stay protected"
+    for candidate in "${REPO_ROOT}"/target-agent/pools/* "${REPO_ROOT}"/target-agent/agents/*; do
+        [[ -d "$candidate" && ! -L "$candidate" ]] || continue
+        if cargo_cache_candidate_is_pinned "$candidate" || cargo_cache_candidate_is_locked "$candidate"; then
+            log "preserving protected pool ${candidate}"
+            continue
+        fi
+        printf '%s\n' "$candidate"
+        if [[ "$APPLY" == "1" ]]; then
+            if cargo_cache_remove_candidate "$candidate"; then
+                log "removed unlocked pool ${candidate}"
+            else
+                log "preserved pool after ownership changed ${candidate}"
+            fi
+        fi
+    done
 }
 
 emergency_delete_incremental() {
-    if [ ! -d target/debug/incremental ]; then return 0; fi
+    [[ -d target/debug/incremental ]] || return 0
+    if cargo_cache_any_live_lock || [[ "${SCRIPT_KIT_ALLOW_SHARED_INCREMENTAL_EVICTION:-0}" != "1" ]]; then
+        log "preserving shared incremental cache; explicit idle-machine opt-in is required"
+        return 0
+    fi
     log "emergency deleting target/debug/incremental contents"
     if [ "$APPLY" = "1" ]; then
         find target/debug/incremental -mindepth 1 -maxdepth 1 -print -exec rm -rf {} +
@@ -229,10 +136,12 @@ if ge_float "$(free_gib)" "$TARGET_FREE_GIB"; then
     exit 0
 fi
 
-# Phase 2: terminate dev processes + aggressive prune
-log "still below target free after normal prune; terminating known dev cargo processes"
-terminate_agent_lock_holders
-terminate_known_dev_cargo_processes
+# Phase 2: aggressive pruning of stale, individually unlocked pools. Never
+# terminate a user's dev watcher, compiler, or active agent build.
+log "still below target free after normal prune; inspecting unlocked stale pools"
+if cargo_cache_any_live_lock; then
+    log "active Cargo build leases remain protected throughout cleanup"
+fi
 run_prune 3 1 3
 
 if ge_float "$(free_gib)" "$TARGET_FREE_GIB"; then
@@ -241,8 +150,8 @@ if ge_float "$(free_gib)" "$TARGET_FREE_GIB"; then
     exit 0
 fi
 
-# Phase 3: emergency delete bounded cache dirs
-log "still below target free; deleting bounded cargo cache directories"
+# Phase 3: remove only individually claimed, unlocked, non-pinned pools.
+log "still below target free; inspecting bounded unlocked cache directories"
 emergency_delete_agent_targets
 emergency_delete_incremental
 run_prune 1 0 1

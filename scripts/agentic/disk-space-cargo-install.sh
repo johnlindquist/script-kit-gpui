@@ -2,7 +2,6 @@
 set -euo pipefail
 
 REPO_ROOT="/Users/johnlindquist/dev/script-kit-gpui"
-CLAUDE_BIN="/Users/johnlindquist/.local/bin/claude"
 LABEL="com.scriptkit.gpui.disk-space-cargo-watcher"
 BIN_DIR="$REPO_ROOT/scripts/agentic/bin"
 LOG_DIR="$HOME/Library/Logs/script-kit-gpui"
@@ -51,7 +50,7 @@ cat > "$PLIST" <<PLIST
         <string>--fsevent-latency-seconds</string>
         <string>5</string>
         <string>--cleanup</string>
-        <string>$REPO_ROOT/scripts/agentic/disk-space-cargo-run-claude-cleanup.sh</string>
+        <string>$REPO_ROOT/scripts/agentic/disk-space-cargo-emergency-clean.sh</string>
         <string>--state-dir</string>
         <string>$STATE_DIR</string>
     </array>
@@ -79,8 +78,6 @@ cat > "$PLIST" <<PLIST
         <string>$HOME</string>
         <key>PATH</key>
         <string>/Users/johnlindquist/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-        <key>CLAUDE_BIN</key>
-        <string>$CLAUDE_BIN</string>
         <key>SCRIPT_KIT_REPO_ROOT</key>
         <string>$REPO_ROOT</string>
         <key>SCRIPT_KIT_WATCHER_STATE_DIR</key>
@@ -89,6 +86,10 @@ cat > "$PLIST" <<PLIST
         <string>25</string>
         <key>SCRIPT_KIT_TARGET_FREE_GIB</key>
         <string>35</string>
+        <key>SCRIPT_KIT_ALLOW_SHARED_INCREMENTAL_EVICTION</key>
+        <string>0</string>
+        <key>SCRIPT_KIT_ALLOW_CLEANUP_AGENT</key>
+        <string>0</string>
     </dict>
 </dict>
 </plist>

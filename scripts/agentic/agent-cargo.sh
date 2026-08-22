@@ -29,11 +29,16 @@
 #   Both respect pre-set env overrides.
 #
 # sccache: SCRIPT_KIT_AGENT_USE_SCCACHE=auto (default) uses sccache when on
-# PATH, 1 forces (warns if missing), 0 disables.
+# PATH, 1 requires it, 0 disables. Shared caches survive individual-pool eviction.
+# Builds default to two workers and fail before starting under the disk floor.
+# SCRIPT_KIT_AGENT_TIMINGS=1 emits Cargo's target/cargo-timings HTML report.
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${SCRIPT_KIT_REPO_ROOT:-$(cd "${SCRIPT_ROOT}/../.." && pwd)}"
+# shellcheck source=scripts/agentic/cargo-cache-locks.sh
+source "${SCRIPT_ROOT}/cargo-cache-locks.sh"
 
 sanitize_id() {
   printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '-'
@@ -61,9 +66,14 @@ esac
 
 lock_root="${REPO_ROOT}/target-agent/.locks"
 lock_dir="${lock_root}/${lock_name}.lock"
-mkdir -p "$target_dir" "$lock_root"
+shared_cache_dir="${REPO_ROOT}/target-agent/shared"
+metal_module_cache="${SCRIPT_KIT_METAL_MODULE_CACHE_DIR:-${shared_cache_dir}/clang-modules}"
+mkdir -p "$target_dir" "$lock_root" "$metal_module_cache"
 
 export CARGO_TARGET_DIR="$target_dir"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-${SCRIPT_KIT_AGENT_MAX_JOBS:-2}}"
+export SCRIPT_KIT_METAL_MODULE_CACHE_DIR="$metal_module_cache"
+export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$metal_module_cache}"
 
 # Slim debug info: agents read backtraces, they do not attach debuggers.
 export CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-line-tables-only}"
@@ -78,13 +88,29 @@ fi
 
 rustc_wrapper_state="none"
 use_sccache="${SCRIPT_KIT_AGENT_USE_SCCACHE:-auto}"
-if [[ "$use_sccache" == "1" || "$use_sccache" == "auto" ]]; then
+if [[ -n "${RUSTC_WRAPPER:-}" ]]; then
+  rustc_wrapper_state="existing:${RUSTC_WRAPPER}"
+elif [[ "$use_sccache" == "1" || "$use_sccache" == "auto" ]]; then
   if command -v sccache >/dev/null 2>&1; then
     export RUSTC_WRAPPER="sccache"
+    export SCCACHE_DIR="${SCCACHE_DIR:-${shared_cache_dir}/sccache}"
     export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
-    rustc_wrapper_state="sccache"
+    export SCCACHE_BASEDIRS="${SCCACHE_BASEDIRS:-$REPO_ROOT}"
+    export SCCACHE_SERVER_UDS="${SCCACHE_SERVER_UDS:-${shared_cache_dir}/sccache.sock}"
+    if sccache --show-stats >/dev/null 2>&1 \
+      && sccache "$(command -v rustc)" -vV >/dev/null 2>&1; then
+      rustc_wrapper_state="sccache"
+    elif [[ "$use_sccache" == "1" ]]; then
+      echo "AGENT_CARGO error: required sccache cannot execute rustc through ${SCCACHE_SERVER_UDS}; start its server or run with the required sandbox permissions" >&2
+      exit 69
+    else
+      unset RUSTC_WRAPPER
+      rustc_wrapper_state="unavailable"
+      echo "AGENT_CARGO warning: sccache cannot execute rustc in this sandbox; continuing without compiler caching" >&2
+    fi
   elif [[ "$use_sccache" == "1" ]]; then
-    echo "AGENT_CARGO warning: SCRIPT_KIT_AGENT_USE_SCCACHE=1 but sccache not on PATH; continuing without it" >&2
+    echo "AGENT_CARGO error: SCRIPT_KIT_AGENT_USE_SCCACHE=1 but sccache is unavailable; install the official prebuilt package or use auto" >&2
+    exit 69
   fi
 fi
 
@@ -98,18 +124,7 @@ dir_kb() {
 
 # A candidate dir is evictable if no live lock holds it.
 candidate_locked() {
-  local dir="$1" name lock pid
-  name="$(basename "$dir")"
-  case "$dir" in
-    */pools/*) lock="${lock_root}/pool-${name}.lock" ;;
-    *) lock="${lock_root}/agent-${name}.lock" ;;
-  esac
-  [[ -d "$lock" ]] || return 1
-  pid="$(cat "${lock}/pid" 2>/dev/null || true)"
-  if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
-    return 1
-  fi
-  return 0
+  cargo_cache_candidate_is_locked "$1"
 }
 
 # Print evictable candidate dirs (not ours, not locked), LRU first.
@@ -118,6 +133,7 @@ eviction_candidates() {
   for dir in "${REPO_ROOT}"/target-agent/pools/* "${REPO_ROOT}"/target-agent/agents/*; do
     [[ -d "$dir" ]] || continue
     [[ "$dir" == "$target_dir" ]] && continue
+    cargo_cache_candidate_is_pinned "$dir" && continue
     candidate_locked "$dir" && continue
     if [[ -f "${dir}/.last_used" ]]; then
       stamp="$(stat -f '%m' "${dir}/.last_used" 2>/dev/null || echo 0)"
@@ -159,7 +175,9 @@ enforce_disk_budget() {
   while IFS= read -r dir; do
     (( total_kb <= budget_kb && free_kb >= min_free_kb )) && break
     echo "AGENT_CARGO evict dir=${dir} size=$(( $(dir_kb "$dir") / 1024 / 1024 ))G" >&2
-    rm -rf "$dir"
+    if ! cargo_cache_remove_candidate "$dir"; then
+      continue
+    fi
     total_kb="$(total_agent_target_kb)"
     free_kb="$(free_disk_kb)"
   done < <(eviction_candidates)
@@ -172,7 +190,11 @@ enforce_disk_budget() {
   fi
 
   if (( free_kb < min_free_kb )); then
-    echo "AGENT_CARGO warning: free disk still $((free_kb / 1024 / 1024))G < ${min_free_gb}G after eviction; the system watcher may intervene" >&2
+    if [[ "${SCRIPT_KIT_AGENT_ALLOW_LOW_DISK:-0}" != "1" ]]; then
+      echo "AGENT_CARGO error: free disk $((free_kb / 1024 / 1024))G remains below ${min_free_gb}G; refusing an unpredictable build before cache cleanup intervenes" >&2
+      return 75
+    fi
+    echo "AGENT_CARGO warning: low-disk build explicitly allowed free=$((free_kb / 1024 / 1024))G floor=${min_free_gb}G" >&2
   fi
 }
 
@@ -271,12 +293,65 @@ trap release_lock EXIT INT TERM
 touch "${target_dir}/.last_used" 2>/dev/null || true
 enforce_disk_budget
 
-echo "AGENT_CARGO mode=${target_mode} pool=${pool} target_dir=${CARGO_TARGET_DIR} lock=${lock_name} rustc_wrapper=${rustc_wrapper_state} debug=${CARGO_PROFILE_DEV_DEBUG} incremental=${CARGO_INCREMENTAL:-default} cargo $*" >&2
+cargo_args=("$@")
+if [[ "${SCRIPT_KIT_AGENT_TIMINGS:-0}" == "1" ]]; then
+  case "${cargo_args[0]:-}" in
+    build|check|test|bench)
+      timed_args=()
+      inserted=0
+      for argument in "${cargo_args[@]}"; do
+        if [[ "$argument" == "--timings" || "$argument" == --timings=* ]]; then
+          inserted=1
+        fi
+        if [[ "$argument" == "--" && "$inserted" == "0" ]]; then
+          timed_args+=("--timings")
+          inserted=1
+        fi
+        timed_args+=("$argument")
+      done
+      if [[ "$inserted" == "0" ]]; then
+        timed_args+=("--timings")
+      fi
+      cargo_args=("${timed_args[@]}")
+      ;;
+  esac
+fi
+
+cache_state="cold"
+if [[ -d "${target_dir}/debug/deps" ]] && [[ -n "$(find "${target_dir}/debug/deps" -maxdepth 1 -type f -print -quit 2>/dev/null)" ]]; then
+  cache_state="warm"
+fi
+started_epoch="$(date +%s)"
+free_before_gb="$(( $(free_disk_kb) / 1024 / 1024 ))"
+echo "AGENT_CARGO mode=${target_mode} pool=${pool} cache=${cache_state} jobs=${CARGO_BUILD_JOBS} target_dir=${CARGO_TARGET_DIR} metal_module_cache=${metal_module_cache} lock=${lock_name} rustc_wrapper=${rustc_wrapper_state} debug=${CARGO_PROFILE_DEV_DEBUG} incremental=${CARGO_INCREMENTAL:-default} cargo ${cargo_args[*]}" >&2
 
 set +e
-cargo "$@"
+cargo "${cargo_args[@]}"
 status=$?
 set -e
+
+if [[ "$status" -eq 0 && "${SCRIPT_KIT_AGENT_TIMINGS:-0}" == "1" ]]; then
+  timing_report="${target_dir}/cargo-timings/cargo-timing.html"
+  timing_summary="${target_dir}/cargo-timings/cargo-timing-summary.json"
+  if [[ -f "$timing_report" && -f "${SCRIPT_ROOT}/cargo-timings-summary.ts" ]] \
+    && command -v bun >/dev/null 2>&1; then
+    if bun "${SCRIPT_ROOT}/cargo-timings-summary.ts" \
+      --report "$timing_report" --out "$timing_summary" >/dev/null; then
+      echo "AGENT_CARGO timing_summary=${timing_summary}" >&2
+    else
+      echo "AGENT_CARGO warning: Cargo timing report could not be summarized" >&2
+    fi
+  fi
+fi
+
+elapsed_seconds="$(( $(date +%s) - started_epoch ))"
+free_after_gb="$(( $(free_disk_kb) / 1024 / 1024 ))"
+receipt_path="${SCRIPT_KIT_AGENT_BUILD_RECEIPT_PATH:-${REPO_ROOT}/target-agent/build-receipts.jsonl}"
+printf '{"started_epoch":%s,"elapsed_seconds":%s,"status":%s,"pool":"%s","cache":"%s","jobs":%s,"free_before_gb":%s,"free_after_gb":%s,"command":"%s","timings":%s}\n' \
+  "$started_epoch" "$elapsed_seconds" "$status" "$pool" "$cache_state" "$CARGO_BUILD_JOBS" \
+  "$free_before_gb" "$free_after_gb" "${cargo_args[0]:-unknown}" "${SCRIPT_KIT_AGENT_TIMINGS:-0}" \
+  >> "$receipt_path" 2>/dev/null || true
+echo "AGENT_CARGO result status=${status} elapsed=${elapsed_seconds}s cache=${cache_state} free=${free_before_gb}G->${free_after_gb}G receipt=${receipt_path}" >&2
 
 if [[ "$status" -eq 0 ]]; then
   export_artifacts "$@"

@@ -10,15 +10,16 @@ Hard boundaries:
 - Do not use sudo.
 - Do not touch `.git`.
 - Do not delete anything outside `target/`, `target-agent/`, or the watcher state/log directories.
-- You are authorized to terminate only Script Kit dev/Cargo processes using this repo's Cargo target dirs:
-  - `./dev.sh`
-  - `cargo watch` launched by `./dev.sh`
-  - `scripts/agentic/agent-cargo.sh`
-  - `cargo`, `cargo-watch`, and `rustc` processes whose cwd is this repo
-  - PIDs listed in `target-agent/.locks/*.lock/pid`
+- Never terminate `./dev.sh`, `cargo watch`, Cargo, rustc, agent wrappers, or any
+  PID listed in `target-agent/.locks/*.lock/pid`.
+- Never delete an active build pool, the pinned `agent-debug` warm pool,
+  `target-agent/.locks`, `target-agent/shared`, runtime exports, or artifacts.
+- Remove only individual stale pools after acquiring their exact ownership lock.
 
 Primary action:
-Run the permitted helper command exactly as shown in the runtime section. That helper is intentionally scoped: it prunes Cargo targets, terminates only matching Script Kit dev/Cargo processes if needed, deletes bounded Cargo cache subdirectories only if pruning is insufficient, and verifies disk space afterward.
+Run the permitted helper command exactly as shown in the runtime section. That
+helper performs deterministic, lock-safe cleanup without terminating processes
+or deleting active/warm caches, and verifies disk space afterward.
 
 Expected flow:
 1. Inspect the runtime facts.
