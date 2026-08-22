@@ -4,12 +4,18 @@
  * The banner is owned by Notification Center rather than the application
  * under test, so it cannot change Script Kit focus/window topology or appear
  * in exact-window Quartz captures. Set SCRIPT_KIT_TEST_STATUS=0 for CI.
+ * Noninteractive verification never displays a banner, even when another
+ * caller inherited SCRIPT_KIT_TEST_STATUS=1 from a visible-probe session.
  */
 export async function announceTestStatus(
   phase: string,
   detail = "Please ignore automated window movement and input",
 ) {
-  if (process.platform !== "darwin" || process.env.SCRIPT_KIT_TEST_STATUS === "0") return;
+  if (
+    process.env.SCRIPT_KIT_NONINTERACTIVE === "1" ||
+    process.platform !== "darwin" ||
+    process.env.SCRIPT_KIT_TEST_STATUS === "0"
+  ) return;
   const escapeAppleScript = (value: string) => value
     .replaceAll("\\", "\\\\")
     .replaceAll('"', '\\"')

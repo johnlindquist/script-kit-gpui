@@ -740,6 +740,7 @@ describe("noninteractive DevTools operator safety", () => {
 
   test("direct session status preserves reviewed noninteractive read-only inspection", () => {
     const temporaryRoot = mkdtempSync(join(tmpdir(), "script-kit-session-status-"));
+    const sessionRoot = join(temporaryRoot, "sessions");
     try {
       const result = Bun.spawnSync([
         "bash",
@@ -751,7 +752,7 @@ describe("noninteractive DevTools operator safety", () => {
         env: {
           ...process.env,
           ...environment,
-          SCRIPT_KIT_SESSION_DIR: join(temporaryRoot, "sessions"),
+          SCRIPT_KIT_SESSION_DIR: sessionRoot,
           SCRIPT_KIT_GPUI_BINARY: join(temporaryRoot, "never-resolve-or-launch"),
         },
         stdout: "pipe",
@@ -763,9 +764,61 @@ describe("noninteractive DevTools operator safety", () => {
         session: "isolated-safety-probe",
         alive: false,
       });
+      expect(existsSync(sessionRoot)).toBe(false);
     } finally {
       rmSync(temporaryRoot, { recursive: true, force: true });
     }
+  });
+
+  test.each([
+    ["send", ["send", "isolated-safety-probe", JSON.stringify({ type: "getState" })]],
+    [
+      "rpc",
+      [
+        "rpc",
+        "isolated-safety-probe",
+        JSON.stringify({ type: "getState", requestId: "read-only-session-probe" }),
+      ],
+    ],
+  ])("missing read-only session %s does not create a registry or resolve an app binary", (_name, args) => {
+    const temporaryRoot = mkdtempSync(join(tmpdir(), "script-kit-session-readonly-"));
+    const sessionRoot = join(temporaryRoot, "must-remain-absent");
+    try {
+      const result = Bun.spawnSync(["bash", "scripts/agentic/session.sh", ...args], {
+        cwd: new URL("../..", import.meta.url).pathname,
+        env: {
+          ...process.env,
+          ...environment,
+          SCRIPT_KIT_SESSION_DIR: sessionRoot,
+          SCRIPT_KIT_GPUI_BINARY: join(temporaryRoot, "never-resolve-or-launch"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.stdout.toString())).toMatchObject({
+        status: "error",
+        error: { code: "no_session" },
+      });
+      expect(existsSync(sessionRoot)).toBe(false);
+    } finally {
+      rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("noninteractive status announcements cannot spawn AppleScript notifications", () => {
+    const result = child(`
+      import { announceTestStatus } from "./scripts/devtools/test-status.ts";
+      Bun.spawn = (() => {
+        throw new Error("unsafe operator notification attempted");
+      });
+      await announceTestStatus("read-only verification");
+      console.log("operator-notification-suppressed");
+    `, { SCRIPT_KIT_TEST_STATUS: "1" });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("operator-notification-suppressed");
+    expect(result.stderr.toString()).not.toContain("unsafe operator notification attempted");
   });
 
   test("legacy --start and stop cannot create or disturb a user-owned GUI session", () => {

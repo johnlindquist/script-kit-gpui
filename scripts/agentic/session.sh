@@ -62,9 +62,16 @@ fi
 
 SCHEMA_VERSION=1
 SESSION_DIR_RAW="${SCRIPT_KIT_SESSION_DIR:-/tmp/sk-agentic-sessions}"
+SESSION_SUBCOMMAND="${1:-}"
 canonical_session_dir() {
   local dir="$1"
-  mkdir -p "$dir"
+  if [ ! -d "$dir" ]; then
+    if [ "$SESSION_SUBCOMMAND" != "start" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    mkdir -p "$dir"
+  fi
   (cd "$dir" && pwd -P)
 }
 SESSION_DIR="$(canonical_session_dir "$SESSION_DIR_RAW")"
@@ -84,7 +91,11 @@ resolve_default_binary() {
     echo "$dev_bin"
   fi
 }
-BINARY="${SCRIPT_KIT_GPUI_BINARY:-$(resolve_default_binary)}"
+if [ "$SESSION_SUBCOMMAND" = "start" ]; then
+  BINARY="${SCRIPT_KIT_GPUI_BINARY:-$(resolve_default_binary)}"
+else
+  BINARY="${SCRIPT_KIT_GPUI_BINARY:-}"
+fi
 READY_TIMEOUT_MS="${SCRIPT_KIT_SESSION_READY_TIMEOUT_MS:-3000}"
 STOP_GRACE_MS="${SCRIPT_KIT_SESSION_STOP_GRACE_MS:-2000}"
 STOP_KILL_TIMEOUT_MS="${SCRIPT_KIT_SESSION_STOP_KILL_TIMEOUT_MS:-2000}"
@@ -1179,6 +1190,8 @@ cmd_status() {
   fi
   if [ -f "${sdir}/binary" ]; then
     launched_binary="$(cat "${sdir}/binary")"
+  elif [ -z "$launched_binary" ]; then
+    launched_binary="$(resolve_default_binary)"
   fi
 
   if [ -f "${sdir}/pid" ]; then
