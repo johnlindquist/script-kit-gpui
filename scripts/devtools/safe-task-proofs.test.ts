@@ -60,6 +60,10 @@ describe("catalog-bound offline consistency task proofs", () => {
       "crates/sk-protocol/src/command_contract.rs",
     );
     expect(ownership.productionSources).toContain(
+      "crates/sk-protocol/src/ascii_search.rs",
+    );
+    expect(ownership.productionSources).toContain("src/scripts/search/ascii.rs");
+    expect(ownership.productionSources).toContain(
       "crates/sk-protocol/src/filter_coalescer.rs",
     );
     expect(ownership.productionSources).toContain("src/filter_coalescer.rs");

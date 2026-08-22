@@ -8,47 +8,6 @@ use crate::scripts::{MatchEvidenceField, ScriptMatchKind};
 use super::super::*;
 
 // ============================================
-// Helper function tests
-// ============================================
-
-#[test]
-fn test_is_word_boundary_match_start() {
-    assert!(is_word_boundary_match("Hello World", 0));
-}
-
-#[test]
-fn test_is_word_boundary_match_after_space() {
-    // "W" in "Hello World" at position 6
-    assert!(is_word_boundary_match("Hello World", 6));
-}
-
-#[test]
-fn test_is_word_boundary_match_after_dash() {
-    // "c" in "git-commit" at position 4
-    assert!(is_word_boundary_match("git-commit", 4));
-}
-
-#[test]
-fn test_is_word_boundary_match_camel_case() {
-    // "C" in "gitCommit" at position 3
-    assert!(is_word_boundary_match("gitCommit", 3));
-}
-
-#[test]
-fn test_is_word_boundary_match_mid_word() {
-    // "e" in "Hello" at position 1 - NOT a word boundary
-    assert!(!is_word_boundary_match("Hello", 1));
-}
-
-#[test]
-fn test_is_exact_name_match() {
-    assert!(is_exact_name_match("Hello", "hello"));
-    assert!(is_exact_name_match("Agent Chat", "agent chat"));
-    assert!(!is_exact_name_match("Hello World", "hello"));
-    assert!(!is_exact_name_match("Hi", "hello"));
-}
-
-// ============================================
 // Search scoring tests
 // ============================================
 

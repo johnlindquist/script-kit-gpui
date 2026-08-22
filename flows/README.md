@@ -11,6 +11,10 @@ Migrated from the retired imps/ fleet (codex-imps runtime) on 2026-07-04.
 
 ## App-independent domain ownership
 
+- `crates/sk-protocol/src/ascii_search.rs` owns shared ASCII case folding,
+  word-boundary/exact matching, fuzzy subsequence indices, and their pure
+  launcher-search regressions. `src/scripts/search/ascii.rs` preserves every
+  existing application import without compiling GUI dependencies.
 - `crates/sk-protocol/src/search_contract.rs` owns exact provider generations,
   bounded worker lifecycle tickets, and the pure root provider coordinator.
   `src/scripts/root_search_contract.rs` retains app-service adapters and

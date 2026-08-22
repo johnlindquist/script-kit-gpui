@@ -1,82 +1,6 @@
 // ============================================
-// ASCII CASE-FOLDING HELPER TESTS
+// SEARCH RESULT HIGHLIGHT TESTS
 // ============================================
-
-#[test]
-fn test_contains_ignore_ascii_case_basic() {
-    // Note: needle_lower must already be lowercase
-    assert!(contains_ignore_ascii_case("OpenFile", "open"));
-    assert!(contains_ignore_ascii_case("OPENFILE", "open"));
-    assert!(contains_ignore_ascii_case("openfile", "open"));
-    assert!(contains_ignore_ascii_case("MyOpenFile", "open"));
-}
-
-#[test]
-fn test_contains_ignore_ascii_case_not_found() {
-    assert!(!contains_ignore_ascii_case("OpenFile", "save"));
-    assert!(!contains_ignore_ascii_case("test", "testing"));
-}
-
-#[test]
-fn test_contains_ignore_ascii_case_empty_needle() {
-    assert!(contains_ignore_ascii_case("OpenFile", ""));
-    assert!(contains_ignore_ascii_case("", ""));
-}
-
-#[test]
-fn test_contains_ignore_ascii_case_needle_longer() {
-    assert!(!contains_ignore_ascii_case("ab", "abc"));
-}
-
-#[test]
-fn test_find_ignore_ascii_case_at_start() {
-    assert_eq!(find_ignore_ascii_case("OpenFile", "open"), Some(0));
-    assert_eq!(find_ignore_ascii_case("OPENFILE", "open"), Some(0));
-}
-
-#[test]
-fn test_find_ignore_ascii_case_in_middle() {
-    assert_eq!(find_ignore_ascii_case("MyOpenFile", "open"), Some(2));
-}
-
-#[test]
-fn test_find_ignore_ascii_case_not_found() {
-    assert_eq!(find_ignore_ascii_case("OpenFile", "save"), None);
-}
-
-#[test]
-fn test_find_ignore_ascii_case_empty_needle() {
-    assert_eq!(find_ignore_ascii_case("OpenFile", ""), Some(0));
-}
-
-#[test]
-fn test_fuzzy_match_with_indices_ascii_basic() {
-    let (matched, indices) = fuzzy_match_with_indices_ascii("OpenFile", "of");
-    assert!(matched);
-    assert_eq!(indices, vec![0, 4]); // 'O' at 0, 'F' at 4
-}
-
-#[test]
-fn test_fuzzy_match_with_indices_ascii_case_insensitive() {
-    // Note: pattern_lower must already be lowercase
-    let (matched, indices) = fuzzy_match_with_indices_ascii("OpenFile", "of");
-    assert!(matched);
-    assert_eq!(indices, vec![0, 4]);
-}
-
-#[test]
-fn test_fuzzy_match_with_indices_ascii_no_match() {
-    let (matched, indices) = fuzzy_match_with_indices_ascii("test", "xyz");
-    assert!(!matched);
-    assert!(indices.is_empty());
-}
-
-#[test]
-fn test_fuzzy_match_with_indices_ascii_empty_pattern() {
-    let (matched, indices) = fuzzy_match_with_indices_ascii("test", "");
-    assert!(matched);
-    assert!(indices.is_empty());
-}
 
 #[test]
 fn test_compute_match_indices_for_script_result() {
@@ -96,7 +20,7 @@ fn test_compute_match_indices_for_script_result() {
         match_indices: MatchIndices::default(),
         match_kind: ScriptMatchKind::default(),
         content_match: None,
-            match_evidence: None,
+        match_evidence: None,
     };
     let result = SearchResult::Script(script_match);
 
@@ -112,7 +36,7 @@ fn test_compute_match_indices_for_scriptlet_result() {
         score: 100,
         display_file_path: Some("copy.md#copy-text".to_string()),
         match_indices: MatchIndices::default(),
-            match_evidence: None,
+        match_evidence: None,
     };
     let result = SearchResult::Scriptlet(scriptlet_match);
 
@@ -139,7 +63,7 @@ fn test_compute_match_indices_empty_query() {
         match_indices: MatchIndices::default(),
         match_kind: ScriptMatchKind::default(),
         content_match: None,
-            match_evidence: None,
+        match_evidence: None,
     };
     let result = SearchResult::Script(script_match);
 
@@ -186,4 +110,3 @@ fn test_scriptlet_code_search_skipped_when_name_matches() {
     // Score should be from name match, not code match
     assert!(results[0].score > 5);
 }
-

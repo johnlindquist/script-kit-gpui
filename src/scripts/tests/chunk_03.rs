@@ -99,48 +99,6 @@ fn test_extract_html_metadata_with_colons_in_value() {
 }
 
 #[test]
-fn test_fuzzy_match_case_insensitive() {
-    assert!(is_fuzzy_match("OPENFILE", "open"));
-    assert!(is_fuzzy_match("Open File", "of"));
-    assert!(is_fuzzy_match("OpenFile", "OP"));
-}
-
-#[test]
-fn test_fuzzy_match_single_char() {
-    assert!(is_fuzzy_match("test", "t"));
-    assert!(is_fuzzy_match("test", "e"));
-    assert!(is_fuzzy_match("test", "s"));
-}
-
-#[test]
-fn test_fuzzy_match_not_in_order() {
-    // "st" IS in order in "test" (t-e-s-t), so this should match
-    assert!(is_fuzzy_match("test", "st"));
-    // But "cab" is NOT in order in "abc"
-    assert!(!is_fuzzy_match("abc", "cab"));
-    // And "nope" is NOT in order in "open" (o-p-e-n doesn't contain n-o-p-e in order)
-    assert!(!is_fuzzy_match("open", "nope"));
-}
-
-#[test]
-fn test_fuzzy_match_exact_match() {
-    assert!(is_fuzzy_match("test", "test"));
-    assert!(is_fuzzy_match("open", "open"));
-}
-
-#[test]
-fn test_fuzzy_match_empty_pattern() {
-    assert!(is_fuzzy_match("test", ""));
-    assert!(is_fuzzy_match("", ""));
-}
-
-#[test]
-fn test_fuzzy_match_pattern_longer_than_haystack() {
-    assert!(!is_fuzzy_match("ab", "abc"));
-    assert!(!is_fuzzy_match("x", "xyz"));
-}
-
-#[test]
 fn test_fuzzy_search_no_results() {
     let scripts = wrap_scripts(vec![Script {
         name: "test".to_string(),
@@ -386,7 +344,7 @@ fn test_search_result_properties() {
         match_indices: MatchIndices::default(),
         match_kind: ScriptMatchKind::default(),
         content_match: None,
-            match_evidence: None,
+        match_evidence: None,
     };
 
     let result = SearchResult::Script(script_match);

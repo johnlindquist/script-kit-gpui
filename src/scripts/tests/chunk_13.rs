@@ -325,27 +325,6 @@ fn test_fuzzy_search_scriptlets_match_indices() {
 }
 
 #[test]
-fn test_fuzzy_match_with_indices_basic() {
-    let (matched, indices) = fuzzy_match_with_indices("openfile", "opf");
-    assert!(matched);
-    assert_eq!(indices, vec![0, 1, 4]);
-}
-
-#[test]
-fn test_fuzzy_match_with_indices_no_match() {
-    let (matched, indices) = fuzzy_match_with_indices("test", "xyz");
-    assert!(!matched);
-    assert!(indices.is_empty());
-}
-
-#[test]
-fn test_fuzzy_match_with_indices_case_insensitive() {
-    let (matched, indices) = fuzzy_match_with_indices("OpenFile", "of");
-    assert!(matched);
-    assert_eq!(indices, vec![0, 4]);
-}
-
-#[test]
 fn test_extract_filename() {
     assert_eq!(
         extract_filename(&PathBuf::from("/path/to/script.ts")),
@@ -390,4 +369,3 @@ fn test_fuzzy_search_scripts_empty_query_has_filename() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].filename, "my-script.ts");
 }
-

@@ -64,8 +64,6 @@ pub(crate) use match_contract::{
 // `is_fuzzy_match` is shared with the spine catalogs so sigil filtering
 // behaves like main-list search.
 pub(crate) use ascii::is_fuzzy_match;
-#[cfg(test)]
-pub(crate) use ascii::{fuzzy_match_with_indices, is_exact_name_match};
 pub(crate) use paths::{extract_filename, extract_scriptlet_display_path};
 pub(crate) use prefix_filters::{
     app_passes_prefix_filter, builtin_passes_prefix_filter, parse_query_prefix,

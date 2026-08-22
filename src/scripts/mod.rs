@@ -126,11 +126,7 @@ pub(crate) use scriptlet_loader::{
     extract_kit_from_path, parse_scriptlet_section,
 };
 #[cfg(test)]
-pub(crate) use search::{
-    contains_ignore_ascii_case, extract_filename, extract_scriptlet_display_path,
-    find_ignore_ascii_case, fuzzy_match_with_indices, fuzzy_match_with_indices_ascii,
-    is_fuzzy_match,
-};
+pub(crate) use search::{extract_filename, extract_scriptlet_display_path, is_fuzzy_match};
 
 #[cfg(test)]
 mod tests;

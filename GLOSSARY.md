@@ -6,6 +6,12 @@ This document defines the main user-facing UI surfaces and components in Script 
 
 ## App-independent domain crates
 
+- **ASCII and fuzzy launcher matching:**
+  [crates/sk-protocol/src/ascii_search.rs](crates/sk-protocol/src/ascii_search.rs)
+  owns allocation-free ASCII case folding, word boundaries, exact names,
+  ordered fuzzy matches, original highlight indices, and short-query policy.
+  [src/scripts/search/ascii.rs](src/scripts/search/ascii.rs) preserves all
+  launcher, browser-tab, spine, script, and metadata imports as a facade.
 - **Search/provider ownership:**
   [crates/sk-protocol/src/search_contract.rs](crates/sk-protocol/src/search_contract.rs)
   owns deterministic search snapshots, exact provider generations, bounded

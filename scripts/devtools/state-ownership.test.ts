@@ -11,6 +11,8 @@ import {
 
 function passingSources(): StateOwnershipSource[] {
   const sources: Record<string, string> = {
+    "crates/sk-protocol/src/ascii_search.rs":
+      "pub fn contains_ignore_ascii_case() {} pub fn find_ignore_ascii_case() {} pub fn fuzzy_match_with_indices_ascii() {} pub fn is_fuzzy_match() {} pub fn is_word_boundary_match() {}",
     "crates/sk-protocol/src/command_contract.rs":
       "pub enum CommandSource {} pub struct CommandIdentity; pub struct CommandDescriptor; pub enum CommandAvailability {}",
     "crates/sk-protocol/src/filter_coalescer.rs":
@@ -20,13 +22,17 @@ function passingSources(): StateOwnershipSource[] {
     "crates/sk-protocol/src/sentence_search.rs":
       "pub struct LongTextQuery; pub struct LongTextMatchEvidence;",
     "crates/sk-protocol/src/lib.rs":
-      "pub mod command_contract; pub mod filter_coalescer; pub mod search_contract; pub mod sentence_search;",
+      "pub mod ascii_search; pub mod command_contract; pub mod filter_coalescer; pub mod search_contract; pub mod sentence_search;",
     "src/scripts/types.rs":
       "pub enum SearchResult {} pub struct MatchEvidence;",
     "src/scripts/command_contract.rs":
       "use sk_protocol::command_contract::{CommandIdentity, CommandDescriptor, CommandSource}; pub struct LauncherCommandReceipt; impl SearchResult { pub fn command_descriptor(&self) {} }",
     "src/scripts/root_search_contract.rs":
       "pub(crate) use sk_protocol::search_contract::{RootProviderCoordinator, RootOwnedProviderRefresh, RootOwnedProviderRefreshLifecycle};",
+    "src/scripts/search.rs":
+      "mod ascii; pub(crate) use ascii::{contains_ignore_ascii_case, find_ignore_ascii_case, fuzzy_match_with_indices_ascii, is_fuzzy_match, is_word_boundary_match};",
+    "src/scripts/search/ascii.rs":
+      "pub(crate) use sk_protocol::ascii_search::{contains_ignore_ascii_case, find_ignore_ascii_case, fuzzy_match_with_indices_ascii, is_fuzzy_match, is_word_boundary_match};",
     "src/scripts/search/sentence.rs":
       "pub(crate) use sk_protocol::sentence_search::*;",
     "src/filter_coalescer.rs":
@@ -125,6 +131,25 @@ describe("GOV-001 canonical state ownership and sanctioned exceptions", () => {
         id: "filter-updates-canonical-coalescer-lifecycle",
         path: "src/app_impl/filter_input_updates.rs",
         pass: true,
+      }),
+    );
+  });
+
+  test("launcher ASCII matching has one GPUI-free domain owner and compatibility adapter", () => {
+    const audit = auditStateOwnership(passingSources());
+
+    expect(audit.pass).toBe(true);
+    expect(audit.owners).toContainEqual(
+      expect.objectContaining({
+        id: "domain-ascii-search",
+        path: "crates/sk-protocol/src/ascii_search.rs",
+        symbols: expect.arrayContaining([
+          "contains_ignore_ascii_case",
+          "find_ignore_ascii_case",
+          "fuzzy_match_with_indices_ascii",
+          "is_fuzzy_match",
+          "is_word_boundary_match",
+        ]),
       }),
     );
   });

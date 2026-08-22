@@ -1,6 +1,7 @@
 //! Stable, app-independent protocol primitives for Script Kit.
 
 pub mod ai_reliability;
+pub mod ascii_search;
 pub mod command_contract;
 pub mod execution_contract;
 pub mod filter_coalescer;

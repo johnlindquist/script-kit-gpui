@@ -9,6 +9,17 @@ import { stripFacadeMigrationRustTrivia } from "./facade-migrations.ts";
  */
 export const CANONICAL_STATE_OWNERS = [
   {
+    id: "domain-ascii-search",
+    path: "crates/sk-protocol/src/ascii_search.rs",
+    symbols: [
+      "contains_ignore_ascii_case",
+      "find_ignore_ascii_case",
+      "fuzzy_match_with_indices_ascii",
+      "is_fuzzy_match",
+      "is_word_boundary_match",
+    ],
+  },
+  {
     id: "domain-command-contract",
     path: "crates/sk-protocol/src/command_contract.rs",
     symbols: ["CommandSource", "CommandIdentity", "CommandDescriptor", "CommandAvailability"],
@@ -78,6 +89,8 @@ export const CANONICAL_STATE_OWNERS = [
 export const REQUIRED_STATE_REGISTRIES = [
   "crates/sk-protocol/src/lib.rs",
   "src/scripts/root_search_contract.rs",
+  "src/scripts/search.rs",
+  "src/scripts/search/ascii.rs",
   "src/scripts/search/sentence.rs",
   "src/filter_coalescer.rs",
   "src/scripts/mod.rs",
@@ -168,7 +181,7 @@ function declarationSites(
   symbol: string,
 ): string[] {
   const pattern = new RegExp(
-    `\\b(?:pub(?:\\s*\\([^)]*\\))?\\s+)?(?:struct|enum|type)\\s+${escapeExpression(symbol)}\\b`,
+    `\\b(?:pub(?:\\s*\\([^)]*\\))?\\s+)?(?:struct|enum|type|fn|const)\\s+${escapeExpression(symbol)}\\b`,
     "g",
   );
   const sites: string[] = [];
@@ -187,7 +200,7 @@ function hasModule(code: string, moduleName: string): boolean {
 function hasGroupedSymbol(code: string, owner: string, symbol: string): boolean {
   const path = owner.split("::").map(escapeExpression).join("\\s*::\\s*");
   return new RegExp(
-    `\\b(?:pub\\s+)?use\\s+${path}\\s*::\\s*(?:${escapeExpression(symbol)}\\b|\\{[^;]*\\b${escapeExpression(symbol)}\\b)`,
+    `\\b(?:pub(?:\\s*\\([^)]*\\))?\\s+)?use\\s+${path}\\s*::\\s*(?:${escapeExpression(symbol)}\\b|\\{[^;]*\\b${escapeExpression(symbol)}\\b)`,
   ).test(code);
 }
 
@@ -265,6 +278,7 @@ export function auditStateOwnership(
 
   const domainRegistry = code("crates/sk-protocol/src/lib.rs");
   for (const module of [
+    "ascii_search",
     "command_contract",
     "filter_coalescer",
     "search_contract",
@@ -320,6 +334,25 @@ export function auditStateOwnership(
   if (!/\buse\s+sk_protocol\s*::\s*sentence_search\s*::\s*\*/.test(sentenceAdapter)) {
     failures.push("sentence-adapter-missing-domain-owner");
   }
+  const searchRegistry = code("src/scripts/search.rs");
+  if (!hasModule(searchRegistry, "ascii")) {
+    failures.push("missing-launcher-ascii-search-module");
+  }
+  const asciiAdapter = code("src/scripts/search/ascii.rs");
+  for (const symbol of [
+    "contains_ignore_ascii_case",
+    "find_ignore_ascii_case",
+    "fuzzy_match_with_indices_ascii",
+    "is_fuzzy_match",
+    "is_word_boundary_match",
+  ]) {
+    if (!hasGroupedSymbol(asciiAdapter, "sk_protocol::ascii_search", symbol)) {
+      failures.push(`ascii-search-adapter-missing-domain-owner:${symbol}`);
+    }
+    if (!hasGroupedSymbol(searchRegistry, "ascii", symbol)) {
+      failures.push(`launcher-search-missing-canonical-ascii-import:${symbol}`);
+    }
+  }
   const coalescerAdapter = code("src/filter_coalescer.rs");
   if (!hasGroupedSymbol(coalescerAdapter, "sk_protocol::filter_coalescer", "FilterCoalescer")) {
     failures.push("filter-coalescer-adapter-missing-domain-owner");
@@ -353,6 +386,7 @@ export function auditStateOwnership(
     }
   }
   for (const domainPath of [
+    "crates/sk-protocol/src/ascii_search.rs",
     "crates/sk-protocol/src/command_contract.rs",
     "crates/sk-protocol/src/filter_coalescer.rs",
     "crates/sk-protocol/src/search_contract.rs",
