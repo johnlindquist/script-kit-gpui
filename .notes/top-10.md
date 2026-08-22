@@ -269,7 +269,10 @@ Evidence in this checkpoint is intentionally time- and source-qualified:
   with **16 Direct / 38 Derived / 0 Unsupported** and still **0/54 direct
   runtime proofs**. Three inexpensive Bun suites execute **15 passing behavior
   cases and 150 assertions**, including explicit anti-fabrication checks;
-  they do not launch the app, capture the screen/camera, or require Cargo.
+  the complete source-fresh offline producer lane then executes **283 passing
+  Bun cases / 1,103 assertions across 17 files**, restoring **15/75 accepted,
+  60 missing, zero stale/invalid/failed receipts, and zero auditor errors**.
+  None launches the app, captures the screen/camera, or requires Cargo.
 - The actual full library and application check completed successfully through
   the prescribed two-job Cargo wrapper. The main binary still reports eight
   preexisting binary-only unused-import warnings; the release-required
