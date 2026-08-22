@@ -1055,12 +1055,24 @@ offline receipts until their real producers are run again.
     and existing-session transports. Direct `session.sh` invocation crosses
     that same policy before creating a session directory, resolving an app
     binary, mutating a FIFO, or disturbing an existing operator session;
-    reviewed read-only status remains available. Its isolated standalone
-    suite passes **32 cases and 230 assertions**, including red/green
-    proofs for every previously unguarded direct shell entry point.
+    reviewed read-only status remains available. Missing-session status,
+    send, and RPC now remain genuinely read-only: they never create a
+    registry or resolve an application binary. Shared test announcements
+    cannot display an AppleScript/macOS notification while noninteractive,
+    even if visible-probe settings leaked in from another session. Neither
+    explicit `noninteractive: false` options nor replacement environments
+    can weaken the real parent's authority; target resolution stays on its
+    capture-free hidden-state path even when callers request an interactive
+    override. The standalone operator-safety suite passes **38 cases and
+    245 assertions**, and the separate hidden-target identity suite passes
+    **14 cases and 66 assertions**. Release evidence now fail-closes unless
+    all six actual safety owners—the direct session shell, Driver, shared
+    client, central policy, target resolver, and status announcer—are
+    tracked and included in the canonical release-source inventory. Real
+    failing-then-passing mutations cover each previously omitted owner.
     The source-current full nonintrusive release lane then executed
-    **701 passing tests, zero failures, and 2,741 assertions across 37 files
-    in 9.61s**, without the previous repository scan or load spike. The
+    **713 passing tests, zero failures, and 2,773 assertions across 37 files
+    in 10.11s**, without the previous repository scan or load spike. The
     focused build/proof-contract lane separately passed **62 tests and 320
     assertions in 0.77s**. None touches the operator's computer.
 
