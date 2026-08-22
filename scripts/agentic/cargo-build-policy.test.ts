@@ -1,10 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -13,9 +14,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const scripts = import.meta.dir;
+const temporaryDirectories: string[] = [];
+
+function temporaryDirectory(prefix: string) {
+  const path = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirectories.push(path);
+  return path;
+}
+
+afterEach(() => {
+  for (const path of temporaryDirectories.splice(0)) {
+    rmSync(path, { recursive: true, force: true });
+  }
+});
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "script-kit-cargo-policy-"));
+  const root = temporaryDirectory("script-kit-cargo-policy-");
   const bin = join(root, "fake-bin");
   const localScripts = join(root, "scripts", "agentic");
   mkdirSync(bin, { recursive: true });
@@ -384,7 +398,7 @@ describe("bounded Cargo builds", () => {
 
   test("refuses a symlinked build pool before touching its external destination", () => {
     const workspace = fixture();
-    const external = mkdtempSync(join(tmpdir(), "script-kit-external-pool-"));
+    const external = temporaryDirectory("script-kit-external-pool-");
     symlinkSync(external, join(workspace.root, "target-agent", "pools", "escaped"));
     const result = run("agent-cargo.sh", ["check", "--lib"], {
       ...workspace.env,
@@ -399,7 +413,7 @@ describe("bounded Cargo builds", () => {
 
   test("refuses a symlinked artifact export before Cargo can write outside its owner", () => {
     const workspace = fixture();
-    const external = mkdtempSync(join(tmpdir(), "script-kit-external-artifact-"));
+    const external = temporaryDirectory("script-kit-external-artifact-");
     symlinkSync(external, join(workspace.root, "target-agent", "artifacts", "escaped"));
     const result = run("agent-cargo.sh", ["build", "--bin", "export_design_tokens"], {
       ...workspace.env,
@@ -947,7 +961,7 @@ describe("development, correctness-test, and CI profile separation", () => {
   });
 
   test("docs-only commits do not rebuild local app harnesses while release provenance stays exact", () => {
-    const output = join(mkdtempSync(join(tmpdir(), "script-kit-build-policy-")), "build-policy-tests");
+    const output = join(temporaryDirectory("script-kit-build-policy-"), "build-policy-tests");
     const compiled = Bun.spawnSync(
       ["rustc", "--edition=2021", "--test", join(scripts, "..", "..", "build.rs"), "-o", output],
       { stdout: "pipe", stderr: "pipe" },
