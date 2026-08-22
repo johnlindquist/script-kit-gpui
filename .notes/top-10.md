@@ -977,6 +977,13 @@ offline receipts until their real producers are run again.
     effective worker limits. Seven disposable fake-executable cases proved
     all direct, inline, foreign-target, job-config, target-config, and
     foreign-config forms reached Cargo successfully.
+15. The canonical `agent-cargo.sh` itself still defaulted to interactive
+    execution when called directly, inherited 100,000-character search and
+    12,000-write storage stress flags unchanged, accepted all six dangerous
+    desktop/provider/application permissions, and treated malformed
+    noninteractive values as valid. Existing release and scoped-agent guards
+    hid the issue at their own entry points but did not protect the wrapper
+    that project instructions explicitly require every agent to call.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1094,7 +1101,12 @@ offline receipts until their real producers are run again.
    negative tests prove the compiler is never invoked when the floor cannot
    be met.
 8. **Bound both compiler CPU and actual Rust-test CPU.** Agent Cargo defaults
-   to two compiler workers **and two Rust harness threads**. It validates
+   to fail-closed noninteractive execution, two compiler workers, **and two
+   Rust harness threads**. Direct calls reject inherited screen takeover,
+   native input, capture, visible probes, live AI, and application launch
+   before touching a build pool; malformed noninteractive values also fail
+   closed. An intentional interactive run must explicitly set
+   `SCRIPT_KIT_NONINTERACTIVE=0`. The wrapper validates
    inherited `CARGO_BUILD_JOBS` / `RUST_TEST_THREADS`, both `--jobs` / `-j`
    forms, and direct `--test-threads` arguments against one explicit ceiling
    before it creates a build pool or starts Cargo. Zero, negative,
@@ -1110,7 +1122,7 @@ offline receipts until their real producers are run again.
    state, pool, exit status, elapsed seconds, and before/after free space.
    Direct, inline, and file-based `--config` overrides fail before pool
    creation because they can replace effective job counts and target
-   ownership. The fake-Cargo behavior suite passes **47 cases and 220
+   ownership. The fake-Cargo behavior suite passes **52 cases and 253
    assertions** without building Rust or opening the application.
    `SCRIPT_KIT_AGENT_TIMINGS=1` emits Cargo's real critical-path HTML plus a
    fail-closed machine-readable summary of actual hot units, duplicate
@@ -1193,7 +1205,7 @@ offline receipts until their real producers are run again.
     across 37 files in 16.39s**, without the previous repository scan or load
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
-    separately passes all **47 fake-Cargo cases / 220 assertions** plus
+    separately passes all **52 fake-Cargo cases / 253 assertions** plus
     **five direct release-owner/proof-gate cases / 16 assertions**. The full
     suite and real compiler were deliberately not rerun while workstation
     free space remained below the enforced **25-GiB** build floor. None of
