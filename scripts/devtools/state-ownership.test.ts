@@ -14,7 +14,7 @@ function passingSources(): StateOwnershipSource[] {
     "crates/sk-protocol/src/command_contract.rs":
       "pub enum CommandSource {} pub struct CommandIdentity; pub struct CommandDescriptor; pub enum CommandAvailability {}",
     "crates/sk-protocol/src/search_contract.rs":
-      "pub struct ProviderRequest; pub struct ProviderGenerationFence;",
+      "pub struct ProviderRequest; pub struct ProviderGenerationFence; pub struct RootOwnedProviderRefresh; pub struct RootOwnedProviderRefreshLifecycle; pub struct RootProviderCoordinator;",
     "crates/sk-protocol/src/lib.rs":
       "pub mod command_contract; pub mod search_contract;",
     "src/scripts/types.rs":
@@ -22,7 +22,7 @@ function passingSources(): StateOwnershipSource[] {
     "src/scripts/command_contract.rs":
       "use sk_protocol::command_contract::{CommandIdentity, CommandDescriptor, CommandSource}; pub struct LauncherCommandReceipt; impl SearchResult { pub fn command_descriptor(&self) {} }",
     "src/scripts/root_search_contract.rs":
-      "use sk_protocol::search_contract::{ProviderRequest, ProviderGenerationFence}; pub(crate) struct RootProviderCoordinator;",
+      "pub(crate) use sk_protocol::search_contract::{RootProviderCoordinator, RootOwnedProviderRefresh, RootOwnedProviderRefreshLifecycle};",
     "src/scripts/mod.rs":
       "mod command_contract; pub(crate) mod root_search_contract; mod types; pub use self::types::{SearchResult, MatchEvidence};",
     "src/main_sections/root_search_store.rs":

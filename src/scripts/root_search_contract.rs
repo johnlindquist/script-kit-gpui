@@ -1,54 +1,18 @@
-//! Pure, library-testable ownership of root-launcher provider generations.
+//! App-owned root-launcher adapters over GPUI-free provider-generation policy.
 //!
 //! `RootSearchStore` lives in the application binary because its cached rows
 //! depend on binary-only presentation types. Its correctness-critical async
-//! request coordinator lives here so the exact production policy is compiled
-//! and exercised by `cargo test --lib` as well as by the launcher.
+//! request coordinator and worker lifecycle live in `sk-protocol`, so they
+//! can be exercised without compiling or linking the application.
 
 use sk_protocol::command_contract::CommandSource;
-use sk_protocol::search_contract::{ProviderGenerationFence, ProviderRequest};
-
-/// Exact ownership of one bounded background provider worker. Source is part
-/// of the ticket, so a stale Dictation/Clipboard/Conversation completion can
-/// never release or publish another provider's active work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RootOwnedProviderRefresh {
-    pub(crate) source: CommandSource,
-    pub(crate) generation: u64,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct RootOwnedProviderRefreshLifecycle {
-    pub(crate) next_generation: u64,
-    pub(crate) in_flight: Option<RootOwnedProviderRefresh>,
-}
-
-impl RootOwnedProviderRefreshLifecycle {
-    pub(crate) fn begin(
-        &mut self,
-        source: CommandSource,
-        cache_is_fresh: bool,
-    ) -> Option<RootOwnedProviderRefresh> {
-        if cache_is_fresh || self.in_flight.is_some() {
-            return None;
-        }
-        self.next_generation = self.next_generation.wrapping_add(1).max(1);
-        let refresh = RootOwnedProviderRefresh {
-            source,
-            generation: self.next_generation,
-        };
-        self.in_flight = Some(refresh);
-        Some(refresh)
-    }
-
-    pub(crate) fn finish(&mut self, refresh: RootOwnedProviderRefresh) -> bool {
-        if self.in_flight != Some(refresh) {
-            return false;
-        }
-        self.in_flight = None;
-        true
-    }
-}
+pub(crate) use sk_protocol::search_contract::{
+    RootOwnedProviderRefresh, RootOwnedProviderRefreshLifecycle,
+};
+// RootSearchStore exists only in the application binary; retain its shared
+// compatibility path without warning in the separately compiled library.
+#[allow(unused_imports)]
+pub(crate) use sk_protocol::search_contract::RootProviderCoordinator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RootLocalContentProvider {
@@ -287,33 +251,6 @@ pub(crate) fn brain_inbox_snapshot_matches(
         })
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct RootProviderCoordinator {
-    generations: ProviderGenerationFence,
-}
-
-impl RootProviderCoordinator {
-    /// Reuse an already-active exact request so repeated renders do not spawn
-    /// duplicate work or invalidate the response that is currently in flight.
-    pub(crate) fn begin(&mut self, source: CommandSource, query: &str) -> ProviderRequest {
-        if let Some(current) = self.generations.current(source) {
-            if current.query == query {
-                return current.clone();
-            }
-        }
-        self.generations.begin(source, query)
-    }
-
-    /// Provider completion, generation lineage, and live input must all agree.
-    pub(crate) fn accepts(&self, request: &ProviderRequest, current_query: &str) -> bool {
-        request.query == current_query && self.generations.accepts(request)
-    }
-
-    pub(crate) fn invalidate(&mut self, source: CommandSource) {
-        self.generations.invalidate(source);
-    }
-}
-
 #[cfg(test)]
 mod root_search_store_tests {
     use super::*;
@@ -329,42 +266,6 @@ mod root_search_store_tests {
             created_at: 100,
             resolved_at: None,
         }
-    }
-
-    #[test]
-    fn owned_provider_worker_rejects_duplicate_fresh_or_cross_source_completion() {
-        let mut lifecycle = RootOwnedProviderRefreshLifecycle::default();
-        assert!(lifecycle.begin(CommandSource::Clipboard, true).is_none());
-
-        let clipboard = lifecycle
-            .begin(CommandSource::Clipboard, false)
-            .expect("cold clipboard owns one worker");
-        assert!(lifecycle.begin(CommandSource::Clipboard, false).is_none());
-        assert!(!lifecycle.finish(RootOwnedProviderRefresh {
-            source: CommandSource::Dictation,
-            generation: clipboard.generation,
-        }));
-        assert!(lifecycle
-            .begin(CommandSource::Conversation, false)
-            .is_none());
-        assert!(lifecycle.finish(clipboard));
-    }
-
-    #[test]
-    fn owned_provider_worker_stale_completion_cannot_release_replacement() {
-        let mut lifecycle = RootOwnedProviderRefreshLifecycle::default();
-        let stale = lifecycle
-            .begin(CommandSource::Dictation, false)
-            .expect("first dictation worker");
-        assert!(lifecycle.finish(stale));
-        let current = lifecycle
-            .begin(CommandSource::Dictation, false)
-            .expect("replacement dictation worker");
-
-        assert!(current.generation > stale.generation);
-        assert!(!lifecycle.finish(stale));
-        assert_eq!(lifecycle.in_flight, Some(current));
-        assert!(lifecycle.finish(current));
     }
 
     #[test]
@@ -445,66 +346,5 @@ mod root_search_store_tests {
             std::slice::from_ref(&first)
         ));
         assert!(!brain_inbox_snapshot_matches(&current, &[second, first]));
-    }
-
-    #[test]
-    fn repeated_exact_query_reuses_the_existing_generation() {
-        let mut coordinator = RootProviderCoordinator::default();
-        let first = coordinator.begin(CommandSource::BrowserHistory, "script");
-        let second = coordinator.begin(CommandSource::BrowserHistory, "script");
-
-        assert_eq!(first, second);
-        assert!(coordinator.accepts(&first, "script"));
-    }
-
-    #[test]
-    fn stale_provider_batches_cannot_replace_a_newer_query() {
-        let mut coordinator = RootProviderCoordinator::default();
-        let stale = coordinator.begin(CommandSource::BrowserTab, "s");
-        let current = coordinator.begin(CommandSource::BrowserTab, "script");
-
-        assert!(current.generation > stale.generation);
-        assert!(!coordinator.accepts(&stale, "script"));
-        assert!(!coordinator.accepts(&current, "s"));
-        assert!(coordinator.accepts(&current, "script"));
-    }
-
-    #[test]
-    fn clearing_a_query_invalidates_its_inflight_provider_response() {
-        let mut coordinator = RootProviderCoordinator::default();
-        let pending = coordinator.begin(CommandSource::BrowserHistory, "docs");
-        coordinator.invalidate(CommandSource::BrowserHistory);
-
-        assert!(!coordinator.accepts(&pending, "docs"));
-    }
-
-    #[test]
-    fn one_passive_provider_cannot_cancel_another_providers_results() {
-        let mut coordinator = RootProviderCoordinator::default();
-        let tabs = coordinator.begin(CommandSource::BrowserTab, "docs");
-        let history = coordinator.begin(CommandSource::BrowserHistory, "docs");
-
-        coordinator.invalidate(CommandSource::BrowserTab);
-
-        assert!(!coordinator.accepts(&tabs, "docs"));
-        assert!(coordinator.accepts(&history, "docs"));
-    }
-
-    #[test]
-    fn same_text_from_the_wrong_provider_or_generation_is_refused() {
-        let mut coordinator = RootProviderCoordinator::default();
-        let expected = coordinator.begin(CommandSource::Clipboard, "hello");
-        let wrong_source = ProviderRequest {
-            source: CommandSource::Dictation,
-            ..expected.clone()
-        };
-        let wrong_generation = ProviderRequest {
-            generation: expected.generation.wrapping_add(1),
-            ..expected.clone()
-        };
-
-        assert!(!coordinator.accepts(&wrong_source, "hello"));
-        assert!(!coordinator.accepts(&wrong_generation, "hello"));
-        assert!(coordinator.accepts(&expected, "hello"));
     }
 }

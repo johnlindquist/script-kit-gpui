@@ -11,6 +11,10 @@ Migrated from the retired imps/ fleet (codex-imps runtime) on 2026-07-04.
 
 ## App-independent domain ownership
 
+- `crates/sk-protocol/src/search_contract.rs` owns exact provider generations,
+  bounded worker lifecycle tickets, and the pure root provider coordinator.
+  `src/scripts/root_search_contract.rs` retains app-service adapters and
+  compatibility re-exports; focused search correctness stays GPUI-free.
 - `crates/sk-storage/src/lib.rs` owns atomic/private file persistence and its
   focused regression tests. `src/atomic_file.rs` temporarily re-exports that
   domain for existing app callers; storage tests must not depend on the app,

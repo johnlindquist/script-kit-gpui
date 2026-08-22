@@ -16,7 +16,12 @@ export const CANONICAL_STATE_OWNERS = [
   {
     id: "domain-search-contract",
     path: "crates/sk-protocol/src/search_contract.rs",
-    symbols: ["ProviderRequest", "ProviderGenerationFence"],
+    symbols: [
+      "ProviderRequest",
+      "ProviderGenerationFence",
+      "RootOwnedProviderRefresh",
+      "RootOwnedProviderRefreshLifecycle",
+    ],
   },
   {
     id: "launcher-result-model",
@@ -30,7 +35,7 @@ export const CANONICAL_STATE_OWNERS = [
   },
   {
     id: "root-provider-coordinator",
-    path: "src/scripts/root_search_contract.rs",
+    path: "crates/sk-protocol/src/search_contract.rs",
     symbols: ["RootProviderCoordinator"],
   },
   {
@@ -62,6 +67,7 @@ export const CANONICAL_STATE_OWNERS = [
 
 export const REQUIRED_STATE_REGISTRIES = [
   "crates/sk-protocol/src/lib.rs",
+  "src/scripts/root_search_contract.rs",
   "src/scripts/mod.rs",
   "src/config/mod.rs",
   "src/components/mod.rs",
@@ -282,10 +288,14 @@ export function auditStateOwnership(
     }
   }
 
-  const coordinator = code("src/scripts/root_search_contract.rs");
-  for (const symbol of ["ProviderRequest", "ProviderGenerationFence"]) {
-    if (!hasGroupedSymbol(coordinator, "sk_protocol::search_contract", symbol)) {
-      failures.push(`coordinator-missing-domain-import:${symbol}`);
+  const coordinatorAdapter = code("src/scripts/root_search_contract.rs");
+  for (const symbol of [
+    "RootProviderCoordinator",
+    "RootOwnedProviderRefresh",
+    "RootOwnedProviderRefreshLifecycle",
+  ]) {
+    if (!hasGroupedSymbol(coordinatorAdapter, "sk_protocol::search_contract", symbol)) {
+      failures.push(`coordinator-adapter-missing-domain-owner:${symbol}`);
     }
   }
   const hostStore = code("src/main_sections/root_search_store.rs");

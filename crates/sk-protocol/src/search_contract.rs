@@ -58,6 +58,74 @@ impl ProviderGenerationFence {
     }
 }
 
+/// Exact ownership of one bounded background provider worker. Source is part
+/// of the ticket, so a stale completion cannot release another provider's work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootOwnedProviderRefresh {
+    pub source: CommandSource,
+    pub generation: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct RootOwnedProviderRefreshLifecycle {
+    pub next_generation: u64,
+    pub in_flight: Option<RootOwnedProviderRefresh>,
+}
+
+impl RootOwnedProviderRefreshLifecycle {
+    pub fn begin(
+        &mut self,
+        source: CommandSource,
+        cache_is_fresh: bool,
+    ) -> Option<RootOwnedProviderRefresh> {
+        if cache_is_fresh || self.in_flight.is_some() {
+            return None;
+        }
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        let refresh = RootOwnedProviderRefresh {
+            source,
+            generation: self.next_generation,
+        };
+        self.in_flight = Some(refresh);
+        Some(refresh)
+    }
+
+    pub fn finish(&mut self, refresh: RootOwnedProviderRefresh) -> bool {
+        if self.in_flight != Some(refresh) {
+            return false;
+        }
+        self.in_flight = None;
+        true
+    }
+}
+
+/// One source-owned query coordinator shared by app launcher/provider adapters.
+#[derive(Debug, Default)]
+pub struct RootProviderCoordinator {
+    generations: ProviderGenerationFence,
+}
+
+impl RootProviderCoordinator {
+    /// Reuse an exact active request so repeated renders cannot duplicate work.
+    pub fn begin(&mut self, source: CommandSource, query: &str) -> ProviderRequest {
+        if let Some(current) = self.generations.current(source) {
+            if current.query == query {
+                return current.clone();
+            }
+        }
+        self.generations.begin(source, query)
+    }
+
+    /// Provider completion, generation lineage, and live input must all agree.
+    pub fn accepts(&self, request: &ProviderRequest, current_query: &str) -> bool {
+        request.query == current_query && self.generations.accepts(request)
+    }
+
+    pub fn invalidate(&mut self, source: CommandSource) {
+        self.generations.invalidate(source);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RankingField {
@@ -189,6 +257,105 @@ mod tests {
         fence.invalidate(CommandSource::File);
         assert!(!fence.accepts(&files));
         assert!(fence.accepts(&notes));
+    }
+
+    #[test]
+    fn owned_provider_worker_rejects_duplicate_fresh_or_cross_source_completion() {
+        let mut lifecycle = RootOwnedProviderRefreshLifecycle::default();
+        assert!(lifecycle.begin(CommandSource::Clipboard, true).is_none());
+
+        let clipboard = lifecycle
+            .begin(CommandSource::Clipboard, false)
+            .expect("cold clipboard owns one worker");
+        assert!(lifecycle.begin(CommandSource::Clipboard, false).is_none());
+        assert!(!lifecycle.finish(RootOwnedProviderRefresh {
+            source: CommandSource::Dictation,
+            generation: clipboard.generation,
+        }));
+        assert!(
+            lifecycle
+                .begin(CommandSource::Conversation, false)
+                .is_none()
+        );
+        assert!(lifecycle.finish(clipboard));
+    }
+
+    #[test]
+    fn owned_provider_worker_stale_completion_cannot_release_replacement() {
+        let mut lifecycle = RootOwnedProviderRefreshLifecycle::default();
+        let stale = lifecycle
+            .begin(CommandSource::Dictation, false)
+            .expect("first dictation worker");
+        assert!(lifecycle.finish(stale));
+        let current = lifecycle
+            .begin(CommandSource::Dictation, false)
+            .expect("replacement dictation worker");
+
+        assert!(current.generation > stale.generation);
+        assert!(!lifecycle.finish(stale));
+        assert_eq!(lifecycle.in_flight, Some(current));
+        assert!(lifecycle.finish(current));
+    }
+
+    #[test]
+    fn repeated_exact_query_reuses_the_existing_generation() {
+        let mut coordinator = RootProviderCoordinator::default();
+        let first = coordinator.begin(CommandSource::BrowserHistory, "script");
+        let second = coordinator.begin(CommandSource::BrowserHistory, "script");
+
+        assert_eq!(first, second);
+        assert!(coordinator.accepts(&first, "script"));
+    }
+
+    #[test]
+    fn stale_provider_batches_cannot_replace_a_newer_query() {
+        let mut coordinator = RootProviderCoordinator::default();
+        let stale = coordinator.begin(CommandSource::BrowserTab, "s");
+        let current = coordinator.begin(CommandSource::BrowserTab, "script");
+
+        assert!(current.generation > stale.generation);
+        assert!(!coordinator.accepts(&stale, "script"));
+        assert!(!coordinator.accepts(&current, "s"));
+        assert!(coordinator.accepts(&current, "script"));
+    }
+
+    #[test]
+    fn clearing_a_query_invalidates_its_inflight_provider_response() {
+        let mut coordinator = RootProviderCoordinator::default();
+        let pending = coordinator.begin(CommandSource::BrowserHistory, "docs");
+        coordinator.invalidate(CommandSource::BrowserHistory);
+
+        assert!(!coordinator.accepts(&pending, "docs"));
+    }
+
+    #[test]
+    fn one_passive_provider_cannot_cancel_another_providers_results() {
+        let mut coordinator = RootProviderCoordinator::default();
+        let tabs = coordinator.begin(CommandSource::BrowserTab, "docs");
+        let history = coordinator.begin(CommandSource::BrowserHistory, "docs");
+
+        coordinator.invalidate(CommandSource::BrowserTab);
+
+        assert!(!coordinator.accepts(&tabs, "docs"));
+        assert!(coordinator.accepts(&history, "docs"));
+    }
+
+    #[test]
+    fn same_text_from_the_wrong_provider_or_generation_is_refused() {
+        let mut coordinator = RootProviderCoordinator::default();
+        let expected = coordinator.begin(CommandSource::Clipboard, "hello");
+        let wrong_source = ProviderRequest {
+            source: CommandSource::Dictation,
+            ..expected.clone()
+        };
+        let wrong_generation = ProviderRequest {
+            generation: expected.generation.wrapping_add(1),
+            ..expected.clone()
+        };
+
+        assert!(!coordinator.accepts(&wrong_source, "hello"));
+        assert!(!coordinator.accepts(&wrong_generation, "hello"));
+        assert!(coordinator.accepts(&expected, "hello"));
     }
 
     #[test]

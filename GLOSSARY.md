@@ -6,6 +6,13 @@ This document defines the main user-facing UI surfaces and components in Script 
 
 ## App-independent domain crates
 
+- **Search/provider ownership:**
+  [crates/sk-protocol/src/search_contract.rs](crates/sk-protocol/src/search_contract.rs)
+  owns deterministic search snapshots, exact provider generations, bounded
+  source-owned refresh lifecycles, and root-launcher request coordination.
+  [src/scripts/root_search_contract.rs](src/scripts/root_search_contract.rs)
+  remains the application adapter and compatibility path; focused provider
+  tests run in `sk-protocol` without GPUI, Metal, Whisper, or ONNX.
 - **Private atomic storage:** [crates/sk-storage/src/lib.rs](crates/sk-storage/src/lib.rs)
   owns durable atomic writes, owner-only file/directory permissions, no-follow
   targets, collision-safe exports, and private JSONL boundaries. The existing
