@@ -4,6 +4,16 @@ This document defines the main user-facing UI surfaces and components in Script 
 
 ---
 
+## App-independent domain crates
+
+- **Private atomic storage:** [crates/sk-storage/src/lib.rs](crates/sk-storage/src/lib.rs)
+  owns durable atomic writes, owner-only file/directory permissions, no-follow
+  targets, collision-safe exports, and private JSONL boundaries. The existing
+  [src/atomic_file.rs](src/atomic_file.rs) module is a compatibility facade.
+  Focused `sk-storage` tests never compile or link GPUI, Metal, Whisper, or ONNX.
+
+---
+
 ## 1. Core Windows & Presentation Modes
 
 | UI Element | Description | Key Structs / Entities | Main Source File |

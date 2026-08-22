@@ -4,6 +4,7 @@ members = [
     "crates/ghost-llm-helper",
     "crates/sk-clipboard",
     "crates/sk-protocol",
+    "crates/sk-storage",
 ]
 exclude = [
     "vendor/gpui-component/crates/macros",
@@ -93,6 +94,7 @@ test = false  # Standalone visual proof-of-concept, no test surface
 [dependencies]
 sk-clipboard = { path = "crates/sk-clipboard" }
 sk-protocol = { path = "crates/sk-protocol" }
+sk-storage = { path = "crates/sk-storage" }
 gpui = { path = "vendor/gpui", features = ["test-support"] }
 gpui_platform = { path = "vendor/gpui_platform", features = ["font-kit"] }
 gpui_macos = { path = "vendor/gpui_macos" }
@@ -313,6 +315,29 @@ opt-level = 2
 debug = 1
 incremental = true
 codegen-units = 256
+
+# The interactive dev binary keeps its calibrated -O2 UI dependencies above,
+# but correctness-only test harnesses must not optimize the entire dependency
+# graph. `test` inherits `dev`, so without these explicit overrides every
+# filtered Rust regression recompiles Whisper, ONNX, GPUI, and hundreds of
+# unrelated crates at -O2 before running even one assertion.
+[profile.test.package."*"]
+opt-level = 0
+
+[profile.test.package.gpui]
+opt-level = 0
+
+[profile.test.package.gpui-component]
+opt-level = 0
+
+[profile.test.package.gpui_util]
+opt-level = 0
+
+[profile.test.package.gpui_macos]
+opt-level = 0
+
+[profile.test.package.gpui_platform]
+opt-level = 0
 
 [profile.release]
 lto = "thin"

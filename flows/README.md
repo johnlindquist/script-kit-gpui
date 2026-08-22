@@ -9,6 +9,13 @@ Sandbox mode is pinned per flow in frontmatter.
 
 Migrated from the retired imps/ fleet (codex-imps runtime) on 2026-07-04.
 
+## App-independent domain ownership
+
+- `crates/sk-storage/src/lib.rs` owns atomic/private file persistence and its
+  focused regression tests. `src/atomic_file.rs` temporarily re-exports that
+  domain for existing app callers; storage tests must not depend on the app,
+  GPUI, Metal shaders, Whisper, or ONNX.
+
 ## Roster
 
 - **[actions.md](./actions.md)** (workspace-write): Actions menu, trigger picker, confirm popup, action builders, and keyboard affordances.

@@ -7974,6 +7974,7 @@ dependencies = [
  "shellexpand 2.1.2",
  "sk-clipboard",
  "sk-protocol",
+ "sk-storage",
  "smallvec",
  "smappservice-rs",
  "smol",
@@ -8370,6 +8371,15 @@ name = "sk-protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "sk-storage"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
