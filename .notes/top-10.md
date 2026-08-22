@@ -969,6 +969,14 @@ offline receipts until their real producers are run again.
     proved all dangerous settings reached a child and only three unrestricted
     commands ran; a separate release mutation proved deleting this actual
     safety owner did not prevent publication.
+14. Even after the target-pool lock and worker ceiling were installed, the
+    agent Cargo wrapper forwarded explicit `--target-dir target` and
+    `--config build.jobs=48` arguments untouched. Direct target selection
+    can redirect a supposedly protected build into the active dev target;
+    inline or file-based Cargo config can replace target ownership and
+    effective worker limits. Seven disposable fake-executable cases proved
+    all direct, inline, foreign-target, job-config, target-config, and
+    foreign-config forms reached Cargo successfully.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1077,7 +1085,9 @@ offline receipts until their real producers are run again.
    `.locks`, shared compiler/shader caches, exports, or artifacts. Both
    ordinary and emergency pruning now remove only individually unlocked
    stale pools. No automatic cleaner kills Cargo, rustc, a dev watcher, or a
-   user-owned process.
+   user-owned process. Direct and inline `--target-dir` arguments fail before
+   creating a pool or taking its lock; a protected build cannot silently
+   escape into `target/` or an unrelated cache.
 7. **Fail before predictable disk contention.** Preserve the 25-GiB floor,
    inspect free space after safe eviction, and refuse to start below that
    reserve unless an explicit low-disk override was provided. Executable
@@ -1098,8 +1108,10 @@ offline receipts until their real producers are run again.
    before launching even an explicitly overridden Cargo executable. Every
    real receipt records both compiler and harness worker counts, cache
    state, pool, exit status, elapsed seconds, and before/after free space.
-   The fake-Cargo behavior suite passes **40 cases and 199 assertions**
-   without building Rust or opening the application.
+   Direct, inline, and file-based `--config` overrides fail before pool
+   creation because they can replace effective job counts and target
+   ownership. The fake-Cargo behavior suite passes **47 cases and 220
+   assertions** without building Rust or opening the application.
    `SCRIPT_KIT_AGENT_TIMINGS=1` emits Cargo's real critical-path HTML plus a
    fail-closed machine-readable summary of actual hot units, duplicate
    compilations, bounded concurrency, and specific next actions.
@@ -1181,7 +1193,7 @@ offline receipts until their real producers are run again.
     across 37 files in 16.39s**, without the previous repository scan or load
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
-    separately passes all **40 fake-Cargo cases / 199 assertions** plus
+    separately passes all **47 fake-Cargo cases / 220 assertions** plus
     **five direct release-owner/proof-gate cases / 16 assertions**. The full
     suite and real compiler were deliberately not rerun while workstation
     free space remained below the enforced **25-GiB** build floor. None of
