@@ -435,7 +435,7 @@ Evidence in this checkpoint is intentionally time- and source-qualified:
   tightening. That tightening also prevents `session.sh` or an attached
   transport from mutating/hiding an existing operator window; **10 current
   purely in-memory tests and 106 assertions** pass without starting even a
-  subprocess, and the current combined proof lane passes all **692 tests**.
+  subprocess, and the current combined proof lane passes all **701 tests**.
   Generated scripts now use exclusive final-byte creation, collision-safe
   actual identities, secret-redacted atomic receipts, and one shared
   precreation shell/slug policy; the shared AI diagnostic vault now suppresses
@@ -888,7 +888,7 @@ Current program status:
 | 06. Execution lifecycle | Partial | Exact owned process groups remain tracked until verified dead, invalid/unowned PID zero cannot be signaled, Codex server replacement cannot orphan a predecessor, and real Quick AI startup reserves its exact generation before side effects and unwinds owned child/group/scratch failures transactionally; same-name command dispatch resolves the exact normalized source; Flow FIFO initialization cannot adopt a colliding project's revision/transcript, follow primary/legacy symlinks, or persist world-readable private turns; transaction traces redact private content, same-process replay is bounded/lossless, and continued batches retain their first failure. Secure cross-process replay and complete command-family receipts remain unproven. |
 | 07. AI consistency | Partial | Actual detached Agent Chat discovers scripts/scriptlets/skills through refreshed launcher snapshots, preserves multiple same-name selected-owner attachments, confirms individual/complete history deletion across all four stores, and protects conversation/prompt/full-transcript attachment files with validated IDs, owner-only `0700`/`0600` no-follow migration, spoof rejection, and atomic writes. Flow, Dictation, AI preflight receipts, current-app automation prompts/recipes, Tab AI intent/generated-source memory/execution receipts, actual screenshot PNGs, exported/handoff prompts, executable handoff wrappers, handoff/export receipts, Claude MCP bearer/API-key config and ownership state, custom agent credential catalogs, private project MRUs, authentication state, model favorites, private user-authored AI system-prompt presets/imports/exports, and real shared/Quick AI traces now share owner-only, no-follow private directory/file ownership and safe legacy repair. Auth-state, favorite, and preset workers serialize actual read/merge/atomic replacement so simultaneous agents cannot erase one another; malformed private state refuses destructive replacement and failed favorite saves surface an honest retry. Provider-declared error facts, empty/missing final responses, exact owned-child cancellation, nonduplicating fallback, and final-only response delivery are behavior-proven without live providers. Private answer/thought/query/diagnostic/prepared-context/prompt/export-path/gist/preset fingerprints use the cryptographically keyed process owner, trace appends remain concurrent-safe without injecting fsync latency, and AI diagnostics never expose private paths/window titles/project names/errors. Actual in-memory Pi and Flow transport paths emit complete private phase milestones and distinguish cancellation from completion. Flow retains exact ID/path SHA-256 identity and one-time legacy adoption. Notes/Todos/Clipboard/Dictation/conversation cold search has generation-fenced launcher-owned refresh. Notes conflict recovery remains private/collision-safe; all success/fallback/failure AI/Notes diagnostics use keyed fingerprints. Existing coverage also proves clean-chat entry, typed recovery, pending-permission safety, accepted-prompt preservation, credential-free Claude argv, and anonymous system prompts. Actual provider-backed transport and live target-scoped recovery remain unproven. |
 | 08. SDK compatibility | Partial | The full isolated suite passes 215/0/0; separate filtered runs prove eight fields date/time/search cases, two hotkey cases, and five editor/mini/micro cases; nine real Rust capability owners mark implemented prompts supported, mark all 18 genuinely unavailable capabilities unsupported, and enforce explicit native permission/platform boundaries. Generated scripts validate capabilities/topology and shared shell/slug policy, escape hostile JSON template values nonrecursively, and write complete final starter bytes through the original exclusive file handle; real seeded/template scripts declare parseable supported capabilities; Rust behavior plus the four repaired creation-contract cases prove collision/symlink-safe files and receipts. Native prompt/window/permission proof remains absent. |
-| 09. Behavioral proof | Partial | All 15 static/unit/fixture task receipts, the two-façade lifecycle inventory, and protected-source hashes are current; hidden target identity rejects fabricated fallback generations; the full proof lane passes 692 tests; the canonical 75-task catalog and every CLI subcommand resolve the now-committed portable catalog; and the auditor reports 15/75 with no stale/invalid/failed tasks after genuinely rerunning both invalidated governance producers and the façade ledger. The catalog and real library-tested owners are now tracked, but all 60 direct-runtime obligations remain honestly unproven. |
+| 09. Behavioral proof | Partial | All 15 static/unit/fixture task receipts, the two-façade lifecycle inventory, and protected-source hashes are current; hidden target identity rejects fabricated fallback generations; the full proof lane passes 701 tests; the canonical 75-task catalog and every CLI subcommand resolve the now-committed portable catalog; and the auditor reports 15/75 with no stale/invalid/failed tasks after genuinely rerunning both invalidated governance producers and the façade ledger. The catalog and real library-tested owners are now tracked, but all 60 direct-runtime obligations remain honestly unproven. |
 | 10. Packaged release | Blocked honestly | Current strict Clippy, formatting, 497 real safe Rust behavior cases, 111 app-free integration cases, complete SDK/proof suites, exact generated JSON/CSS byte parity, canonical 54-target validators, packaged-asset byte parity, private AI/screenshot/trace/handoff/credential/auth-state/model-favorite/system-prompt/SQLite storage, truthful provider cancellation/failure/final-output ownership, and symlink rejection pass; version-3 release manifests independently attest every signed archive file/link/mode, the CodeResources envelope, and executable/Pi/SDK/Info.plist, including a real `ditto` framework-symlink archive and app-less Ubuntu verification. Actual packaged journeys, the full direct matrix, signing/notarization, and ratified paint still prevent publication even after the source/catalog are committed. |
 
 Next permitted work: close genuinely provable offline ownership gaps, retain
@@ -1050,9 +1050,17 @@ offline receipts until their real producers are run again.
     while preserving canonical source paths and fingerprints. A live
     child-output regression proves subprocess evidence is observable, and
     both extra native-input/screen-capture opt-ins are forcibly disabled.
+    The shared DevTools safety boundary now rejects inherited native-input
+    and screen-capture permission for protocol requests, driver launches,
+    and existing-session transports. Direct `session.sh` invocation crosses
+    that same policy before creating a session directory, resolving an app
+    binary, mutating a FIFO, or disturbing an existing operator session;
+    reviewed read-only status remains available. Its isolated standalone
+    suite passes **32 cases and 230 assertions**, including red/green
+    proofs for every previously unguarded direct shell entry point.
     The source-current full nonintrusive release lane then executed
-    **692 passing tests, zero failures, and 2,711 assertions across 37 files
-    in 10.85s**, without the previous repository scan or load spike. The
+    **701 passing tests, zero failures, and 2,741 assertions across 37 files
+    in 9.61s**, without the previous repository scan or load spike. The
     focused build/proof-contract lane separately passed **62 tests and 320
     assertions in 0.77s**. None touches the operator's computer.
 
@@ -1340,8 +1348,10 @@ the explicit program gates below.
     until the actual parser confirms it exists.
 15. Standard planning, implementation, CI, and local verification must not
     take over the operator's computer. Set `SCRIPT_KIT_NONINTERACTIVE=1`, keep
-    screen-takeover/visible-probe/live-AI opt-ins disabled, and fail closed on
-    nested unsafe protocol commands. Separate owner-approved sessions are
+    screen-takeover/visible-probe/native-input/screen-capture/live-AI opt-ins
+    disabled, and fail closed on nested unsafe protocol commands plus direct
+    session-shell lifecycle bypasses before any filesystem side effect.
+    Separate owner-approved sessions are
     required for any visible, native-input, camera, microphone, or paid-AI
     proof.
 16. Distinguish committed source, uncommitted source, compiled source,
@@ -1616,7 +1626,7 @@ action contract, search projection, execution plan, and failure semantics.
 ```bash
 ./scripts/agentic/agent-cargo.sh test -p sk-protocol
 ./scripts/agentic/agent-cargo.sh check --lib --bin script-kit-gpui
-bun test scripts/devtools/consistency.test.ts
+bun test ./scripts/devtools/consistency.test.ts
 bun scripts/devtools/surfaces.ts | jq '.totals'
 ```
 
@@ -1706,7 +1716,7 @@ popup dismissal, and return routes feel predictable on every supported host.
 ```bash
 ./scripts/agentic/agent-cargo.sh test --lib window_orchestrator::tests
 ./scripts/agentic/agent-cargo.sh test --lib dismissal_resolver_closes_one_overlay_before_considering_active_work
-bun test scripts/devtools/operator-safety.test.ts
+bun test ./scripts/devtools/operator-safety.test.ts
 bun scripts/agentic/filterable-surface-matrix.ts --list
 bun scripts/agentic/attached-popup-surface-matrix.ts --list
 ```
@@ -1785,7 +1795,7 @@ chrome always read as one native Script Kit product.
 
 ```bash
 python3 -B -m unittest tests/hardcoded_visual_inventory_test.py
-bun test scripts/devtools/consistency.test.ts
+bun test ./scripts/devtools/consistency.test.ts
 bun scripts/devtools/surfaces.ts | jq '.totals'
 ./scripts/agentic/agent-cargo.sh test --lib components
 ```
@@ -1891,7 +1901,7 @@ misleading highlights.
 ./scripts/agentic/agent-cargo.sh test -p sk-protocol
 ./scripts/agentic/agent-cargo.sh test --lib scripts::search
 ./scripts/agentic/agent-cargo.sh test --lib scripts::root_search_contract::root_search_store_tests
-bun test scripts/agentic/root-search-frame-stability.test.ts
+bun test ./scripts/agentic/root-search-frame-stability.test.ts
 bun scripts/agentic/root-search-frame-stability.ts --help
 bun scripts/agentic/root-typing-lag-benchmark.ts --help
 ```
@@ -1993,10 +2003,10 @@ bun scripts/agentic/root-typing-lag-benchmark.ts --help
 bun scripts/agentic/quick-ai-latency-bench.ts --help
 bun scripts/agentic/quick-ai-latency-bench.ts --describe-contract
 bun scripts/agentic/quick-ai-latency-bench.ts --print-command
-bun test scripts/agentic/root-typing-lag-benchmark.test.ts
-bun test scripts/agentic/root-search-frame-stability.test.ts
-bun test scripts/agentic/quick-ai-latency-bench.test.ts
-bun test scripts/agentic/ai-phase-trace-report.test.ts
+bun test ./scripts/agentic/root-typing-lag-benchmark.test.ts
+bun test ./scripts/agentic/root-search-frame-stability.test.ts
+bun test ./scripts/agentic/quick-ai-latency-bench.test.ts
+bun test ./scripts/agentic/ai-phase-trace-report.test.ts
 ```
 
 - `quick-ai-latency-bench.ts --help`, `--describe-contract`, and
@@ -2373,7 +2383,7 @@ modes of the same reliable assistant.
 ```bash
 ./scripts/agentic/agent-cargo.sh test -p sk-protocol
 ./scripts/agentic/agent-cargo.sh test --lib ai::reliability
-bun test scripts/agentic/ai-phase-trace-report.test.ts
+bun test ./scripts/agentic/ai-phase-trace-report.test.ts
 bun scripts/devtools/coverage.ts --surface agent-chat
 ```
 
@@ -2485,7 +2495,7 @@ SCRIPT_KIT_NONINTERACTIVE=1 bun run scripts/test-runner.ts --filter editor
 SCRIPT_KIT_NONINTERACTIVE=1 bun run scripts/test-runner.ts --filter fields-datetime
 SCRIPT_KIT_NONINTERACTIVE=1 bun run scripts/test-runner.ts --filter window-management
 SCRIPT_KIT_NONINTERACTIVE=1 bun run scripts/test-runner.ts --parallel --json
-bun test tests/sdk/runner-safety.test.ts
+bun test ./tests/sdk/runner-safety.test.ts
 ./scripts/agentic/agent-cargo.sh test --lib scripts::validation
 ./scripts/agentic/agent-cargo.sh test --lib mcp_resources
 ./scripts/agentic/agent-cargo.sh test --lib mcp_resources::tests::sdk_reference_marks_
@@ -2618,7 +2628,7 @@ bun scripts/devtools/surfaces.ts | jq '.totals'
 bun scripts/devtools/coverage.ts | jq '[.surfaces[] | {id, status, missing: (.missingRuntimePrimitives | length)}]'
 bun scripts/devtools/consistency.ts catalog --fixes scripts/devtools/consistency-catalog.md
 git ls-files scripts/devtools/consistency-catalog.md
-bun test scripts/devtools/surface.test.ts scripts/devtools/elements.test.ts scripts/devtools/layout.test.ts scripts/devtools/receipt-schema.test.ts scripts/devtools/coverage.test.ts scripts/devtools/runtime-coverage.test.ts
+bun test ./scripts/devtools/surface.test.ts ./scripts/devtools/elements.test.ts ./scripts/devtools/layout.test.ts ./scripts/devtools/receipt-schema.test.ts ./scripts/devtools/coverage.test.ts ./scripts/devtools/runtime-coverage.test.ts
 python3 -B -m unittest tests/source_audit_inventory_test.py
 ```
 

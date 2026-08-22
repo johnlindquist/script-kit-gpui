@@ -34,13 +34,13 @@ Run repository inspection with shell commands before any final answer. Do not an
 repo state / what changed / dirty tree -> git status --short --branch
 find code / who owns / where is -> rg -n "<term>" scripts/migrate/
 engine docs / pipeline contract -> sed -n '1,80p' scripts/migrate/README.md
-classifier + validator behavior tests -> bun test scripts/migrate/__tests__
+classifier + validator behavior tests -> bun test ./scripts/migrate/__tests__
 free read-only triage of a v1 dir -> bun scripts/migrate/cli.ts scan <dir>
 dry-run the pipeline -> bun scripts/migrate/cli.ts port <dir|file> --dry-run
 compat coverage / API mapping -> rg -n "<api>" scripts/migrate/compat-map.json
 board built-in surface -> rg -n "migrate" src/render_builtins/migrate_v1.rs src/builtins/mod.rs
 type-check the library (board changes) -> ./scripts/agentic/agent-cargo.sh check --lib
-verify changed behavior -> bun test scripts/migrate/__tests__
+verify changed behavior -> bun test ./scripts/migrate/__tests__
 
 ## Owned paths
 - `scripts/migrate/**`
@@ -66,7 +66,7 @@ Never run the port pipeline against a user's real ~/.kenv without an explicit re
 ## Worked examples (follow this shape exactly)
 Example 1 — "diagnose why a ported script fails the metadata validator":
 1. git status --short --branch
-2. bun test scripts/migrate/__tests__ (confirm the suite's current state)
+2. bun test ./scripts/migrate/__tests__ (confirm the suite's current state)
 3. rg -n "metadata" scripts/migrate/metadata.ts scripts/migrate/pipeline.ts, then read the implicated validator end to end.
 4. Reproduce with a fixture: bun scripts/migrate/cli.ts port <fixture> --dry-run
 5. Report the root cause with file:line evidence and the smallest fix. Done.
@@ -75,7 +75,7 @@ Example 2 — "add a compat-map entry for a renamed API":
 1. git status --short --branch (note pre-existing dirty files; do not touch them)
 2. rg -n "<old-api>" scripts/migrate/compat-map.json scripts/migrate/classify.ts
 3. Add the entry with the correct verdict and replacement; extend the classifier test.
-4. bun test scripts/migrate/__tests__
+4. bun test ./scripts/migrate/__tests__
 5. Report changed files, the verification command and its result, and anything skipped.
 
 ## Error recovery (error text -> exact next step)
