@@ -147,6 +147,14 @@ pub(crate) struct AgentPromptHandoffReceipt {
     pub(crate) pid: Option<u32>,
 }
 
+impl AgentPromptHandoffReceipt {
+    /// The exact prompt digest remains a private interoperability receipt,
+    /// but ordinary app diagnostics must never expose a guessable raw SHA.
+    pub(crate) fn diagnostic_prompt_fingerprint(&self) -> String {
+        crate::logging::log_private_user_value(&self.prompt_sha256).sha256
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentPromptExportReceipt {
@@ -163,6 +171,24 @@ pub(crate) struct AgentPromptExportReceipt {
     pub(crate) command_kind: String,
     pub(crate) clipboard_written: bool,
     pub(crate) spawned: bool,
+}
+
+impl AgentPromptExportReceipt {
+    pub(crate) fn diagnostic_prompt_fingerprint(&self) -> String {
+        crate::logging::log_private_user_value(&self.prompt_sha256).sha256
+    }
+
+    pub(crate) fn diagnostic_path_fingerprint(&self) -> Option<String> {
+        self.path
+            .as_deref()
+            .map(|path| crate::logging::log_private_user_value(path).sha256)
+    }
+
+    pub(crate) fn diagnostic_url_fingerprint(&self) -> Option<String> {
+        self.url
+            .as_deref()
+            .map(|url| crate::logging::log_private_user_value(url).sha256)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -506,16 +532,11 @@ fn launch_command_target(
             .values()
             .any(|value| value.contains("{promptFile}"));
     if needs_prompt_file && !dry_run {
-        let dir = std::env::temp_dir()
-            .join("script-kit-agent-handoff")
-            .join(uuid::Uuid::new_v4().to_string());
-        std::fs::create_dir_all(&dir)
-            .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-        set_file_mode(&dir, 0o700)?;
+        let dir = create_private_handoff_directory(
+            &std::env::temp_dir().join("script-kit-agent-handoff"),
+        )?;
         let path = dir.join("prompt.md");
-        std::fs::write(&path, &payload.prompt)
-            .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-        set_file_mode(&path, 0o600)?;
+        write_private_handoff_file(&path, payload.prompt.as_bytes())?;
         prompt_file_created = true;
         prompt_file_path = Some(path);
     }
@@ -604,12 +625,8 @@ fn export_prompt_to_file(
         return Ok(receipt);
     }
 
-    std::fs::create_dir_all(&export_dir)
-        .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-    set_file_mode(&export_dir, 0o700)?;
-    std::fs::write(&path, &payload.prompt)
-        .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-    set_file_mode(&path, 0o600)?;
+    ensure_private_handoff_directory(&export_dir)?;
+    write_private_handoff_file(&path, payload.prompt.as_bytes())?;
     receipt.path = Some(path.to_string_lossy().to_string());
     write_export_receipt_if_requested(&receipt)?;
     Ok(receipt)
@@ -637,16 +654,10 @@ fn export_prompt_to_gist(
         return Ok(receipt);
     }
 
-    let dir = std::env::temp_dir()
-        .join("script-kit-prompt-export")
-        .join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-    set_file_mode(&dir, 0o700)?;
+    let dir =
+        create_private_handoff_directory(&std::env::temp_dir().join("script-kit-prompt-export"))?;
     let path = dir.join(&filename);
-    std::fs::write(&path, &payload.prompt)
-        .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-    set_file_mode(&path, 0o600)?;
+    write_private_handoff_file(&path, payload.prompt.as_bytes())?;
     receipt.path = Some(path.to_string_lossy().to_string());
 
     let output = std::process::Command::new(&gh_binary)
@@ -770,26 +781,32 @@ fn prepare_cmux_codex_wrapper(
     codex_binary: &str,
     cwd: &Path,
 ) -> Result<PreparedCmuxCodexWrapper, AgentPromptHandoffError> {
-    let dir = std::env::temp_dir()
-        .join("script-kit-agent-handoff")
-        .join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-    set_file_mode(&dir, 0o700)?;
+    prepare_cmux_codex_wrapper_at(
+        prompt,
+        codex_binary,
+        cwd,
+        &std::env::temp_dir().join("script-kit-agent-handoff"),
+    )
+}
+
+fn prepare_cmux_codex_wrapper_at(
+    prompt: &str,
+    codex_binary: &str,
+    cwd: &Path,
+    handoff_root: &Path,
+) -> Result<PreparedCmuxCodexWrapper, AgentPromptHandoffError> {
+    let dir = create_private_handoff_directory(handoff_root)?;
 
     let prompt_path = dir.join("prompt.md");
     let script_path = dir.join("run.zsh");
-    std::fs::write(&prompt_path, prompt)
-        .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-    set_file_mode(&prompt_path, 0o600)?;
+    write_private_handoff_file(&prompt_path, prompt.as_bytes())?;
 
     let script = format!(
         "#!/bin/zsh\nset -euo pipefail\nscript_path=\"${{0:A}}\"\nhandoff_dir=\"${{script_path:h}}\"\nprompt_file=\"$handoff_dir/prompt.md\"\ncleanup() {{\n  rm -f \"$prompt_file\" \"$script_path\"\n  rmdir \"$handoff_dir\" 2>/dev/null || true\n}}\ntrap cleanup EXIT\npython3 - \"$prompt_file\" \"$script_path\" \"$handoff_dir\" {} {} <<'PY'\nimport os\nimport sys\n\nprompt_file, script_path, handoff_dir, codex_binary, cwd = sys.argv[1:]\nwith open(prompt_file, 'rb') as handle:\n    prompt = handle.read().decode('utf-8')\nfor path in (prompt_file, script_path):\n    try:\n        os.unlink(path)\n    except FileNotFoundError:\n        pass\ntry:\n    os.rmdir(handoff_dir)\nexcept OSError:\n    pass\nos.chdir(cwd)\nos.execvp(codex_binary, [codex_binary, '--cd', cwd, '--', prompt])\nPY\n",
         shell_quote(codex_binary),
         shell_quote_path(cwd)
     );
-    std::fs::write(&script_path, script)
-        .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
+    write_private_handoff_file(&script_path, script.as_bytes())?;
     set_file_mode(&script_path, 0o700)?;
 
     Ok(PreparedCmuxCodexWrapper {
@@ -856,6 +873,23 @@ fn parse_cmux_workspace_ref(stdout: &[u8]) -> Result<String, AgentPromptHandoffE
         })
 }
 
+fn ensure_private_handoff_directory(path: &Path) -> Result<(), AgentPromptHandoffError> {
+    crate::atomic_file::ensure_private_directory(path)
+        .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))
+}
+
+fn create_private_handoff_directory(root: &Path) -> Result<PathBuf, AgentPromptHandoffError> {
+    ensure_private_handoff_directory(root)?;
+    let directory = root.join(uuid::Uuid::new_v4().to_string());
+    ensure_private_handoff_directory(&directory)?;
+    Ok(directory)
+}
+
+fn write_private_handoff_file(path: &Path, bytes: &[u8]) -> Result<(), AgentPromptHandoffError> {
+    crate::atomic_file::write_private_atomic(path, bytes)
+        .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))
+}
+
 fn set_file_mode(path: &Path, mode: u32) -> Result<(), AgentPromptHandoffError> {
     #[cfg(unix)]
     {
@@ -881,13 +915,9 @@ fn write_receipt_if_requested(
         return Ok(());
     };
     let path = PathBuf::from(path);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-    }
     let json = serde_json::to_string_pretty(receipt)
         .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-    std::fs::write(path, json).map_err(|error| AgentPromptHandoffError::Io(error.to_string()))
+    write_private_handoff_file(&path, json.as_bytes())
 }
 
 fn write_export_receipt_if_requested(
@@ -897,13 +927,9 @@ fn write_export_receipt_if_requested(
         return Ok(());
     };
     let path = PathBuf::from(path);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-    }
     let json = serde_json::to_string_pretty(receipt)
         .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
-    std::fs::write(path, json).map_err(|error| AgentPromptHandoffError::Io(error.to_string()))
+    write_private_handoff_file(&path, json.as_bytes())
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -1096,6 +1122,325 @@ mod tests {
             std::fs::read_to_string(&receipt_path).expect("serialized export receipt");
         assert!(serialized_receipt.contains("\"prompt_export_file\""));
         assert!(!serialized_receipt.contains(prompt));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            assert_eq!(
+                std::fs::metadata(&export_dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(&receipt_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_prompt_export_repairs_legacy_directory_and_receipt_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let _guard = lock_env_test();
+        let fixture = tempfile::tempdir().expect("isolated legacy export fixture");
+        let export_dir = fixture.path().join("exports");
+        let receipt_path = fixture.path().join("receipt.json");
+        std::fs::create_dir(&export_dir).unwrap();
+        std::fs::set_permissions(&export_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&receipt_path, "older unsafe receipt").unwrap();
+        std::fs::set_permissions(&receipt_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _environment = HandoffEnvGuard::set([
+            (DRY_RUN_ENV, None),
+            (GH_BINARY_ENV, None),
+            (
+                RECEIPT_PATH_ENV,
+                Some(receipt_path.to_string_lossy().to_string()),
+            ),
+            (
+                PROMPT_EXPORT_DIR_ENV,
+                Some(export_dir.to_string_lossy().to_string()),
+            ),
+        ]);
+
+        let prompt = "private user prompt with attached account data";
+        let receipt = export_prompt(&test_payload(prompt), AgentPromptActionId::ExportFile)
+            .expect("repair legacy private export owners");
+        let prompt_path = PathBuf::from(receipt.path.unwrap());
+
+        assert_eq!(
+            std::fs::metadata(&export_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&prompt_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&receipt_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_to_string(prompt_path).unwrap(), prompt);
+        assert!(!std::fs::read_to_string(receipt_path)
+            .unwrap()
+            .contains(prompt));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_prompt_export_rejects_symlinked_directory_without_touching_foreign_owner() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let _guard = lock_env_test();
+        let fixture = tempfile::tempdir().expect("isolated symlinked export directory fixture");
+        let external = fixture.path().join("foreign");
+        let planted = fixture.path().join("exports");
+        std::fs::create_dir(&external).unwrap();
+        std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&external, &planted).unwrap();
+        let _environment = HandoffEnvGuard::set([
+            (DRY_RUN_ENV, None),
+            (GH_BINARY_ENV, None),
+            (RECEIPT_PATH_ENV, None),
+            (
+                PROMPT_EXPORT_DIR_ENV,
+                Some(planted.to_string_lossy().to_string()),
+            ),
+        ]);
+
+        assert!(export_prompt(
+            &test_payload("never export my private prompt through a link"),
+            AgentPromptActionId::ExportFile,
+        )
+        .is_err());
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::metadata(&external).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(std::fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_prompt_export_rejects_symlinked_receipt_without_touching_foreign_file() {
+        use std::os::unix::fs::symlink;
+
+        let _guard = lock_env_test();
+        let fixture = tempfile::tempdir().expect("isolated symlinked export receipt fixture");
+        let external = fixture.path().join("foreign.txt");
+        let planted = fixture.path().join("receipt.json");
+        let export_dir = fixture.path().join("exports");
+        std::fs::write(&external, "foreign receipt must not change").unwrap();
+        symlink(&external, &planted).unwrap();
+        let _environment = HandoffEnvGuard::set([
+            (DRY_RUN_ENV, None),
+            (GH_BINARY_ENV, None),
+            (
+                RECEIPT_PATH_ENV,
+                Some(planted.to_string_lossy().to_string()),
+            ),
+            (
+                PROMPT_EXPORT_DIR_ENV,
+                Some(export_dir.to_string_lossy().to_string()),
+            ),
+        ]);
+
+        assert!(export_prompt(
+            &test_payload("private export receipt payload"),
+            AgentPromptActionId::ExportFile,
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap(),
+            "foreign receipt must not change"
+        );
+        assert!(std::fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_prompt_handoff_file_rejects_symlinked_destination_without_corruption() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().expect("isolated symlinked handoff prompt fixture");
+        let external = fixture.path().join("foreign.txt");
+        let planted = fixture.path().join("prompt.md");
+        std::fs::write(&external, "foreign private content").unwrap();
+        symlink(&external, &planted).unwrap();
+
+        assert!(write_private_handoff_file(&planted, b"new private user prompt").is_err());
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap(),
+            "foreign private content"
+        );
+        assert!(std::fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_prompt_handoff_receipt_is_owner_only_and_rejects_symlinked_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let _guard = lock_env_test();
+        let fixture = tempfile::tempdir().expect("isolated private handoff receipt fixture");
+        let receipt_path = fixture.path().join("handoff.json");
+        let _environment = HandoffEnvGuard::set([(
+            RECEIPT_PATH_ENV,
+            Some(receipt_path.to_string_lossy().to_string()),
+        )]);
+        let receipt = AgentPromptHandoffReceipt {
+            adapter_id: CMUX_CODEX_ADAPTER_ID.to_string(),
+            action_id: CMUX_CODEX_ACTION_ID.to_string(),
+            dry_run: true,
+            cwd: "/synthetic/private-project".to_string(),
+            prompt_chars: 14,
+            prompt_sha256: sha256_hex("private prompt"),
+            command_kind: "synthetic-handoff".to_string(),
+            cmux_binary: "cmux".to_string(),
+            codex_binary: "codex".to_string(),
+            prompt_file_created: false,
+            script_file_created: false,
+            spawned: false,
+            pid: None,
+        };
+        write_receipt_if_requested(&receipt).expect("owner-only actual handoff receipt");
+        assert_eq!(
+            std::fs::metadata(&receipt_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let external = fixture.path().join("foreign.txt");
+        std::fs::write(&external, "never overwrite this foreign receipt").unwrap();
+        std::fs::remove_file(&receipt_path).unwrap();
+        symlink(&external, &receipt_path).unwrap();
+        assert!(write_receipt_if_requested(&receipt).is_err());
+        assert_eq!(
+            std::fs::read_to_string(external).unwrap(),
+            "never overwrite this foreign receipt"
+        );
+    }
+
+    #[test]
+    fn private_prompt_handoff_diagnostics_never_expose_guessable_hashes_or_locations() {
+        let prompt = "private customer prompt";
+        let digest = sha256_hex(prompt);
+        let handoff = AgentPromptHandoffReceipt {
+            adapter_id: CMUX_CODEX_ADAPTER_ID.to_string(),
+            action_id: CMUX_CODEX_ACTION_ID.to_string(),
+            dry_run: true,
+            cwd: "/synthetic/private-project".to_string(),
+            prompt_chars: prompt.chars().count(),
+            prompt_sha256: digest.clone(),
+            command_kind: "synthetic-handoff".to_string(),
+            cmux_binary: "cmux".to_string(),
+            codex_binary: "codex".to_string(),
+            prompt_file_created: false,
+            script_file_created: false,
+            spawned: false,
+            pid: None,
+        };
+        let export = AgentPromptExportReceipt {
+            action_id: EXPORT_FILE_ACTION_ID.to_string(),
+            dry_run: true,
+            cwd: "/synthetic/private-project".to_string(),
+            prompt_chars: prompt.chars().count(),
+            prompt_sha256: digest.clone(),
+            context_part_count: 1,
+            prompt_builder_segment_count: 1,
+            export_kind: "file".to_string(),
+            path: Some("/Users/private/medical-client/prompt.md".to_string()),
+            url: Some("https://gist.github.com/private-secret-gist".to_string()),
+            command_kind: "synthetic-export".to_string(),
+            clipboard_written: false,
+            spawned: false,
+        };
+
+        let expected = crate::logging::log_private_user_value(&digest).sha256;
+        assert_eq!(handoff.diagnostic_prompt_fingerprint(), expected);
+        assert_eq!(export.diagnostic_prompt_fingerprint(), expected);
+        assert_ne!(expected, digest);
+        assert_eq!(
+            export.diagnostic_path_fingerprint().unwrap(),
+            crate::logging::log_private_user_value("/Users/private/medical-client/prompt.md")
+                .sha256
+        );
+        assert_eq!(
+            export.diagnostic_url_fingerprint().unwrap(),
+            crate::logging::log_private_user_value("https://gist.github.com/private-secret-gist")
+                .sha256
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_prompt_wrapper_is_owner_only_without_starting_external_process() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempfile::tempdir().expect("isolated wrapper preparation fixture");
+        let handoff_root = fixture.path().join("handoff-root");
+        let prompt = "private wrapper handoff prompt";
+        let prepared = prepare_cmux_codex_wrapper_at(
+            prompt,
+            "/synthetic/never-start-codex",
+            fixture.path(),
+            &handoff_root,
+        )
+        .expect("prepare private wrapper without running it");
+        let script_path = prepared
+            .command_string
+            .strip_prefix("/bin/zsh '")
+            .and_then(|value| value.strip_suffix('\''))
+            .map(PathBuf::from)
+            .expect("synthetic quoted wrapper path");
+        let handoff_dir = script_path.parent().unwrap();
+        let prompt_path = handoff_dir.join("prompt.md");
+
+        for (path, expected) in [
+            (handoff_root.as_path(), 0o700),
+            (handoff_dir, 0o700),
+            (prompt_path.as_path(), 0o600),
+            (script_path.as_path(), 0o700),
+        ] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                expected
+            );
+        }
+        assert_eq!(std::fs::read_to_string(prompt_path).unwrap(), prompt);
+        assert!(!std::fs::read_to_string(script_path)
+            .unwrap()
+            .contains(prompt));
     }
 
     #[test]

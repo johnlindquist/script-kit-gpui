@@ -17,12 +17,17 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::brain::substrate::{BrainFrontmatter, BrainSlugDir, BrainSubstrate};
+use crate::scripts::root_search_contract::{
+    RootOwnedProviderRefresh, RootOwnedProviderRefreshLifecycle,
+};
 
 use super::metadata;
 use super::model::{Note, NoteId};
 
 /// SQLite index schema generation — bump when index shape changes.
 const NOTES_INDEX_SCHEMA_VERSION: i32 = 2;
+/// Root-level source filters may request the whole bounded launcher result set.
+const MAX_ROOT_NOTES_SEARCH_RESULTS: usize = 24;
 
 /// Global database connection for notes
 static NOTES_DB: OnceLock<Arc<Mutex<Connection>>> = OnceLock::new();
@@ -88,10 +93,23 @@ struct RootNotesSearchFlightKey {
     search: RootNotesSearchCacheKey,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RootNotesSearchRefresh {
+    owner: RootOwnedProviderRefresh,
+    flight: RootNotesSearchFlightKey,
+    options: RootNotesSectionOptions,
+}
+
+pub(crate) struct RootNotesSearchSnapshot {
+    flight: RootNotesSearchFlightKey,
+    hits: Vec<RootNoteSearchHit>,
+}
+
 #[derive(Default)]
 struct RootNotesSearchCache {
     hits_by_query: HashMap<RootNotesSearchCacheKey, Vec<RootNoteSearchHit>>,
     in_flight: HashSet<RootNotesSearchFlightKey>,
+    refresh_lifecycle: RootOwnedProviderRefreshLifecycle,
 }
 
 fn root_notes_search_cache() -> &'static Mutex<RootNotesSearchCache> {
@@ -347,27 +365,65 @@ fn resolve_note_slug(conn: &Connection, note: &Note) -> Result<String> {
 }
 
 fn write_conflict_copy(path: &Path, contents: &str) -> Result<()> {
-    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+    let timestamp = Utc::now().format("%Y%m%d%H%M%S").to_string();
+    let Some(conflict_path) = write_conflict_copy_at(path, contents, &timestamp)? else {
         return Ok(());
     };
-    let parent = path.parent().context("conflict copy path missing parent")?;
-    let timestamp = Utc::now().format("%Y%m%d%H%M%S");
-    let conflict_path = parent.join(format!("{stem}.conflict-{timestamp}.md"));
-    fs::write(&conflict_path, contents)
-        .with_context(|| format!("writing conflict copy {}", conflict_path.display()))?;
-    // A conflict copy holds a full note body; keep it owner-only rather than the
-    // umask default that a raw fs::write would otherwise leave (0644).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&conflict_path, fs::Permissions::from_mode(0o600));
-    }
+    let original = crate::logging::log_private_user_value(&path.display().to_string());
+    let conflict = crate::logging::log_private_user_value(&conflict_path.display().to_string());
     warn!(
-        original = %path.display(),
-        conflict = %conflict_path.display(),
+        original_bytes = original.raw_bytes,
+        original_sha256 = %original.sha256,
+        conflict_bytes = conflict.raw_bytes,
+        conflict_sha256 = %conflict.sha256,
         "External note edit conflict preserved as conflict copy"
     );
     Ok(())
+}
+
+fn write_conflict_copy_at(path: &Path, contents: &str, timestamp: &str) -> Result<Option<PathBuf>> {
+    use std::io::Write as _;
+
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return Ok(None);
+    };
+    let parent = path.parent().context("conflict copy path missing parent")?;
+    for attempt in 1..=1024 {
+        let suffix = if attempt == 1 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
+        let conflict_path = parent.join(format!("{stem}.conflict-{timestamp}{suffix}.md"));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        match options.open(&conflict_path) {
+            Ok(mut file) => {
+                if let Err(error) = file
+                    .write_all(contents.as_bytes())
+                    .and_then(|_| file.sync_all())
+                {
+                    let _ = fs::remove_file(&conflict_path);
+                    return Err(error).with_context(|| {
+                        format!("writing private conflict copy {}", conflict_path.display())
+                    });
+                }
+                return Ok(Some(conflict_path));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("creating private conflict copy {}", conflict_path.display())
+                });
+            }
+        }
+    }
+    anyhow::bail!("no unused private note conflict filename remained")
 }
 
 fn guard_external_edit_before_write(path: &Path, note_id: NoteId) -> Result<()> {
@@ -1042,7 +1098,8 @@ static NOTES_DB_INIT_LOCK: Mutex<()> = Mutex::new(());
 /// with `quick_check`, and ensure the schema. Any failure returns Err with the
 /// connection already dropped, so the caller can safely rename files aside.
 fn open_and_check_notes_db(path: &Path) -> Result<Connection> {
-    let conn = Connection::open(path).context("Failed to open notes database")?;
+    let conn = crate::utils::db_permissions::open_private_sqlite(path)
+        .context("Failed to open private notes database")?;
     conn.execute_batch("PRAGMA journal_mode=WAL;")
         .context("Failed to enable WAL mode")?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")
@@ -1056,7 +1113,8 @@ fn open_and_check_notes_db(path: &Path) -> Result<Connection> {
     ensure_notes_schema(&conn)?;
     // notes.sqlite stores full note titles + bodies (+ FTS shadow). Keep it and
     // its WAL/SHM sidecars owner-only rather than inheriting umask.
-    crate::utils::db_permissions::harden_sqlite_permissions(path);
+    crate::utils::db_permissions::harden_sqlite_permissions(path)
+        .context("Failed to protect private Notes SQLite sidecars")?;
     Ok(conn)
 }
 
@@ -1100,6 +1158,8 @@ fn move_corrupt_notes_db_aside(path: &Path) -> Result<PathBuf> {
 /// the returned bool is `true` — a corrupt index must never present as an
 /// empty Notes list while the notes still exist on disk.
 fn open_or_recover_notes_db(path: &Path) -> Result<(Connection, bool)> {
+    crate::utils::db_permissions::prepare_private_sqlite(path)
+        .context("Refuse unsafe Notes SQLite ownership before corruption recovery")?;
     match open_and_check_notes_db(path) {
         Ok(conn) => Ok((conn, false)),
         Err(err) => {
@@ -1560,6 +1620,30 @@ fn sanitize_fts_query(query: &str) -> String {
     format!("\"{}\"", escaped)
 }
 
+fn log_notes_search_completed(query: &str, count: usize, method: &'static str) {
+    let safe_query = crate::logging::log_private_user_value(query);
+    debug!(
+        query_bytes = safe_query.raw_bytes,
+        query_sha256 = %safe_query.sha256,
+        count,
+        method,
+        "Note search completed"
+    );
+}
+
+fn log_notes_search_fts_fallback(query: &str, error: &impl std::fmt::Display) {
+    let safe_query = crate::logging::log_private_user_value(query);
+    let safe_error = crate::logging::log_private_user_value(&error.to_string());
+    debug!(
+        query_bytes = safe_query.raw_bytes,
+        query_sha256 = %safe_query.sha256,
+        error_bytes = safe_error.raw_bytes,
+        error_sha256 = %safe_error.sha256,
+        method = "like_fallback",
+        "FTS search failed, using LIKE fallback"
+    );
+}
+
 /// Search notes using full-text search
 ///
 /// Uses FTS5 search when possible with a fallback to LIKE queries for robustness
@@ -1573,7 +1657,7 @@ pub fn search_notes(query: &str) -> Result<Vec<Note>> {
     let conn = db.lock().map_err(db_lock_err)?;
 
     if let Some(metadata_notes) = search_notes_metadata_only(&conn, query)? {
-        debug!(query = %query, count = metadata_notes.len(), method = "metadata_only", "Note search completed");
+        log_notes_search_completed(query, metadata_notes.len(), "metadata_only");
         return Ok(metadata_notes);
     }
 
@@ -1602,17 +1686,12 @@ pub fn search_notes(query: &str) -> Result<Vec<Note>> {
 
     match fts_result {
         Ok(notes) => {
-            debug!(query = %query, count = notes.len(), method = "fts", "Note search completed");
+            log_notes_search_completed(query, notes.len(), "fts");
             Ok(notes)
         }
         Err(e) => {
             // FTS failed (possibly due to special characters), fall back to LIKE search
-            debug!(
-                query = %query,
-                error = %e,
-                method = "like_fallback",
-                "FTS search failed, using LIKE fallback"
-            );
+            log_notes_search_fts_fallback(query, &e);
 
             let like_pattern = format!("%{}%", query);
             let mut stmt = conn
@@ -1634,7 +1713,7 @@ pub fn search_notes(query: &str) -> Result<Vec<Note>> {
                 .collect::<Result<Vec<_>, _>>()
                 .context("Failed to collect LIKE fallback results")?;
 
-            debug!(query = %query, count = notes.len(), method = "like_fallback", "Note search completed");
+            log_notes_search_completed(query, notes.len(), "like_fallback");
             Ok(notes)
         }
     }
@@ -1829,14 +1908,22 @@ pub(crate) fn search_root_notes_meta(
     match search_root_notes_meta_result(query.trim(), options) {
         Ok(hits) => hits,
         Err(error) => {
-            tracing::warn!(
-                query = %query,
-                error = %error,
-                "root_notes_search_failed"
-            );
+            log_root_notes_search_failure(query, &error);
             Vec::new()
         }
     }
+}
+
+fn log_root_notes_search_failure(query: &str, error: &anyhow::Error) {
+    let safe_query = crate::logging::log_private_user_value(query);
+    let safe_error = crate::logging::log_private_user_value(&error.to_string());
+    tracing::warn!(
+        query_bytes = safe_query.raw_bytes,
+        query_sha256 = %safe_query.sha256,
+        error_bytes = safe_error.raw_bytes,
+        error_sha256 = %safe_error.sha256,
+        "root_notes_search_failed"
+    );
 }
 
 pub(crate) fn search_root_notes_meta_direct(
@@ -1848,9 +1935,9 @@ pub(crate) fn search_root_notes_meta_direct(
 
 /// Cache-only root notes lookup for the launcher foreground search path.
 ///
-/// A cold query starts a background SQLite search and returns no hits for the
-/// active frame. The worker only warms a future frame cache; it does not notify
-/// or invalidate the current launcher rows.
+/// A cold query returns no hits without opening SQLite or starting a worker.
+/// The launcher owns refresh scheduling and only publishes an exact live-query
+/// snapshot after validating its source, generation, and cache epoch.
 pub(crate) fn search_root_notes_meta_cached(
     query: &str,
     options: RootNotesSectionOptions,
@@ -1859,46 +1946,143 @@ pub(crate) fn search_root_notes_meta_cached(
         return Vec::new();
     }
 
-    let key = root_notes_search_cache_key(query, options);
-    let generation = ROOT_NOTES_SEARCH_CACHE_GENERATION.load(Ordering::Relaxed);
+    root_notes_search_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .hits_by_query
+                .get(&root_notes_search_cache_key(query, options))
+                .cloned()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn root_notes_search_cache_is_fresh(
+    query: &str,
+    options: RootNotesSectionOptions,
+) -> bool {
+    root_notes_query_is_eligible(query, options)
+        && root_notes_search_cache().lock().is_ok_and(|cache| {
+            cache
+                .hits_by_query
+                .contains_key(&root_notes_search_cache_key(query, options))
+        })
+}
+
+fn try_begin_root_notes_search_refresh_in_cache(
+    cache: &mut RootNotesSearchCache,
+    query: &str,
+    options: RootNotesSectionOptions,
+    cache_generation: u64,
+) -> Option<RootNotesSearchRefresh> {
+    if !root_notes_query_is_eligible(query, options) {
+        return None;
+    }
+
+    let search = root_notes_search_cache_key(query, options);
+    let owner = cache.refresh_lifecycle.begin(
+        sk_protocol::command_contract::CommandSource::Note,
+        cache.hits_by_query.contains_key(&search),
+    )?;
     let flight = RootNotesSearchFlightKey {
-        generation,
-        search: key.clone(),
+        generation: cache_generation,
+        search,
     };
-
-    if let Ok(mut guard) = root_notes_search_cache().lock() {
-        if let Some(hits) = guard.hits_by_query.get(&key) {
-            return hits.clone();
-        }
-        if !guard.in_flight.insert(flight.clone()) {
-            return Vec::new();
-        }
-    } else {
-        return Vec::new();
+    if !cache.in_flight.insert(flight.clone()) {
+        cache.refresh_lifecycle.finish(owner);
+        return None;
     }
 
-    let query = key.query.clone();
-    let key_for_worker = key.clone();
-    let flight_for_worker = flight.clone();
-    let spawn_result = std::thread::Builder::new()
-        .name("root-notes-search-cache".to_string())
-        .spawn(move || {
-            let hits = search_root_notes_meta(&query, options);
-            if let Ok(mut guard) = root_notes_search_cache().lock() {
-                guard.in_flight.remove(&flight_for_worker);
-                if ROOT_NOTES_SEARCH_CACHE_GENERATION.load(Ordering::Relaxed) == generation {
-                    guard.hits_by_query.insert(key_for_worker, hits);
-                }
-            }
-        });
+    tracing::debug!(
+        target: "script_kit::search",
+        source = "root-notes-search-cache",
+        generation = owner.generation,
+        cache_generation,
+        "Started owned Notes snapshot refresh"
+    );
+    Some(RootNotesSearchRefresh {
+        owner,
+        flight,
+        options,
+    })
+}
 
-    if spawn_result.is_err() {
-        if let Ok(mut guard) = root_notes_search_cache().lock() {
-            guard.in_flight.remove(&flight);
-        }
+pub(crate) fn try_begin_root_notes_search_refresh(
+    query: &str,
+    options: RootNotesSectionOptions,
+) -> Option<RootNotesSearchRefresh> {
+    let cache_generation = ROOT_NOTES_SEARCH_CACHE_GENERATION.load(Ordering::Relaxed);
+    let mut cache = root_notes_search_cache().lock().ok()?;
+    try_begin_root_notes_search_refresh_in_cache(&mut cache, query, options, cache_generation)
+}
+
+pub(crate) fn read_root_notes_search_snapshot(
+    refresh: &RootNotesSearchRefresh,
+) -> RootNotesSearchSnapshot {
+    RootNotesSearchSnapshot {
+        flight: refresh.flight.clone(),
+        hits: search_root_notes_meta(&refresh.flight.search.query, refresh.options),
     }
+}
 
-    Vec::new()
+fn finish_root_notes_search_refresh_in_cache(
+    cache: &mut RootNotesSearchCache,
+    refresh: RootNotesSearchRefresh,
+    snapshot: RootNotesSearchSnapshot,
+    current_cache_generation: u64,
+) -> bool {
+    if refresh.owner.source != sk_protocol::command_contract::CommandSource::Note
+        || snapshot.flight != refresh.flight
+        || cache.refresh_lifecycle.in_flight != Some(refresh.owner)
+    {
+        return false;
+    }
+    cache.in_flight.remove(&refresh.flight);
+    if !cache.refresh_lifecycle.finish(refresh.owner)
+        || refresh.flight.generation != current_cache_generation
+    {
+        return false;
+    }
+    cache
+        .hits_by_query
+        .insert(refresh.flight.search, snapshot.hits);
+    true
+}
+
+pub(crate) fn finish_root_notes_search_refresh(
+    refresh: RootNotesSearchRefresh,
+    snapshot: RootNotesSearchSnapshot,
+) -> bool {
+    root_notes_search_cache().lock().is_ok_and(|mut cache| {
+        finish_root_notes_search_refresh_in_cache(
+            &mut cache,
+            refresh,
+            snapshot,
+            ROOT_NOTES_SEARCH_CACHE_GENERATION.load(Ordering::Relaxed),
+        )
+    })
+}
+
+fn discard_root_notes_search_refresh_in_cache(
+    cache: &mut RootNotesSearchCache,
+    refresh: RootNotesSearchRefresh,
+) -> bool {
+    if !cache.refresh_lifecycle.finish(refresh.owner) {
+        return false;
+    }
+    cache.in_flight.remove(&refresh.flight);
+    true
+}
+
+pub(crate) fn discard_root_notes_search_refresh(refresh: RootNotesSearchRefresh) -> bool {
+    root_notes_search_cache()
+        .lock()
+        .is_ok_and(|mut cache| discard_root_notes_search_refresh_in_cache(&mut cache, refresh))
+}
+
+fn root_notes_search_result_limit(options: RootNotesSectionOptions) -> i64 {
+    options.max_results.clamp(1, MAX_ROOT_NOTES_SEARCH_RESULTS) as i64
 }
 
 fn search_root_notes_meta_result(
@@ -1909,7 +2093,7 @@ fn search_root_notes_meta_result(
     let db = get_db()?;
     let conn = db.lock().map_err(db_lock_err)?;
 
-    let limit = options.max_results.clamp(1, 5) as i64;
+    let limit = root_notes_search_result_limit(options);
     let hits = if query.trim().is_empty() {
         let mut stmt = conn
             .prepare(
@@ -2368,6 +2552,332 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn root_owned_notes_options() -> RootNotesSectionOptions {
+        RootNotesSectionOptions {
+            enabled: true,
+            max_results: 5,
+            min_query_chars: 0,
+            search_content: true,
+        }
+    }
+
+    fn root_owned_note_hit(title: &str) -> RootNoteSearchHit {
+        RootNoteSearchHit {
+            id: NoteId::new(),
+            title: title.to_owned(),
+            updated_at: Utc::now(),
+            is_pinned: false,
+            char_count: title.chars().count(),
+            score: 100,
+        }
+    }
+
+    #[test]
+    fn root_notes_owned_result_limit_honors_explicit_sources_without_unbounded_reads() {
+        let mut options = root_owned_notes_options();
+        options.max_results = 3;
+        assert_eq!(root_notes_search_result_limit(options), 3);
+        options.max_results = 8;
+        assert_eq!(root_notes_search_result_limit(options), 8);
+        options.max_results = 12;
+        assert_eq!(root_notes_search_result_limit(options), 12);
+        options.max_results = usize::MAX;
+        assert_eq!(root_notes_search_result_limit(options), 24);
+        options.max_results = 0;
+        assert_eq!(root_notes_search_result_limit(options), 1);
+    }
+
+    #[test]
+    fn root_notes_owned_refresh_accepts_empty_snapshot_without_restarting_forever() {
+        let mut cache = RootNotesSearchCache::default();
+        let options = root_owned_notes_options();
+        let refresh =
+            try_begin_root_notes_search_refresh_in_cache(&mut cache, "private query", options, 41)
+                .expect("one exact Notes owner for a cold query");
+        assert!(try_begin_root_notes_search_refresh_in_cache(
+            &mut cache,
+            "private query",
+            options,
+            41,
+        )
+        .is_none());
+
+        let flight = refresh.flight.clone();
+        assert!(finish_root_notes_search_refresh_in_cache(
+            &mut cache,
+            refresh,
+            RootNotesSearchSnapshot {
+                flight: flight.clone(),
+                hits: Vec::new(),
+            },
+            41,
+        ));
+        assert!(cache
+            .hits_by_query
+            .get(&flight.search)
+            .is_some_and(Vec::is_empty));
+        assert!(cache.in_flight.is_empty());
+        assert!(try_begin_root_notes_search_refresh_in_cache(
+            &mut cache,
+            "private query",
+            options,
+            41,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn root_notes_owned_refresh_rejects_stale_epoch_and_releases_current_worker() {
+        let mut cache = RootNotesSearchCache::default();
+        let options = root_owned_notes_options();
+        let refresh = try_begin_root_notes_search_refresh_in_cache(
+            &mut cache,
+            "changed private note",
+            options,
+            7,
+        )
+        .expect("old Notes cache epoch owns one worker");
+        let flight = refresh.flight.clone();
+
+        assert!(!finish_root_notes_search_refresh_in_cache(
+            &mut cache,
+            refresh,
+            RootNotesSearchSnapshot {
+                flight,
+                hits: vec![root_owned_note_hit("stale private note")],
+            },
+            8,
+        ));
+        assert!(cache.hits_by_query.is_empty());
+        assert!(cache.in_flight.is_empty());
+        let replacement = try_begin_root_notes_search_refresh_in_cache(
+            &mut cache,
+            "changed private note",
+            options,
+            8,
+        )
+        .expect("new cache epoch can immediately recover");
+        assert_eq!(replacement.flight.generation, 8);
+    }
+
+    #[test]
+    fn root_notes_owned_refresh_rejects_foreign_owner_and_wrong_query_before_publication() {
+        let mut cache = RootNotesSearchCache::default();
+        let options = root_owned_notes_options();
+        let refresh = try_begin_root_notes_search_refresh_in_cache(
+            &mut cache,
+            "real private query",
+            options,
+            12,
+        )
+        .expect("Notes owns the exact query");
+        let mut foreign = refresh.clone();
+        foreign.owner.source = sk_protocol::command_contract::CommandSource::Todo;
+        assert!(!finish_root_notes_search_refresh_in_cache(
+            &mut cache,
+            foreign.clone(),
+            RootNotesSearchSnapshot {
+                flight: foreign.flight.clone(),
+                hits: vec![root_owned_note_hit("foreign private note")],
+            },
+            12,
+        ));
+        assert!(!discard_root_notes_search_refresh_in_cache(
+            &mut cache, foreign,
+        ));
+
+        let mut wrong_query = refresh.flight.clone();
+        wrong_query.search.query = "another private query".to_owned();
+        assert!(!finish_root_notes_search_refresh_in_cache(
+            &mut cache,
+            refresh.clone(),
+            RootNotesSearchSnapshot {
+                flight: wrong_query,
+                hits: vec![root_owned_note_hit("wrong private note")],
+            },
+            12,
+        ));
+        assert!(cache.hits_by_query.is_empty());
+        assert_eq!(cache.refresh_lifecycle.in_flight, Some(refresh.owner));
+        assert!(discard_root_notes_search_refresh_in_cache(
+            &mut cache, refresh,
+        ));
+    }
+
+    #[test]
+    fn root_notes_owned_cache_only_lookup_never_creates_an_unowned_worker() {
+        let query = format!("isolated-private-cache-{}", uuid::Uuid::new_v4());
+        let options = root_owned_notes_options();
+        assert!(search_root_notes_meta_cached(&query, options).is_empty());
+
+        let key = root_notes_search_cache_key(&query, options);
+        let cache = root_notes_search_cache()
+            .lock()
+            .expect("inspect cache-only Notes lookup");
+        assert!(!cache.hits_by_query.contains_key(&key));
+        assert!(!cache.in_flight.iter().any(|flight| flight.search == key));
+    }
+
+    #[test]
+    fn root_notes_owned_failure_event_never_emits_raw_private_query_or_database_error() {
+        #[derive(Clone)]
+        struct EventWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for EventWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let query = "my private cancer journal and sk-live-secret";
+        let error_text = "/Users/private/medical/notes.sqlite: provider password hunter2";
+        let error = anyhow::anyhow!(error_text);
+        let expected_query = crate::logging::log_private_user_value(query);
+        let expected_error = crate::logging::log_private_user_value(error_text);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::clone(&captured);
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || EventWriter(Arc::clone(&writer)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_notes_search_completed(query, 2, "metadata_only");
+            log_notes_search_fts_fallback(query, &error);
+            log_root_notes_search_failure(query, &error);
+        });
+
+        let output = String::from_utf8(
+            captured
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        )
+        .expect("structured Notes failure event");
+        assert!(!output.contains(query));
+        assert!(!output.contains(error_text));
+        assert!(!output.contains("cancer"));
+        assert!(!output.contains("hunter2"));
+        let events: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("actual JSON tracing event"))
+            .collect();
+        assert_eq!(events.len(), 3);
+        for event in &events {
+            assert_eq!(event["fields"]["query_bytes"], query.len());
+            assert_eq!(event["fields"]["query_sha256"], expected_query.sha256);
+        }
+        assert_eq!(events[0]["fields"]["message"], "Note search completed");
+        assert_eq!(events[0]["fields"]["method"], "metadata_only");
+        assert_eq!(events[0]["fields"]["count"], 2);
+        for event in &events[1..] {
+            assert_eq!(event["fields"]["error_bytes"], error_text.len());
+            assert_eq!(event["fields"]["error_sha256"], expected_error.sha256);
+        }
+        assert_eq!(
+            events[1]["fields"]["message"],
+            "FTS search failed, using LIKE fallback"
+        );
+        assert_eq!(events[2]["fields"]["message"], "root_notes_search_failed");
+    }
+
+    #[test]
+    fn conflict_copy_preserves_every_same_second_recovery_artifact() {
+        let root = tempfile::tempdir().expect("isolated note conflict fixture");
+        let original = root.path().join("private-note.md");
+        let timestamp = "20260822123456";
+        let first = write_conflict_copy_at(&original, "first private version", timestamp)
+            .unwrap()
+            .unwrap();
+        let second = write_conflict_copy_at(&original, "second private version", timestamp)
+            .unwrap()
+            .unwrap();
+        let third = write_conflict_copy_at(&original, "third private version", timestamp)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            first.file_name().unwrap().to_str().unwrap(),
+            "private-note.conflict-20260822123456.md"
+        );
+        assert_eq!(
+            second.file_name().unwrap().to_str().unwrap(),
+            "private-note.conflict-20260822123456-2.md"
+        );
+        assert_eq!(
+            third.file_name().unwrap().to_str().unwrap(),
+            "private-note.conflict-20260822123456-3.md"
+        );
+        assert_eq!(fs::read_to_string(&first).unwrap(), "first private version");
+        assert_eq!(
+            fs::read_to_string(&second).unwrap(),
+            "second private version"
+        );
+        assert_eq!(fs::read_to_string(&third).unwrap(), "third private version");
+        assert!([first, second, third]
+            .iter()
+            .all(|path| is_conflict_copy_path(path)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conflict_copy_refuses_symlink_redirection_without_destroying_private_target() {
+        let root = tempfile::tempdir().expect("isolated note conflict fixture");
+        let original = root.path().join("private-note.md");
+        let target = root.path().join("unrelated-private.txt");
+        fs::write(&target, "preserve unrelated private data").unwrap();
+        let hostile = root.path().join("private-note.conflict-20260822123456.md");
+        std::os::unix::fs::symlink(&target, &hostile).expect("hostile conflict symlink");
+
+        let safe = write_conflict_copy_at(&original, "new private note", "20260822123456")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "preserve unrelated private data"
+        );
+        assert_eq!(
+            safe.file_name().unwrap().to_str().unwrap(),
+            "private-note.conflict-20260822123456-2.md"
+        );
+        assert_eq!(fs::read_to_string(safe).unwrap(), "new private note");
+        assert!(fs::symlink_metadata(hostile)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conflict_copy_is_owner_only_from_its_first_creation() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("isolated note conflict fixture");
+        let path = write_conflict_copy_at(
+            &root.path().join("private-note.md"),
+            "sensitive private note",
+            "20260822123456",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), "sensitive private note");
+    }
+
     /// A corrupt notes.sqlite must be moved aside and replaced with a fresh,
     /// working database — never surfaced as an error (which breaks deeplink
     /// open, search, and MCP note tools) or as a silently empty Notes list.
@@ -2415,6 +2925,37 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_or_recover_notes_db_rejects_hostile_symlink_without_replacing_foreign_notes() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("isolated notes recovery fixture");
+        let path = directory.path().join("notes.sqlite");
+        let foreign = directory.path().join("foreign.sqlite");
+        fs::write(&foreign, b"foreign private note titles and bodies")
+            .expect("seed foreign Notes owner");
+        symlink(&foreign, &path).expect("plant Notes recovery symlink");
+
+        assert!(open_or_recover_notes_db(&path).is_err());
+        assert_eq!(
+            fs::read(&foreign).expect("foreign Notes owner remains untouched"),
+            b"foreign private note titles and bodies"
+        );
+        assert!(fs::symlink_metadata(&path)
+            .expect("hostile Notes link remains available for repair")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .expect("inspect isolated Notes directory")
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+                .count(),
+            0
+        );
     }
 
     fn unique_test_token(prefix: &str) -> String {

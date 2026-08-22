@@ -416,7 +416,8 @@ fn brain_path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// with `quick_check`, and ensure the schema. Any failure returns Err with the
 /// connection already dropped, so the caller can safely rename files.
 fn open_and_check(path: &Path) -> Result<Connection> {
-    let conn = Connection::open(path).context("open brain.sqlite")?;
+    let conn = crate::utils::db_permissions::open_private_sqlite(path)
+        .context("open private brain.sqlite")?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .context("brain WAL")?;
     conn.pragma_update(None, "busy_timeout", 5000)
@@ -432,7 +433,8 @@ fn open_and_check(path: &Path) -> Result<Connection> {
     ensure_brain_schema(&conn)?;
     // brain.sqlite holds the full text of notes, day pages, fragments, and chat
     // turns. Keep it (and its WAL/SHM sidecars) owner-only rather than umask.
-    crate::utils::db_permissions::harden_sqlite_permissions(path);
+    crate::utils::db_permissions::harden_sqlite_permissions(path)
+        .context("protect private Brain SQLite sidecars")?;
     Ok(conn)
 }
 
@@ -466,6 +468,8 @@ fn move_corrupt_brain_db_aside(path: &Path) -> Result<PathBuf> {
 /// The returned bool is `true` when recovery ran (the caller should wake the
 /// indexer so the empty index repopulates promptly).
 fn open_or_recover_brain_db(path: &Path) -> Result<(Connection, bool)> {
+    crate::utils::db_permissions::prepare_private_sqlite(path)
+        .context("refuse unsafe Brain SQLite ownership before corruption recovery")?;
     match open_and_check(path) {
         Ok(conn) => Ok((conn, false)),
         Err(err) => {
@@ -532,7 +536,8 @@ fn open_read_conn() -> Result<Connection> {
         &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .context("open brain read-only connection")?;
     conn.pragma_update(None, "busy_timeout", 5000)
@@ -1472,5 +1477,29 @@ mod store_recovery_tests {
             !corrupt_sibling_exists(&path),
             "a valid db must not trigger recovery"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brain_recovery_refuses_hostile_database_symlinks_without_moving_foreign_owner() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("isolated brain recovery fixture");
+        let path = directory.path().join("brain.sqlite");
+        let foreign = directory.path().join("foreign.sqlite");
+        std::fs::write(&foreign, b"foreign private brain documents")
+            .expect("seed foreign brain owner");
+        symlink(&foreign, &path).expect("plant brain recovery symlink");
+
+        assert!(open_or_recover_brain_db(&path).is_err());
+        assert!(!corrupt_sibling_exists(&path));
+        assert_eq!(
+            std::fs::read(&foreign).expect("foreign brain owner remains untouched"),
+            b"foreign private brain documents"
+        );
+        assert!(std::fs::symlink_metadata(&path)
+            .expect("hostile brain link remains visible for repair")
+            .file_type()
+            .is_symlink());
     }
 }

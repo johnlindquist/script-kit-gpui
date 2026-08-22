@@ -35,7 +35,8 @@ pub use rate_limit::{
 };
 #[allow(unused_imports)]
 pub use safe_user_value::{
-    log_user_value, log_user_value_with_limit, LogSafe, SAFE_USER_VALUE_MAX_BYTES,
+    log_private_user_value, log_user_value, log_user_value_with_limit, LogSafe, PrivateLogValue,
+    SAFE_USER_VALUE_MAX_BYTES,
 };
 
 // --- merged from part_000.rs ---
@@ -2160,6 +2161,122 @@ mod tests {
             "correlation_id should be present and non-empty"
         );
     }
+
+    #[test]
+    fn private_launcher_values_never_escape_into_structured_json_logs() {
+        let secret = "sk-live-private-token https://private.example/path?password=hunter2";
+        let safe = log_private_user_value(secret);
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = fmt_sub()
+            .json()
+            .with_writer(BufferWriter(buffer.clone()))
+            .event_format(JsonWithCorrelation)
+            .with_env_filter(EnvFilter::new("info"))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                query_bytes = safe.raw_bytes,
+                query_sha256 = %safe.sha256,
+                "private launcher query"
+            );
+            tracing::info!("legacy launcher query {} ({} bytes)", safe, safe.raw_bytes);
+        });
+
+        let output = String::from_utf8(
+            buffer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        )
+        .expect("structured test output must be valid UTF-8");
+
+        assert!(!output.contains(secret));
+        assert!(!output.contains("hunter2"));
+        assert!(!output.contains("private.example"));
+        assert!(output.contains(&safe.sha256));
+        assert!(output.contains(&safe.raw_bytes.to_string()));
+        assert_eq!(output.lines().count(), 2);
+    }
+
+    #[test]
+    fn production_ai_queries_and_file_mentions_never_escape_structured_logs() {
+        let secret_query = "canary-private-query-93841";
+        let secret_path = "/vault/canary-auth-token-93841/private-prompt.txt";
+        let mention = format!("attach @file:{secret_path}");
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = fmt_sub()
+            .json()
+            .with_writer(BufferWriter(buffer.clone()))
+            .event_format(JsonWithCorrelation)
+            .with_env_filter(EnvFilter::new("info"))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let rows = crate::ai::context_selector::slash_command_rows_with_descriptions(
+                secret_query,
+                [(secret_query, "sensitive command")],
+            );
+            assert_eq!(rows.len(), 1);
+
+            let mentions = crate::ai::context_mentions::parse_inline_context_mentions(&mention);
+            assert_eq!(mentions.len(), 1);
+            assert_eq!(mentions[0].part.label(), "private-prompt.txt");
+
+            let private_token = format!("@skills:{secret_query}");
+            let aliases = std::collections::HashMap::from([(
+                private_token.clone(),
+                crate::ai::message_parts::AiContextPart::FilePath {
+                    path: secret_path.to_string(),
+                    label: "private-prompt.txt".to_string(),
+                },
+            )]);
+            let sync_plan =
+                crate::ai::context_mentions::build_inline_mention_sync_plan_with_aliases(
+                    &private_token,
+                    &[],
+                    &std::collections::HashSet::new(),
+                    &aliases,
+                );
+            assert_eq!(sync_plan.added_parts.len(), 1);
+        });
+
+        let output = String::from_utf8(
+            buffer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        )
+        .expect("structured production events must be valid UTF-8");
+
+        assert!(output.contains("ai_context_selector_slash_items_built"));
+        assert!(output.contains("inline_context_token_resolved"));
+        assert!(output.contains("inline_mention_sync_plan_built"));
+        assert!(output.contains(&log_private_user_value(secret_query).sha256));
+        assert!(output.contains(&log_private_user_value("private-prompt.txt").sha256));
+        assert!(!output.contains(secret_query));
+        assert!(!output.contains(secret_path));
+        assert!(!output.contains("canary-auth-token-93841"));
+        assert!(!output.contains("private-prompt.txt"));
+    }
+
+    #[test]
+    fn slash_command_ties_use_canonical_identity_not_discovery_order() {
+        let forward = crate::ai::context_selector::slash_command_rows_with_descriptions(
+            "",
+            [("zeta", "last"), ("alpha", "first")],
+        );
+        let reverse = crate::ai::context_selector::slash_command_rows_with_descriptions(
+            "",
+            [("alpha", "first"), ("zeta", "last")],
+        );
+        let forward_labels: Vec<&str> = forward.iter().map(|row| row.label.as_ref()).collect();
+        let reverse_labels: Vec<&str> = reverse.iter().map(|row| row.label.as_ref()).collect();
+
+        assert_eq!(forward_labels, ["alpha", "zeta"]);
+        assert_eq!(forward_labels, reverse_labels);
+    }
+
     #[test]
     fn compact_formatter_includes_correlation_id_token() {
         let buffer = Arc::new(Mutex::new(Vec::new()));

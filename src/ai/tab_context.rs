@@ -173,6 +173,10 @@ impl TabAiTargetAudit {
 
     /// Emit this audit as a structured `tracing::info` log line with a phase tag.
     pub fn emit_with_phase(&self, phase: &str) {
+        let safe_focused_id = self
+            .focused_semantic_id
+            .as_deref()
+            .map(crate::logging::log_private_user_value);
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "tab_ai_target_audit",
@@ -183,7 +187,9 @@ impl TabAiTargetAudit {
             visible_target_count = self.visible_target_count,
             focused_source = ?self.focused_source,
             focused_kind = ?self.focused_kind,
-            focused_semantic_id = ?self.focused_semantic_id,
+            focused_semantic_id_bytes = ?safe_focused_id.as_ref().map(|value| value.raw_bytes),
+            focused_semantic_id_sha256 =
+                ?safe_focused_id.as_ref().map(|value| value.sha256.as_str()),
             visible_kinds = ?self.visible_kinds,
         );
     }
@@ -1816,45 +1822,19 @@ pub fn append_tab_ai_execution_receipt_to_path(
     receipt: &TabAiExecutionReceipt,
     path: &std::path::Path,
 ) -> Result<(), String> {
-    use std::io::Write as _;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "tab_ai_execution_audit_dir_failed: path={} error={}",
-                parent.display(),
-                e
-            )
-        })?;
-    }
-
-    let line = serde_json::to_string(receipt)
-        .map_err(|e| format!("tab_ai_execution_audit_serialize_failed: error={}", e))?;
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| {
-            format!(
-                "tab_ai_execution_audit_open_failed: path={} error={}",
-                path.display(),
-                e
-            )
-        })?;
-
-    writeln!(file, "{}", line).map_err(|e| {
-        format!(
-            "tab_ai_execution_audit_write_failed: path={} error={}",
-            path.display(),
-            e
-        )
+    let line = serde_json::to_vec(receipt).map_err(|error| {
+        private_tab_ai_persistence_error("tab_ai_execution_audit_serialize_failed", path, &error)
+    })?;
+    crate::atomic_file::append_private_jsonl_record(path, &line).map_err(|error| {
+        private_tab_ai_persistence_error("tab_ai_execution_audit_write_failed", path, &error)
     })?;
 
+    let safe_slug = crate::logging::log_private_user_value(&receipt.slug);
     tracing::info!(
         event = "tab_ai_execution_audit_written",
         status = ?receipt.status,
-        slug = %receipt.slug,
+        slug_bytes = safe_slug.raw_bytes,
+        slug_sha256 = %safe_slug.sha256,
         prompt_type = %receipt.prompt_type,
         model_id = %receipt.model_id,
         provider_id = %receipt.provider_id,
@@ -1899,28 +1879,36 @@ pub fn tab_ai_memory_index_path() -> Result<std::path::PathBuf, String> {
         .join(".tab-ai-memory.json"))
 }
 
+fn private_tab_ai_persistence_error(
+    code: &str,
+    path: &std::path::Path,
+    error: &impl std::fmt::Display,
+) -> String {
+    let safe_path = crate::logging::log_private_user_value(&path.display().to_string());
+    let safe_error = crate::logging::log_private_user_value(&error.to_string());
+    format!(
+        "{code}: path_bytes={} path_sha256={} error_bytes={} error_sha256={}",
+        safe_path.raw_bytes, safe_path.sha256, safe_error.raw_bytes, safe_error.sha256,
+    )
+}
+
 /// Read the Tab AI memory index from an explicit path.
 ///
 /// Returns an empty `Vec` if the index file does not exist.
 pub fn read_tab_ai_memory_index_from_path(
     path: &std::path::Path,
 ) -> Result<Vec<TabAiMemoryEntry>, String> {
-    if !path.exists() {
+    let exists = crate::atomic_file::inspect_private_file(path).map_err(|error| {
+        private_tab_ai_persistence_error("tab_ai_memory_read_failed", path, &error)
+    })?;
+    if !exists {
         return Ok(Vec::new());
     }
-    let json = std::fs::read_to_string(path).map_err(|e| {
-        format!(
-            "tab_ai_memory_read_failed: path={} error={}",
-            path.display(),
-            e
-        )
+    let json = crate::atomic_file::read_private_file(path).map_err(|error| {
+        private_tab_ai_persistence_error("tab_ai_memory_read_failed", path, &error)
     })?;
-    serde_json::from_str(&json).map_err(|e| {
-        format!(
-            "tab_ai_memory_parse_failed: path={} error={}",
-            path.display(),
-            e
-        )
+    serde_json::from_str(&json).map_err(|error| {
+        private_tab_ai_persistence_error("tab_ai_memory_parse_failed", path, &error)
     })
 }
 
@@ -1957,30 +1945,21 @@ pub fn write_tab_ai_memory_entry_to_path(
 
     entries.push(entry.clone());
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "tab_ai_memory_dir_failed: path={} error={}",
-                parent.display(),
-                e
-            )
-        })?;
-    }
-
-    let json = serde_json::to_string_pretty(&entries)
-        .map_err(|e| format!("tab_ai_memory_serialize_failed: error={}", e))?;
-    std::fs::write(path, json).map_err(|e| {
-        format!(
-            "tab_ai_memory_write_failed: path={} error={}",
-            path.display(),
-            e
-        )
+    let json = serde_json::to_string_pretty(&entries).map_err(|error| {
+        private_tab_ai_persistence_error("tab_ai_memory_serialize_failed", path, &error)
+    })?;
+    crate::atomic_file::write_private_atomic(path, json.as_bytes()).map_err(|error| {
+        private_tab_ai_persistence_error("tab_ai_memory_write_failed", path, &error)
     })?;
 
+    let safe_intent = crate::logging::log_private_user_value(&record.intent);
+    let safe_slug = crate::logging::log_private_user_value(&record.slug);
     tracing::info!(
         event = "tab_ai_memory_written",
-        intent = %record.intent,
-        slug = %record.slug,
+        intent_bytes = safe_intent.raw_bytes,
+        intent_sha256 = %safe_intent.sha256,
+        slug_bytes = safe_slug.raw_bytes,
+        slug_sha256 = %safe_slug.sha256,
         prompt_type = %record.prompt_type,
     );
 
@@ -2001,10 +1980,12 @@ pub fn write_tab_ai_memory_entry(
 /// `false` if removal failed.
 pub fn cleanup_tab_ai_temp_script(path: &str) -> bool {
     let p = std::path::Path::new(path);
+    let safe_path = crate::logging::log_private_user_value(path);
     if !p.exists() {
         tracing::info!(
             event = "tab_ai_temp_cleanup_noop",
-            path = %path,
+            path_bytes = safe_path.raw_bytes,
+            path_sha256 = %safe_path.sha256,
             reason = "already_absent",
         );
         return true;
@@ -2013,15 +1994,19 @@ pub fn cleanup_tab_ai_temp_script(path: &str) -> bool {
         Ok(()) => {
             tracing::info!(
                 event = "tab_ai_temp_cleanup_success",
-                path = %path,
+                path_bytes = safe_path.raw_bytes,
+                path_sha256 = %safe_path.sha256,
             );
             true
         }
         Err(e) => {
+            let safe_error = crate::logging::log_private_user_value(&e.to_string());
             tracing::warn!(
                 event = "tab_ai_temp_cleanup_failed",
-                path = %path,
-                error = %e,
+                path_bytes = safe_path.raw_bytes,
+                path_sha256 = %safe_path.sha256,
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
             );
             false
         }
@@ -2038,10 +2023,12 @@ pub fn should_offer_save(record: &TabAiExecutionRecord) -> bool {
         .filter(|line| !line.trim().is_empty())
         .count();
     let offer = non_empty_line_count >= 3;
+    let safe_slug = crate::logging::log_private_user_value(&record.slug);
     tracing::info!(
         event = "tab_ai_save_offer_decision",
         offer,
-        slug = %record.slug,
+        slug_bytes = safe_slug.raw_bytes,
+        slug_sha256 = %safe_slug.sha256,
         model_id = %record.model_id,
         provider_id = %record.provider_id,
         source_len = record.generated_source.len(),
@@ -2182,10 +2169,20 @@ fn score_tab_ai_memory_candidate(query: &str, entry: &TabAiMemoryEntry) -> f32 {
 
 /// Emit the structured log event for a memory resolution outcome.
 fn log_tab_ai_memory_resolution(outcome: &TabAiMemoryResolutionOutcome) {
+    let safe_query = crate::logging::log_private_user_value(&outcome.query);
+    let safe_normalized_query = crate::logging::log_private_user_value(&outcome.normalized_query);
+    let safe_index_path = crate::logging::log_private_user_value(&outcome.index_path);
+    let safe_matched_slugs: Vec<String> = outcome
+        .matched_slugs
+        .iter()
+        .map(|slug| crate::logging::log_private_user_value(slug).sha256)
+        .collect();
     tracing::info!(
         event = "tab_ai_memory_resolution",
-        query = %outcome.query,
-        normalized_query = %outcome.normalized_query,
+        query_bytes = safe_query.raw_bytes,
+        query_sha256 = %safe_query.sha256,
+        normalized_query_bytes = safe_normalized_query.raw_bytes,
+        normalized_query_sha256 = %safe_normalized_query.sha256,
         bundle_id = ?outcome.bundle_id,
         limit = outcome.limit,
         threshold = outcome.threshold,
@@ -2193,8 +2190,9 @@ fn log_tab_ai_memory_resolution(outcome: &TabAiMemoryResolutionOutcome) {
         match_count = outcome.match_count,
         top_score = ?outcome.top_score,
         reason = ?outcome.reason,
-        matched_slugs = ?outcome.matched_slugs,
-        index_path = %outcome.index_path,
+        matched_slugs_sha256 = ?safe_matched_slugs,
+        index_path_bytes = safe_index_path.raw_bytes,
+        index_path_sha256 = %safe_index_path.sha256,
     );
 }
 
@@ -3230,6 +3228,115 @@ mod tests {
             0,
             "2026-03-28T12:00:00Z".to_string(),
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_tab_ai_persistence_stores_memory_atomically_and_repairs_legacy_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("isolated private Tab AI memory fixture");
+        let path = directory.path().join("private-tab-ai-memory.json");
+        let record = sample_execution_record();
+        let written = write_tab_ai_memory_entry_to_path(&record, &path)
+            .expect("private owner-only Tab AI memory write");
+        assert_eq!(written.intent, record.intent);
+        assert_eq!(written.generated_source, record.generated_source);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let entries = read_tab_ai_memory_index_from_path(&path)
+            .expect("legacy Tab AI memory permissions repair before read");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].generated_source, record.generated_source);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_tab_ai_persistence_repairs_receipt_boundary_and_owner_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("isolated private Tab AI receipt fixture");
+        let path = directory.path().join("private-tab-ai-executions.jsonl");
+        let record = sample_execution_record();
+        let first = build_tab_ai_execution_receipt(
+            &record,
+            TabAiExecutionStatus::Dispatched,
+            false,
+            false,
+            None,
+        );
+        std::fs::write(&path, serde_json::to_vec(&first).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let second = build_tab_ai_execution_receipt(
+            &record,
+            TabAiExecutionStatus::Succeeded,
+            true,
+            true,
+            None,
+        );
+
+        append_tab_ai_execution_receipt_to_path(&second, &path)
+            .expect("append safe receipt after a legacy unterminated line");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<TabAiExecutionReceipt>(lines[1])
+                .unwrap()
+                .status,
+            TabAiExecutionStatus::Succeeded
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_tab_ai_persistence_refuses_symlinks_without_exposing_private_paths() {
+        let directory = tempfile::tempdir().expect("isolated private Tab AI symlink fixture");
+        let external = directory.path().join("unrelated-private-data.json");
+        let planted = directory
+            .path()
+            .join("private-cancer-treatment-memory.json");
+        std::fs::write(&external, "preserve unrelated private data").unwrap();
+        std::os::unix::fs::symlink(&external, &planted).unwrap();
+        let record = sample_execution_record();
+        let receipt = build_tab_ai_execution_receipt(
+            &record,
+            TabAiExecutionStatus::Succeeded,
+            true,
+            true,
+            None,
+        );
+
+        let read_error = read_tab_ai_memory_index_from_path(&planted)
+            .expect_err("Tab AI memory must not read a planted symlink");
+        assert!(!read_error.contains("private-cancer-treatment"));
+        let write_error = write_tab_ai_memory_entry_to_path(&record, &planted)
+            .expect_err("Tab AI memory must not write through a planted symlink");
+        assert!(!write_error.contains("private-cancer-treatment"));
+        let audit_error = append_tab_ai_execution_receipt_to_path(&receipt, &planted)
+            .expect_err("Tab AI receipts must not append through a planted symlink");
+        assert!(!audit_error.contains("private-cancer-treatment"));
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap(),
+            "preserve unrelated private data"
+        );
+        assert!(std::fs::symlink_metadata(&planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]

@@ -5,8 +5,7 @@ use super::model::ChatId;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const AI_PREFLIGHT_AUDIT_SCHEMA_VERSION: u32 = 3;
@@ -130,56 +129,29 @@ pub fn append_preflight_audit(
     let path = path
         .map(PathBuf::from)
         .unwrap_or_else(default_preflight_audit_log_path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
     compact_preflight_audits_if_needed(&path)?;
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .append(true)
-        .open(&path)?;
-    ensure_jsonl_append_boundary(&mut file)?;
-    writeln!(file, "{}", serde_json::to_string(audit)?)?;
+    let record = serde_json::to_vec(audit)?;
+    crate::atomic_file::append_private_jsonl_record(&path, &record)?;
     Ok(path)
-}
-
-fn ensure_jsonl_append_boundary(file: &mut fs::File) -> anyhow::Result<()> {
-    let len = file.metadata()?.len();
-    if len == 0 {
-        return Ok(());
-    }
-    file.seek(SeekFrom::End(-1))?;
-    let mut last = [0u8; 1];
-    file.read_exact(&mut last)?;
-    file.seek(SeekFrom::End(0))?;
-    if last[0] != b'\n' {
-        writeln!(file)?;
-    }
-    Ok(())
 }
 
 pub fn read_preflight_audits(path: Option<&Path>) -> anyhow::Result<Vec<AiPreflightAudit>> {
     let path = path
         .map(PathBuf::from)
         .unwrap_or_else(default_preflight_audit_log_path);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let file = OpenOptions::new().read(true).open(&path)?;
-    let reader = BufReader::new(file);
+    let contents = match crate::atomic_file::read_private_file(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
     let mut seen = BTreeSet::new();
     let mut audits = Vec::new();
 
-    for line in reader.lines() {
-        let line = line?;
+    for line in contents.lines() {
         if line.trim().is_empty() {
             continue;
         }
-        let audit: AiPreflightAudit = match serde_json::from_str(&line) {
+        let audit: AiPreflightAudit = match serde_json::from_str(line) {
             Ok(audit) => audit,
             Err(error) => {
                 tracing::warn!(
@@ -207,25 +179,32 @@ pub fn read_preflight_audits(path: Option<&Path>) -> anyhow::Result<Vec<AiPrefli
 }
 
 pub fn compact_preflight_audits_if_needed(path: &Path) -> anyhow::Result<()> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    if metadata.len() <= AI_PREFLIGHT_AUDIT_MAX_BYTES {
+    compact_preflight_audits_if_needed_with_limits(
+        path,
+        AI_PREFLIGHT_AUDIT_MAX_BYTES,
+        AI_PREFLIGHT_AUDIT_COMPACT_KEEP,
+    )
+}
+
+fn compact_preflight_audits_if_needed_with_limits(
+    path: &Path,
+    max_bytes: u64,
+    keep: usize,
+) -> anyhow::Result<()> {
+    if !crate::atomic_file::inspect_private_file(path)? {
+        return Ok(());
+    }
+    if std::fs::symlink_metadata(path)?.len() <= max_bytes {
         return Ok(());
     }
 
     let audits = read_preflight_audits(Some(path))?;
-    let start = audits.len().saturating_sub(AI_PREFLIGHT_AUDIT_COMPACT_KEEP);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)?;
+    let start = audits.len().saturating_sub(keep);
+    let mut compacted = Vec::new();
     for audit in audits.into_iter().skip(start) {
-        writeln!(file, "{}", serde_json::to_string(&audit)?)?;
+        writeln!(compacted, "{}", serde_json::to_string(&audit)?)?;
     }
+    crate::atomic_file::write_private_atomic(path, &compacted)?;
     Ok(())
 }
 
@@ -343,6 +322,95 @@ mod tests {
                     .to_string(),
             ),
         }
+    }
+
+    fn private_preflight_audit(correlation_id: &str) -> AiPreflightAudit {
+        AiPreflightAudit {
+            schema_version: AI_PREFLIGHT_AUDIT_SCHEMA_VERSION,
+            correlation_id: correlation_id.to_owned(),
+            preflight_generation: 7,
+            draft_fingerprint: Some("raw:19:authored:19".to_owned()),
+            chat_id: "private-chat-id".to_owned(),
+            message_id: None,
+            decision: PreparedMessageDecision::Blocked,
+            raw_content_chars: 19,
+            authored_content_chars: 19,
+            has_pending_image: false,
+            has_context_parts: true,
+            receipt: receipt_with_failure(),
+            actionable_failures: Vec::new(),
+            created_at: "2026-08-22T08:00:00Z".to_owned(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_preflight_audits_repair_legacy_boundaries_and_owner_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("isolated AI preflight audit fixture");
+        let path = directory.path().join("private-preflight.jsonl");
+        let first = private_preflight_audit("private-first");
+        std::fs::write(&path, serde_json::to_vec(&first).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        append_preflight_audit(Some(&path), &private_preflight_audit("private-second")).unwrap();
+        let audits = read_preflight_audits(Some(&path)).unwrap();
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].correlation_id, "private-first");
+        assert_eq!(audits[1].correlation_id, "private-second");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(std::fs::read_to_string(&path).unwrap().ends_with('\n'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_preflight_audits_reject_symlinks_before_read_append_or_compaction() {
+        let directory = tempfile::tempdir().expect("isolated AI preflight symlink fixture");
+        let external = directory.path().join("unrelated-private-data.jsonl");
+        let planted = directory.path().join("preflight.jsonl");
+        std::fs::write(&external, "preserve unrelated private data").unwrap();
+        std::os::unix::fs::symlink(&external, &planted).unwrap();
+
+        assert!(read_preflight_audits(Some(&planted)).is_err());
+        assert!(
+            append_preflight_audit(Some(&planted), &private_preflight_audit("hostile")).is_err()
+        );
+        assert!(compact_preflight_audits_if_needed_with_limits(&planted, 0, 1).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap(),
+            "preserve unrelated private data"
+        );
+        assert!(std::fs::symlink_metadata(&planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_preflight_audits_compact_atomically_without_exposing_old_entries() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("isolated AI preflight compaction fixture");
+        let path = directory.path().join("preflight.jsonl");
+        for id in ["private-first", "private-second", "private-third"] {
+            append_preflight_audit(Some(&path), &private_preflight_audit(id)).unwrap();
+        }
+        compact_preflight_audits_if_needed_with_limits(&path, 1, 2).unwrap();
+
+        let audits = read_preflight_audits(Some(&path)).unwrap();
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].correlation_id, "private-second");
+        assert_eq!(audits[1].correlation_id, "private-third");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -63,24 +62,22 @@ pub fn current_app_automation_memory_index_path() -> Result<PathBuf> {
 
 pub fn read_current_app_automation_memory_index(
 ) -> Result<Vec<CurrentAppAutomationMemoryIndexEntry>> {
-    let path = current_app_automation_memory_index_path()?;
-    if !path.exists() {
+    read_current_app_automation_memory_index_at(&current_app_automation_memory_index_path()?)
+}
+
+fn read_current_app_automation_memory_index_at(
+    path: &Path,
+) -> Result<Vec<CurrentAppAutomationMemoryIndexEntry>> {
+    if !crate::atomic_file::inspect_private_file(path)
+        .context("Failed inspecting current app automation memory index")?
+    {
         return Ok(Vec::new());
     }
 
-    let json = fs::read_to_string(&path).with_context(|| {
-        format!(
-            "Failed reading current app automation memory index at {}",
-            path.display()
-        )
-    })?;
+    let json = crate::atomic_file::read_private_file(path)
+        .context("Failed reading current app automation memory index")?;
 
-    serde_json::from_str(&json).with_context(|| {
-        format!(
-            "Failed parsing current app automation memory index at {}",
-            path.display()
-        )
-    })
+    serde_json::from_str(&json).context("Failed parsing current app automation memory index")
 }
 
 pub fn normalize_automation_memory_text(input: &str) -> String {
@@ -155,11 +152,24 @@ fn score_candidate(query: &str, entry: &CurrentAppAutomationMemoryIndexEntry) ->
 pub fn upsert_current_app_automation_memory_from_receipt(
     receipt: &GeneratedScriptReceipt,
 ) -> Result<()> {
+    if receipt.current_app_recipe.is_none() {
+        return Ok(());
+    }
+    upsert_current_app_automation_memory_from_receipt_at(
+        &current_app_automation_memory_index_path()?,
+        receipt,
+    )
+}
+
+fn upsert_current_app_automation_memory_from_receipt_at(
+    path: &Path,
+    receipt: &GeneratedScriptReceipt,
+) -> Result<()> {
     let Some(recipe) = receipt.current_app_recipe.clone() else {
         return Ok(());
     };
 
-    let mut entries = read_current_app_automation_memory_index()?;
+    let mut entries = read_current_app_automation_memory_index_at(path)?;
     let entry = CurrentAppAutomationMemoryIndexEntry {
         schema_version: CURRENT_APP_AUTOMATION_MEMORY_INDEX_SCHEMA_VERSION,
         slug: receipt.slug.clone(),
@@ -190,30 +200,20 @@ pub fn upsert_current_app_automation_memory_from_receipt(
             .then_with(|| right.written_at_unix_ms.cmp(&left.written_at_unix_ms))
     });
 
-    let path = current_app_automation_memory_index_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "Failed creating current app automation memory directory at {}",
-                parent.display()
-            )
-        })?;
-    }
-
     let json = serde_json::to_string_pretty(&entries)
         .context("Failed to serialize current app automation memory index")?;
-    fs::write(&path, json).with_context(|| {
-        format!(
-            "Failed writing current app automation memory index at {}",
-            path.display()
-        )
-    })?;
+    crate::atomic_file::write_private_atomic(path, json.as_bytes())
+        .context("Failed writing current app automation memory index")?;
 
+    let safe_lookup_key = crate::logging::log_private_user_value(&entry.lookup_key);
+    let safe_slug = crate::logging::log_private_user_value(&entry.slug);
     tracing::info!(
         category = "CURRENT_APP_AUTOMATION_MEMORY",
         action = "index_upsert",
-        lookup_key = %entry.lookup_key,
-        slug = %entry.slug,
+        lookup_key_bytes = safe_lookup_key.raw_bytes,
+        lookup_key_sha256 = %safe_lookup_key.sha256,
+        slug_bytes = safe_slug.raw_bytes,
+        slug_sha256 = %safe_slug.sha256,
         auto_replay_eligible = entry.auto_replay_eligible,
         "current_app_automation_memory.index_upserted"
     );
@@ -329,14 +329,18 @@ pub fn resolve_current_app_automation_from_memory(
         )
     };
 
+    let safe_query = crate::logging::log_private_user_value(query);
+    let safe_slug = crate::logging::log_private_user_value(&best_entry.slug);
     tracing::info!(
         category = "CURRENT_APP_AUTOMATION_MEMORY",
         action,
         best_score,
         considered,
         bundle_id = %snapshot.bundle_id,
-        query = %query,
-        slug = %best_entry.slug,
+        query_bytes = safe_query.raw_bytes,
+        query_sha256 = %safe_query.sha256,
+        slug_bytes = safe_slug.raw_bytes,
+        slug_sha256 = %safe_slug.sha256,
         "current_app_automation_memory.resolved"
     );
 

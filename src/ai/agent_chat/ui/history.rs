@@ -10,6 +10,7 @@ use std::sync::{Mutex, OnceLock};
 
 type HistoryFileSignature = Option<(std::path::PathBuf, std::time::SystemTime, u64)>;
 const HISTORY_SEARCH_TEXT_MAX_CHARS: usize = 4096;
+const ROOT_AGENT_CHAT_HISTORY_REFRESH_LABEL: &str = "root-agent_chat-history-cache";
 
 #[derive(Clone)]
 struct AgentChatHistoryIndexCache {
@@ -17,19 +18,30 @@ struct AgentChatHistoryIndexCache {
     entries: Vec<AgentChatHistoryEntry>,
 }
 
+type AgentChatHistoryRefreshLifecycle =
+    crate::scripts::root_search_contract::RootOwnedProviderRefreshLifecycle;
+pub(crate) type RootAgentChatHistoryRefresh =
+    crate::scripts::root_search_contract::RootOwnedProviderRefresh;
+
+pub(crate) struct RootAgentChatHistorySnapshot {
+    cache: AgentChatHistoryIndexCache,
+}
+
 static AGENT_CHAT_HISTORY_INDEX_CACHE: OnceLock<Mutex<Option<AgentChatHistoryIndexCache>>> =
     OnceLock::new();
-static AGENT_CHAT_HISTORY_REFRESH_IN_FLIGHT: OnceLock<Mutex<bool>> = OnceLock::new();
+static AGENT_CHAT_HISTORY_REFRESH_LIFECYCLE: OnceLock<Mutex<AgentChatHistoryRefreshLifecycle>> =
+    OnceLock::new();
 
 fn agent_chat_history_index_cache() -> &'static Mutex<Option<AgentChatHistoryIndexCache>> {
     AGENT_CHAT_HISTORY_INDEX_CACHE.get_or_init(|| Mutex::new(None))
 }
 
-fn agent_chat_history_refresh_in_flight() -> &'static Mutex<bool> {
-    AGENT_CHAT_HISTORY_REFRESH_IN_FLIGHT.get_or_init(|| Mutex::new(false))
+fn agent_chat_history_refresh_lifecycle() -> &'static Mutex<AgentChatHistoryRefreshLifecycle> {
+    AGENT_CHAT_HISTORY_REFRESH_LIFECYCLE
+        .get_or_init(|| Mutex::new(AgentChatHistoryRefreshLifecycle::default()))
 }
 
-fn invalidate_history_cache() {
+pub(crate) fn invalidate_history_cache() {
     if let Some(cache) = AGENT_CHAT_HISTORY_INDEX_CACHE.get() {
         if let Ok(mut guard) = cache.lock() {
             *guard = None;
@@ -342,10 +354,12 @@ fn rank_history_entries(
 /// Emits `agent_chat_history_search_executed` structured log on every call.
 pub(crate) fn search_history(query: &str, limit: usize) -> Vec<AgentChatHistorySearchHit> {
     let hits = rank_history_entries(load_history(), query, limit);
+    let safe_query = crate::logging::log_private_user_value(query);
     tracing::info!(
         target: "script_kit::tab_ai",
         event = "agent_chat_history_search_executed",
-        query = %query,
+        query_bytes = safe_query.raw_bytes,
+        query_sha256 = %safe_query.sha256,
         limit,
         hit_count = hits.len(),
     );
@@ -364,40 +378,83 @@ fn cached_history_entries_if_fresh() -> Option<Vec<AgentChatHistoryEntry>> {
     (cache.signature == signature).then(|| cache.entries.clone())
 }
 
-fn ensure_history_cache_warm() {
-    if let Ok(mut refreshing) = agent_chat_history_refresh_in_flight().lock() {
-        if *refreshing {
-            return;
-        }
-        *refreshing = true;
-    } else {
-        return;
-    }
+pub(crate) fn root_agent_chat_history_cache_is_fresh() -> bool {
+    cached_history_entries_if_fresh().is_some()
+}
 
-    let spawn_result = std::thread::Builder::new()
-        .name("root-agent_chat-history-cache".to_string())
-        .spawn(|| {
-            let _ = load_history();
-            if let Ok(mut refreshing) = agent_chat_history_refresh_in_flight().lock() {
-                *refreshing = false;
-            }
-        });
+pub(crate) fn try_begin_root_agent_chat_history_refresh() -> Option<RootAgentChatHistoryRefresh> {
+    let cache_is_fresh = root_agent_chat_history_cache_is_fresh();
+    agent_chat_history_refresh_lifecycle().lock().ok()?.begin(
+        sk_protocol::command_contract::CommandSource::Conversation,
+        cache_is_fresh,
+    )
+}
 
-    if spawn_result.is_err() {
-        if let Ok(mut refreshing) = agent_chat_history_refresh_in_flight().lock() {
-            *refreshing = false;
-        }
+fn read_root_agent_chat_history_snapshot_at(
+    path: &std::path::Path,
+) -> RootAgentChatHistorySnapshot {
+    let signature = history_file_signature(path);
+    let entries = read_private_history_file(path)
+        .map(|content| parse_history_entries(&content))
+        .unwrap_or_default();
+    RootAgentChatHistorySnapshot {
+        cache: AgentChatHistoryIndexCache { signature, entries },
     }
+}
+
+pub(crate) fn read_root_agent_chat_history_snapshot() -> RootAgentChatHistorySnapshot {
+    tracing::debug!(
+        target: "script_kit::search",
+        worker = ROOT_AGENT_CHAT_HISTORY_REFRESH_LABEL,
+        "Reading owned private conversation history snapshot"
+    );
+    read_root_agent_chat_history_snapshot_at(&history_path())
+}
+
+fn root_agent_chat_history_snapshot_is_current_at(
+    snapshot: &RootAgentChatHistorySnapshot,
+    path: &std::path::Path,
+) -> bool {
+    snapshot.cache.signature == history_file_signature(path)
+}
+
+pub(crate) fn finish_root_agent_chat_history_refresh(
+    refresh: RootAgentChatHistoryRefresh,
+    snapshot: RootAgentChatHistorySnapshot,
+) -> bool {
+    let Ok(mut lifecycle) = agent_chat_history_refresh_lifecycle().lock() else {
+        return false;
+    };
+    if !lifecycle.finish(refresh) {
+        return false;
+    }
+    drop(lifecycle);
+
+    if !root_agent_chat_history_snapshot_is_current_at(&snapshot, &history_path()) {
+        return false;
+    }
+    let Ok(mut cache) = agent_chat_history_index_cache().lock() else {
+        return false;
+    };
+    *cache = Some(snapshot.cache);
+    true
+}
+
+pub(crate) fn discard_root_agent_chat_history_refresh(
+    refresh: RootAgentChatHistoryRefresh,
+) -> bool {
+    agent_chat_history_refresh_lifecycle()
+        .lock()
+        .is_ok_and(|mut lifecycle| lifecycle.finish(refresh))
 }
 
 /// Cache-only Agent Chat history search for root launcher passive rows.
 ///
-/// A cold or stale JSONL index starts a background load and returns no hits for
-/// the current frame. Late completion warms a future frame without invalidating
-/// or notifying the active main menu.
+/// A cold or stale JSONL index returns no hits without starting work or
+/// publishing a snapshot. The real input owner starts a generation-fenced
+/// refresh and explicitly reconciles the selected launcher row on completion.
 pub(crate) fn search_history_cached(query: &str, limit: usize) -> Vec<AgentChatHistorySearchHit> {
     let Some(entries) = cached_history_entries_if_fresh() else {
-        ensure_history_cache_warm();
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "root_agent_chat_history_search_cache_miss",
@@ -426,10 +483,6 @@ fn history_path() -> std::path::PathBuf {
     crate::setup::get_kit_path().join("agent_chat-history.jsonl")
 }
 
-fn prompt_history_path() -> std::path::PathBuf {
-    crate::setup::get_kit_path().join("agent_chat-prompt-history.jsonl")
-}
-
 /// One submitted composer prompt, for shell-style Up/Down recall.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PromptHistoryLine {
@@ -443,55 +496,92 @@ const PROMPT_HISTORY_MAX_LINES: usize = 200;
 /// duplicates are skipped; the file compacts to the newest
 /// `PROMPT_HISTORY_MAX_LINES` entries once it doubles that size.
 pub(crate) fn append_prompt_history(prompt: &str) {
+    if let Err(error) = append_prompt_history_at(&crate::setup::get_kit_path(), prompt) {
+        tracing::debug!(reason = %error, "agent_chat_prompt_history_write_failed");
+    }
+}
+
+fn append_prompt_history_at(
+    kit_root: &std::path::Path,
+    prompt: &str,
+) -> Result<(), AgentChatConversationPersistenceError> {
+    use std::io::Write as _;
+
     let prompt = prompt.trim();
     if prompt.is_empty() {
-        return;
-    }
-    if load_prompt_history(1).last().map(String::as_str) == Some(prompt) {
-        return;
+        return Ok(());
     }
 
-    let path = prompt_history_path();
+    let path = kit_root.join("agent_chat-prompt-history.jsonl");
+    let _ = inspect_regular_history_file(&path)?;
+    if load_prompt_history_at(kit_root, 1)?
+        .last()
+        .map(String::as_str)
+        == Some(prompt)
+    {
+        return Ok(());
+    }
+
     let line = PromptHistoryLine {
         timestamp: chrono::Utc::now().to_rfc3339(),
         prompt: prompt.to_string(),
     };
-    let Ok(json) = serde_json::to_string(&line) else {
-        return;
-    };
+    let json = serde_json::to_string(&line)
+        .map_err(|_| AgentChatConversationPersistenceError::SerializationFailed)?;
 
-    use std::io::Write;
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    else {
-        tracing::debug!(path = %path.display(), "agent_chat_prompt_history_write_failed");
-        return;
-    };
-    let _ = writeln!(file, "{json}");
-
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        if content.lines().count() > PROMPT_HISTORY_MAX_LINES * 2 {
-            let keep: Vec<&str> = content
-                .lines()
-                .rev()
-                .take(PROMPT_HISTORY_MAX_LINES)
-                .collect();
-            if let Ok(mut f) = std::fs::File::create(&path) {
-                for entry in keep.iter().rev() {
-                    let _ = writeln!(f, "{entry}");
-                }
-            }
-        }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
+    let mut file = options
+        .open(&path)
+        .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+    ensure_private_regular_history_file(&file)?;
+    writeln!(file, "{json}")
+        .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+    drop(file);
+
+    let content = read_private_history_file(&path)?;
+    if content.lines().count() > PROMPT_HISTORY_MAX_LINES * 2 {
+        let keep: Vec<&str> = content
+            .lines()
+            .rev()
+            .take(PROMPT_HISTORY_MAX_LINES)
+            .collect();
+        let mut rewritten = String::new();
+        for entry in keep.iter().rev() {
+            rewritten.push_str(entry);
+            rewritten.push('\n');
+        }
+        write_private_history_file_atomically(&path, &rewritten)?;
+    }
+
+    Ok(())
 }
 
 /// Load the newest `limit` submitted prompts, oldest → newest.
 pub(crate) fn load_prompt_history(limit: usize) -> Vec<String> {
-    let Ok(content) = std::fs::read_to_string(prompt_history_path()) else {
-        return Vec::new();
-    };
+    match load_prompt_history_at(&crate::setup::get_kit_path(), limit) {
+        Ok(prompts) => prompts,
+        Err(error) => {
+            tracing::debug!(reason = %error, "agent_chat_prompt_history_read_failed");
+            Vec::new()
+        }
+    }
+}
+
+fn load_prompt_history_at(
+    kit_root: &std::path::Path,
+    limit: usize,
+) -> Result<Vec<String>, AgentChatConversationPersistenceError> {
+    let path = kit_root.join("agent_chat-prompt-history.jsonl");
+    if !inspect_regular_history_file(&path)? {
+        return Ok(Vec::new());
+    }
+    let content = read_private_history_file(&path)?;
     let mut prompts: Vec<String> = content
         .lines()
         .rev()
@@ -500,72 +590,286 @@ pub(crate) fn load_prompt_history(limit: usize) -> Vec<String> {
         .take(limit)
         .collect();
     prompts.reverse();
-    prompts
+    Ok(prompts)
 }
 
 fn conversations_dir() -> std::path::PathBuf {
     crate::setup::get_kit_path().join("agent_chat-conversations")
 }
 
-/// Append a history entry to the JSONL index file.
-/// Compacts the file when it exceeds 200 lines.
-pub(crate) fn save_history_entry(entry: &AgentChatHistoryEntry) {
-    let path = history_path();
-    let Ok(json) = serde_json::to_string(entry) else {
-        return;
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentChatConversationPersistenceError {
+    InvalidSessionId,
+    UnsafeConversationDirectory,
+    UnsafeFileTarget,
+    SessionIdMismatch,
+    SerializationFailed,
+    InvalidConversationPayload,
+    Io(std::io::ErrorKind),
+}
 
-    use std::io::Write;
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    else {
-        tracing::debug!(path = %path.display(), "agent_chat_history_write_failed");
-        return;
-    };
-    let _ = writeln!(file, "{json}");
-    invalidate_history_cache();
-
-    // Compact when file grows too large (>200 lines)
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        let line_count = content.lines().count();
-        if line_count > 200 {
-            let compacted = load_history();
-            if let Ok(mut f) = std::fs::File::create(&path) {
-                for e in compacted.iter().rev() {
-                    if let Ok(j) = serde_json::to_string(e) {
-                        let _ = writeln!(f, "{j}");
-                    }
-                }
-                invalidate_history_cache();
+impl std::fmt::Display for AgentChatConversationPersistenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSessionId => formatter.write_str("invalid Agent Chat session identifier"),
+            Self::UnsafeConversationDirectory => {
+                formatter.write_str("unsafe Agent Chat conversation directory")
             }
+            Self::UnsafeFileTarget => formatter.write_str("unsafe Agent Chat history file"),
+            Self::SessionIdMismatch => {
+                formatter.write_str("saved Agent Chat conversation identity does not match")
+            }
+            Self::SerializationFailed => {
+                formatter.write_str("failed to encode Agent Chat conversation")
+            }
+            Self::InvalidConversationPayload => {
+                formatter.write_str("invalid saved Agent Chat conversation")
+            }
+            Self::Io(kind) => write!(formatter, "Agent Chat history I/O failed ({kind:?})"),
         }
     }
 }
 
-/// Save full conversation messages to a session-specific JSON file.
-pub(crate) fn save_conversation(conversation: &SavedConversation) {
-    let dir = conversations_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        tracing::debug!(dir = %dir.display(), "agent_chat_conversations_dir_create_failed");
-        return;
+impl std::error::Error for AgentChatConversationPersistenceError {}
+
+pub(super) fn validate_agent_chat_session_id(
+    session_id: &str,
+) -> Result<(), AgentChatConversationPersistenceError> {
+    use std::path::Component;
+
+    let mut chars = session_id.chars();
+    let has_windows_drive_prefix = matches!(
+        (chars.next(), chars.next()),
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic()
+    );
+    if session_id.is_empty()
+        || session_id.trim().is_empty()
+        || has_windows_drive_prefix
+        || session_id
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
+        return Err(AgentChatConversationPersistenceError::InvalidSessionId);
     }
 
-    let path = dir.join(format!("{}.json", conversation.session_id));
-    match serde_json::to_string_pretty(conversation) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                tracing::debug!(path = %path.display(), %e, "agent_chat_conversation_write_failed");
+    let mut components = std::path::Path::new(session_id).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(component)), None)
+            if component == std::ffi::OsStr::new(session_id) =>
+        {
+            Ok(())
+        }
+        _ => Err(AgentChatConversationPersistenceError::InvalidSessionId),
+    }
+}
+
+fn conversation_path_at(
+    kit_root: &std::path::Path,
+    session_id: &str,
+) -> Result<std::path::PathBuf, AgentChatConversationPersistenceError> {
+    validate_agent_chat_session_id(session_id)?;
+    Ok(kit_root
+        .join("agent_chat-conversations")
+        .join(format!("{session_id}.json")))
+}
+
+pub(super) fn inspect_regular_history_file(
+    path: &std::path::Path,
+) -> Result<bool, AgentChatConversationPersistenceError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => Ok(true),
+        Ok(_) => Err(AgentChatConversationPersistenceError::UnsafeFileTarget),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(AgentChatConversationPersistenceError::Io(error.kind())),
+    }
+}
+
+pub(super) fn inspect_conversation_directory(
+    path: &std::path::Path,
+) -> Result<bool, AgentChatConversationPersistenceError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => Ok(true),
+        Ok(_) => Err(AgentChatConversationPersistenceError::UnsafeConversationDirectory),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(AgentChatConversationPersistenceError::Io(error.kind())),
+    }
+}
+
+/// Repair legacy world/group-readable history through its already-open,
+/// no-follow file descriptor before exposing or appending private content.
+fn ensure_private_regular_history_file(
+    file: &std::fs::File,
+) -> Result<(), AgentChatConversationPersistenceError> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+    if !metadata.is_file() {
+        return Err(AgentChatConversationPersistenceError::UnsafeFileTarget);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+        }
+    }
+    Ok(())
+}
+
+fn read_private_history_file(
+    path: &std::path::Path,
+) -> Result<String, AgentChatConversationPersistenceError> {
+    use std::io::Read as _;
+
+    if !inspect_regular_history_file(path)? {
+        return Err(AgentChatConversationPersistenceError::Io(
+            std::io::ErrorKind::NotFound,
+        ));
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+    ensure_private_regular_history_file(&file)?;
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+    Ok(contents)
+}
+
+pub(super) fn write_private_history_file_atomically(
+    destination: &std::path::Path,
+    contents: &str,
+) -> Result<(), AgentChatConversationPersistenceError> {
+    use std::io::Write as _;
+
+    let _ = inspect_regular_history_file(destination)?;
+    let parent = destination
+        .parent()
+        .ok_or(AgentChatConversationPersistenceError::UnsafeFileTarget)?;
+    let temporary = parent.join(format!(".agent-chat-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+        file.write_all(contents.as_bytes())
+            .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+        file.flush()
+            .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+        drop(file);
+
+        // Revalidate immediately before rename. Renaming replaces a raced
+        // directory entry itself; it never writes through a destination link.
+        let _ = inspect_regular_history_file(destination)?;
+        std::fs::rename(&temporary, destination)
+            .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Append a history entry to the JSONL index file.
+/// Compacts the file when it exceeds 200 lines.
+pub(crate) fn save_history_entry(entry: &AgentChatHistoryEntry) {
+    if let Err(error) = save_history_entry_at(&crate::setup::get_kit_path(), entry) {
+        tracing::debug!(reason = %error, "agent_chat_history_write_failed");
+    }
+}
+
+fn save_history_entry_at(
+    kit_root: &std::path::Path,
+    entry: &AgentChatHistoryEntry,
+) -> Result<(), AgentChatConversationPersistenceError> {
+    use std::io::Write as _;
+
+    validate_agent_chat_session_id(&entry.session_id)?;
+    let path = kit_root.join("agent_chat-history.jsonl");
+    let json = serde_json::to_string(entry)
+        .map_err(|_| AgentChatConversationPersistenceError::SerializationFailed)?;
+    let _ = inspect_regular_history_file(&path)?;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+    ensure_private_regular_history_file(&file)?;
+    writeln!(file, "{json}")
+        .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+    drop(file);
+    invalidate_history_cache();
+
+    // Compact when file grows too large (>200 lines)
+    let content = read_private_history_file(&path)?;
+    if content.lines().count() > 200 {
+        let compacted = parse_history_entries(&content);
+        let mut rewritten = String::new();
+        for compacted_entry in compacted.iter().rev() {
+            if let Ok(json) = serde_json::to_string(compacted_entry) {
+                rewritten.push_str(&json);
+                rewritten.push('\n');
             }
         }
-        Err(e) => {
-            tracing::debug!(%e, "agent_chat_conversation_serialize_failed");
+        write_private_history_file_atomically(&path, &rewritten)?;
+        invalidate_history_cache();
+    }
+
+    Ok(())
+}
+
+/// Save full conversation messages to a session-specific JSON file.
+pub(crate) fn save_conversation(conversation: &SavedConversation) {
+    match save_conversation_at(&crate::setup::get_kit_path(), conversation) {
+        Ok(()) => cleanup_old_conversations(50),
+        Err(error) => {
+            tracing::debug!(reason = %error, "agent_chat_conversation_write_failed");
+        }
+    }
+}
+
+fn save_conversation_at(
+    kit_root: &std::path::Path,
+    conversation: &SavedConversation,
+) -> Result<(), AgentChatConversationPersistenceError> {
+    // Validate the untrusted session before creating even the containing
+    // directory: hostile IDs must not produce any filesystem side effects.
+    let path = conversation_path_at(kit_root, &conversation.session_id)?;
+    let json = serde_json::to_string_pretty(conversation)
+        .map_err(|_| AgentChatConversationPersistenceError::SerializationFailed)?;
+    let directory = kit_root.join("agent_chat-conversations");
+    if !inspect_conversation_directory(&directory)? {
+        std::fs::create_dir_all(&directory)
+            .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+        if !inspect_conversation_directory(&directory)? {
+            return Err(AgentChatConversationPersistenceError::UnsafeConversationDirectory);
         }
     }
 
-    // Clean up old conversations (keep most recent 50)
-    cleanup_old_conversations(50);
+    write_private_history_file_atomically(&path, &json)
 }
 
 /// Load history entries from the JSONL file (most recent first).
@@ -584,7 +888,7 @@ pub(crate) fn load_history() -> Vec<AgentChatHistoryEntry> {
         }
     }
 
-    let entries = std::fs::read_to_string(&path)
+    let entries = read_private_history_file(&path)
         .map(|content| parse_history_entries(&content))
         .unwrap_or_default();
 
@@ -599,15 +903,17 @@ pub(crate) fn load_history() -> Vec<AgentChatHistoryEntry> {
 }
 
 fn history_file_signature(path: &std::path::Path) -> HistoryFileSignature {
-    std::fs::metadata(path).ok().map(|metadata| {
-        (
-            path.to_path_buf(),
-            metadata
-                .modified()
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-            metadata.len(),
-        )
-    })
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    Some((
+        path.to_path_buf(),
+        metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        metadata.len(),
+    ))
 }
 
 fn parse_history_entries(content: &str) -> Vec<AgentChatHistoryEntry> {
@@ -657,30 +963,66 @@ fn parse_history_entries(content: &str) -> Vec<AgentChatHistoryEntry> {
 /// fall back — e.g. a brain chat_turn memory whose conversation file is gone
 /// stages the memory as a context chip instead of opening an empty chat.
 pub(crate) fn conversation_exists(session_id: &str) -> bool {
-    conversations_dir()
-        .join(format!("{session_id}.json"))
-        .is_file()
+    conversation_exists_at(&crate::setup::get_kit_path(), session_id).unwrap_or(false)
+}
+
+fn conversation_exists_at(
+    kit_root: &std::path::Path,
+    session_id: &str,
+) -> Result<bool, AgentChatConversationPersistenceError> {
+    let path = conversation_path_at(kit_root, session_id)?;
+    let directory = kit_root.join("agent_chat-conversations");
+    if !inspect_conversation_directory(&directory)? {
+        return Ok(false);
+    }
+    inspect_regular_history_file(&path)
 }
 
 /// Load a full conversation by session ID.
 pub(crate) fn load_conversation(session_id: &str) -> Option<SavedConversation> {
-    let path = conversations_dir().join(format!("{session_id}.json"));
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
+    load_conversation_at(&crate::setup::get_kit_path(), session_id)
+        .ok()
+        .flatten()
+}
+
+fn load_conversation_at(
+    kit_root: &std::path::Path,
+    session_id: &str,
+) -> Result<Option<SavedConversation>, AgentChatConversationPersistenceError> {
+    let path = conversation_path_at(kit_root, session_id)?;
+    if !conversation_exists_at(kit_root, session_id)? {
+        return Ok(None);
+    }
+
+    let content = read_private_history_file(&path)?;
+    let conversation: SavedConversation = serde_json::from_str(&content)
+        .map_err(|_| AgentChatConversationPersistenceError::InvalidConversationPayload)?;
+    if conversation.session_id != session_id {
+        return Err(AgentChatConversationPersistenceError::SessionIdMismatch);
+    }
+    Ok(Some(conversation))
 }
 
 pub(crate) fn rename_conversation(session_id: &str, new_title: &str) -> anyhow::Result<()> {
+    rename_conversation_at(&crate::setup::get_kit_path(), session_id, new_title)
+}
+
+fn rename_conversation_at(
+    kit_root: &std::path::Path,
+    session_id: &str,
+    new_title: &str,
+) -> anyhow::Result<()> {
     use anyhow::Context;
 
-    let mut conversation = load_conversation(session_id)
-        .with_context(|| format!("load saved Agent Chat conversation {session_id}"))?;
+    validate_agent_chat_session_id(session_id)?;
+    let mut conversation = load_conversation_at(kit_root, session_id)?
+        .context("load saved Agent Chat conversation")?;
     let sanitized = sanitize_conversation_title(new_title);
     conversation.custom_title = (!sanitized.is_empty()).then_some(sanitized);
-    save_conversation(&conversation);
-
-    let entry = build_history_entry(&conversation)
-        .with_context(|| format!("rebuild Agent Chat history entry {session_id}"))?;
-    save_history_entry(&entry);
+    let entry = build_history_entry(&conversation).context("rebuild Agent Chat history entry")?;
+    let _ = inspect_regular_history_file(&kit_root.join("agent_chat-history.jsonl"))?;
+    save_conversation_at(kit_root, &conversation)?;
+    save_history_entry_at(kit_root, &entry)?;
     Ok(())
 }
 
@@ -690,42 +1032,70 @@ pub(crate) fn rename_conversation(session_id: &str, new_title: &str) -> anyhow::
 /// without the deleted `session_id`. Returns `Ok(())` even if the
 /// session was not found (idempotent).
 pub(crate) fn delete_conversation(session_id: &str) -> anyhow::Result<()> {
-    use anyhow::Context;
+    delete_conversation_at(&crate::setup::get_kit_path(), session_id)?;
+    tracing::info!(event = "agent_chat_history_item_deleted", session_id = %session_id);
+    Ok(())
+}
 
-    // Remove the conversation JSON file if it exists.
-    let conversation_path = conversations_dir().join(format!("{session_id}.json"));
-    if conversation_path.exists() {
-        std::fs::remove_file(&conversation_path).with_context(|| {
-            format!("remove saved conversation {}", conversation_path.display())
-        })?;
+fn delete_conversation_at(kit_root: &std::path::Path, session_id: &str) -> anyhow::Result<()> {
+    let conversation_path = conversation_path_at(kit_root, session_id)?;
+    let directory = kit_root.join("agent_chat-conversations");
+    let conversation_exists = if inspect_conversation_directory(&directory)? {
+        inspect_regular_history_file(&conversation_path)?
+    } else {
+        false
+    };
+    if conversation_exists {
+        let _ = load_conversation_at(kit_root, session_id)?
+            .ok_or(AgentChatConversationPersistenceError::InvalidConversationPayload)?;
     }
+    let attachment_paths =
+        super::history_attachment::existing_history_attachment_paths_at(kit_root, session_id)?;
 
-    // Rewrite the history index without the deleted session.
-    let hp = history_path();
-    if hp.exists() {
-        let entries: Vec<AgentChatHistoryEntry> = load_history()
+    // Preflight and fully prepare the index before mutating either target. An
+    // unsafe index must never delete a conversation as a partial side effect.
+    let index_path = kit_root.join("agent_chat-history.jsonl");
+    let rewritten_index = if inspect_regular_history_file(&index_path)? {
+        let content = read_private_history_file(&index_path)?;
+        let entries = parse_history_entries(&content);
+        let mut rewritten = String::new();
+        for entry in entries
             .into_iter()
             .filter(|entry| entry.session_id != session_id)
-            .collect();
-
-        let mut out = String::new();
-        for entry in &entries {
-            if let Ok(json) = serde_json::to_string(entry) {
-                out.push_str(&json);
-                out.push('\n');
-            }
+        {
+            let json = serde_json::to_string(&entry)
+                .map_err(|_| AgentChatConversationPersistenceError::SerializationFailed)?;
+            rewritten.push_str(&json);
+            rewritten.push('\n');
         }
-        std::fs::write(&hp, out).with_context(|| format!("rewrite {}", hp.display()))?;
-        invalidate_history_cache();
+        Some(rewritten)
+    } else {
+        None
+    };
+
+    if conversation_exists {
+        std::fs::remove_file(&conversation_path)
+            .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
     }
 
-    tracing::info!(event = "agent_chat_history_item_deleted", session_id = %session_id);
+    if let Some(rewritten) = rewritten_index {
+        write_private_history_file_atomically(&index_path, &rewritten)?;
+        invalidate_history_cache();
+    }
+    for attachment in attachment_paths {
+        std::fs::remove_file(&attachment)
+            .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
+    }
+
     Ok(())
 }
 
 /// Remove oldest conversation files beyond the keep limit.
 fn cleanup_old_conversations(keep: usize) {
     let dir = conversations_dir();
+    if !matches!(inspect_conversation_directory(&dir), Ok(true)) {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
     };
@@ -734,7 +1104,13 @@ fn cleanup_old_conversations(keep: usize) {
         .flatten()
         .filter_map(|e| {
             let path = e.path();
-            let modified = e.metadata().ok()?.modified().ok()?;
+            let session_id = path.file_name()?.to_str()?.strip_suffix(".json")?;
+            validate_agent_chat_session_id(session_id).ok()?;
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return None;
+            }
+            let modified = metadata.modified().ok()?;
             Some((path, modified))
         })
         .collect();
@@ -783,6 +1159,79 @@ mod tests {
     // repoints SK_PATH (dictation history, config, scriptlets, ...).
     fn history_env_lock() -> &'static Mutex<()> {
         crate::test_utils::SK_PATH_TEST_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn root_history_refresh_never_starts_for_fresh_cache_or_duplicates_active_worker() {
+        let source = sk_protocol::command_contract::CommandSource::Conversation;
+        let mut lifecycle = AgentChatHistoryRefreshLifecycle::default();
+        assert!(lifecycle.begin(source, true).is_none());
+
+        let first = lifecycle
+            .begin(source, false)
+            .expect("cold cache starts one worker");
+        assert_eq!(first.generation, 1);
+        assert!(lifecycle.begin(source, false).is_none());
+        assert!(lifecycle.finish(first));
+        assert!(lifecycle.begin(source, false).is_some());
+    }
+
+    #[test]
+    fn root_history_refresh_stale_completion_cannot_release_a_newer_owned_worker() {
+        let source = sk_protocol::command_contract::CommandSource::Conversation;
+        let mut lifecycle = AgentChatHistoryRefreshLifecycle::default();
+        let stale = lifecycle.begin(source, false).expect("first owned worker");
+        assert!(lifecycle.finish(stale));
+
+        let current = lifecycle
+            .begin(source, false)
+            .expect("replacement owned worker");
+        assert!(current.generation > stale.generation);
+        assert!(!lifecycle.finish(stale));
+        assert!(lifecycle.begin(source, false).is_none());
+        assert!(lifecycle.finish(current));
+    }
+
+    #[test]
+    fn root_history_refresh_generation_wrap_never_issues_the_unowned_zero_token() {
+        let mut lifecycle = AgentChatHistoryRefreshLifecycle {
+            next_generation: u64::MAX,
+            in_flight: None,
+        };
+        let refresh = lifecycle
+            .begin(
+                sk_protocol::command_contract::CommandSource::Conversation,
+                false,
+            )
+            .expect("wrapped generation");
+        assert_eq!(refresh.generation, 1);
+        assert!(lifecycle.finish(refresh));
+    }
+
+    #[test]
+    fn root_history_refresh_reads_private_snapshot_without_publishing_changed_file() {
+        let temp = tempfile::tempdir().expect("isolated history refresh fixture");
+        let path = temp.path().join("history.jsonl");
+        let entry = AgentChatHistoryEntry {
+            session_id: "owned-history-session".to_owned(),
+            first_message: "private conversation".to_owned(),
+            timestamp: "2026-08-22T10:00:00Z".to_owned(),
+            ..Default::default()
+        };
+        std::fs::write(&path, serde_json::to_string(&entry).unwrap()).unwrap();
+
+        let snapshot = read_root_agent_chat_history_snapshot_at(&path);
+        assert_eq!(snapshot.cache.entries.len(), 1);
+        assert_eq!(snapshot.cache.entries[0].session_id, entry.session_id);
+        assert!(root_agent_chat_history_snapshot_is_current_at(
+            &snapshot, &path
+        ));
+
+        std::fs::write(&path, "a newer and deliberately different private snapshot")
+            .expect("replace history after worker read");
+        assert!(!root_agent_chat_history_snapshot_is_current_at(
+            &snapshot, &path
+        ));
     }
 
     // ── Serde roundtrip ─────────────────────────────────────────────
@@ -840,6 +1289,576 @@ mod tests {
         let json = serde_json::to_string_pretty(&conv).expect("serialize");
         assert!(json.contains("hello"));
         assert!(json.contains("hi there!"));
+    }
+
+    #[test]
+    fn prompt_history_preserves_trimmed_private_values_order_and_consecutive_deduplication() {
+        let temp = tempfile::tempdir().expect("isolated prompt fixture");
+        assert_eq!(load_prompt_history_at(temp.path(), 10), Ok(Vec::new()));
+        assert_eq!(append_prompt_history_at(temp.path(), "   \n"), Ok(()));
+        assert!(!temp.path().join("agent_chat-prompt-history.jsonl").exists());
+
+        append_prompt_history_at(temp.path(), "  first private prompt  ")
+            .expect("first private prompt saves");
+        append_prompt_history_at(temp.path(), "first private prompt")
+            .expect("consecutive duplicate is suppressed");
+        append_prompt_history_at(temp.path(), "second private prompt")
+            .expect("second private prompt saves");
+        append_prompt_history_at(temp.path(), "first private prompt")
+            .expect("non-consecutive repeated prompt remains legitimate");
+
+        assert_eq!(
+            load_prompt_history_at(temp.path(), 10),
+            Ok(vec![
+                "first private prompt".to_string(),
+                "second private prompt".to_string(),
+                "first private prompt".to_string(),
+            ]),
+        );
+        assert_eq!(
+            load_prompt_history_at(temp.path(), 2),
+            Ok(vec![
+                "second private prompt".to_string(),
+                "first private prompt".to_string(),
+            ]),
+        );
+        assert_eq!(load_prompt_history_at(temp.path(), 0), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn prompt_history_compaction_preserves_only_newest_entries_in_chronological_order() {
+        let temp = tempfile::tempdir().expect("isolated prompt fixture");
+        let path = temp.path().join("agent_chat-prompt-history.jsonl");
+        let mut seeded = String::new();
+        for index in 0..PROMPT_HISTORY_MAX_LINES * 2 {
+            let line = PromptHistoryLine {
+                timestamp: "2026-04-01T18:00:00Z".to_string(),
+                prompt: format!("private-prompt-{index}"),
+            };
+            seeded.push_str(&serde_json::to_string(&line).expect("synthetic prompt line"));
+            seeded.push('\n');
+        }
+        write_private_history_file_atomically(&path, &seeded)
+            .expect("private bounded prompt fixture");
+
+        append_prompt_history_at(temp.path(), "  newest private prompt  ")
+            .expect("one extra prompt triggers private atomic compaction");
+        let loaded = load_prompt_history_at(temp.path(), usize::MAX)
+            .expect("compacted private prompts remain readable");
+        assert_eq!(loaded.len(), PROMPT_HISTORY_MAX_LINES);
+        assert_eq!(
+            loaded.first().map(String::as_str),
+            Some("private-prompt-201")
+        );
+        assert_eq!(
+            loaded.last().map(String::as_str),
+            Some("newest private prompt")
+        );
+        assert_eq!(
+            std::fs::read_to_string(path)
+                .expect("compacted prompt file remains regular")
+                .lines()
+                .count(),
+            PROMPT_HISTORY_MAX_LINES,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prompt_history_never_follows_symlinked_private_prompt_store() {
+        let temp = tempfile::tempdir().expect("isolated prompt fixture");
+        let root = temp.path().join("kit");
+        std::fs::create_dir(&root).expect("isolated kit root");
+        let external = temp.path().join("unrelated-sensitive-file.txt");
+        std::fs::write(&external, "external private content")
+            .expect("external private file fixture");
+        std::os::unix::fs::symlink(&external, root.join("agent_chat-prompt-history.jsonl"))
+            .expect("malicious private-prompt symlink fixture");
+
+        assert_eq!(
+            append_prompt_history_at(&root, "never append this secret"),
+            Err(AgentChatConversationPersistenceError::UnsafeFileTarget),
+        );
+        assert_eq!(
+            load_prompt_history_at(&root, 10),
+            Err(AgentChatConversationPersistenceError::UnsafeFileTarget),
+        );
+        assert_eq!(
+            std::fs::read_to_string(&external).expect("external private file stays untouched"),
+            "external private content",
+        );
+        assert!(
+            std::fs::symlink_metadata(root.join("agent_chat-prompt-history.jsonl"))
+                .expect("malicious symlink remains untouched")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn prompt_history_rejects_non_file_targets_before_writing() {
+        let temp = tempfile::tempdir().expect("isolated prompt fixture");
+        std::fs::create_dir(temp.path().join("agent_chat-prompt-history.jsonl"))
+            .expect("wrong-type prompt fixture");
+
+        assert_eq!(
+            append_prompt_history_at(temp.path(), "never write this private prompt"),
+            Err(AgentChatConversationPersistenceError::UnsafeFileTarget),
+        );
+        assert_eq!(
+            load_prompt_history_at(temp.path(), 5),
+            Err(AgentChatConversationPersistenceError::UnsafeFileTarget),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prompt_history_creates_and_compacts_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().expect("isolated prompt fixture");
+        let path = temp.path().join("agent_chat-prompt-history.jsonl");
+        append_prompt_history_at(temp.path(), "private prompt")
+            .expect("private prompt store initializes safely");
+        let created_mode = std::fs::metadata(&path)
+            .expect("private prompt metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(created_mode, 0o600);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("legacy over-permissive prompt fixture");
+        append_prompt_history_at(temp.path(), "repair legacy private permissions")
+            .expect("legacy prompt store permissions become private before append");
+        let repaired_mode = std::fs::metadata(&path)
+            .expect("repaired private prompt metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(repaired_mode, 0o600);
+
+        let mut oversized = String::new();
+        for index in 0..PROMPT_HISTORY_MAX_LINES * 2 {
+            let line = PromptHistoryLine {
+                timestamp: "2026-04-01T18:00:00Z".to_string(),
+                prompt: format!("private-{index}"),
+            };
+            oversized.push_str(&serde_json::to_string(&line).expect("synthetic prompt line"));
+            oversized.push('\n');
+        }
+        write_private_history_file_atomically(&path, &oversized)
+            .expect("private oversized fixture");
+        append_prompt_history_at(temp.path(), "final private prompt")
+            .expect("atomic prompt compaction");
+        let compacted_mode = std::fs::metadata(&path)
+            .expect("compacted private prompt metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(compacted_mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_index_repairs_legacy_permissions_before_appending_private_transcript() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().expect("isolated conversation index fixture");
+        let path = temp.path().join("agent_chat-history.jsonl");
+        std::fs::write(&path, "").expect("legacy conversation index fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("over-permissive legacy conversation index fixture");
+        let conversation = make_conversation(
+            "private-history-session",
+            "2026-08-22T10:00:00Z",
+            vec![("user", "private medical transcript")],
+        );
+        let entry = build_history_entry(&conversation).expect("real conversation index entry");
+
+        save_history_entry_at(temp.path(), &entry)
+            .expect("private transcript index repairs legacy permissions before append");
+
+        let mode = std::fs::metadata(&path)
+            .expect("repaired conversation index metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let persisted = std::fs::read_to_string(path).expect("private index remains readable");
+        assert!(persisted.contains("private medical transcript"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_history_reads_repair_legacy_permissions_before_exposing_contents() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().expect("isolated private-history fixture");
+        for filename in [
+            "agent_chat-history.jsonl",
+            "agent_chat-prompt-history.jsonl",
+            "saved-conversation.json",
+        ] {
+            let path = temp.path().join(filename);
+            std::fs::write(&path, "legacy private user content")
+                .expect("legacy private-history fixture");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                .expect("over-permissive legacy private-history fixture");
+
+            assert_eq!(
+                read_private_history_file(&path)
+                    .expect("private-history migration succeeds before content is returned"),
+                "legacy private user content",
+            );
+            let mode = std::fs::metadata(&path)
+                .expect("migrated private-history metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{filename} stayed world-readable");
+        }
+    }
+
+    #[test]
+    fn conversation_session_ids_preserve_real_formats_and_reject_traversal() {
+        for valid in [
+            "warm:8ecf16f4-c02a-4a2b-a4d2-a64c76d69303",
+            "standard-agent-chat-mock-fixture",
+            "legacy.session_42",
+            "東京-session",
+        ] {
+            assert_eq!(validate_agent_chat_session_id(valid), Ok(()));
+        }
+
+        for invalid in [
+            "",
+            " ",
+            ".",
+            "..",
+            "../escaped",
+            "../../outside",
+            "/absolute/session",
+            "nested/session",
+            "nested\\session",
+            "C:outside",
+            "C:\\outside",
+            "line\nbreak",
+            "nul\0value",
+        ] {
+            assert_eq!(
+                validate_agent_chat_session_id(invalid),
+                Err(AgentChatConversationPersistenceError::InvalidSessionId),
+                "session ID must fail closed: {invalid:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn conversation_persistence_rejects_traversal_before_any_filesystem_mutation() {
+        let temp = tempfile::tempdir().expect("isolated session fixture");
+        let root = temp.path().join("kit");
+        std::fs::create_dir(&root).expect("isolated kit root");
+        let root_sibling = root.join("escaped.json");
+        let external_sibling = temp.path().join("outside.json");
+        std::fs::write(&root_sibling, "preserve kit sibling").expect("kit sibling fixture");
+        std::fs::write(&external_sibling, "preserve external sibling")
+            .expect("external sibling fixture");
+
+        for session_id in [
+            "../escaped",
+            "../../outside",
+            "/absolute/session",
+            "nested\\escape",
+            ".",
+            "..",
+            "nul\0escape",
+        ] {
+            let conversation = make_conversation(
+                session_id,
+                "2026-04-01T18:00:00Z",
+                vec![("user", "safe fixture")],
+            );
+            assert_eq!(
+                save_conversation_at(&root, &conversation),
+                Err(AgentChatConversationPersistenceError::InvalidSessionId),
+            );
+            assert_eq!(
+                conversation_exists_at(&root, session_id),
+                Err(AgentChatConversationPersistenceError::InvalidSessionId),
+            );
+            assert!(matches!(
+                load_conversation_at(&root, session_id),
+                Err(AgentChatConversationPersistenceError::InvalidSessionId)
+            ));
+            assert!(rename_conversation_at(&root, session_id, "ignored").is_err());
+            assert!(delete_conversation_at(&root, session_id).is_err());
+
+            let entry = build_history_entry(&conversation).expect("synthetic history entry");
+            assert_eq!(
+                save_history_entry_at(&root, &entry),
+                Err(AgentChatConversationPersistenceError::InvalidSessionId),
+            );
+        }
+
+        assert!(!root.join("agent_chat-conversations").exists());
+        assert!(!root.join("agent_chat-history.jsonl").exists());
+        assert_eq!(
+            std::fs::read_to_string(root_sibling).expect("kit sibling stays intact"),
+            "preserve kit sibling",
+        );
+        assert_eq!(
+            std::fs::read_to_string(external_sibling).expect("external sibling stays intact"),
+            "preserve external sibling",
+        );
+    }
+
+    #[test]
+    fn conversation_persistence_round_trips_warm_ids_and_preserves_private_permissions() {
+        let temp = tempfile::tempdir().expect("isolated session fixture");
+        let session_id = "warm:8ecf16f4-c02a-4a2b-a4d2-a64c76d69303";
+        let conversation = make_conversation(
+            session_id,
+            "2026-04-01T18:00:00Z",
+            vec![
+                ("user", "private question"),
+                ("assistant", "private answer"),
+            ],
+        );
+
+        save_conversation_at(temp.path(), &conversation).expect("safe session saves");
+        assert_eq!(conversation_exists_at(temp.path(), session_id), Ok(true));
+        let loaded = load_conversation_at(temp.path(), session_id)
+            .expect("safe session loads")
+            .expect("saved session exists");
+        assert_eq!(loaded.session_id, session_id);
+        assert_eq!(loaded.messages.len(), 2);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let path = conversation_path_at(temp.path(), session_id).expect("safe path");
+            let mode = std::fs::metadata(path)
+                .expect("private conversation metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        rename_conversation_at(temp.path(), session_id, "Private Title")
+            .expect("safe session renames");
+        let renamed = load_conversation_at(temp.path(), session_id)
+            .expect("renamed session loads")
+            .expect("renamed session exists");
+        assert_eq!(renamed.custom_title.as_deref(), Some("Private Title"));
+        delete_conversation_at(temp.path(), session_id).expect("safe session deletes");
+        assert_eq!(conversation_exists_at(temp.path(), session_id), Ok(false));
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("agent_chat-history.jsonl"))
+                .expect("safe index remains readable"),
+            "",
+        );
+    }
+
+    #[test]
+    fn conversation_deletion_removes_only_the_selected_sessions_private_attachments() {
+        let root = tempfile::tempdir().expect("isolated conversation fixture");
+        let session_id = "warm:owned-session";
+        let conversation = make_conversation(
+            session_id,
+            "2026-04-01T18:00:00Z",
+            vec![
+                ("user", "private question"),
+                ("assistant", "private answer"),
+            ],
+        );
+        save_conversation_at(root.path(), &conversation).expect("save owned conversation");
+        let directory = root.path().join("agent_chat-history-attachments");
+        std::fs::create_dir(&directory).expect("attachment directory");
+        let owned_summary = directory.join(format!("{session_id}-summary.md"));
+        let owned_transcript = directory.join(format!("{session_id}-transcript.md"));
+        let unrelated = directory.join("another-session-transcript.md");
+        std::fs::write(&owned_summary, "private summary").unwrap();
+        std::fs::write(&owned_transcript, "private complete transcript").unwrap();
+        std::fs::write(&unrelated, "another owner's private transcript").unwrap();
+
+        delete_conversation_at(root.path(), session_id)
+            .expect("delete only the selected conversation and its attachments");
+
+        assert!(!owned_summary.exists());
+        assert!(!owned_transcript.exists());
+        assert_eq!(
+            std::fs::read_to_string(unrelated).unwrap(),
+            "another owner's private transcript"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conversation_deletion_rejects_attachment_symlink_before_any_private_store_changes() {
+        let root = tempfile::tempdir().expect("isolated conversation fixture");
+        let session_id = "owned-session";
+        let conversation = make_conversation(
+            session_id,
+            "2026-04-01T18:00:00Z",
+            vec![("user", "private question")],
+        );
+        save_conversation_at(root.path(), &conversation).expect("save owned conversation");
+        save_history_entry_at(
+            root.path(),
+            &build_history_entry(&conversation).expect("private index entry"),
+        )
+        .expect("save owned index entry");
+        let directory = root.path().join("agent_chat-history-attachments");
+        std::fs::create_dir(&directory).expect("attachment directory");
+        let external = root.path().join("external-private.md");
+        std::fs::write(&external, "never follow or delete me").unwrap();
+        std::os::unix::fs::symlink(&external, directory.join("owned-session-transcript.md"))
+            .expect("hostile attachment symlink");
+
+        assert!(delete_conversation_at(root.path(), session_id).is_err());
+        assert_eq!(conversation_exists_at(root.path(), session_id), Ok(true));
+        assert!(
+            std::fs::read_to_string(root.path().join("agent_chat-history.jsonl"))
+                .unwrap()
+                .contains(session_id)
+        );
+        assert_eq!(
+            std::fs::read_to_string(external).unwrap(),
+            "never follow or delete me"
+        );
+    }
+
+    #[test]
+    fn conversation_load_rename_and_delete_reject_spoofed_payload_identity() {
+        let temp = tempfile::tempdir().expect("isolated session fixture");
+        let directory = temp.path().join("agent_chat-conversations");
+        std::fs::create_dir(&directory).expect("conversation directory fixture");
+        let spoofed = make_conversation(
+            "other-session",
+            "2026-04-01T18:00:00Z",
+            vec![("user", "another user's conversation")],
+        );
+        let requested_path = directory.join("requested-session.json");
+        let payload = serde_json::to_string(&spoofed).expect("spoofed payload fixture");
+        std::fs::write(&requested_path, &payload).expect("spoofed session fixture");
+
+        assert!(matches!(
+            load_conversation_at(temp.path(), "requested-session"),
+            Err(AgentChatConversationPersistenceError::SessionIdMismatch)
+        ));
+        assert!(rename_conversation_at(temp.path(), "requested-session", "Wrong Title").is_err());
+        assert!(delete_conversation_at(temp.path(), "requested-session").is_err());
+        assert_eq!(
+            std::fs::read_to_string(requested_path).expect("spoofed payload remains untouched"),
+            payload,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conversation_persistence_never_follows_symlinked_session_targets() {
+        let temp = tempfile::tempdir().expect("isolated session fixture");
+        let root = temp.path().join("kit");
+        let directory = root.join("agent_chat-conversations");
+        std::fs::create_dir_all(&directory).expect("conversation directory fixture");
+        let external = temp.path().join("private-sibling.json");
+        std::fs::write(&external, "untouched sibling secrets").expect("sibling fixture");
+        let session_path = directory.join("safe-session.json");
+        std::os::unix::fs::symlink(&external, &session_path)
+            .expect("malicious session symlink fixture");
+
+        let conversation = make_conversation(
+            "safe-session",
+            "2026-04-01T18:00:00Z",
+            vec![("user", "private question")],
+        );
+        assert_eq!(
+            save_conversation_at(&root, &conversation),
+            Err(AgentChatConversationPersistenceError::UnsafeFileTarget),
+        );
+        assert_eq!(
+            conversation_exists_at(&root, "safe-session"),
+            Err(AgentChatConversationPersistenceError::UnsafeFileTarget),
+        );
+        assert!(matches!(
+            load_conversation_at(&root, "safe-session"),
+            Err(AgentChatConversationPersistenceError::UnsafeFileTarget)
+        ));
+        assert!(rename_conversation_at(&root, "safe-session", "Wrong Title").is_err());
+        assert!(delete_conversation_at(&root, "safe-session").is_err());
+        assert_eq!(
+            std::fs::read_to_string(external).expect("symlink destination remains untouched"),
+            "untouched sibling secrets",
+        );
+        assert!(std::fs::symlink_metadata(session_path)
+            .expect("session link remains untouched")
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conversation_persistence_rejects_symlinked_conversation_directory() {
+        let temp = tempfile::tempdir().expect("isolated session fixture");
+        let root = temp.path().join("kit");
+        let external = temp.path().join("private-external-directory");
+        std::fs::create_dir(&root).expect("isolated kit root");
+        std::fs::create_dir(&external).expect("external directory fixture");
+        std::os::unix::fs::symlink(&external, root.join("agent_chat-conversations"))
+            .expect("malicious directory symlink fixture");
+        let conversation = make_conversation(
+            "safe-session",
+            "2026-04-01T18:00:00Z",
+            vec![("user", "private question")],
+        );
+
+        assert_eq!(
+            save_conversation_at(&root, &conversation),
+            Err(AgentChatConversationPersistenceError::UnsafeConversationDirectory),
+        );
+        assert_eq!(
+            conversation_exists_at(&root, "safe-session"),
+            Err(AgentChatConversationPersistenceError::UnsafeConversationDirectory),
+        );
+        assert!(load_conversation_at(&root, "safe-session").is_err());
+        assert!(delete_conversation_at(&root, "safe-session").is_err());
+        assert!(!external.join("safe-session.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conversation_delete_preflights_symlinked_index_before_touching_saved_session() {
+        let temp = tempfile::tempdir().expect("isolated session fixture");
+        let root = temp.path().join("kit");
+        std::fs::create_dir(&root).expect("isolated kit root");
+        let conversation = make_conversation(
+            "safe-session",
+            "2026-04-01T18:00:00Z",
+            vec![("user", "private question")],
+        );
+        save_conversation_at(&root, &conversation).expect("safe saved conversation fixture");
+        let external = temp.path().join("unrelated-private-index.jsonl");
+        std::fs::write(&external, "external history secrets").expect("external index fixture");
+        std::os::unix::fs::symlink(&external, root.join("agent_chat-history.jsonl"))
+            .expect("malicious index symlink fixture");
+
+        assert!(delete_conversation_at(&root, "safe-session").is_err());
+        assert!(rename_conversation_at(&root, "safe-session", "Wrong Title").is_err());
+        let entry = build_history_entry(&conversation).expect("synthetic index entry");
+        assert_eq!(
+            save_history_entry_at(&root, &entry),
+            Err(AgentChatConversationPersistenceError::UnsafeFileTarget),
+        );
+        let original = load_conversation_at(&root, "safe-session")
+            .expect("original session remains readable")
+            .expect("original session remains on disk");
+        assert!(original.custom_title.is_none());
+        assert_eq!(
+            std::fs::read_to_string(external).expect("external index remains untouched"),
+            "external history secrets",
+        );
     }
 
     #[test]

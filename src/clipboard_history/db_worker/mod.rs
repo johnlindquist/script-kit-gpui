@@ -14,7 +14,7 @@ mod db_impl;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::OnceLock;
 use std::thread::{self, JoinHandle};
@@ -132,7 +132,12 @@ pub fn start_db_worker() -> Result<()> {
 
     let handle = thread::spawn(move || match init_connection() {
         Ok(conn) => db_worker_loop(conn, rx),
-        Err(e) => error!(error = %e, "Failed to initialize DB worker connection"),
+        Err(error) => error!(
+            diagnostic_fingerprint = %crate::ai::reliability::redacted_fingerprint(
+                &error.to_string()
+            ),
+            "Failed to initialize private clipboard DB worker connection"
+        ),
     });
 
     let _ = WORKER_STARTED.set(handle);
@@ -147,8 +152,12 @@ pub fn get_db_sender() -> Option<&'static Sender<DbRequest>> {
 
 fn init_connection() -> Result<Connection> {
     let db_path = get_db_path()?;
-    let conn = Connection::open(&db_path)
-        .with_context(|| format!("Failed to open database at {:?}", db_path))?;
+    init_connection_at(&db_path)
+}
+
+fn init_connection_at(db_path: &Path) -> Result<Connection> {
+    let conn = crate::utils::db_permissions::open_private_sqlite(db_path)
+        .context("Failed to open private clipboard-worker database")?;
 
     conn.execute_batch(
         "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; \
@@ -159,6 +168,8 @@ fn init_connection() -> Result<Connection> {
     create_schema(&conn)?;
     run_migrations(&conn)?;
     create_indexes(&conn)?;
+    crate::utils::db_permissions::harden_sqlite_permissions(db_path)
+        .context("Failed to protect private clipboard-worker SQLite sidecars")?;
 
     info!("Database worker initialized");
     Ok(conn)
@@ -370,6 +381,58 @@ fn handle_request(conn: &Connection, req: DbRequest) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn clipboard_worker_database_and_sidecars_are_owner_only_from_initialization() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("isolated clipboard worker fixture");
+        let path = directory.path().join("clipboard.sqlite");
+        let connection = init_connection_at(&path).expect("initialize private clipboard worker");
+
+        for suffix in ["", "-wal", "-shm"] {
+            let mut candidate = path.as_os_str().to_owned();
+            candidate.push(suffix);
+            let candidate = PathBuf::from(candidate);
+            if candidate.exists() {
+                assert_eq!(
+                    std::fs::metadata(candidate)
+                        .expect("private clipboard SQLite metadata")
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+        }
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM history", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("read isolated clipboard worker history"),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clipboard_worker_refuses_database_symlinks_before_exposing_foreign_history() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("isolated clipboard worker fixture");
+        let path = directory.path().join("clipboard.sqlite");
+        let foreign = directory.path().join("foreign.sqlite");
+        std::fs::write(&foreign, b"foreign clipboard tokens and one-time codes")
+            .expect("seed foreign clipboard owner");
+        symlink(&foreign, &path).expect("plant clipboard database symlink");
+
+        assert!(init_connection_at(&path).is_err());
+        assert_eq!(
+            std::fs::read(&foreign).expect("foreign clipboard owner remains untouched"),
+            b"foreign clipboard tokens and one-time codes"
+        );
+    }
 
     #[test]
     fn test_db_path_format() {

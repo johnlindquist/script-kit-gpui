@@ -6,8 +6,11 @@
 use anyhow::{bail, Context, Result};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use tracing::{info, warn};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use tracing::info;
+
+static AI_PRESET_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// A user-created AI preset stored on disk.
 ///
@@ -44,30 +47,25 @@ pub fn get_presets_path() -> PathBuf {
 /// Load saved presets from disk.
 ///
 /// Returns an empty vec if the file doesn't exist yet.
-/// Handles corrupt files gracefully by logging and returning empty.
+/// Corrupt, unsafe, or unreadable stores fail closed so later mutations cannot
+/// silently replace recoverable private system prompts with an empty list.
 pub fn load_presets() -> Result<Vec<SavedAiPreset>> {
-    let path = get_presets_path();
+    load_presets_at(&get_presets_path())
+}
 
-    if !path.exists() {
-        info!(path = %path.display(), "No presets file found, returning empty list");
+fn load_presets_at(path: &Path) -> Result<Vec<SavedAiPreset>> {
+    if !crate::atomic_file::inspect_private_file(path).context("Inspect private AI preset store")? {
+        info!("No AI preset store found, returning empty list");
         return Ok(Vec::new());
     }
 
-    let contents = std::fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read presets file: {}", path.display()))?;
+    let contents =
+        crate::atomic_file::read_private_file(path).context("Read owner-only AI preset store")?;
 
-    let presets: Vec<SavedAiPreset> = serde_json::from_str(&contents).with_context(|| {
-        format!(
-            "Failed to parse presets file: {} — file may be corrupt",
-            path.display()
-        )
-    })?;
+    let presets: Vec<SavedAiPreset> =
+        serde_json::from_str(&contents).context("Parse private AI preset store")?;
 
-    info!(
-        count = presets.len(),
-        path = %path.display(),
-        "Loaded AI presets from disk"
-    );
+    info!(count = presets.len(), "Loaded private AI presets from disk");
 
     Ok(presets)
 }
@@ -76,33 +74,36 @@ pub fn load_presets() -> Result<Vec<SavedAiPreset>> {
 ///
 /// Uses atomic write-to-temp-then-rename to prevent corruption on partial failure.
 pub fn save_presets(presets: &[SavedAiPreset]) -> Result<()> {
-    let path = get_presets_path();
+    let _owner = AI_PRESET_WRITE_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("AI preset persistence lock poisoned"))?;
+    save_presets_at(&get_presets_path(), presets)
+}
 
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create presets directory: {}", parent.display()))?;
-    }
+fn save_presets_at(path: &Path, presets: &[SavedAiPreset]) -> Result<()> {
+    let json = serde_json::to_vec_pretty(presets).context("Serialize private AI presets")?;
 
-    let json =
-        serde_json::to_string_pretty(presets).context("Failed to serialize presets to JSON")?;
+    crate::atomic_file::write_private_atomic(path, &json)
+        .context("Atomically write owner-only AI presets")?;
 
-    // Atomic write via a UNIQUE temp file + rename (see src/atomic_file.rs): a
-    // fixed temp path let concurrent savers corrupt the file.
-    crate::atomic_file::write_atomic(&path, json.as_bytes()).with_context(|| {
-        format!(
-            "Failed to atomically write presets file: {}",
-            path.display()
-        )
-    })?;
-
-    info!(
-        count = presets.len(),
-        path = %path.display(),
-        "Saved AI presets to disk"
-    );
+    info!(count = presets.len(), "Saved private AI presets to disk");
 
     Ok(())
+}
+
+fn mutate_presets_at<T>(
+    path: &Path,
+    mutation: impl FnOnce(&mut Vec<SavedAiPreset>) -> Result<(T, bool)>,
+) -> Result<T> {
+    let _owner = AI_PRESET_WRITE_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("AI preset persistence lock poisoned"))?;
+    let mut presets = load_presets_at(path)?;
+    let (result, changed) = mutation(&mut presets)?;
+    if changed {
+        save_presets_at(path, &presets)?;
+    }
+    Ok(result)
 }
 
 /// Create a new preset and save it to disk.
@@ -110,6 +111,15 @@ pub fn save_presets(presets: &[SavedAiPreset]) -> Result<()> {
 /// Validates that the name is non-empty and generates a unique ID.
 /// Returns the created preset.
 pub fn create_preset(
+    name: &str,
+    system_prompt: &str,
+    preferred_model: Option<&str>,
+) -> Result<SavedAiPreset> {
+    create_preset_at(&get_presets_path(), name, system_prompt, preferred_model)
+}
+
+fn create_preset_at(
+    path: &Path,
     name: &str,
     system_prompt: &str,
     preferred_model: Option<&str>,
@@ -130,75 +140,90 @@ pub fn create_preset(
         preferred_model: preferred_model.map(String::from),
     };
 
-    let mut existing = load_presets().unwrap_or_default();
-
-    // Deduplicate by ID (update if exists)
-    if let Some(pos) = existing.iter().position(|p| p.id == preset.id) {
-        existing[pos] = preset.clone();
-        info!(id = %preset.id, action = "update_preset", "Updated existing preset");
-    } else {
-        existing.push(preset.clone());
-        info!(id = %preset.id, action = "create_preset", "Created new preset");
-    }
-
-    save_presets(&existing)?;
-    Ok(preset)
+    mutate_presets_at(path, |existing| {
+        let preset_fingerprint = crate::ai::reliability::redacted_fingerprint(&preset.id);
+        if let Some(pos) = existing
+            .iter()
+            .position(|existing| existing.id == preset.id)
+        {
+            existing[pos] = preset.clone();
+            info!(
+                preset_fingerprint,
+                action = "update_preset",
+                "Updated existing AI preset"
+            );
+        } else {
+            existing.push(preset.clone());
+            info!(
+                preset_fingerprint,
+                action = "create_preset",
+                "Created new AI preset"
+            );
+        }
+        Ok((preset, true))
+    })
 }
 
 /// Import presets from a JSON file, merging with existing presets.
 ///
 /// Presets with the same ID are updated (import wins).
 /// Returns the total count after merge.
-pub fn import_presets_from_file(path: &std::path::Path) -> Result<usize> {
-    let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read import file: {}", path.display()))?;
+pub fn import_presets_from_file(path: &Path) -> Result<usize> {
+    import_presets_from_file_at(&get_presets_path(), path)
+}
 
-    let imported = validate_presets_json(&contents)
-        .with_context(|| format!("Invalid import file: {}", path.display()))?;
+fn import_presets_from_file_at(store_path: &Path, import_path: &Path) -> Result<usize> {
+    let contents = crate::atomic_file::read_private_file(import_path)
+        .context("Read owner-only AI preset import file")?;
 
-    let mut existing = load_presets().unwrap_or_default();
+    let imported = validate_presets_json(&contents).context("Validate AI preset import file")?;
+
     let import_count = imported.len();
 
-    for import_preset in imported {
-        if let Some(pos) = existing.iter().position(|p| p.id == import_preset.id) {
-            existing[pos] = import_preset;
-        } else {
-            existing.push(import_preset);
+    mutate_presets_at(store_path, |existing| {
+        for import_preset in imported {
+            if let Some(pos) = existing
+                .iter()
+                .position(|existing| existing.id == import_preset.id)
+            {
+                existing[pos] = import_preset;
+            } else {
+                existing.push(import_preset);
+            }
         }
-    }
 
-    save_presets(&existing)?;
+        info!(
+            imported = import_count,
+            total = existing.len(),
+            action = "import_presets",
+            "Imported private AI presets"
+        );
 
-    info!(
-        imported = import_count,
-        total = existing.len(),
-        action = "import_presets",
-        "Imported AI presets"
-    );
-
-    Ok(existing.len())
+        Ok((existing.len(), true))
+    })
 }
 
 /// Export presets to a user-chosen file path.
 ///
 /// Uses atomic write (temp file + rename) to prevent corruption.
 /// Returns the number of presets written.
-pub fn export_presets_to_file(path: &std::path::Path) -> Result<usize> {
-    let presets = load_presets()?;
+pub fn export_presets_to_file(path: &Path) -> Result<usize> {
+    export_presets_to_file_at(&get_presets_path(), path)
+}
+
+fn export_presets_to_file_at(store_path: &Path, export_path: &Path) -> Result<usize> {
+    let presets = load_presets_at(store_path)?;
     let count = presets.len();
 
-    let json =
-        serde_json::to_string_pretty(&presets).context("Failed to serialize presets to JSON")?;
+    let json = serde_json::to_vec_pretty(&presets).context("Serialize private AI preset export")?;
 
-    // Atomic write via a UNIQUE temp file + rename (see src/atomic_file.rs).
-    crate::atomic_file::write_atomic(path, json.as_bytes())
-        .with_context(|| format!("Failed to atomically write export file: {}", path.display()))?;
+    crate::atomic_file::write_private_atomic(export_path, &json)
+        .context("Atomically write owner-only AI preset export")?;
 
     info!(
         count = count,
-        path = %path.display(),
         action = "export_presets",
-        "Exported AI presets to file"
+        "Exported private AI presets to an owner-only file"
     );
 
     Ok(count)
@@ -225,17 +250,23 @@ pub fn validate_presets_json(contents: &str) -> Result<Vec<SavedAiPreset>> {
 
 /// Delete a preset by ID.
 pub fn delete_preset(id: &str) -> Result<bool> {
-    let mut existing = load_presets().unwrap_or_default();
-    let original_len = existing.len();
-    existing.retain(|p| p.id != id);
+    delete_preset_at(&get_presets_path(), id)
+}
 
-    if existing.len() < original_len {
-        save_presets(&existing)?;
-        info!(id = %id, action = "delete_preset", "Deleted AI preset");
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+fn delete_preset_at(path: &Path, id: &str) -> Result<bool> {
+    mutate_presets_at(path, |existing| {
+        let original_len = existing.len();
+        existing.retain(|preset| preset.id != id);
+        let deleted = existing.len() < original_len;
+        if deleted {
+            info!(
+                preset_fingerprint = %crate::ai::reliability::redacted_fingerprint(id),
+                action = "delete_preset",
+                "Deleted private AI preset"
+            );
+        }
+        Ok((deleted, deleted))
+    })
 }
 
 /// A saved AI preset resolved for application to the current Agent Chat surface.
@@ -293,6 +324,215 @@ fn truncate_for_description(system_prompt: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn private_preset(id: &str, system_prompt: &str) -> SavedAiPreset {
+        SavedAiPreset {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: "Private preset fixture".to_string(),
+            system_prompt: system_prompt.to_string(),
+            icon: "star".to_string(),
+            preferred_model: Some("private-custom-model".to_string()),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_ai_presets_store_system_prompts_owner_only_and_repair_legacy_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("ai-presets.json");
+        let presets = vec![private_preset("private", "private customer system prompt")];
+
+        save_presets_at(&path, &presets).expect("save private system prompt");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("preset metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("make legacy preset readable");
+        assert_eq!(
+            load_presets_at(&path).expect("repair private preset before exposing its prompt"),
+            presets
+        );
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("repaired preset metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_ai_presets_reject_store_symlinks_without_reading_or_replacing_foreign_prompts() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("ai-presets.json");
+        let foreign = temp.path().join("foreign.json");
+        let original = serde_json::to_vec(&vec![private_preset(
+            "foreign",
+            "private system prompt belonging to another owner",
+        )])
+        .expect("serialize foreign private prompt");
+        std::fs::write(&foreign, &original).expect("seed foreign private prompts");
+        symlink(&foreign, &path).expect("plant preset store symlink");
+
+        assert!(load_presets_at(&path).is_err());
+        assert!(save_presets_at(&path, &[private_preset("new", "new private prompt")]).is_err());
+        assert!(create_preset_at(&path, "New", "new private prompt", None).is_err());
+        assert!(delete_preset_at(&path, "foreign").is_err());
+        assert_eq!(
+            std::fs::read(&foreign).expect("foreign private prompts remain untouched"),
+            original
+        );
+    }
+
+    #[test]
+    fn private_ai_presets_malformed_store_is_never_erased_by_create_delete_or_import() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("ai-presets.json");
+        let import_path = temp.path().join("import.json");
+        let original = br#"[{"systemPrompt":"recoverable private system prompt""#;
+        std::fs::write(&path, original).expect("seed malformed recoverable presets");
+        save_presets_at(
+            &import_path,
+            &[private_preset("imported", "private imported prompt")],
+        )
+        .expect("seed private preset import");
+
+        assert!(create_preset_at(&path, "New", "new private prompt", None).is_err());
+        assert!(delete_preset_at(&path, "private").is_err());
+        assert!(import_presets_from_file_at(&path, &import_path).is_err());
+        assert_eq!(
+            std::fs::read(&path).expect("malformed prompt bytes remain available for recovery"),
+            original
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_ai_preset_exports_are_owner_only_and_never_replace_symlink_targets() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store_path = temp.path().join("ai-presets.json");
+        let export_path = temp.path().join("private-export.json");
+        let hostile_export = temp.path().join("hostile-export.json");
+        let foreign = temp.path().join("foreign.json");
+        let presets = vec![private_preset("private", "private exported system prompt")];
+        save_presets_at(&store_path, &presets).expect("seed private prompt store");
+
+        assert_eq!(
+            export_presets_to_file_at(&store_path, &export_path)
+                .expect("export owner-only private prompts"),
+            1
+        );
+        assert_eq!(
+            std::fs::metadata(&export_path)
+                .expect("private export metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            load_presets_at(&export_path).expect("read private exported prompts"),
+            presets
+        );
+
+        std::fs::write(&foreign, "another owner's private content")
+            .expect("seed foreign export target");
+        symlink(&foreign, &hostile_export).expect("plant export symlink");
+        assert!(export_presets_to_file_at(&store_path, &hostile_export).is_err());
+        assert_eq!(
+            std::fs::read(&foreign).expect("foreign export target remains untouched"),
+            b"another owner's private content"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_ai_preset_imports_repair_legacy_permissions_and_reject_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store_path = temp.path().join("ai-presets.json");
+        let import_path = temp.path().join("private-import.json");
+        let hostile_import = temp.path().join("hostile-import.json");
+        let presets = vec![private_preset("imported", "private imported system prompt")];
+        std::fs::write(
+            &import_path,
+            serde_json::to_vec(&presets).expect("serialize imported private prompt"),
+        )
+        .expect("seed legacy private import");
+        std::fs::set_permissions(&import_path, std::fs::Permissions::from_mode(0o644))
+            .expect("seed permissive legacy import");
+
+        assert_eq!(
+            import_presets_from_file_at(&store_path, &import_path)
+                .expect("repair and import private prompts"),
+            1
+        );
+        assert_eq!(
+            std::fs::metadata(&import_path)
+                .expect("repaired private import metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            load_presets_at(&store_path).expect("load imported private prompt"),
+            presets
+        );
+
+        symlink(&import_path, &hostile_import).expect("plant import symlink");
+        assert!(import_presets_from_file_at(&store_path, &hostile_import).is_err());
+        assert_eq!(
+            load_presets_at(&store_path).expect("private prompt import remains unchanged"),
+            presets
+        );
+    }
+
+    #[test]
+    fn private_ai_preset_concurrent_creators_preserve_every_private_prompt() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("ai-presets.json");
+
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let preset_path = &path;
+                scope.spawn(move || {
+                    create_preset_at(
+                        preset_path,
+                        &format!("Private owner {index}"),
+                        &format!("Private system prompt {index}"),
+                        None,
+                    )
+                    .expect("serialize private owner read/merge/write");
+                });
+            }
+        });
+
+        let presets = load_presets_at(&path).expect("load every serialized private prompt");
+        assert_eq!(presets.len(), 8);
+        for index in 0..8 {
+            assert!(presets.iter().any(|preset| {
+                preset.id == format!("private-owner-{index}")
+                    && preset.system_prompt == format!("Private system prompt {index}")
+            }));
+        }
+    }
 
     #[test]
     fn test_slug_from_name_converts_spaces_and_special_chars() {

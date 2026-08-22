@@ -1,8 +1,12 @@
 //! Agent Chat favorite model persistence.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::Mutex;
 
 use super::config::AgentChatModelEntry;
+
+static FAVORITE_MODELS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
@@ -19,31 +23,57 @@ fn favorites_path() -> std::path::PathBuf {
 }
 
 pub(crate) fn load_favorite_model_ids() -> Vec<String> {
-    std::fs::read_to_string(favorites_path())
-        .ok()
-        .and_then(|content| serde_json::from_str::<FavoriteModelsFile>(&content).ok())
-        .map(|file| normalize_favorites(file.favorite_model_ids))
-        .unwrap_or_default()
+    match load_favorite_model_ids_at(&favorites_path()) {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::warn!(
+                target: "script_kit::agent_chat",
+                event = "agent_chat_favorite_models_load_failed",
+                error_kind = ?error.kind(),
+                diagnostic_fingerprint = %crate::ai::reliability::redacted_fingerprint(
+                    &error.to_string()
+                ),
+            );
+            Vec::new()
+        }
+    }
 }
 
-pub(crate) fn save_favorite_model_ids(ids: &[String]) -> std::io::Result<()> {
-    let path = favorites_path();
+fn load_favorite_model_ids_at(path: &Path) -> std::io::Result<Vec<String>> {
+    if !crate::atomic_file::inspect_private_file(path)? {
+        return Ok(Vec::new());
+    }
+
+    let content = crate::atomic_file::read_private_file(path)?;
+    let file = serde_json::from_str::<FavoriteModelsFile>(&content)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(normalize_favorites(file.favorite_model_ids))
+}
+
+fn save_favorite_model_ids_at(path: &Path, ids: &[String]) -> std::io::Result<()> {
     let file = FavoriteModelsFile {
         favorite_model_ids: normalize_favorites(ids.to_vec()),
     };
-    let json = serde_json::to_string_pretty(&file)?;
-    std::fs::write(path, json)
+    let json = serde_json::to_vec_pretty(&file)?;
+    crate::atomic_file::write_private_atomic(path, &json)
 }
 
-pub(crate) fn toggle_favorite_model_id(model_id: &str) -> Vec<String> {
-    let mut ids = load_favorite_model_ids();
+pub(crate) fn toggle_favorite_model_id(model_id: &str) -> std::io::Result<Vec<String>> {
+    toggle_favorite_model_id_at(&favorites_path(), model_id)
+}
+
+fn toggle_favorite_model_id_at(path: &Path, model_id: &str) -> std::io::Result<Vec<String>> {
+    let _owner = FAVORITE_MODELS_WRITE_LOCK
+        .lock()
+        .map_err(|_| std::io::Error::other("favorite model persistence lock poisoned"))?;
+    let mut ids = load_favorite_model_ids_at(path)?;
     if let Some(index) = ids.iter().position(|id| id == model_id) {
         ids.remove(index);
     } else if !model_id.trim().is_empty() {
         ids.push(model_id.to_string());
     }
-    let _ = save_favorite_model_ids(&ids);
-    ids
+    save_favorite_model_ids_at(path, &ids)?;
+    Ok(ids)
 }
 
 pub(crate) fn is_favorite_model_id(model_id: &str) -> bool {
@@ -110,15 +140,121 @@ mod tests {
         std::env::set_var("AGENT_CHAT_FAVORITE_MODELS_PATH", &path);
 
         assert!(load_favorite_model_ids().is_empty());
-        assert_eq!(toggle_favorite_model_id("m1"), vec!["m1".to_string()]);
+        assert_eq!(
+            toggle_favorite_model_id("m1").expect("persist favorite"),
+            vec!["m1".to_string()]
+        );
         assert_eq!(load_favorite_model_ids(), vec!["m1".to_string()]);
-        assert!(toggle_favorite_model_id("m1").is_empty());
+        assert!(toggle_favorite_model_id("m1")
+            .expect("persist favorite removal")
+            .is_empty());
         assert!(load_favorite_model_ids().is_empty());
 
         match previous_path {
             Some(path) => std::env::set_var("AGENT_CHAT_FAVORITE_MODELS_PATH", path),
             None => std::env::remove_var("AGENT_CHAT_FAVORITE_MODELS_PATH"),
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn favorite_models_store_is_owner_only_and_repairs_legacy_permissions_before_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("favorites.json");
+        let ids = vec!["private-custom-model".to_string()];
+
+        save_favorite_model_ids_at(&path, &ids).expect("save private favorites");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("favorite metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("make legacy file permissive");
+        assert_eq!(
+            load_favorite_model_ids_at(&path).expect("repair before loading private model"),
+            ids
+        );
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("repaired favorite metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn favorite_models_reject_planted_symlinks_without_reading_or_replacing_foreign_state() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let foreign = temp.path().join("foreign.json");
+        let path = temp.path().join("favorites.json");
+        let original = br#"{"favoriteModelIds":["private-foreign-model"]}"#;
+        std::fs::write(&foreign, original).expect("seed foreign favorite owner");
+        symlink(&foreign, &path).expect("plant favorite symlink");
+
+        assert!(load_favorite_model_ids_at(&path).is_err());
+        assert!(save_favorite_model_ids_at(&path, &["new-model".to_string()]).is_err());
+        assert!(toggle_favorite_model_id_at(&path, "new-model").is_err());
+        assert_eq!(
+            std::fs::read(&foreign).expect("foreign favorite owner remains untouched"),
+            original
+        );
+        assert!(std::fs::symlink_metadata(&path)
+            .expect("planted symlink remains in place")
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn favorite_models_malformed_store_refuses_toggle_without_erasing_existing_preferences() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("favorites.json");
+        let original = br#"{"favoriteModelIds":["private-preserved-model""#;
+        std::fs::write(&path, original).expect("seed malformed recoverable favorites");
+
+        let error = toggle_favorite_model_id_at(&path, "new-model")
+            .expect_err("malformed favorites must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(&path).expect("malformed favorite bytes remain recoverable"),
+            original
+        );
+    }
+
+    #[test]
+    fn favorite_models_concurrent_toggles_preserve_every_successfully_saved_owner() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("favorites.json");
+
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let favorite_path = &path;
+                scope.spawn(move || {
+                    toggle_favorite_model_id_at(favorite_path, &format!("model-{index}"))
+                        .expect("serialize and persist favorite owner");
+                });
+            }
+        });
+
+        let mut ids = load_favorite_model_ids_at(&path).expect("load every persisted owner");
+        ids.sort();
+        assert_eq!(
+            ids,
+            (0..8)
+                .map(|index| format!("model-{index}"))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

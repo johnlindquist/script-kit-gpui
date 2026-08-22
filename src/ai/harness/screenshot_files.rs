@@ -78,6 +78,70 @@ pub struct TabAiScreenshotFile {
     pub used_fallback: bool,
 }
 
+fn write_private_tab_ai_screenshot(path: &std::path::Path, png: &[u8]) -> Result<()> {
+    crate::atomic_file::write_private_atomic(path, png)
+        .context("failed to write owner-only private screenshot")
+}
+
+fn log_private_tab_ai_screenshot_written(
+    event: &'static str,
+    path: &str,
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+    used_fallback: bool,
+    bytes: usize,
+) {
+    let safe_path = crate::logging::log_private_user_value(path);
+    if let Some(title) = title {
+        let safe_title = crate::logging::log_private_user_value(title);
+        tracing::debug!(
+            event,
+            path_bytes = safe_path.raw_bytes,
+            path_sha256 = %safe_path.sha256,
+            title_bytes = safe_title.raw_bytes,
+            title_sha256 = %safe_title.sha256,
+            width,
+            height,
+            used_fallback,
+            bytes,
+        );
+    } else {
+        tracing::debug!(
+            event,
+            path_bytes = safe_path.raw_bytes,
+            path_sha256 = %safe_path.sha256,
+            width,
+            height,
+            bytes,
+        );
+    }
+}
+
+fn log_private_tab_ai_screenshot_failure(event: &'static str, error: &impl std::fmt::Display) {
+    let safe_error = crate::logging::log_private_user_value(&error.to_string());
+    tracing::debug!(
+        event,
+        error_bytes = safe_error.raw_bytes,
+        error_sha256 = %safe_error.sha256,
+    );
+}
+
+fn log_private_tab_ai_screenshot_cleanup_failure(
+    path: &std::path::Path,
+    error: &impl std::fmt::Display,
+) {
+    let safe_path = crate::logging::log_private_user_value(&path.display().to_string());
+    let safe_error = crate::logging::log_private_user_value(&error.to_string());
+    tracing::debug!(
+        event = "tab_ai_screenshot_cleanup_file_failed",
+        path_bytes = safe_path.raw_bytes,
+        path_sha256 = %safe_path.sha256,
+        error_bytes = safe_error.raw_bytes,
+        error_sha256 = %safe_error.sha256,
+    );
+}
+
 /// Capture a screenshot of the focused window and write it to a temp file.
 ///
 /// Returns `Ok(None)` if no suitable window was found. Returns `Ok(Some(...))`
@@ -87,10 +151,7 @@ pub fn capture_tab_ai_focused_window_screenshot_file() -> Result<Option<TabAiScr
     let capture = match crate::platform::capture_focused_window_screenshot() {
         Ok(c) => c,
         Err(e) => {
-            tracing::debug!(
-                event = "tab_ai_screenshot_capture_failed",
-                error = %e,
-            );
+            log_private_tab_ai_screenshot_failure("tab_ai_screenshot_capture_failed", &e);
             return Ok(None);
         }
     };
@@ -100,8 +161,7 @@ pub fn capture_tab_ai_focused_window_screenshot_file() -> Result<Option<TabAiScr
     }
 
     let tmp_dir = screenshot_tmp_dir()?;
-    std::fs::create_dir_all(&tmp_dir)
-        .with_context(|| format!("failed to create screenshot tmp dir: {}", tmp_dir.display()))?;
+    std::fs::create_dir_all(&tmp_dir).context("failed to create private screenshot directory")?;
 
     let filename = build_tab_ai_screenshot_filename(
         chrono::Utc::now(),
@@ -110,28 +170,28 @@ pub fn capture_tab_ai_focused_window_screenshot_file() -> Result<Option<TabAiScr
     );
     let file_path = tmp_dir.join(&filename);
 
-    std::fs::write(&file_path, &capture.png_data)
-        .with_context(|| format!("failed to write screenshot: {}", file_path.display()))?;
+    write_private_tab_ai_screenshot(&file_path, &capture.png_data)?;
 
     let abs_path = file_path.to_string_lossy().into_owned();
-
-    tracing::debug!(
-        event = "tab_ai_screenshot_file_written",
-        path = %abs_path,
-        width = capture.width,
-        height = capture.height,
-        title = %capture.window_title,
-        used_fallback = capture.used_fallback,
-        bytes = capture.png_data.len(),
+    log_private_tab_ai_screenshot_written(
+        "tab_ai_screenshot_file_written",
+        &abs_path,
+        Some(&capture.window_title),
+        capture.width,
+        capture.height,
+        capture.used_fallback,
+        capture.png_data.len(),
     );
 
     record_last_screenshot_identity(filename.clone());
 
     // Best-effort cleanup — don't fail the capture if cleanup errors
     if let Err(e) = cleanup_old_tab_ai_screenshot_files(TAB_AI_SCREENSHOT_MAX_KEEP) {
+        let safe_error = crate::logging::log_private_user_value(&e.to_string());
         tracing::warn!(
             event = "tab_ai_screenshot_cleanup_failed",
-            error = %e,
+            error_bytes = safe_error.raw_bytes,
+            error_sha256 = %safe_error.sha256,
         );
     }
 
@@ -153,10 +213,7 @@ pub fn capture_tab_ai_screen_screenshot_file() -> Result<Option<TabAiScreenshotF
     let (png_data, width, height) = match crate::platform::capture_screen_screenshot() {
         Ok(data) => data,
         Err(e) => {
-            tracing::debug!(
-                event = "tab_ai_screen_screenshot_capture_failed",
-                error = %e,
-            );
+            log_private_tab_ai_screenshot_failure("tab_ai_screen_screenshot_capture_failed", &e);
             return Ok(None);
         }
     };
@@ -166,8 +223,7 @@ pub fn capture_tab_ai_screen_screenshot_file() -> Result<Option<TabAiScreenshotF
     }
 
     let tmp_dir = screenshot_tmp_dir()?;
-    std::fs::create_dir_all(&tmp_dir)
-        .with_context(|| format!("failed to create screenshot tmp dir: {}", tmp_dir.display()))?;
+    std::fs::create_dir_all(&tmp_dir).context("failed to create private screenshot directory")?;
 
     let filename = build_tab_ai_screenshot_filename(
         chrono::Utc::now(),
@@ -176,25 +232,27 @@ pub fn capture_tab_ai_screen_screenshot_file() -> Result<Option<TabAiScreenshotF
     );
     let file_path = tmp_dir.join(&filename);
 
-    std::fs::write(&file_path, &png_data)
-        .with_context(|| format!("failed to write screenshot: {}", file_path.display()))?;
+    write_private_tab_ai_screenshot(&file_path, &png_data)?;
 
     let abs_path = file_path.to_string_lossy().into_owned();
-
-    tracing::debug!(
-        event = "tab_ai_screen_screenshot_file_written",
-        path = %abs_path,
+    log_private_tab_ai_screenshot_written(
+        "tab_ai_screen_screenshot_file_written",
+        &abs_path,
+        None,
         width,
         height,
-        bytes = png_data.len(),
+        false,
+        png_data.len(),
     );
 
     record_last_screenshot_identity(filename.clone());
 
     if let Err(e) = cleanup_old_tab_ai_screenshot_files(TAB_AI_SCREENSHOT_MAX_KEEP) {
+        let safe_error = crate::logging::log_private_user_value(&e.to_string());
         tracing::warn!(
             event = "tab_ai_screenshot_cleanup_failed",
-            error = %e,
+            error_bytes = safe_error.raw_bytes,
+            error_sha256 = %safe_error.sha256,
         );
     }
 
@@ -245,11 +303,7 @@ pub fn cleanup_old_tab_ai_screenshot_files(max_keep: usize) -> Result<()> {
     // Remove everything beyond max_keep
     for (path, _) in screenshot_files.iter().skip(max_keep) {
         if let Err(e) = std::fs::remove_file(path) {
-            tracing::debug!(
-                event = "tab_ai_screenshot_cleanup_file_failed",
-                path = %path.display(),
-                error = %e,
-            );
+            log_private_tab_ai_screenshot_cleanup_failure(path, &e);
         }
     }
 
@@ -306,11 +360,7 @@ pub fn cleanup_old_tab_ai_screenshot_files_in_dir(
     // Remove everything beyond max_keep
     for (path, _) in screenshot_files.iter().skip(max_keep) {
         if let Err(e) = std::fs::remove_file(path) {
-            tracing::debug!(
-                event = "tab_ai_screenshot_cleanup_file_failed",
-                path = %path.display(),
-                error = %e,
-            );
+            log_private_tab_ai_screenshot_cleanup_failure(path, &e);
         }
     }
 
@@ -337,6 +387,126 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create test dir");
         dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_screenshot_file_is_owner_only_and_atomically_replaced_without_capture() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("isolated synthetic screenshot fixture");
+        let path = directory.path().join("private-screenshot.png");
+        write_private_tab_ai_screenshot(&path, b"\x89PNG\r\nprivate synthetic pixels")
+            .expect("write synthetic PNG bytes without capturing a screen");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        write_private_tab_ai_screenshot(&path, b"\x89PNG\r\nreplacement synthetic pixels")
+            .expect("atomically replace synthetic PNG bytes");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"\x89PNG\r\nreplacement synthetic pixels"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_screenshot_file_rejects_symlinks_without_capture_or_target_changes() {
+        let directory = tempfile::tempdir().expect("isolated synthetic screenshot symlink");
+        let external = directory.path().join("unrelated-private-image.png");
+        let planted = directory.path().join("capture.png");
+        std::fs::write(&external, b"preserve unrelated private pixels").unwrap();
+        std::os::unix::fs::symlink(&external, &planted).unwrap();
+
+        assert!(write_private_tab_ai_screenshot(&planted, b"\x89PNG private pixels").is_err());
+        assert_eq!(
+            std::fs::read(&external).unwrap(),
+            b"preserve unrelated private pixels"
+        );
+        assert!(std::fs::symlink_metadata(&planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn private_screenshot_events_never_expose_raw_window_titles_paths_or_errors() {
+        #[derive(Clone)]
+        struct EventWriter(std::sync::Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for EventWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let path = "/Users/private/cancer-treatment/screenshot.png";
+        let title = "Confidential oncology diagnosis";
+        let error = anyhow::anyhow!("private screenshot provider token sk-live-secret");
+        let safe_path = crate::logging::log_private_user_value(path);
+        let safe_title = crate::logging::log_private_user_value(title);
+        let safe_error = crate::logging::log_private_user_value(&error.to_string());
+        let captured = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let writer = std::sync::Arc::clone(&captured);
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || EventWriter(std::sync::Arc::clone(&writer)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_private_tab_ai_screenshot_written(
+                "tab_ai_screenshot_file_written",
+                path,
+                Some(title),
+                640,
+                480,
+                false,
+                128,
+            );
+            log_private_tab_ai_screenshot_failure("tab_ai_screenshot_capture_failed", &error);
+            log_private_tab_ai_screenshot_cleanup_failure(std::path::Path::new(path), &error);
+        });
+
+        let output = String::from_utf8(
+            captured
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        )
+        .unwrap();
+        assert!(!output.contains(path));
+        assert!(!output.contains(title));
+        assert!(!output.contains("cancer-treatment"));
+        assert!(!output.contains("oncology"));
+        assert!(!output.contains("sk-live-secret"));
+        let events: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["fields"]["path_sha256"], safe_path.sha256);
+        assert_eq!(events[0]["fields"]["title_sha256"], safe_title.sha256);
+        assert_eq!(events[0]["fields"]["width"], 640);
+        assert_eq!(events[1]["fields"]["error_sha256"], safe_error.sha256);
+        assert_eq!(events[2]["fields"]["path_sha256"], safe_path.sha256);
+        assert_eq!(events[2]["fields"]["error_sha256"], safe_error.sha256);
     }
 
     #[test]

@@ -68,6 +68,10 @@ fn make_test_receipt(
             has_kit_import: true,
             has_current_app_recipe_header: recipe.is_some(),
             current_app_recipe_header_at_top: recipe.is_some(),
+            declared_capabilities: vec![],
+            execution_topology: None,
+            metadata_parse_errors: vec![],
+            capability_issues: vec![],
             warnings: vec![],
         },
         verification: GeneratedScriptVerificationReceipt::skipped("unit_test_fixture"),
@@ -86,75 +90,100 @@ fn current_app_automation_memory_index_path_is_stable() {
 }
 
 #[test]
-fn current_app_automation_memory_upsert_is_idempotent() {
+fn private_current_app_automation_memory_upsert_is_real_atomic_and_idempotent() {
     let dir = tempfile::tempdir().expect("create temp dir");
     let index_path = dir.path().join(".current-app-automation-memory.json");
 
-    // Override HOME so the index writes to our temp dir
-    // We'll write/read manually to avoid env pollution
     let recipe = make_test_recipe("com.apple.Safari", "summarize this article");
-    let receipt = make_test_receipt(
+    let mut receipt = make_test_receipt(
         "summarize-article",
         "/tmp/test-scripts/summarize-article.scriptkit.json",
         Some(recipe),
     );
 
-    // Simulate upsert by building the entry and writing directly
-    let recipe_ref = receipt.current_app_recipe.clone().unwrap();
-    let entry = CurrentAppAutomationMemoryIndexEntry {
-        schema_version: CURRENT_APP_AUTOMATION_MEMORY_INDEX_SCHEMA_VERSION,
-        slug: receipt.slug.clone(),
-        script_path: receipt.script_path.clone(),
-        receipt_path: receipt.receipt_path.clone(),
-        bundle_id: recipe_ref.prompt_receipt.bundle_id.clone(),
-        app_name: recipe_ref.prompt_receipt.app_name.clone(),
-        effective_query: recipe_ref.effective_query.clone(),
-        raw_query: recipe_ref.raw_query.clone(),
-        prompt: receipt.prompt.clone(),
-        provider_id: receipt.provider_id.clone(),
-        model_id: receipt.model_id.clone(),
-        lookup_key: current_app_recipe_lookup_key(&recipe_ref),
-        auto_replay_eligible: !receipt.shell_execution_warning,
-        written_at_unix_ms: 1000,
-        recipe: recipe_ref,
-    };
-
-    // First write
-    let entries = vec![entry.clone()];
-    let json = serde_json::to_string_pretty(&entries).unwrap();
-    std::fs::write(&index_path, &json).unwrap();
-
-    // Read back
-    let parsed: Vec<CurrentAppAutomationMemoryIndexEntry> =
-        serde_json::from_str(&std::fs::read_to_string(&index_path).unwrap()).unwrap();
+    upsert_current_app_automation_memory_from_receipt_at(&index_path, &receipt).unwrap();
+    let parsed = read_current_app_automation_memory_index_at(&index_path).unwrap();
     assert_eq!(parsed.len(), 1, "first write should produce one entry");
+    assert_eq!(parsed[0].prompt, "summarize this article");
 
-    // Simulate second upsert: retain + push
-    let mut entries_2 = parsed;
-    entries_2.retain(|existing| existing.receipt_path != entry.receipt_path);
-    let mut updated_entry = entry.clone();
-    updated_entry.written_at_unix_ms = 2000;
-    entries_2.push(updated_entry);
-    entries_2.sort_by(|l, r| {
-        l.lookup_key
-            .cmp(&r.lookup_key)
-            .then_with(|| r.written_at_unix_ms.cmp(&l.written_at_unix_ms))
-    });
-
-    let json_2 = serde_json::to_string_pretty(&entries_2).unwrap();
-    std::fs::write(&index_path, &json_2).unwrap();
-
-    let parsed_2: Vec<CurrentAppAutomationMemoryIndexEntry> =
-        serde_json::from_str(&std::fs::read_to_string(&index_path).unwrap()).unwrap();
+    receipt.prompt = "updated private medical prompt".to_owned();
+    upsert_current_app_automation_memory_from_receipt_at(&index_path, &receipt).unwrap();
+    let parsed_2 = read_current_app_automation_memory_index_at(&index_path).unwrap();
     assert_eq!(
         parsed_2.len(),
         1,
         "second upsert with same receipt_path should still produce one entry"
     );
     assert_eq!(
-        parsed_2[0].written_at_unix_ms, 2000,
-        "should have updated timestamp"
+        parsed_2[0].prompt, "updated private medical prompt",
+        "the actual production upsert should replace the owned entry"
     );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&index_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn private_current_app_automation_memory_repairs_legacy_permissions_before_reading() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().expect("isolated legacy automation-memory fixture");
+    let path = directory.path().join("private-automation-memory.json");
+    let entry = make_memory_entry(
+        "com.apple.Safari",
+        "private patient appointment",
+        "private-recipe",
+    );
+    std::fs::write(&path, serde_json::to_vec(&vec![entry]).unwrap()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let entries = read_current_app_automation_memory_index_at(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].effective_query, "private patient appointment");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn private_current_app_automation_memory_rejects_symlinks_without_exposing_private_paths() {
+    let directory = tempfile::tempdir().expect("isolated automation-memory symlink fixture");
+    let external = directory.path().join("unrelated-private-data.json");
+    let planted = directory
+        .path()
+        .join("secret-cancer-patient-automation.json");
+    std::fs::write(&external, "preserve unrelated private data").unwrap();
+    std::os::unix::fs::symlink(&external, &planted).unwrap();
+    let receipt = make_test_receipt(
+        "private-recipe",
+        "/tmp/private-recipe.scriptkit.json",
+        Some(make_test_recipe("com.apple.Safari", "private prompt")),
+    );
+
+    let read_error = read_current_app_automation_memory_index_at(&planted)
+        .expect_err("private memory must not read a planted symlink");
+    assert!(!read_error.to_string().contains("secret-cancer-patient"));
+    let write_error = upsert_current_app_automation_memory_from_receipt_at(&planted, &receipt)
+        .expect_err("private memory must not write through a planted symlink");
+    assert!(!write_error.to_string().contains("secret-cancer-patient"));
+    assert_eq!(
+        std::fs::read_to_string(&external).unwrap(),
+        "preserve unrelated private data"
+    );
+    assert!(std::fs::symlink_metadata(&planted)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 }
 
 #[test]
@@ -270,16 +299,13 @@ fn score_candidate_no_overlap_returns_low_score() {
 }
 
 #[test]
-fn receipt_without_recipe_is_ignored_by_upsert_logic() {
+fn private_current_app_automation_memory_ignores_receipts_without_recipes() {
+    let directory = tempfile::tempdir().expect("isolated empty automation-memory fixture");
+    let path = directory.path().join("must-not-exist.json");
     let receipt = make_test_receipt("no-recipe", "/tmp/no-recipe.scriptkit.json", None);
-    assert!(
-        receipt.current_app_recipe.is_none(),
-        "receipt without recipe should have None"
-    );
-    // The upsert function early-returns Ok(()) for None recipes
-    // Testing the condition directly since we can't call upsert without HOME env changes
-    let result: Result<()> = Ok(());
-    assert!(result.is_ok());
+    upsert_current_app_automation_memory_from_receipt_at(&path, &receipt)
+        .expect("recipe-free receipt should have no persistence side effects");
+    assert!(!path.exists());
 }
 
 // ---------------------------------------------------------------------------

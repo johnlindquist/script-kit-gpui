@@ -45,7 +45,8 @@ fn init_ai_db_at(db_path: PathBuf) -> Result<()> {
         std::fs::create_dir_all(parent).context("Failed to create AI db directory")?;
     }
 
-    let conn = Connection::open(&db_path).context("Failed to open AI chats database")?;
+    let conn = crate::utils::db_permissions::open_private_sqlite(&db_path)
+        .context("Failed to open private AI chats database")?;
 
     // Enable WAL mode for better write performance and concurrency
     // This matches the pattern used in notes/storage.rs
@@ -66,7 +67,12 @@ fn init_ai_db_at(db_path: PathBuf) -> Result<()> {
     conn.busy_timeout(std::time::Duration::from_millis(1000))
         .context("Failed to set busy_timeout for AI database")?;
 
-    debug!(db_path = %db_path.display(), "AI database PRAGMAs configured: WAL, synchronous=NORMAL, foreign_keys=ON, busy_timeout=1000ms");
+    let safe_db_path = crate::logging::log_private_user_value(&db_path.display().to_string());
+    debug!(
+        db_path_bytes = safe_db_path.raw_bytes,
+        db_path_sha256 = %safe_db_path.sha256,
+        "AI database PRAGMAs configured: WAL, synchronous=NORMAL, foreign_keys=ON, busy_timeout=1000ms"
+    );
 
     // Create tables
     conn.execute_batch(
@@ -250,11 +256,16 @@ fn init_ai_db_at(db_path: PathBuf) -> Result<()> {
     )
     .context("Failed to redact legacy message preparation audits")?;
 
-    info!(db_path = %db_path.display(), "AI chats database initialized");
+    info!(
+        db_path_bytes = safe_db_path.raw_bytes,
+        db_path_sha256 = %safe_db_path.sha256,
+        "AI chats database initialized"
+    );
 
     // ai-chats.sqlite stores full conversation history. Keep it and its
     // WAL/SHM sidecars owner-only rather than inheriting umask.
-    crate::utils::db_permissions::harden_sqlite_permissions(&db_path);
+    crate::utils::db_permissions::harden_sqlite_permissions(&db_path)
+        .context("Failed to protect private AI chat SQLite sidecars")?;
 
     // Try to set the global connection. If another thread beat us to it
     // (race condition), that's fine - just return success (idempotent).
@@ -391,7 +402,13 @@ pub fn create_chat(chat: &Chat) -> Result<()> {
 
     insert_chat_record(&conn, chat)?;
 
-    debug!(chat_id = %chat.id, title = %chat.title, "Chat created");
+    let safe_title = crate::logging::log_private_user_value(&chat.title);
+    debug!(
+        chat_id = %chat.id,
+        title_bytes = safe_title.raw_bytes,
+        title_sha256 = %safe_title.sha256,
+        "Chat created"
+    );
     Ok(())
 }
 
@@ -418,9 +435,11 @@ pub fn create_chat_with_messages_bulk(chat: &Chat, messages: &[ChatMessage]) -> 
     tx.commit()
         .context("Failed to commit bulk chat transaction")?;
 
+    let safe_title = crate::logging::log_private_user_value(&chat.title);
     debug!(
         chat_id = %chat.id,
-        title = %chat.title,
+        title_bytes = safe_title.raw_bytes,
+        title_sha256 = %safe_title.sha256,
         message_count = messages.len(),
         "Chat and messages created in bulk transaction"
     );
@@ -467,7 +486,13 @@ pub fn update_chat_title(chat_id: &ChatId, title: &str) -> Result<()> {
     )
     .context("Failed to update chat title")?;
 
-    debug!(chat_id = %chat_id, title = %title, "Chat title updated");
+    let safe_title = crate::logging::log_private_user_value(title);
+    debug!(
+        chat_id = %chat_id,
+        title_bytes = safe_title.raw_bytes,
+        title_sha256 = %safe_title.sha256,
+        "Chat title updated"
+    );
     Ok(())
 }
 
@@ -653,15 +678,29 @@ pub fn search_chats(query: &str) -> Result<Vec<Chat>> {
         Ok(chats)
     })();
 
+    let safe_query = crate::logging::log_private_user_value(query);
     match fts_result {
         Ok(chats) => {
-            debug!(query = %query, count = chats.len(), method = "fts", "Chat search completed");
+            debug!(
+                query_bytes = safe_query.raw_bytes,
+                query_sha256 = %safe_query.sha256,
+                count = chats.len(),
+                method = "fts",
+                "Chat search completed"
+            );
             Ok(chats)
         }
         Err(e) => {
             // FTS failed (possibly due to special characters or other issues)
             // Fall back to simple LIKE search on title
-            debug!(error = %e, query = %query, "FTS search failed, falling back to LIKE");
+            let safe_error = crate::logging::log_private_user_value(&e.to_string());
+            debug!(
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
+                query_bytes = safe_query.raw_bytes,
+                query_sha256 = %safe_query.sha256,
+                "FTS search failed, falling back to LIKE"
+            );
 
             let like_pattern = format!("%{}%", query);
             let mut stmt = conn
@@ -684,7 +723,13 @@ pub fn search_chats(query: &str) -> Result<Vec<Chat>> {
                 .collect::<Result<Vec<_>, _>>()
                 .context("Failed to collect LIKE search results")?;
 
-            debug!(query = %query, count = chats.len(), method = "like", "Chat search completed (fallback)");
+            debug!(
+                query_bytes = safe_query.raw_bytes,
+                query_sha256 = %safe_query.sha256,
+                count = chats.len(),
+                method = "like",
+                "Chat search completed (fallback)"
+            );
             Ok(chats)
         }
     }
@@ -753,10 +798,12 @@ pub fn search_chats_with_snippets(query: &str) -> Result<Vec<ChatSearchResult>> 
         Ok(deduplicate_search_results(results, &query_lower))
     })();
 
+    let safe_query = crate::logging::log_private_user_value(query);
     match fts_result {
         Ok(results) => {
             info!(
-                query = %query,
+                query_bytes = safe_query.raw_bytes,
+                query_sha256 = %safe_query.sha256,
                 count = results.len(),
                 method = "fts_snippets",
                 "Chat search with snippets completed"
@@ -764,7 +811,14 @@ pub fn search_chats_with_snippets(query: &str) -> Result<Vec<ChatSearchResult>> 
             Ok(results)
         }
         Err(e) => {
-            debug!(error = %e, query = %query, "FTS snippet search failed, falling back to LIKE");
+            let safe_error = crate::logging::log_private_user_value(&e.to_string());
+            debug!(
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
+                query_bytes = safe_query.raw_bytes,
+                query_sha256 = %safe_query.sha256,
+                "FTS snippet search failed, falling back to LIKE"
+            );
             let like_pattern = format!("%{}%", query);
             let mut stmt = conn
                 .prepare(
@@ -793,7 +847,8 @@ pub fn search_chats_with_snippets(query: &str) -> Result<Vec<ChatSearchResult>> 
 
             let deduplicated = deduplicate_search_results(results, &query_lower);
             info!(
-                query = %query,
+                query_bytes = safe_query.raw_bytes,
+                query_sha256 = %safe_query.sha256,
                 count = deduplicated.len(),
                 method = "like_snippets",
                 "Chat search with snippets completed (fallback)"

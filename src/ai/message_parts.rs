@@ -1,7 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// Canonical label for the Ask Anything ambient context chip.
 pub const ASK_ANYTHING_LABEL: &str = "Ask Anything";
@@ -83,6 +82,14 @@ impl AiContextPart {
             Self::AmbientContext { .. } => "ambient://ask-anything",
             Self::TextBlock { source, .. } => source,
         }
+    }
+
+    /// Stable owner identity for context selection and synchronization.
+    /// Labels and editable content may change without turning one selected
+    /// file, command, transcript, or resource into a different attachment.
+    pub(crate) fn has_same_attachment_owner(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+            && self.source() == other.source()
     }
 
     /// Returns `true` when this part is the initial Ask Anything resource
@@ -366,18 +373,7 @@ fn escape_xml_attribute(value: &str) -> String {
 }
 
 pub(crate) fn run_scoped_fingerprint(value: &str) -> String {
-    static SALT: OnceLock<String> = OnceLock::new();
-    let salt = SALT.get_or_init(|| {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        format!("{}:{nanos}", std::process::id())
-    });
-    let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
-    hasher.update([0]);
-    hasher.update(value.as_bytes());
-    format!("{:x}", hasher.finalize())
+    crate::logging::log_private_user_value(value).sha256
 }
 
 #[derive(Clone)]
@@ -395,7 +391,7 @@ fn resolve_context_part_sanitized(
     item: &ContextPreparationItem,
     scripts: &[Arc<crate::scripts::Script>],
     scriptlets: &[Arc<crate::scripts::Scriptlet>],
-) -> std::result::Result<PreparedContextBlock, crate::ai::reliability::AppFailureRecord> {
+) -> std::result::Result<PreparedContextBlock, Box<crate::ai::reliability::AppFailureRecord>> {
     let full = |content: String| PreparedContextBlock {
         content,
         kind: ContextPartPreparationOutcomeKind::FullContent,
@@ -403,7 +399,11 @@ fn resolve_context_part_sanitized(
     match &item.part {
         AiContextPart::ResourceUri { uri, .. } => {
             let content = crate::mcp_resources::read_resource(uri, scripts, scriptlets, None)
-                .map_err(|error| context_unavailable(&format!("resource read failed: {error}")))?;
+                .map_err(|error| {
+                    Box::new(context_unavailable(&format!(
+                        "resource read failed: {error}"
+                    )))
+                })?;
             let text =
                 sanitize_resource_text_for_prompt(&content.text, &content.mime_type, &content.uri);
             Ok(full(format!(
@@ -428,9 +428,9 @@ fn resolve_context_part_sanitized(
                     ),
                     kind: ContextPartPreparationOutcomeKind::MetadataOnly,
                 }),
-                Err(stat_error) => Err(context_unavailable(&format!(
+                Err(stat_error) => Err(Box::new(context_unavailable(&format!(
                     "attachment read failed: {read_error}; metadata failed: {stat_error}"
-                ))),
+                )))),
             },
         },
         AiContextPart::SkillFile {
@@ -439,8 +439,9 @@ fn resolve_context_part_sanitized(
             owner_label,
             ..
         } => {
-            let raw = std::fs::read_to_string(path)
-                .map_err(|error| context_unavailable(&format!("skill read failed: {error}")))?;
+            let raw = std::fs::read_to_string(path).map_err(|error| {
+                Box::new(context_unavailable(&format!("skill read failed: {error}")))
+            })?;
             let content = sanitize_resource_text_for_prompt(&raw, "text/markdown", path);
             let owner = escape_xml_attribute(owner_label);
             let title = escape_xml_attribute(skill_name);
@@ -470,7 +471,9 @@ fn resolve_context_part_sanitized(
                 .map(serde_json::to_string_pretty)
                 .transpose()
                 .map_err(|error| {
-                    context_unavailable(&format!("focused metadata serialization failed: {error}"))
+                    Box::new(context_unavailable(&format!(
+                        "focused metadata serialization failed: {error}"
+                    )))
                 })?
                 .unwrap_or_else(|| "{}".to_string());
             let metadata = sanitize_resource_text_for_prompt(
@@ -509,6 +512,10 @@ fn resolve_context_part_sanitized(
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Agent Chat's cross-surface context boundary preserves the complete unboxed AppFailureRecord for typed recovery"
+)]
 pub(crate) fn resolve_context_item_to_prompt_block(
     part: &AiContextPart,
     role: ContextPreparationRole,
@@ -519,7 +526,9 @@ pub(crate) fn resolve_context_item_to_prompt_block(
         part: part.clone(),
         role,
     };
-    resolve_context_part_sanitized(&item, scripts, scriptlets).map(|block| block.content)
+    resolve_context_part_sanitized(&item, scripts, scriptlets)
+        .map(|block| block.content)
+        .map_err(|failure| *failure)
 }
 
 /// Compatibility resolver. All content still passes through the canonical
@@ -561,7 +570,7 @@ fn resolve_context_items_with_receipt(
                 part_id: format!("context-{index:04}"),
                 source_kind: item.part.source_kind(),
                 role: item.role,
-                failure,
+                failure: *failure,
             }),
         }
     }
@@ -700,19 +709,14 @@ pub enum PreparedMessageDecision {
     Blocked,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ContextPartPreparationOutcomeKind {
     FullContent,
     MetadataOnly,
+    #[default]
     Failed,
     DisplayOnly,
-}
-
-impl Default for ContextPartPreparationOutcomeKind {
-    fn default() -> Self {
-        Self::Failed
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -852,7 +856,10 @@ fn build_user_visible_context_error(failures: &[ContextResolutionFailure]) -> Op
 fn safe_outcome(
     index: usize,
     item: &ContextPreparationItem,
-    result: &std::result::Result<PreparedContextBlock, crate::ai::reliability::AppFailureRecord>,
+    result: &std::result::Result<
+        PreparedContextBlock,
+        Box<crate::ai::reliability::AppFailureRecord>,
+    >,
 ) -> ContextPartPreparationOutcome {
     let part_id = format!("context-{index:04}");
     match result {
@@ -908,7 +915,7 @@ pub fn prepare_user_message(
                     part_id: format!("context-{index:04}"),
                     source_kind: item.part.source_kind(),
                     role: item.role,
-                    failure,
+                    failure: *failure,
                 });
             }
         }
@@ -1022,6 +1029,61 @@ pub fn prepare_user_message_from_sources_with_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_context_fingerprint_uses_ephemeral_key_not_predictable_public_hash() {
+        use sha2::Digest as _;
+
+        let secret = "private attached document and hidden model context";
+        let actual = run_scoped_fingerprint(secret);
+
+        assert_eq!(
+            actual,
+            crate::logging::log_private_user_value(secret).sha256
+        );
+        assert_eq!(actual, run_scoped_fingerprint(secret));
+        assert_ne!(
+            actual,
+            run_scoped_fingerprint("a different private context")
+        );
+        assert_ne!(
+            actual,
+            format!("{:x}", sha2::Sha256::digest(secret.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn private_context_receipt_fingerprints_actual_prepared_prompt_with_shared_key() {
+        use sha2::Digest as _;
+
+        let secret = "sensitive attached document content";
+        let items = [ContextPreparationItem::primary(AiContextPart::TextBlock {
+            label: "Private notes".to_string(),
+            source: "synthetic://private".to_string(),
+            text: secret.to_string(),
+            mime_type: Some("text/plain".to_string()),
+        })];
+        let prepared = prepare_user_message("", &items, &[], &[]);
+        let actual = prepared.receipt.outcomes[0]
+            .content_fingerprint
+            .as_deref()
+            .expect("successful real context preparation has a private fingerprint");
+
+        assert_eq!(
+            actual,
+            crate::logging::log_private_user_value(&prepared.final_user_content).sha256
+        );
+        assert_ne!(
+            actual,
+            format!(
+                "{:x}",
+                sha2::Sha256::digest(prepared.final_user_content.as_bytes())
+            )
+        );
+        assert!(!serde_json::to_string(&prepared.receipt)
+            .unwrap()
+            .contains(secret));
+    }
 
     #[test]
     fn semantic_chip_projection_is_stable_redacted_and_capability_neutral() {

@@ -116,7 +116,7 @@ fn screenshot_files_exposes_identity_accessor_and_capture_paths_record_it() {
          would bypass the contract."
     );
     let focused_write_idx = SCREENSHOT_FILES_SOURCE
-        .find("event = \"tab_ai_screenshot_file_written\"")
+        .find("\"tab_ai_screenshot_file_written\",")
         .expect("focused-window capture path trace event must remain");
     let after_focused = &SCREENSHOT_FILES_SOURCE[focused_write_idx..];
     let focused_end = after_focused
@@ -133,7 +133,7 @@ fn screenshot_files_exposes_identity_accessor_and_capture_paths_record_it() {
     );
 
     let screen_write_idx = SCREENSHOT_FILES_SOURCE
-        .find("event = \"tab_ai_screen_screenshot_file_written\"")
+        .find("\"tab_ai_screen_screenshot_file_written\",")
         .expect("full-screen capture path trace event must remain");
     let after_screen = &SCREENSHOT_FILES_SOURCE[screen_write_idx..];
     let screen_end = after_screen

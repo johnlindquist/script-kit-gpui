@@ -29,12 +29,91 @@
 
 use std::borrow::Cow;
 use std::fmt;
+use std::sync::OnceLock;
+
+use sha2::{Digest, Sha256};
 
 /// Default byte cap for a single log preview.
 pub const SAFE_USER_VALUE_MAX_BYTES: usize = 200;
 
 /// Ellipsis marker appended to truncated previews (3 bytes in UTF-8).
 const ELLIPSIS: &str = "…";
+
+/// Private to this process: never persisted, emitted, or accepted from callers.
+static PRIVATE_LOG_HMAC_KEY: OnceLock<[u8; 16]> = OnceLock::new();
+
+/// A genuinely private diagnostic identity that never stores user content.
+///
+/// Unlike [`LogSafe`], which deliberately exposes a bounded preview, this
+/// representation is suitable for prompts, filters, URLs, clipboard labels,
+/// provider errors, and any other value that must never reach a log sink.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrivateLogValue {
+    /// Exact byte length of the original UTF-8 value.
+    pub raw_bytes: usize,
+    /// Process-stable HMAC-SHA-256 fingerprint; the original value is not retained.
+    pub sha256: String,
+}
+
+impl PrivateLogValue {
+    /// Byte length of the digest-only representation emitted by `Display`.
+    pub fn safe_bytes(&self) -> usize {
+        "sha256:".len() + self.sha256.len()
+    }
+}
+
+impl fmt::Display for PrivateLogValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "sha256:{}", self.sha256)
+    }
+}
+
+/// Fingerprint sensitive user content with a process-private HMAC-SHA-256 key.
+///
+/// A public SHA-256 of progressively typed prefixes is reversible: an observer
+/// can test every possible next character against each successive log entry.
+/// The ephemeral key preserves correlation within this process without making
+/// offline guessing or cross-session tracking possible.
+pub fn log_private_user_value(raw: &str) -> PrivateLogValue {
+    let key = PRIVATE_LOG_HMAC_KEY.get_or_init(|| *uuid::Uuid::new_v4().as_bytes());
+    PrivateLogValue {
+        raw_bytes: raw.len(),
+        sha256: hmac_sha256(key, raw.as_bytes()),
+    }
+}
+
+/// RFC 2104 HMAC with SHA-256's 64-byte block and standard long-key normalization.
+fn hmac_sha256(key: &[u8], message: &[u8]) -> String {
+    const BLOCK_BYTES: usize = 64;
+
+    let mut normalized_key = [0_u8; BLOCK_BYTES];
+    if key.len() > BLOCK_BYTES {
+        let shortened_key = Sha256::digest(key);
+        normalized_key[..shortened_key.len()].copy_from_slice(&shortened_key);
+    } else {
+        normalized_key[..key.len()].copy_from_slice(key);
+    }
+
+    let mut inner_pad = [0x36_u8; BLOCK_BYTES];
+    let mut outer_pad = [0x5c_u8; BLOCK_BYTES];
+    for ((inner, outer), byte) in inner_pad
+        .iter_mut()
+        .zip(outer_pad.iter_mut())
+        .zip(normalized_key)
+    {
+        *inner ^= byte;
+        *outer ^= byte;
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner.finalize());
+    format!("{:x}", outer.finalize())
+}
 
 /// Byte-capped preview of an untrusted value plus byte-level metadata.
 ///
@@ -115,6 +194,73 @@ pub fn log_user_value_with_limit(raw: &str, max_bytes: usize) -> LogSafe<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_log_value_never_contains_user_content() {
+        let secret = "sk-live-secret-query🔐 https://private.example/path?token=hunter2";
+        let private = log_private_user_value(secret);
+
+        assert_eq!(private.raw_bytes, secret.len());
+        assert_eq!(private.sha256.len(), 64);
+        assert_eq!(private.safe_bytes(), private.to_string().len());
+        assert!(private
+            .sha256
+            .chars()
+            .all(|value| value.is_ascii_hexdigit()));
+        assert_eq!(private.to_string(), format!("sha256:{}", private.sha256));
+        assert!(!private.to_string().contains("sk-live-secret"));
+        assert!(!format!("{private:?}").contains("hunter2"));
+        assert!(!format!("{private:?}").contains("private.example"));
+    }
+
+    #[test]
+    fn private_log_value_is_stable_and_distinguishes_equal_length_secrets() {
+        let left = log_private_user_value("secret-a");
+        let same = log_private_user_value("secret-a");
+        let right = log_private_user_value("secret-b");
+
+        assert_eq!(left, same);
+        assert_eq!(left.raw_bytes, right.raw_bytes);
+        assert_ne!(left.sha256, right.sha256);
+    }
+
+    #[test]
+    fn private_log_hmac_matches_the_rfc4231_sha256_vector() {
+        let key = [0x0b_u8; 20];
+        assert_eq!(
+            hmac_sha256(&key, b"Hi There"),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+    }
+
+    #[test]
+    fn private_log_hmac_normalizes_keys_longer_than_the_sha256_block() {
+        let key = [0xaa_u8; 131];
+        assert_eq!(
+            hmac_sha256(
+                &key,
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            ),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    #[test]
+    fn progressively_typed_prefixes_never_expose_public_sha256_digests() {
+        let mut previous = None;
+
+        for prefix in ["s", "sk", "sk-", "sk-live", "sk-live-private"] {
+            let private = log_private_user_value(prefix);
+            let public_sha256 = format!("{:x}", Sha256::digest(prefix.as_bytes()));
+
+            assert_eq!(private.raw_bytes, prefix.len());
+            assert_ne!(private.sha256, public_sha256);
+            assert_eq!(private, log_private_user_value(prefix));
+            if let Some(previous_digest) = previous.replace(private.sha256.clone()) {
+                assert_ne!(private.sha256, previous_digest);
+            }
+        }
+    }
 
     #[test]
     fn short_ascii_is_borrowed_unchanged() {

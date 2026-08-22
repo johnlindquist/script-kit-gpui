@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing::{debug, error, info};
 use uuid::Uuid;
@@ -196,9 +196,9 @@ fn migrate_add_column_if_missing(conn: &Connection, column: &str, ddl: &str) -> 
     Ok(())
 }
 
-fn open_and_init_connection(db_path: &PathBuf) -> Result<Connection> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("Failed to open database at {:?}", db_path))?;
+fn open_and_init_connection(db_path: &Path) -> Result<Connection> {
+    let conn = crate::utils::db_permissions::open_private_sqlite(db_path)
+        .context("Failed to open private clipboard-history database")?;
 
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
         .context("Failed to enable WAL mode")?;
@@ -214,44 +214,10 @@ fn open_and_init_connection(db_path: &PathBuf) -> Result<Connection> {
 
     ensure_clipboard_schema(&conn)?;
 
-    // Clipboard history captures whatever the user copies (messages, tokens,
-    // one-time codes). Keep the DB and its WAL/SHM sidecars owner-only (0600)
-    // rather than inheriting umask. Best-effort; done after WAL mode so the
-    // sidecar files exist.
-    harden_clipboard_db_permissions(db_path);
+    crate::utils::db_permissions::harden_sqlite_permissions(db_path)
+        .context("Failed to protect private clipboard SQLite sidecars")?;
 
     Ok(conn)
-}
-
-/// Restrict the clipboard-history SQLite file and its `-wal`/`-shm` sidecars to
-/// owner read/write (0600). Best-effort — a looser-permission DB is not worth
-/// failing to open the store over.
-fn harden_clipboard_db_permissions(db_path: &std::path::Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for suffix in ["", "-wal", "-shm"] {
-            let path = if suffix.is_empty() {
-                db_path.to_path_buf()
-            } else {
-                let mut os = db_path.as_os_str().to_owned();
-                os.push(suffix);
-                PathBuf::from(os)
-            };
-            if path.exists() {
-                if let Err(err) =
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                {
-                    debug!(
-                        "Could not restrict clipboard DB permissions on {:?}: {err}",
-                        path
-                    );
-                }
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = db_path;
 }
 
 /// Get or create the database connection
@@ -1039,6 +1005,37 @@ pub(crate) fn reset_test_clipboard_db() {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[test]
+    fn clipboard_database_owner_is_private_and_rejects_foreign_symlink_targets() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let directory = tempfile::tempdir().expect("isolated clipboard database fixture");
+        let path = directory.path().join("clipboard.sqlite");
+        let connection = open_and_init_connection(&path).expect("initialize private clipboard");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("private clipboard metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(connection);
+
+        let foreign = directory.path().join("foreign.sqlite");
+        let hostile = directory.path().join("hostile.sqlite");
+        std::fs::write(&foreign, b"foreign private clipboard content")
+            .expect("seed unrelated clipboard owner");
+        symlink(&foreign, &hostile).expect("plant clipboard database symlink");
+
+        assert!(open_and_init_connection(&hostile).is_err());
+        assert_eq!(
+            std::fs::read(&foreign).expect("foreign clipboard remains untouched"),
+            b"foreign private clipboard content"
+        );
+    }
 
     #[test]
     fn test_db_path_format() {

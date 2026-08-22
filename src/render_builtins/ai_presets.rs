@@ -405,7 +405,11 @@ impl ScriptListApp {
 
     /// Select a preset from the search view and apply it in AI chat.
     fn select_ai_preset(&mut self, preset_id: &str, _window: &mut Window, cx: &mut Context<Self>) {
-        tracing::info!(preset_id = %preset_id, action = "select_ai_preset", "User selected AI preset from search");
+        tracing::info!(
+            preset_fingerprint = %crate::ai::reliability::redacted_fingerprint(preset_id),
+            action = "select_ai_preset",
+            "User selected AI preset from search"
+        );
         let trace_id = uuid::Uuid::new_v4().to_string();
         self.open_agent_chat_after_main_hide(
             "select_ai_preset",
@@ -443,7 +447,13 @@ impl ScriptListApp {
                 let model_val = AiPresetModelSelection::from_input(model.as_str()).as_create_arg();
                 match crate::ai::presets::create_preset(&name_val, &prompt_val, model_val) {
                     Ok(preset) => {
-                        tracing::info!(id = %preset.id, name = %preset.name, action = "create_preset_success", "AI preset created");
+                        tracing::info!(
+                            preset_fingerprint = %crate::ai::reliability::redacted_fingerprint(
+                                &preset.id
+                            ),
+                            action = "create_preset_success",
+                            "AI preset created"
+                        );
                         self.show_hud(
                             form_action.success_hud(&preset.name),
                             Some(HUD_SHORT_MS),
@@ -452,7 +462,13 @@ impl ScriptListApp {
                         self.go_back_or_close(window, cx);
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, action = "create_preset_failed", "Failed to create preset");
+                        tracing::error!(
+                            diagnostic_fingerprint = %crate::ai::reliability::redacted_fingerprint(
+                                &e.to_string()
+                            ),
+                            action = "create_preset_failed",
+                            "Failed to create preset"
+                        );
                         self.show_error_toast(form_action.failure_message(e), cx);
                     }
                 }

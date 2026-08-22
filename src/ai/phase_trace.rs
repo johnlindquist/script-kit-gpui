@@ -27,8 +27,8 @@
 //! at the diagnostic vault. This trace is a *timing* instrument, not a content
 //! log. It therefore records:
 //!
-//! - lengths (`textChars`) and salted-free SHA-256 hex digests (`textSha256`),
-//!   never the text;
+//! - lengths (`textChars`) and process-keyed HMAC fingerprints (`textSha256`),
+//!   never the text or a publicly guessable unsalted digest;
 //! - stable enum labels (`outcome`, `surface`, `transport`, `failureCode`),
 //!   never free-form provider prose.
 //!
@@ -48,7 +48,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::{json, Value};
-use sha2::{Digest as _, Sha256};
 
 /// Environment variable naming the NDJSON file every surface appends to.
 ///
@@ -302,11 +301,8 @@ impl PhaseTrace {
         if let (Some(target), Some(fields)) = (record.as_object_mut(), details.as_object()) {
             target.extend(fields.clone());
         }
-        if let Some(parent) = inner.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        // Serialise the whole record — newline included — into one buffer and
-        // issue exactly ONE `write_all`.
+        // Serialize the whole record into the shared private append owner's
+        // single newline-terminated buffer and issue exactly ONE `write_all`.
         //
         // This is load-bearing, not stylistic. `writeln!` against a `File`
         // drives `fmt::Write` machinery that emits several `write` syscalls per
@@ -315,17 +311,12 @@ impl PhaseTrace {
         // line and NDJSON parsing dies on corrupted JSON. A single `write_all`
         // to an `O_APPEND` descriptor is atomic with respect to the file
         // offset, so records can be ordered arbitrarily but never spliced.
-        // `concurrent_writes_produce_unique_sequence_numbers` is the regression.
-        let mut line = record.to_string();
-        line.push('\n');
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&inner.path)
-        {
-            use std::io::Write as _;
-            let _ = file.write_all(line.as_bytes());
-        }
+        // `concurrent_writes_produce_unique_sequence_numbers` is the
+        // regression. The observability variant intentionally skips fsync so
+        // measuring a phase cannot inject disk-sync latency into that phase.
+        let line = record.to_string();
+        let _ =
+            crate::atomic_file::append_private_observability_record(&inner.path, line.as_bytes());
     }
 
     /// Record the turn start. Call once, as early as the transport accepts work.
@@ -355,7 +346,7 @@ impl PhaseTrace {
                 events::FIRST_VISIBLE_OUTPUT,
                 json!({
                     "textChars": text.chars().count(),
-                    "textSha256": sha256_hex(text),
+                    "textSha256": private_trace_fingerprint(text),
                 }),
             );
         }
@@ -371,7 +362,7 @@ impl PhaseTrace {
                 events::FIRST_THOUGHT,
                 json!({
                     "textChars": text.chars().count(),
-                    "textSha256": sha256_hex(text),
+                    "textSha256": private_trace_fingerprint(text),
                 }),
             );
         }
@@ -416,17 +407,16 @@ impl PhaseTrace {
     }
 }
 
-/// Hex SHA-256. Lets a reader confirm two surfaces saw the same text without
-/// the trace ever containing that text.
-pub(crate) fn sha256_hex(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    format!("{:x}", hasher.finalize())
+/// Ephemeral process-keyed correlation: surfaces in this app process can
+/// compare observations, but a copied trace cannot verify guessed private text.
+fn private_trace_fingerprint(value: &str) -> String {
+    crate::logging::log_private_user_value(value).sha256
 }
 
 #[cfg(test)]
 mod phase_trace_tests {
     use super::*;
+    use sha2::Digest as _;
 
     fn read_records(path: &std::path::Path) -> Vec<Value> {
         std::fs::read_to_string(path)
@@ -619,14 +609,110 @@ mod phase_trace_tests {
                 "trace leaked {leaked:?}; it must record hashes and counts only"
             );
         }
-        // ...while still being useful: the digest and length are present.
-        assert!(raw.contains(&sha256_hex(secret_query)));
+        // ...while still being useful: a keyed fingerprint and length are
+        // present, while the publicly guessable SHA-256 digest is absent.
+        assert!(raw.contains(&private_trace_fingerprint(secret_query)));
+        assert!(!raw.contains(&format!(
+            "{:x}",
+            sha2::Sha256::digest(secret_query.as_bytes())
+        )));
         assert!(raw.contains("\"textChars\""));
         assert!(
             raw.contains("RuntimeClosed"),
             "a stable classifier code is allowed and needed"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_phase_trace_repairs_legacy_permissions_before_recording() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("isolated phase trace fixture");
+        let path = directory.path().join("shared.ndjson");
+        let trace = PhaseTrace::begin_at(
+            path.clone(),
+            AiSurface::AgentChat,
+            AiTransport::PiRpc,
+            "private-run",
+        );
+        trace.turn_start(json!({}));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        trace.observe_provider_event();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(read_records(&path).len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_phase_trace_rejects_symlinks_without_touching_foreign_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("isolated phase trace symlink fixture");
+        let external = directory.path().join("foreign.txt");
+        let planted = directory.path().join("shared.ndjson");
+        std::fs::write(&external, "foreign trace must remain untouched").unwrap();
+        symlink(&external, &planted).unwrap();
+
+        let trace = PhaseTrace::begin_at(
+            planted.clone(),
+            AiSurface::Flow,
+            AiTransport::CodexAppServer,
+            "private-run",
+        );
+        trace.turn_start(json!({}));
+
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap(),
+            "foreign trace must remain untouched"
+        );
+        assert!(std::fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn private_phase_trace_fingerprints_cannot_verify_guessed_model_content() {
+        let directory = tempfile::tempdir().expect("isolated model trace fixture");
+        let path = directory.path().join("model.ndjson");
+        let visible = "my private model answer";
+        let thought = "my private hidden reasoning";
+        let trace = PhaseTrace::begin_at(
+            path.clone(),
+            AiSurface::Mini,
+            AiTransport::PiRpc,
+            "private-model-run",
+        );
+        trace.observe_visible_output(visible);
+        trace.observe_thought(thought);
+
+        let records = read_records(&path);
+        assert_eq!(records.len(), 2);
+        for (record, secret) in records.iter().zip([visible, thought]) {
+            let actual = record["textSha256"].as_str().unwrap();
+            assert_eq!(
+                actual,
+                crate::logging::log_private_user_value(secret).sha256
+            );
+            assert_ne!(
+                actual,
+                format!("{:x}", sha2::Sha256::digest(secret.as_bytes()))
+            );
+        }
+
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(!raw.contains(visible));
+        assert!(!raw.contains(thought));
     }
 
     /// The surface label must come from the existing profile plumbing, and the

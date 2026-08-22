@@ -436,45 +436,46 @@ fn script_kit_managed_claude_mcp_servers(
     Ok(servers)
 }
 
-fn load_claude_managed_mcp_state(path: &Path) -> anyhow::Result<ClaudeManagedMcpState> {
-    if !path.exists() {
-        return Ok(ClaudeManagedMcpState::default());
+fn read_private_agent_chat_json<T: serde::de::DeserializeOwned>(
+    path: &Path,
+) -> anyhow::Result<Option<T>> {
+    if !crate::atomic_file::inspect_private_file(path)
+        .context("inspect private Agent Chat configuration target")?
+    {
+        return Ok(None);
     }
+    let contents = crate::atomic_file::read_private_file(path)
+        .context("read owner-only Agent Chat configuration")?;
+    let value =
+        serde_json::from_str(&contents).context("parse private Agent Chat configuration")?;
+    Ok(Some(value))
+}
 
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("read Claude MCP sync state {}", path.display()))?;
-    let state = serde_json::from_slice::<ClaudeManagedMcpState>(&bytes)
-        .with_context(|| format!("parse Claude MCP sync state {}", path.display()))?;
-    Ok(state)
+fn write_private_agent_chat_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).context("serialize private Agent Chat state")?;
+    crate::atomic_file::write_private_atomic(path, &bytes)
+        .context("atomically persist owner-only Agent Chat state")
+}
+
+fn load_claude_managed_mcp_state(path: &Path) -> anyhow::Result<ClaudeManagedMcpState> {
+    Ok(read_private_agent_chat_json(path)?.unwrap_or_default())
 }
 
 fn write_claude_managed_mcp_state(path: &Path, managed_servers: &[String]) -> anyhow::Result<()> {
     if managed_servers.is_empty() {
-        if path.exists() {
-            std::fs::remove_file(path)
-                .with_context(|| format!("remove Claude MCP sync state {}", path.display()))?;
+        if crate::atomic_file::inspect_private_file(path)
+            .context("inspect private Claude MCP sync state before removal")?
+        {
+            std::fs::remove_file(path).context("remove private Claude MCP sync state")?;
         }
         return Ok(());
-    }
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "create Claude MCP sync state directory {}",
-                parent.display()
-            )
-        })?;
     }
 
     let state = ClaudeManagedMcpState {
         schema_version: CLAUDE_MCP_SYNC_SCHEMA_VERSION,
         managed_servers: managed_servers.to_vec(),
     };
-    let bytes = serde_json::to_vec_pretty(&state)
-        .with_context(|| format!("serialize Claude MCP sync state {}", path.display()))?;
-    std::fs::write(path, bytes)
-        .with_context(|| format!("write Claude MCP sync state {}", path.display()))?;
-    Ok(())
+    write_private_agent_chat_json(path, &state)
 }
 
 fn sync_script_kit_mcp_to_claude(config: &crate::config::Config) -> anyhow::Result<()> {
@@ -501,14 +502,8 @@ fn sync_script_kit_mcp_to_claude_at(
     state_path: &Path,
 ) -> anyhow::Result<()> {
     let previous_state = load_claude_managed_mcp_state(state_path)?;
-    let mut root = if claude_config_path.exists() {
-        let bytes = std::fs::read(claude_config_path)
-            .with_context(|| format!("read Claude config {}", claude_config_path.display()))?;
-        serde_json::from_slice::<Value>(&bytes)
-            .with_context(|| format!("parse Claude config {}", claude_config_path.display()))?
-    } else {
-        Value::Object(Map::new())
-    };
+    let mut root = read_private_agent_chat_json(claude_config_path)?
+        .unwrap_or_else(|| Value::Object(Map::new()));
 
     let root_object = root
         .as_object_mut()
@@ -537,16 +532,8 @@ fn sync_script_kit_mcp_to_claude_at(
         );
     }
 
-    if let Some(parent) = claude_config_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create Claude config directory {}", parent.display()))?;
-    }
-
-    let bytes = serde_json::to_vec_pretty(&root)
-        .with_context(|| format!("serialize Claude config {}", claude_config_path.display()))?;
-    std::fs::write(claude_config_path, bytes)
-        .with_context(|| format!("write Claude config {}", claude_config_path.display()))?;
-
+    write_private_agent_chat_json(claude_config_path, &root)
+        .context("persist private Claude MCP configuration")?;
     write_claude_managed_mcp_state(state_path, managed_server_names)?;
     Ok(())
 }
@@ -634,10 +621,12 @@ pub(crate) fn prewarm_agent_config() {
 fn claude_code_agent_config() -> anyhow::Result<AgentChatAgentConfig> {
     let config = crate::config::load_config();
     if let Err(error) = sync_script_kit_mcp_to_claude(&config) {
+        let safe_error = crate::logging::log_private_user_value(&error.to_string());
         tracing::warn!(
             target: "script_kit::tab_ai",
             event = "script_kit_mcp_sync_failed",
-            error = %error,
+            error_bytes = safe_error.raw_bytes,
+            error_sha256 = %safe_error.sha256,
         );
     }
     let claude_code = config.claude_code.unwrap_or_default();
@@ -894,42 +883,36 @@ fn prune_deprecated_google_cli_agents(
 /// Agent Chat-compatible agents so the user has a concrete file to edit.
 pub(crate) fn ensure_agent_chat_agents_catalog_seeded() -> anyhow::Result<PathBuf> {
     let path = super::catalog::default_agent_chat_agents_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create Agent Chat catalog directory {}", parent.display()))?;
-    }
-
-    let existed = path.exists();
-    let mut file = if existed {
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("read Agent Chat agents catalog at {}", path.display()))?;
-        serde_json::from_slice::<super::catalog::AgentChatAgentCatalogFile>(&bytes)
-            .with_context(|| format!("parse Agent Chat agents catalog at {}", path.display()))?
-    } else {
-        super::catalog::AgentChatAgentCatalogFile::default()
-    };
-
-    let pruned_count = prune_deprecated_google_cli_agents(&mut file);
-    let starter_count = merge_catalog_with_starter_agents(&mut file);
-    if !existed || starter_count > 0 || pruned_count > 0 {
-        let bytes = serde_json::to_vec_pretty(&file).with_context(|| {
-            format!("serialize Agent Chat agents catalog at {}", path.display())
-        })?;
-        std::fs::write(&path, bytes)
-            .with_context(|| format!("write Agent Chat agents catalog at {}", path.display()))?;
-    }
+    let (existed, starter_count, pruned_count, total_agents) =
+        ensure_agent_chat_agents_catalog_seeded_at(&path)?;
+    let safe_path = crate::logging::log_private_user_value(&path.to_string_lossy());
 
     tracing::info!(
         target: "script_kit::tab_ai",
         event = "agent_chat_agent_catalog_seeded_for_editing",
-        path = %path.display(),
+        path_bytes = safe_path.raw_bytes,
+        path_sha256 = %safe_path.sha256,
         existed,
         starter_count,
         pruned_count,
-        total_agents = file.agents.len(),
+        total_agents,
     );
 
     Ok(path)
+}
+
+fn ensure_agent_chat_agents_catalog_seeded_at(
+    path: &Path,
+) -> anyhow::Result<(bool, usize, usize, usize)> {
+    let existing = read_private_agent_chat_json::<super::catalog::AgentChatAgentCatalogFile>(path)?;
+    let existed = existing.is_some();
+    let mut file = existing.unwrap_or_default();
+    let pruned_count = prune_deprecated_google_cli_agents(&mut file);
+    let starter_count = merge_catalog_with_starter_agents(&mut file);
+    if !existed || starter_count > 0 || pruned_count > 0 {
+        write_private_agent_chat_json(path, &file)?;
+    }
+    Ok((existed, starter_count, pruned_count, file.agents.len()))
 }
 
 /// Seed the Agent Chat catalog with starter entries and open it in the default editor.
@@ -984,35 +967,19 @@ pub(crate) fn load_agent_chat_agent_configs() -> anyhow::Result<Vec<AgentChatAge
     // 2. Script Kit native multi-agent catalog.
     let catalog_path = super::catalog::default_agent_chat_agents_path();
     {
-        let mut file = match std::fs::read(&catalog_path) {
-            Ok(bytes) => {
-                serde_json::from_slice::<super::catalog::AgentChatAgentCatalogFile>(&bytes)
-                    .with_context(|| {
-                        format!(
-                            "parse Agent Chat agents catalog at {}",
-                            catalog_path.display()
-                        )
-                    })?
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                super::catalog::AgentChatAgentCatalogFile::default()
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "read Agent Chat agents catalog at {}",
-                        catalog_path.display()
-                    )
-                });
-            }
-        };
+        let mut file = read_private_agent_chat_json::<super::catalog::AgentChatAgentCatalogFile>(
+            &catalog_path,
+        )?
+        .unwrap_or_default();
         let pruned_count = prune_deprecated_google_cli_agents(&mut file);
         let starter_count = merge_catalog_with_starter_agents(&mut file);
         if starter_count > 0 || pruned_count > 0 {
+            let safe_path = crate::logging::log_private_user_value(&catalog_path.to_string_lossy());
             tracing::info!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_agent_catalog_starters_merged_runtime",
-                path = %catalog_path.display(),
+                path_bytes = safe_path.raw_bytes,
+                path_sha256 = %safe_path.sha256,
                 starter_count,
                 pruned_count,
             );
@@ -1312,6 +1279,28 @@ impl AgentChatCwdRecentsFile {
 }
 
 static AGENT_CHAT_CWD_RECENTS_CACHE: OnceLock<Mutex<AgentChatCwdRecentsFile>> = OnceLock::new();
+static AGENT_CHAT_RUNTIME_STATE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+fn log_private_agent_chat_state_failure(
+    event: &'static str,
+    path: &Path,
+    error: &dyn std::fmt::Display,
+    owner: Option<&str>,
+) {
+    let safe_path = crate::logging::log_private_user_value(&path.to_string_lossy());
+    let safe_error = crate::logging::log_private_user_value(&error.to_string());
+    let safe_owner = crate::logging::log_private_user_value(owner.unwrap_or_default());
+    tracing::warn!(
+        target: "script_kit::tab_ai",
+        event,
+        path_bytes = safe_path.raw_bytes,
+        path_sha256 = %safe_path.sha256,
+        error_bytes = safe_error.raw_bytes,
+        error_sha256 = %safe_error.sha256,
+        owner_bytes = safe_owner.raw_bytes,
+        owner_sha256 = %safe_owner.sha256,
+    );
+}
 
 /// Default path for the Agent Chat cwd picker MRU file.
 ///
@@ -1325,22 +1314,29 @@ pub(crate) fn default_agent_chat_cwd_recents_path() -> PathBuf {
 
 fn load_agent_chat_cwd_recents_file_from_disk() -> AgentChatCwdRecentsFile {
     let path = default_agent_chat_cwd_recents_path();
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(_) => return AgentChatCwdRecentsFile::default(),
-    };
-    match serde_json::from_slice::<AgentChatCwdRecentsFile>(&bytes) {
+    match load_agent_chat_cwd_recents_file_at(&path) {
         Ok(file) => file,
         Err(error) => {
-            tracing::warn!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_cwd_recents_load_failed",
-                path = %path.display(),
-                error = %error,
+            log_private_agent_chat_state_failure(
+                "agent_chat_cwd_recents_load_failed",
+                &path,
+                &error,
+                None,
             );
             AgentChatCwdRecentsFile::default()
         }
     }
+}
+
+fn load_agent_chat_cwd_recents_file_at(path: &Path) -> anyhow::Result<AgentChatCwdRecentsFile> {
+    Ok(read_private_agent_chat_json(path)?.unwrap_or_default())
+}
+
+fn persist_agent_chat_cwd_recents_file_at(
+    path: &Path,
+    file: &AgentChatCwdRecentsFile,
+) -> anyhow::Result<()> {
+    write_private_agent_chat_json(path, file)
 }
 
 fn agent_chat_cwd_recents_cache() -> &'static Mutex<AgentChatCwdRecentsFile> {
@@ -1373,45 +1369,18 @@ pub(crate) fn record_agent_chat_cwd_recent(
             return;
         }
     };
-    if !file.push_recent_for_profile(profile_id, cwd.clone(), default_cwd) {
+    if !file.push_recent_for_profile(profile_id, cwd, default_cwd) {
         return;
     }
 
     let path = default_agent_chat_cwd_recents_path();
-    if let Some(parent) = path.parent() {
-        if let Err(error) = std::fs::create_dir_all(parent) {
-            tracing::warn!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_cwd_recents_persist_failed",
-                path = %path.display(),
-                error = %error,
-            );
-            return;
-        }
-    }
-    match serde_json::to_vec_pretty(&*file) {
-        Ok(bytes) => {
-            if let Err(error) = std::fs::write(&path, bytes) {
-                tracing::warn!(
-                    target: "script_kit::tab_ai",
-                    event = "agent_chat_cwd_recents_persist_failed",
-                    path = %path.display(),
-                    profile_id = %profile_id,
-                    cwd = %cwd.display(),
-                    error = %error,
-                );
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_cwd_recents_persist_failed",
-                path = %path.display(),
-                profile_id = %profile_id,
-                cwd = %cwd.display(),
-                error = %error,
-            );
-        }
+    if let Err(error) = persist_agent_chat_cwd_recents_file_at(&path, &file) {
+        log_private_agent_chat_state_failure(
+            "agent_chat_cwd_recents_persist_failed",
+            &path,
+            &error,
+            Some(profile_id),
+        );
     }
 }
 
@@ -1487,30 +1456,50 @@ pub(crate) fn default_agent_chat_agent_runtime_state_path() -> PathBuf {
 pub(crate) fn load_agent_chat_agent_runtime_states() -> HashMap<String, AgentChatAgentRuntimeState>
 {
     let path = default_agent_chat_agent_runtime_state_path();
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(_) => return HashMap::new(),
-    };
-    match serde_json::from_slice::<AgentChatAgentRuntimeStateFile>(&bytes) {
-        Ok(file) => {
+    match read_private_agent_chat_json::<AgentChatAgentRuntimeStateFile>(&path) {
+        Ok(Some(file)) => {
+            let safe_path = crate::logging::log_private_user_value(&path.to_string_lossy());
             tracing::info!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_agent_runtime_state_loaded",
-                path = %path.display(),
+                path_bytes = safe_path.raw_bytes,
+                path_sha256 = %safe_path.sha256,
                 agent_count = file.agents.len(),
             );
             file.agents
         }
+        Ok(None) => HashMap::new(),
         Err(error) => {
-            tracing::warn!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_agent_runtime_state_load_failed",
-                path = %path.display(),
-                error = %error,
+            log_private_agent_chat_state_failure(
+                "agent_chat_agent_runtime_state_load_failed",
+                &path,
+                &error,
+                None,
             );
             HashMap::new()
         }
     }
+}
+
+fn persist_agent_chat_agent_runtime_state_at(
+    path: &Path,
+    agent_id: &str,
+    next: &AgentChatAgentRuntimeState,
+) -> anyhow::Result<AgentChatAgentRuntimeState> {
+    let _owner = AGENT_CHAT_RUNTIME_STATE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut file =
+        read_private_agent_chat_json::<AgentChatAgentRuntimeStateFile>(path)?.unwrap_or_default();
+    let merged = file
+        .agents
+        .get(agent_id)
+        .map(|current| current.merged_with(next))
+        .unwrap_or_else(|| next.clone());
+
+    file.agents.insert(agent_id.to_string(), merged.clone());
+    write_private_agent_chat_json(path, &file)?;
+    Ok(merged)
 }
 
 /// Persist runtime state for a single agent on a background thread.
@@ -1522,64 +1511,28 @@ pub(crate) fn persist_agent_chat_agent_runtime_state(
         .name("agent_chat-save-runtime-state".into())
         .spawn(move || {
             let path = default_agent_chat_agent_runtime_state_path();
-
-            let mut file = std::fs::read(&path)
-                .ok()
-                .and_then(|bytes| {
-                    serde_json::from_slice::<AgentChatAgentRuntimeStateFile>(&bytes).ok()
-                })
-                .unwrap_or_default();
-
-            let merged = file
-                .agents
-                .get(&agent_id)
-                .map(|current| current.merged_with(&next))
-                .unwrap_or_else(|| next.clone());
-
-            file.agents.insert(agent_id.clone(), merged.clone());
-
-            if let Some(parent) = path.parent() {
-                if let Err(error) = std::fs::create_dir_all(parent) {
-                    tracing::warn!(
+            match persist_agent_chat_agent_runtime_state_at(&path, &agent_id, &next) {
+                Ok(merged) => {
+                    let safe_path = crate::logging::log_private_user_value(&path.to_string_lossy());
+                    let safe_agent = crate::logging::log_private_user_value(&agent_id);
+                    tracing::info!(
                         target: "script_kit::tab_ai",
-                        event = "agent_chat_agent_runtime_state_persist_failed",
-                        path = %path.display(),
-                        error = %error,
-                        agent_id = %agent_id,
+                        event = "agent_chat_agent_runtime_state_persisted",
+                        path_bytes = safe_path.raw_bytes,
+                        path_sha256 = %safe_path.sha256,
+                        agent_bytes = safe_agent.raw_bytes,
+                        agent_sha256 = %safe_agent.sha256,
+                        auth_state = ?merged.auth_state,
+                        auth_method_count = merged.auth_methods.len(),
+                        last_session_ok = merged.last_session_ok,
                     );
-                    return;
-                }
-            }
-
-            match serde_json::to_vec_pretty(&file) {
-                Ok(bytes) => {
-                    if let Err(error) = std::fs::write(&path, bytes) {
-                        tracing::warn!(
-                            target: "script_kit::tab_ai",
-                            event = "agent_chat_agent_runtime_state_persist_failed",
-                            path = %path.display(),
-                            error = %error,
-                            agent_id = %agent_id,
-                        );
-                    } else {
-                        tracing::info!(
-                            target: "script_kit::tab_ai",
-                            event = "agent_chat_agent_runtime_state_persisted",
-                            path = %path.display(),
-                            agent_id = %agent_id,
-                            auth_state = ?merged.auth_state,
-                            auth_method_count = merged.auth_methods.len(),
-                            last_session_ok = merged.last_session_ok,
-                        );
-                    }
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        target: "script_kit::tab_ai",
-                        event = "agent_chat_agent_runtime_state_persist_failed",
-                        path = %path.display(),
-                        error = %error,
-                        agent_id = %agent_id,
+                    log_private_agent_chat_state_failure(
+                        "agent_chat_agent_runtime_state_persist_failed",
+                        &path,
+                        &error,
+                        Some(&agent_id),
                     );
                 }
             }
@@ -2241,5 +2194,401 @@ mod tests {
         assert_eq!(synced["theme"], "dark");
         assert!(synced.get("mcpServers").is_none());
         assert!(!state_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_agent_chat_config_claude_mcp_credentials_are_owner_only_after_legacy_repair() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempdir().expect("isolated Claude credentials fixture");
+        let config_path = fixture.path().join(".claude.json");
+        let state_path = fixture.path().join("claude-sync.json");
+        let existing = serde_json::json!({
+            "mcpServers": {
+                "personal": {
+                    "type": "stdio",
+                    "command": "synthetic-agent",
+                    "env": { "OPENAI_API_KEY": "sk-private-existing-user-token" }
+                },
+                "previous-managed": { "type": "stdio", "command": "old" }
+            }
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&existing).unwrap()).unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_claude_managed_mcp_state(&state_path, &["previous-managed".to_string()]).unwrap();
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let desired = vec![(
+            "managed".to_string(),
+            serde_json::json!({
+                "type": "http",
+                "url": "https://synthetic.invalid/mcp",
+                "headers": { "Authorization": "Bearer private-managed-token" }
+            }),
+        )];
+
+        sync_script_kit_mcp_to_claude_at(
+            &desired,
+            &["managed".to_string()],
+            &config_path,
+            &state_path,
+        )
+        .expect("secure real Claude MCP synchronization");
+
+        for path in [&config_path, &state_path] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let saved: Value = read_private_agent_chat_json(&config_path)
+            .unwrap()
+            .expect("saved private Claude config");
+        assert_eq!(
+            saved["mcpServers"]["personal"]["env"]["OPENAI_API_KEY"],
+            "sk-private-existing-user-token"
+        );
+        assert_eq!(
+            saved["mcpServers"]["managed"]["headers"]["Authorization"],
+            "Bearer private-managed-token"
+        );
+        assert!(saved["mcpServers"].get("previous-managed").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_agent_chat_config_claude_rejects_symlinked_user_configuration() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let fixture = tempdir().expect("isolated symlinked Claude configuration fixture");
+        let external = fixture.path().join("foreign.json");
+        let planted = fixture.path().join(".claude.json");
+        let state_path = fixture.path().join("claude-sync.json");
+        let foreign = r#"{"apiKey":"foreign private credential"}"#;
+        std::fs::write(&external, foreign).unwrap();
+        std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&external, &planted).unwrap();
+
+        assert!(sync_script_kit_mcp_to_claude_at(&[], &[], &planted, &state_path).is_err());
+        assert_eq!(std::fs::read_to_string(&external).unwrap(), foreign);
+        assert_eq!(
+            std::fs::metadata(&external).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert!(std::fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_agent_chat_config_claude_rejects_symlinked_state_before_mutating_config() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("isolated symlinked Claude sync state fixture");
+        let config_path = fixture.path().join(".claude.json");
+        let external = fixture.path().join("foreign-state.json");
+        let planted = fixture.path().join("claude-sync.json");
+        let original = r#"{"mcpServers":{"personal":{"env":{"TOKEN":"private"}}}}"#;
+        std::fs::write(&config_path, original).unwrap();
+        std::fs::write(&external, r#"{"schemaVersion":1,"managedServers":[]}"#).unwrap();
+        symlink(&external, &planted).unwrap();
+
+        assert!(sync_script_kit_mcp_to_claude_at(&[], &[], &config_path, &planted).is_err());
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), original);
+        assert_eq!(
+            std::fs::read_to_string(external).unwrap(),
+            r#"{"schemaVersion":1,"managedServers":[]}"#
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_agent_chat_config_agent_catalog_protects_user_environment_credentials() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempdir().expect("isolated private agent catalog fixture");
+        let path = fixture.path().join("agents.json");
+        let mut file = super::super::catalog::AgentChatAgentCatalogFile::default();
+        file.agents.push(AgentChatAgentConfig {
+            id: "private-agent".to_string(),
+            display_name: "Private Agent".to_string(),
+            command: "private-agent".to_string(),
+            args: Vec::new(),
+            env: HashMap::from([(
+                "OPENAI_API_KEY".to_string(),
+                "sk-private-catalog-token".to_string(),
+            )]),
+            models: Vec::new(),
+            install: None,
+            auth: None,
+        });
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let (existed, starters, _, total) = ensure_agent_chat_agents_catalog_seeded_at(&path)
+            .expect("seed actual private agent catalog owner");
+        assert!(existed);
+        assert_eq!(starters, 2);
+        assert_eq!(total, 3);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let stored: super::super::catalog::AgentChatAgentCatalogFile =
+            read_private_agent_chat_json(&path).unwrap().unwrap();
+        let private = stored
+            .agents
+            .iter()
+            .find(|entry| entry.id == "private-agent")
+            .unwrap();
+        assert_eq!(private.env["OPENAI_API_KEY"], "sk-private-catalog-token");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_agent_chat_config_agent_catalog_rejects_foreign_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("isolated symlinked agent catalog fixture");
+        let external = fixture.path().join("foreign.json");
+        let planted = fixture.path().join("agents.json");
+        std::fs::write(&external, r#"{"private":"foreign provider token"}"#).unwrap();
+        symlink(&external, &planted).unwrap();
+
+        assert!(ensure_agent_chat_agents_catalog_seeded_at(&planted).is_err());
+        assert_eq!(
+            std::fs::read_to_string(external).unwrap(),
+            r#"{"private":"foreign provider token"}"#
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_agent_chat_config_cwd_history_repairs_legacy_permissions_before_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempdir().expect("isolated private project history fixture");
+        let path = fixture.path().join("cwd-recents.json");
+        let mut recents = AgentChatCwdRecentsFile::default();
+        assert!(recents.push_recent_for_profile(
+            "private-client",
+            PathBuf::from("/Users/private/medical-project"),
+            None,
+        ));
+        persist_agent_chat_cwd_recents_file_at(&path, &recents)
+            .expect("persist real private project MRU");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let restored =
+            load_agent_chat_cwd_recents_file_at(&path).expect("repair older project history");
+        assert_eq!(
+            restored.recents_for_profile("private-client"),
+            vec![PathBuf::from("/Users/private/medical-project")]
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_agent_chat_config_cwd_history_rejects_symlinked_read_and_write() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("isolated symlinked project history fixture");
+        let external = fixture.path().join("foreign.json");
+        let planted = fixture.path().join("cwd-recents.json");
+        std::fs::write(
+            &external,
+            "do not read or overwrite foreign project history",
+        )
+        .unwrap();
+        symlink(&external, &planted).unwrap();
+
+        assert!(load_agent_chat_cwd_recents_file_at(&planted).is_err());
+        assert!(persist_agent_chat_cwd_recents_file_at(
+            &planted,
+            &AgentChatCwdRecentsFile::default(),
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read_to_string(external).unwrap(),
+            "do not read or overwrite foreign project history"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_agent_chat_config_runtime_state_is_owner_only_and_preserves_auth() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempdir().expect("isolated private authentication state fixture");
+        let path = fixture.path().join("agent-runtime-state.json");
+        let authenticated = AgentChatAgentRuntimeState {
+            auth_state: Some(AgentChatAgentAuthState::Authenticated),
+            auth_methods: vec!["private-login".to_string()],
+            supports_embedded_context: Some(true),
+            supports_image: Some(true),
+            last_session_ok: true,
+        };
+        persist_agent_chat_agent_runtime_state_at(&path, "private-agent", &authenticated)
+            .expect("persist real authentication state");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let stale = AgentChatAgentRuntimeState {
+            auth_state: Some(AgentChatAgentAuthState::Unknown),
+            ..AgentChatAgentRuntimeState::default()
+        };
+        let merged = persist_agent_chat_agent_runtime_state_at(&path, "private-agent", &stale)
+            .expect("repair legacy auth state and preserve known facts");
+        assert_eq!(
+            merged.auth_state,
+            Some(AgentChatAgentAuthState::Authenticated)
+        );
+        assert_eq!(merged.auth_methods, vec!["private-login"]);
+        assert!(merged.last_session_ok);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn private_agent_chat_config_concurrent_runtime_writers_preserve_every_agent() {
+        use std::sync::{Arc, Barrier};
+
+        let fixture = tempdir().expect("isolated concurrent agent-state fixture");
+        let path = Arc::new(fixture.path().join("agent-runtime-state.json"));
+        let start = Arc::new(Barrier::new(8));
+        let workers = (0..8)
+            .map(|index| {
+                let path = Arc::clone(&path);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let next = AgentChatAgentRuntimeState {
+                        auth_state: Some(AgentChatAgentAuthState::Authenticated),
+                        auth_methods: vec![format!("private-method-{index}")],
+                        ..AgentChatAgentRuntimeState::default()
+                    };
+                    start.wait();
+                    persist_agent_chat_agent_runtime_state_at(
+                        &path,
+                        &format!("agent-{index}"),
+                        &next,
+                    )
+                    .expect("serialized production auth-state write");
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let saved: AgentChatAgentRuntimeStateFile =
+            read_private_agent_chat_json(&path).unwrap().unwrap();
+        assert_eq!(saved.agents.len(), 8);
+        for index in 0..8 {
+            let state = saved.agents.get(&format!("agent-{index}")).unwrap();
+            assert_eq!(state.auth_methods, vec![format!("private-method-{index}")]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_agent_chat_config_runtime_state_refuses_symlinks_and_malformed_history() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("isolated hostile authentication state fixture");
+        let external = fixture.path().join("foreign.json");
+        let planted = fixture.path().join("agent-runtime-state.json");
+        std::fs::write(&external, "never mutate foreign authentication state").unwrap();
+        symlink(&external, &planted).unwrap();
+        let next = AgentChatAgentRuntimeState::default();
+        assert!(persist_agent_chat_agent_runtime_state_at(&planted, "agent", &next).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap(),
+            "never mutate foreign authentication state"
+        );
+
+        let malformed = fixture.path().join("malformed.json");
+        std::fs::write(&malformed, "{ user data that must never be overwritten").unwrap();
+        assert!(persist_agent_chat_agent_runtime_state_at(&malformed, "agent", &next).is_err());
+        assert_eq!(
+            std::fs::read_to_string(malformed).unwrap(),
+            "{ user data that must never be overwritten"
+        );
+    }
+
+    #[test]
+    fn private_agent_chat_config_failure_logs_hide_paths_provider_errors_and_profile_names() {
+        use std::sync::Arc;
+
+        #[derive(Clone)]
+        struct EventWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for EventWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let path = Path::new("/Users/private/medical-client/auth.json");
+        let error = anyhow::anyhow!("provider rejected sk-private-secret bearer token");
+        let owner = "private-client-project";
+        let expected_path = crate::logging::log_private_user_value(&path.to_string_lossy());
+        let expected_error = crate::logging::log_private_user_value(&error.to_string());
+        let expected_owner = crate::logging::log_private_user_value(owner);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::clone(&captured);
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || EventWriter(Arc::clone(&writer)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_private_agent_chat_state_failure(
+                "agent_chat_agent_runtime_state_persist_failed",
+                path,
+                &error,
+                Some(owner),
+            );
+        });
+
+        let raw = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        for secret in [
+            "medical-client",
+            "sk-private-secret",
+            "private-client-project",
+        ] {
+            assert!(
+                !raw.contains(secret),
+                "private Agent Chat event leaked {secret}"
+            );
+        }
+        let event: Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(event["fields"]["path_sha256"], expected_path.sha256);
+        assert_eq!(event["fields"]["error_sha256"], expected_error.sha256);
+        assert_eq!(event["fields"]["owner_sha256"], expected_owner.sha256);
     }
 }

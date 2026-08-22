@@ -8,6 +8,7 @@ use std::time::Duration;
 
 const HISTORY_COMPACT_LIMIT: usize = 200;
 const RESOURCE_ITEMS_LIMIT: usize = 10;
+const ROOT_DICTATION_HISTORY_REFRESH_LABEL: &str = "root-dictation-history-cache";
 pub const DICTATION_HISTORY_ENTRY_VERSION: u32 = 2;
 pub const DICTATION_HISTORY_PAGE_SIZE: usize = 100;
 pub const DICTATION_HISTORY_LEGACY_UNKNOWN_TARGET_ID: &str = "legacy-unknown";
@@ -24,16 +25,30 @@ struct DictationHistoryIndexCache {
     entries: Vec<DictationHistoryEntry>,
 }
 
+pub(crate) type RootDictationHistoryRefresh =
+    crate::scripts::root_search_contract::RootOwnedProviderRefresh;
+
+pub(crate) struct RootDictationHistorySnapshot {
+    cache: DictationHistoryIndexCache,
+}
+
 static DICTATION_HISTORY_INDEX_CACHE: OnceLock<Mutex<Option<DictationHistoryIndexCache>>> =
     OnceLock::new();
-static DICTATION_HISTORY_REFRESH_IN_FLIGHT: OnceLock<Mutex<bool>> = OnceLock::new();
+static DICTATION_HISTORY_REFRESH_LIFECYCLE: OnceLock<
+    Mutex<crate::scripts::root_search_contract::RootOwnedProviderRefreshLifecycle>,
+> = OnceLock::new();
 
 fn dictation_history_index_cache() -> &'static Mutex<Option<DictationHistoryIndexCache>> {
     DICTATION_HISTORY_INDEX_CACHE.get_or_init(|| Mutex::new(None))
 }
 
-fn dictation_history_refresh_in_flight() -> &'static Mutex<bool> {
-    DICTATION_HISTORY_REFRESH_IN_FLIGHT.get_or_init(|| Mutex::new(false))
+fn dictation_history_refresh_lifecycle(
+) -> &'static Mutex<crate::scripts::root_search_contract::RootOwnedProviderRefreshLifecycle> {
+    DICTATION_HISTORY_REFRESH_LIFECYCLE.get_or_init(|| {
+        Mutex::new(
+            crate::scripts::root_search_contract::RootOwnedProviderRefreshLifecycle::default(),
+        )
+    })
 }
 
 fn invalidate_history_cache() {
@@ -279,44 +294,48 @@ pub fn build_history_entry(
     }
 }
 
-fn write_history(entries: &[DictationHistoryEntry]) -> std::io::Result<()> {
-    use std::io::Write;
-
-    let path = history_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut file = std::fs::File::create(path)?;
+fn write_history_at(
+    path: &std::path::Path,
+    entries: &[DictationHistoryEntry],
+) -> std::io::Result<()> {
+    let mut content = String::new();
     for entry in entries {
-        if let Ok(json) = serde_json::to_string(entry) {
-            writeln!(file, "{json}")?;
-        }
+        let json = serde_json::to_string(entry).map_err(std::io::Error::other)?;
+        content.push_str(&json);
+        content.push('\n');
     }
+    crate::atomic_file::write_private_atomic(path, content.as_bytes())?;
+    invalidate_history_cache();
+    Ok(())
+}
+
+fn write_history(entries: &[DictationHistoryEntry]) -> std::io::Result<()> {
+    write_history_at(&history_path(), entries)
+}
+
+fn save_history_entry_at(
+    path: &std::path::Path,
+    entry: &DictationHistoryEntry,
+) -> std::io::Result<()> {
+    let mut json = serde_json::to_string(entry).map_err(std::io::Error::other)?;
+    json.push('\n');
+    crate::atomic_file::append_private_file(path, json.as_bytes())?;
     invalidate_history_cache();
     Ok(())
 }
 
 fn save_history_entry(entry: &DictationHistoryEntry) {
     let path = history_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Err(error) = save_history_entry_at(&path, entry) {
+        let safe_path = crate::logging::log_private_user_value(&path.display().to_string());
+        tracing::debug!(
+            path_bytes = safe_path.raw_bytes,
+            path_sha256 = %safe_path.sha256,
+            reason = ?error.kind(),
+            "dictation_history_write_failed"
+        );
+        return;
     }
-
-    let Ok(json) = serde_json::to_string(entry) else {
-        return;
-    };
-
-    use std::io::Write;
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    else {
-        tracing::debug!(path = %path.display(), "dictation_history_write_failed");
-        return;
-    };
-    let _ = writeln!(file, "{json}");
 
     if load_history().len() > HISTORY_COMPACT_LIMIT {
         let compacted: Vec<DictationHistoryEntry> = load_history()
@@ -340,8 +359,12 @@ pub fn load_history_result() -> std::io::Result<Vec<DictationHistoryEntry>> {
         ));
     }
 
-    let path = history_path();
-    let signature = history_file_signature(&path);
+    load_history_result_at(&history_path())
+}
+
+fn load_history_result_at(path: &std::path::Path) -> std::io::Result<Vec<DictationHistoryEntry>> {
+    let exists = crate::atomic_file::inspect_private_file(path)?;
+    let signature = history_file_signature(path);
     if let Ok(guard) = dictation_history_index_cache().lock() {
         if let Some(cache) = guard.as_ref() {
             if cache.signature == signature {
@@ -350,10 +373,10 @@ pub fn load_history_result() -> std::io::Result<Vec<DictationHistoryEntry>> {
         }
     }
 
-    let entries = match std::fs::read_to_string(&path) {
-        Ok(content) => parse_history_entries(&content),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error),
+    let entries = if exists {
+        parse_history_entries(&crate::atomic_file::read_private_file(path)?)
+    } else {
+        Vec::new()
     };
 
     if let Ok(mut guard) = dictation_history_index_cache().lock() {
@@ -371,15 +394,17 @@ pub fn load_history() -> Vec<DictationHistoryEntry> {
 }
 
 fn history_file_signature(path: &std::path::Path) -> HistoryFileSignature {
-    std::fs::metadata(path).ok().map(|metadata| {
-        (
-            path.to_path_buf(),
-            metadata
-                .modified()
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-            metadata.len(),
-        )
-    })
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    Some((
+        path.to_path_buf(),
+        metadata
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        metadata.len(),
+    ))
 }
 
 fn migrate_history_entry(mut entry: DictationHistoryEntry) -> DictationHistoryEntry {
@@ -587,30 +612,70 @@ fn cached_history_entries_if_fresh() -> Option<Vec<DictationHistoryEntry>> {
     (cache.signature == signature).then(|| cache.entries.clone())
 }
 
-fn ensure_history_cache_warm() {
-    if let Ok(mut refreshing) = dictation_history_refresh_in_flight().lock() {
-        if *refreshing {
-            return;
-        }
-        *refreshing = true;
-    } else {
-        return;
-    }
+pub(crate) fn root_dictation_history_cache_is_fresh() -> bool {
+    cached_history_entries_if_fresh().is_some()
+}
 
-    let spawn_result = std::thread::Builder::new()
-        .name("root-dictation-history-cache".to_string())
-        .spawn(|| {
-            let _ = load_history();
-            if let Ok(mut refreshing) = dictation_history_refresh_in_flight().lock() {
-                *refreshing = false;
-            }
-        });
+pub(crate) fn try_begin_root_dictation_history_refresh() -> Option<RootDictationHistoryRefresh> {
+    let cache_is_fresh = root_dictation_history_cache_is_fresh();
+    dictation_history_refresh_lifecycle().lock().ok()?.begin(
+        sk_protocol::command_contract::CommandSource::Dictation,
+        cache_is_fresh,
+    )
+}
 
-    if spawn_result.is_err() {
-        if let Ok(mut refreshing) = dictation_history_refresh_in_flight().lock() {
-            *refreshing = false;
-        }
+fn read_root_dictation_history_snapshot_at(path: &std::path::Path) -> RootDictationHistorySnapshot {
+    let signature = history_file_signature(path);
+    let entries = crate::atomic_file::read_private_file(path)
+        .map(|content| parse_history_entries(&content))
+        .unwrap_or_default();
+    RootDictationHistorySnapshot {
+        cache: DictationHistoryIndexCache { signature, entries },
     }
+}
+
+pub(crate) fn read_root_dictation_history_snapshot() -> RootDictationHistorySnapshot {
+    tracing::debug!(
+        target: "script_kit::search",
+        worker = ROOT_DICTATION_HISTORY_REFRESH_LABEL,
+        "Reading owned private dictation history snapshot"
+    );
+    read_root_dictation_history_snapshot_at(&history_path())
+}
+
+fn root_dictation_history_snapshot_is_current_at(
+    snapshot: &RootDictationHistorySnapshot,
+    path: &std::path::Path,
+) -> bool {
+    snapshot.cache.signature == history_file_signature(path)
+}
+
+pub(crate) fn finish_root_dictation_history_refresh(
+    refresh: RootDictationHistoryRefresh,
+    snapshot: RootDictationHistorySnapshot,
+) -> bool {
+    let Ok(mut lifecycle) = dictation_history_refresh_lifecycle().lock() else {
+        return false;
+    };
+    if !lifecycle.finish(refresh) {
+        return false;
+    }
+    drop(lifecycle);
+
+    if !root_dictation_history_snapshot_is_current_at(&snapshot, &history_path()) {
+        return false;
+    }
+    let Ok(mut cache) = dictation_history_index_cache().lock() else {
+        return false;
+    };
+    *cache = Some(snapshot.cache);
+    true
+}
+
+pub(crate) fn discard_root_dictation_history_refresh(refresh: RootDictationHistoryRefresh) -> bool {
+    dictation_history_refresh_lifecycle()
+        .lock()
+        .is_ok_and(|mut lifecycle| lifecycle.finish(refresh))
 }
 
 pub fn root_dictation_history_query_is_eligible(
@@ -668,8 +733,8 @@ pub fn search_root_dictation_history_direct(
 
 /// Cache-only dictation history search for root launcher passive rows.
 ///
-/// Cold JSONL reads warm a background index and return no hits for the current
-/// frame, preserving the active search result projection while the user types.
+/// Cold JSONL indexes return no hits without starting a worker or publishing
+/// state; the real launcher input owner coordinates generation-fenced refresh.
 pub fn search_root_dictation_history_cached(
     query: &str,
     options: RootDictationHistorySectionOptions,
@@ -679,7 +744,6 @@ pub fn search_root_dictation_history_cached(
     }
 
     let Some(entries) = cached_history_entries_if_fresh() else {
-        ensure_history_cache_warm();
         tracing::info!(
             category = "DICTATION",
             event = "root_dictation_history_search_cache_miss",
@@ -862,6 +926,123 @@ mod tests {
             crate::mcp_resources::clear_provider_json_slots();
             let _ = &self.tempdir;
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_dictation_history_append_and_atomic_rewrite_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("isolated dictation privacy fixture");
+        let path = directory.path().join("dictation-history.jsonl");
+        let first = build_history_entry(
+            "first private spoken transcript",
+            Duration::from_secs(1),
+            DictationTarget::NotesEditor,
+        );
+        let second = build_history_entry(
+            "second private spoken transcript",
+            Duration::from_secs(2),
+            DictationTarget::AiChatComposer,
+        );
+
+        save_history_entry_at(&path, &first).expect("private first transcript");
+        save_history_entry_at(&path, &second).expect("private second transcript");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(load_history_result_at(&path).unwrap().len(), 2);
+
+        write_history_at(&path, std::slice::from_ref(&second))
+            .expect("atomic private history rewrite");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let loaded = load_history_result_at(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].transcript, second.transcript);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_dictation_history_repairs_legacy_permissions_before_loading() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("isolated legacy dictation fixture");
+        let path = directory.path().join("dictation-history.jsonl");
+        let entry = build_history_entry(
+            "previously exposed spoken transcript",
+            Duration::from_secs(1),
+            DictationTarget::NotesEditor,
+        );
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&entry).unwrap()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let loaded = load_history_result_at(&path).expect("legacy transcript migrates safely");
+        assert_eq!(loaded[0].transcript, entry.transcript);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_dictation_history_refuses_symlinks_before_read_append_or_rewrite() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("isolated dictation symlink fixture");
+        let external = directory.path().join("another-users-transcript.txt");
+        let planted = directory.path().join("dictation-history.jsonl");
+        std::fs::write(&external, "never expose or overwrite this transcript").unwrap();
+        symlink(&external, &planted).unwrap();
+        let entry = build_history_entry(
+            "new private spoken transcript",
+            Duration::from_secs(1),
+            DictationTarget::AiChatComposer,
+        );
+
+        assert!(load_history_result_at(&planted).is_err());
+        assert!(save_history_entry_at(&planted, &entry).is_err());
+        assert!(write_history_at(&planted, &[entry]).is_err());
+        assert_eq!(
+            std::fs::read_to_string(external).unwrap(),
+            "never expose or overwrite this transcript"
+        );
+        assert!(std::fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn private_dictation_history_snapshot_refuses_changed_transcript_before_publication() {
+        let directory = tempfile::tempdir().expect("isolated dictation snapshot fixture");
+        let path = directory.path().join("dictation-history.jsonl");
+        let entry = build_history_entry(
+            "private spoken snapshot",
+            Duration::from_secs(1),
+            DictationTarget::NotesEditor,
+        );
+        save_history_entry_at(&path, &entry).expect("private snapshot seed");
+
+        let snapshot = read_root_dictation_history_snapshot_at(&path);
+        assert_eq!(snapshot.cache.entries.len(), 1);
+        assert!(root_dictation_history_snapshot_is_current_at(
+            &snapshot, &path
+        ));
+
+        std::fs::write(&path, "a later and differently sized spoken transcript")
+            .expect("mutate isolated snapshot after read");
+        assert!(!root_dictation_history_snapshot_is_current_at(
+            &snapshot, &path
+        ));
     }
 
     #[test]
