@@ -5,7 +5,9 @@
 //! transaction execution without tailing log files manually.
 
 use super::{McpResource, ResourceContent};
-use crate::protocol::transaction_trace::read_latest_transaction_trace;
+use crate::protocol::transaction_trace::{
+    read_latest_transaction_trace, sanitize_transaction_trace,
+};
 use serde::Serialize;
 
 /// Self-describing schema document for the transaction trace resource.
@@ -25,7 +27,7 @@ pub fn transaction_resource_definitions() -> Vec<McpResource> {
             uri: "kit://transactions/latest".to_string(),
             name: "Latest Transaction Trace".to_string(),
             description: Some(
-                "Last waitFor/batch execution trace with timings, matched semantic IDs, and actionable failure suggestions. Supports ?requestId=<id> to filter by receipt."
+                "Privacy-redacted waitFor/batch trace with timings, fingerprinted user values and semantic IDs, and typed actionable failure summaries. Supports ?requestId=<id> to filter by receipt."
                     .to_string(),
             ),
             mime_type: "application/json".to_string(),
@@ -82,18 +84,18 @@ fn read_schema_resource(uri: &str) -> Result<ResourceContent, String> {
     let doc = TransactionSchemaDocument {
         kind: "transaction_trace_schema",
         version: 1,
-        trace_modes: vec!["off", "on", "on_failure"],
+        trace_modes: vec!["off", "on", "onFailure"],
         examples: vec![
             serde_json::json!({
                 "type": "waitFor",
                 "requestId": "wait-1",
                 "condition": "choicesRendered",
-                "trace": "on_failure"
+                "trace": "onFailure"
             }),
             serde_json::json!({
                 "type": "batch",
                 "requestId": "txn-1",
-                "trace": "on_failure",
+                "trace": "onFailure",
                 "commands": [
                     {"type": "setInput", "text": "apple"},
                     {"type": "waitFor", "condition": "choicesRendered", "timeout": 1000},
@@ -137,16 +139,7 @@ fn read_latest_resource(uri: &str) -> Result<ResourceContent, String> {
     let trace = read_latest_transaction_trace(None, request_id.as_deref())
         .map_err(|e| format!("Failed to read latest transaction trace: {e}"))?;
 
-    let text = match &trace {
-        Some(t) => serde_json::to_string_pretty(t)
-            .map_err(|e| format!("Failed to serialize transaction trace: {e}"))?,
-        None => serde_json::to_string_pretty(&serde_json::json!({
-            "kind": "transactionTrace",
-            "status": "empty",
-            "message": "No transaction traces found"
-        }))
-        .map_err(|e| format!("Failed to serialize empty payload: {e}"))?,
-    };
+    let text = serialize_transaction_resource_trace(trace.as_ref())?;
 
     tracing::info!(
         target: "script_kit::transaction",
@@ -161,6 +154,22 @@ fn read_latest_resource(uri: &str) -> Result<ResourceContent, String> {
         mime_type: "application/json".to_string(),
         text,
     })
+}
+
+fn serialize_transaction_resource_trace(
+    trace: Option<&crate::protocol::TransactionTrace>,
+) -> Result<String, String> {
+    let text = match trace {
+        Some(t) => serde_json::to_string_pretty(&sanitize_transaction_trace(t))
+            .map_err(|e| format!("Failed to serialize transaction trace: {e}"))?,
+        None => serde_json::to_string_pretty(&serde_json::json!({
+            "kind": "transactionTrace",
+            "status": "empty",
+            "message": "No transaction traces found"
+        }))
+        .map_err(|e| format!("Failed to serialize empty payload: {e}"))?,
+    };
+    Ok(text)
 }
 
 /// Extract `requestId` value from a URI query string.
@@ -220,6 +229,7 @@ mod tests {
         assert_eq!(value["kind"], "transaction_trace_schema");
         assert_eq!(value["version"], 1);
         assert!(value["traceModes"].is_array());
+        assert_eq!(value["traceModes"][2], "onFailure");
         assert!(value["examples"].is_array());
     }
 
@@ -255,5 +265,50 @@ mod tests {
         assert_eq!(defs.len(), 2);
         assert!(defs.iter().any(|r| r.uri == "kit://transactions/latest"));
         assert!(defs.iter().any(|r| r.uri == "kit://transactions/schema"));
+    }
+
+    #[test]
+    fn latest_resource_redacts_legacy_trace_before_mcp_serialization() {
+        use crate::protocol::{
+            BatchCommand, TransactionCommandTrace, TransactionTrace, TransactionTraceStatus,
+            UiStateSnapshot,
+        };
+
+        let trace = TransactionTrace {
+            schema_version: 1,
+            request_id: "safe-request".to_owned(),
+            command_fingerprint: "{\"input\":\"mcp-fingerprint-canary\"}".to_owned(),
+            status: TransactionTraceStatus::Ok,
+            started_at_ms: 1,
+            total_elapsed_ms: 1,
+            failed_at: None,
+            commands: vec![TransactionCommandTrace {
+                index: 0,
+                command: "setInput".to_owned(),
+                command_payload: Some(BatchCommand::SetInput {
+                    text: "mcp-prompt-canary".to_owned(),
+                }),
+                started_at_ms: 1,
+                elapsed_ms: 1,
+                before: UiStateSnapshot {
+                    input_value: Some("mcp-snapshot-canary".to_owned()),
+                    ..UiStateSnapshot::default()
+                },
+                after: UiStateSnapshot::default(),
+                polls: Vec::new(),
+                error: None,
+            }],
+        };
+
+        let text = serialize_transaction_resource_trace(Some(&trace))
+            .expect("MCP transaction resource serializes safely");
+        assert!(!text.contains("mcp-fingerprint-canary"));
+        assert!(!text.contains("mcp-prompt-canary"));
+        assert!(!text.contains("mcp-snapshot-canary"));
+        let value: serde_json::Value = serde_json::from_str(&text).expect("valid resource JSON");
+        assert_eq!(value["commands"][0]["command"], "setInput");
+        assert!(value["commandFingerprint"]
+            .as_str()
+            .is_some_and(|fingerprint| fingerprint.starts_with("sha256:")));
     }
 }

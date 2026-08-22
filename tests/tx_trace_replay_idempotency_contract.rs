@@ -56,7 +56,12 @@ fn trace_contains_command_payloads_and_schema_version() {
     let trace = result.trace.expect("trace included");
     assert_eq!(trace.schema_version, TRANSACTION_TRACE_SCHEMA_VERSION);
     assert!(!trace.command_fingerprint.is_empty());
-    assert_eq!(trace.commands[0].command_payload, Some(commands[0].clone()));
+    let Some(BatchCommand::SetInput { text }) = &trace.commands[0].command_payload else {
+        panic!("transaction trace must preserve the setInput command shape");
+    };
+    assert!(text.starts_with("[REDACTED sha256:"));
+    assert!(!text.contains("alpha"));
+    assert!(trace.command_fingerprint.starts_with("sha256:"));
 }
 
 #[test]

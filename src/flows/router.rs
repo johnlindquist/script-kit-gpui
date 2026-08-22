@@ -18,7 +18,7 @@ use super::model::FlowDescriptor;
 #[derive(Debug, Clone, PartialEq)]
 pub enum RouteDecision {
     /// One flow clearly owns this text — start the conversation now.
-    AutoStart { flow: FlowDescriptor },
+    AutoStart { flow: Box<FlowDescriptor> },
     /// More than one plausible owner — show these, best first.
     Candidates { flows: Vec<FlowDescriptor> },
     /// No flow matched — offer creation.
@@ -86,7 +86,7 @@ pub fn route(text: &str, flows: &[FlowDescriptor]) -> RouteDecision {
             // Confident: a real identity hit that clearly beats the runner-up.
             if *top_score >= 6 && *top_score >= second_score * 2 {
                 RouteDecision::AutoStart {
-                    flow: (*top).clone(),
+                    flow: Box::new((*top).clone()),
                 }
             } else {
                 RouteDecision::Candidates {

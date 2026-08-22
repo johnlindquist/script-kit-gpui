@@ -33,12 +33,17 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use crate::ai::phase_trace::{AiSurface, AiTransport, PhaseTrace, TurnOutcome};
+use parking_lot::Mutex;
 
 /// Events surfaced to the flow tick, keyed by app session id.
 #[derive(Debug, Clone)]
+#[allow(
+    dead_code,
+    reason = "event payload fields are consumed by the separately compiled Flow renderer"
+)]
 pub(crate) enum FlowThreadEvent {
     /// `thread/start` answered; the session is linked to a protocol thread.
     ThreadStarted { session_id: u64, model: String },
@@ -104,6 +109,13 @@ struct SessionLink {
     queued_prompts: Vec<String>,
 }
 
+fn preserve_session_for_recovery(link: &mut SessionLink) {
+    link.thread_id = None;
+    link.thread_starting = false;
+    // The accepted user turn, cwd, chosen model/sandbox, and developer
+    // instructions remain owned by the session for an explicit retry.
+}
+
 #[derive(Default)]
 struct Shared {
     stdin: Option<ChildStdin>,
@@ -111,6 +123,9 @@ struct Shared {
     /// Keeps the live child registered with the global process manager so
     /// quit paths and post-crash orphan cleanup can reap it (drop = unregister).
     child_registration: Option<crate::process_manager::ChildRegistration>,
+    /// A replacement is forbidden until this exact previously owned group
+    /// has independently disappeared; SIGTERM acknowledgement is not enough.
+    retiring_child_pgid: Option<u32>,
     child_generation: u64,
     next_id: u64,
     pending: HashMap<u64, PendingKind>,
@@ -217,7 +232,7 @@ impl CodexAppServer {
         profile: Option<super::session::FlowThreadProfile>,
         prompt: String,
     ) {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
 
         // Open the trace at the top of `converse`, BEFORE ensure_child and
         // before any thread/start round trip.
@@ -245,9 +260,15 @@ impl CodexAppServer {
         shared.traces.insert(session_id, trace);
 
         if let Err(failure) = ensure_child(&mut shared) {
+            let link = shared.sessions.entry(session_id).or_default();
+            link.cwd = cwd.to_string();
+            if let Some(profile) = profile {
+                link.profile = profile;
+            }
+            link.queued_prompts.push(prompt);
             shared.emit(FlowThreadEvent::SessionFailed {
                 session_id,
-                failure,
+                failure: *failure,
             });
             return;
         }
@@ -261,7 +282,6 @@ impl CodexAppServer {
                 send_turn_start(&mut shared, session_id, &thread_id, &prompt);
             }
             None => {
-                let link = shared.sessions.get_mut(&session_id).expect("just inserted");
                 link.queued_prompts.push(prompt);
                 let needs_start = !link.thread_starting;
                 if needs_start {
@@ -288,11 +308,11 @@ impl CodexAppServer {
         cwd: &str,
         profile: super::session::FlowThreadProfile,
     ) {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
         if let Err(failure) = ensure_child(&mut shared) {
             shared.emit(FlowThreadEvent::SessionFailed {
                 session_id,
-                failure,
+                failure: *failure,
             });
             return;
         }
@@ -315,7 +335,7 @@ impl CodexAppServer {
     /// Interrupt the session's in-flight turn (⌘K Stop). No-op when the
     /// session has no live thread.
     pub fn interrupt(&self, session_id: u64) {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
         let Some(thread_id) = shared
             .sessions
             .get(&session_id)
@@ -334,7 +354,7 @@ impl CodexAppServer {
     /// Forget a session (dismissed). The protocol thread is left to idle;
     /// the server prunes on exit.
     pub fn forget_session(&self, session_id: u64) {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
         if let Some(link) = shared.sessions.remove(&session_id) {
             if let Some(thread_id) = link.thread_id {
                 shared.threads.remove(&thread_id);
@@ -343,15 +363,19 @@ impl CodexAppServer {
     }
 
     /// Drain queued events (called from the flow tick).
+    #[allow(
+        dead_code,
+        reason = "queued Flow events are drained by the separately compiled launcher renderer"
+    )]
     pub(crate) fn drain_events(&self) -> Vec<FlowThreadEvent> {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
         std::mem::take(&mut shared.events)
     }
 
     /// Test seam: push an event as if the reader thread produced it.
     #[cfg(test)]
     fn push_event_for_test(&self, event: FlowThreadEvent) {
-        self.shared.lock().unwrap().events.push(event);
+        self.shared.lock().events.push(event);
     }
 }
 
@@ -361,8 +385,75 @@ impl CodexAppServer {
 /// failed is `SpawnFailed`, a missing pipe is `RuntimeClosed` — instead of
 /// returning prose for the free-text classifier to guess at (which produced
 /// `Unknown`, and with it a recovery card that offered nothing useful).
-fn ensure_child(shared: &mut Shared) -> Result<(), crate::ai::reliability::AppFailureRecord> {
-    let alive = shared
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexChildDisposition {
+    Reuse,
+    Replace,
+    RequestOwnedCleanup,
+    AwaitOwnedCleanup,
+}
+
+fn codex_child_disposition(
+    present: bool,
+    leader_alive: bool,
+    transport_ready: bool,
+    group: crate::process_manager::OwnedProcessGroupLiveness,
+    retirement_pending: bool,
+) -> CodexChildDisposition {
+    use crate::process_manager::OwnedProcessGroupLiveness;
+
+    if !present {
+        return CodexChildDisposition::Replace;
+    }
+    match group {
+        OwnedProcessGroupLiveness::Exited if !leader_alive => CodexChildDisposition::Replace,
+        OwnedProcessGroupLiveness::Alive
+            if leader_alive && transport_ready && !retirement_pending =>
+        {
+            CodexChildDisposition::Reuse
+        }
+        OwnedProcessGroupLiveness::Alive if !retirement_pending => {
+            CodexChildDisposition::RequestOwnedCleanup
+        }
+        OwnedProcessGroupLiveness::Alive
+        | OwnedProcessGroupLiveness::Exited
+        | OwnedProcessGroupLiveness::Unverified => CodexChildDisposition::AwaitOwnedCleanup,
+    }
+}
+
+fn codex_runtime_closed() -> crate::ai::reliability::AppFailureRecord {
+    crate::ai::reliability::process_failure(
+        sk_protocol::ai_reliability::ProtocolComponent::Codex,
+        crate::ai::reliability::ProcessFailureFacts::RuntimeClosed,
+    )
+}
+
+fn request_owned_codex_cleanup(
+    shared: &mut Shared,
+    pgid: u32,
+) -> Result<(), Box<crate::ai::reliability::AppFailureRecord>> {
+    if shared.retiring_child_pgid == Some(pgid) {
+        return Ok(());
+    }
+    crate::process_manager::PROCESS_MANAGER
+        .terminate_process(pgid)
+        .map_err(|error| {
+            tracing::warn!(
+                target: "script_kit::flows",
+                event = "codex_owned_cleanup_request_failed",
+                pgid,
+                error_length = error.len(),
+                "codex app-server process group remains owned"
+            );
+            Box::new(codex_runtime_closed())
+        })?;
+    shared.retiring_child_pgid = Some(pgid);
+    Ok(())
+}
+
+fn ensure_child(shared: &mut Shared) -> Result<(), Box<crate::ai::reliability::AppFailureRecord>> {
+    let child_pid = shared.child.as_ref().map(Child::id);
+    let leader_alive = shared
         .child
         .as_mut()
         .map(|child| child.try_wait().map(|status| status.is_none()))
@@ -379,8 +470,29 @@ fn ensure_child(shared: &mut Shared) -> Result<(), crate::ai::reliability::AppFa
             )
         })?
         .unwrap_or(false);
-    if alive && shared.stdin.is_some() {
-        return Ok(());
+    let group = child_pid
+        .map(crate::process_manager::observe_owned_process_group)
+        .unwrap_or(crate::process_manager::OwnedProcessGroupLiveness::Exited);
+    match codex_child_disposition(
+        child_pid.is_some(),
+        leader_alive,
+        shared.stdin.is_some(),
+        group,
+        shared.retiring_child_pgid == child_pid && child_pid.is_some(),
+    ) {
+        CodexChildDisposition::Reuse => return Ok(()),
+        CodexChildDisposition::RequestOwnedCleanup => {
+            let Some(pgid) = child_pid else {
+                return Err(Box::new(codex_runtime_closed()));
+            };
+            shared.stdin = None;
+            request_owned_codex_cleanup(shared, pgid)?;
+            return Err(Box::new(codex_runtime_closed()));
+        }
+        CodexChildDisposition::AwaitOwnedCleanup => {
+            return Err(Box::new(codex_runtime_closed()));
+        }
+        CodexChildDisposition::Replace => {}
     }
 
     // (Re)spawn: invalidate every thread link but keep cwds + queued
@@ -388,6 +500,7 @@ fn ensure_child(shared: &mut Shared) -> Result<(), crate::ai::reliability::AppFa
     shared.stdin = None;
     shared.child = None;
     shared.child_registration = None;
+    shared.retiring_child_pgid = None;
     shared.pending.clear();
     shared.threads.clear();
     for link in shared.sessions.values_mut() {
@@ -533,7 +646,7 @@ fn reader_loop(stdout: std::process::ChildStdout, generation: u64) {
             continue;
         };
         let client = codex_app_server();
-        let mut shared = client.shared.lock().unwrap();
+        let mut shared = client.shared.lock();
         if shared.child_generation != generation {
             return; // superseded by a respawn
         }
@@ -543,7 +656,7 @@ fn reader_loop(stdout: std::process::ChildStdout, generation: u64) {
     // EOF: the child died. Fail every session with work in flight so no
     // chip can lie about a dead server.
     let client = codex_app_server();
-    let mut shared = client.shared.lock().unwrap();
+    let mut shared = client.shared.lock();
     if shared.child_generation != generation {
         return;
     }
@@ -561,8 +674,11 @@ fn reader_loop(stdout: std::process::ChildStdout, generation: u64) {
     // finish" card instead of a runtime-closed one with Reconnect.
     let mut exit_code = None;
     let mut signal = None;
-    if let Some(mut child) = shared.child.take() {
+    let mut leader_exited = false;
+    let child_pid = shared.child.as_ref().map(Child::id);
+    if let Some(child) = shared.child.as_mut() {
         if let Ok(Some(status)) = child.try_wait() {
+            leader_exited = true;
             exit_code = status.code();
             #[cfg(unix)]
             {
@@ -571,10 +687,28 @@ fn reader_loop(stdout: std::process::ChildStdout, generation: u64) {
             }
         }
     }
-    let death = crate::ai::reliability::process_failure(
-        sk_protocol::ai_reliability::ProtocolComponent::Codex,
-        crate::ai::reliability::ProcessFailureFacts::ChildExited { exit_code, signal },
-    );
+    if let Some(pgid) = child_pid {
+        match crate::process_manager::observe_owned_process_group(pgid) {
+            crate::process_manager::OwnedProcessGroupLiveness::Exited if leader_exited => {
+                shared.child = None;
+                shared.child_registration = None;
+                shared.retiring_child_pgid = None;
+            }
+            crate::process_manager::OwnedProcessGroupLiveness::Alive => {
+                let _ = request_owned_codex_cleanup(&mut shared, pgid);
+            }
+            crate::process_manager::OwnedProcessGroupLiveness::Exited
+            | crate::process_manager::OwnedProcessGroupLiveness::Unverified => {}
+        }
+    }
+    let death = if leader_exited {
+        crate::ai::reliability::process_failure(
+            sk_protocol::ai_reliability::ProtocolComponent::Codex,
+            crate::ai::reliability::ProcessFailureFacts::ChildExited { exit_code, signal },
+        )
+    } else {
+        codex_runtime_closed()
+    };
     let session_ids: Vec<u64> = shared.sessions.keys().copied().collect();
     for session_id in session_ids {
         shared.emit(FlowThreadEvent::SessionFailed {
@@ -582,9 +716,7 @@ fn reader_loop(stdout: std::process::ChildStdout, generation: u64) {
             failure: death.clone(),
         });
         if let Some(link) = shared.sessions.get_mut(&session_id) {
-            link.thread_id = None;
-            link.thread_starting = false;
-            link.queued_prompts.clear();
+            preserve_session_for_recovery(link);
         }
     }
     shared.threads.clear();
@@ -772,8 +904,7 @@ fn handle_rpc_error(shared: &mut Shared, kind: PendingKind, message: String) {
         }
         PendingKind::ThreadStart { session_id } => {
             if let Some(link) = shared.sessions.get_mut(&session_id) {
-                link.thread_starting = false;
-                link.queued_prompts.clear();
+                preserve_session_for_recovery(link);
             }
             shared.emit(FlowThreadEvent::SessionFailed {
                 session_id,
@@ -823,6 +954,9 @@ fn handle_response(shared: &mut Shared, kind: PendingKind, result: &serde_json::
                 .unwrap_or_default()
                 .to_string();
             let Some(thread_id) = thread_id else {
+                if let Some(link) = shared.sessions.get_mut(&session_id) {
+                    preserve_session_for_recovery(link);
+                }
                 shared.emit(FlowThreadEvent::SessionFailed {
                     session_id,
                     failure: flow_failure("thread/start response missing thread.id"),
@@ -857,6 +991,134 @@ fn handle_response(shared: &mut Shared, kind: PendingKind, result: &serde_json::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_owned_codex_group_must_be_retired_before_server_replacement() {
+        use crate::process_manager::OwnedProcessGroupLiveness;
+
+        assert_eq!(
+            codex_child_disposition(true, true, true, OwnedProcessGroupLiveness::Alive, false,),
+            CodexChildDisposition::Reuse
+        );
+        assert_eq!(
+            codex_child_disposition(true, true, false, OwnedProcessGroupLiveness::Alive, false,),
+            CodexChildDisposition::RequestOwnedCleanup
+        );
+        assert_eq!(
+            codex_child_disposition(true, true, false, OwnedProcessGroupLiveness::Alive, true,),
+            CodexChildDisposition::AwaitOwnedCleanup
+        );
+        assert_eq!(
+            codex_child_disposition(true, false, false, OwnedProcessGroupLiveness::Alive, false,),
+            CodexChildDisposition::RequestOwnedCleanup,
+            "a dead group leader does not prove its descendants exited"
+        );
+        assert_eq!(
+            codex_child_disposition(
+                true,
+                false,
+                false,
+                OwnedProcessGroupLiveness::Unverified,
+                false,
+            ),
+            CodexChildDisposition::AwaitOwnedCleanup
+        );
+        assert_eq!(
+            codex_child_disposition(true, false, false, OwnedProcessGroupLiveness::Exited, true,),
+            CodexChildDisposition::Replace
+        );
+    }
+
+    #[test]
+    fn codex_transport_failure_preserves_private_prompt_and_selected_context() {
+        let mut session = SessionLink {
+            cwd: "/isolated/selected-project".to_string(),
+            profile: super::super::session::FlowThreadProfile {
+                model: Some("deliberately-selected-model".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                developer_instructions: Some("private selected mission".to_string()),
+            },
+            thread_id: Some("stale-thread".to_string()),
+            thread_starting: true,
+            queued_prompts: vec!["private user prompt sk-secret".to_string()],
+        };
+
+        preserve_session_for_recovery(&mut session);
+
+        assert!(session.thread_id.is_none());
+        assert!(!session.thread_starting);
+        assert_eq!(session.cwd, "/isolated/selected-project");
+        assert_eq!(
+            session.profile.model.as_deref(),
+            Some("deliberately-selected-model")
+        );
+        assert_eq!(
+            session.profile.developer_instructions.as_deref(),
+            Some("private selected mission")
+        );
+        assert_eq!(session.queued_prompts, ["private user prompt sk-secret"]);
+    }
+
+    #[test]
+    fn rejected_thread_start_preserves_accepted_prompt_for_recovery() {
+        let mut shared = Shared::default();
+        shared.sessions.insert(
+            42,
+            SessionLink {
+                cwd: "/isolated/project".to_string(),
+                thread_starting: true,
+                queued_prompts: vec!["private accepted prompt".to_string()],
+                ..SessionLink::default()
+            },
+        );
+
+        handle_rpc_error(
+            &mut shared,
+            PendingKind::ThreadStart { session_id: 42 },
+            "authentication required".to_string(),
+        );
+
+        let session = shared
+            .sessions
+            .get(&42)
+            .expect("session remains recoverable");
+        assert!(!session.thread_starting);
+        assert_eq!(session.queued_prompts, ["private accepted prompt"]);
+        assert!(matches!(
+            shared.events.as_slice(),
+            [FlowThreadEvent::SessionFailed { session_id: 42, .. }]
+        ));
+    }
+
+    #[test]
+    fn malformed_thread_start_response_keeps_prompt_retryable() {
+        let mut shared = Shared::default();
+        shared.sessions.insert(
+            18,
+            SessionLink {
+                thread_starting: true,
+                queued_prompts: vec!["private recoverable input".to_string()],
+                ..SessionLink::default()
+            },
+        );
+
+        handle_response(
+            &mut shared,
+            PendingKind::ThreadStart { session_id: 18 },
+            &serde_json::json!({ "thread": {} }),
+        );
+
+        let session = shared
+            .sessions
+            .get(&18)
+            .expect("session remains recoverable");
+        assert!(!session.thread_starting);
+        assert_eq!(session.queued_prompts, ["private recoverable input"]);
+        assert!(matches!(
+            shared.events.as_slice(),
+            [FlowThreadEvent::SessionFailed { session_id: 18, .. }]
+        ));
+    }
 
     /// Notification routing: agent deltas and completion map thread ids back
     /// to app session ids, and unknown notifications are ignored.

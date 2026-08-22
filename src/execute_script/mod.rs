@@ -427,7 +427,7 @@ fn execute_script_spawn_feedback_command(
         category = "EXEC",
         effect = %effect,
         program = spec.program,
-        args = ?spec.args,
+        argument_count = spec.args.len(),
         "Dispatching protocol feedback command"
     );
 
@@ -605,12 +605,27 @@ impl ScriptListApp {
         argv: Vec<String>,
         cx: &mut Context<Self>,
     ) {
+        let capability_issues = crate::scripts::validate_declared_sdk_capabilities(script);
+        if let Some(issue) = capability_issues
+            .iter()
+            .find(|issue| issue.severity == crate::scripts::ValidationSeverity::Fatal)
+            .or_else(|| capability_issues.first())
+        {
+            tracing::warn!(
+                target: "script_kit::execution",
+                issue = ?issue.kind,
+                "script_capability_preflight_refused_before_process_spawn"
+            );
+            self.show_hud(issue.message.clone(), Some(HUD_MEDIUM_MS), cx);
+            return;
+        }
+
         // --- merged from part_001_body/execute_interactive_merged.rs ---
         {
             tracing::info!(
                 category = "EXEC",
                 script_name = %script.name,
-                argv = ?argv,
+                argument_count = argv.len(),
                 "Starting interactive execution"
             );
 
@@ -665,7 +680,7 @@ impl ScriptListApp {
                             logging::with_correlation_scope(scope.as_deref(), || {
                                 tracing::info!(
                                     category = "EXEC",
-                                    prompt_message = ?msg,
+                                    prompt_message_kind = ?std::mem::discriminant(&msg),
                                     "Prompt message received"
                                 );
                                 let _ = cx.update(|cx| {
@@ -1702,7 +1717,6 @@ impl ScriptListApp {
                                         tracing::info!(
                                             category = "EXEC",
                                             request_id = %request_id,
-                                            response = ?response,
                                             "Sending window bounds response"
                                         );
                                         if let Err(e) = reader_response_tx.send(response) {
@@ -1767,7 +1781,7 @@ impl ScriptListApp {
                                     if let Some(response) = crate::ai::try_handle_ai_message(&msg) {
                                         tracing::info!(
                                             category = "EXEC",
-                                            message = ?msg,
+                                            message_kind = ?std::mem::discriminant(&msg),
                                             "AI SDK message handled"
                                         );
                                         if let Err(e) = reader_response_tx.send(response) {

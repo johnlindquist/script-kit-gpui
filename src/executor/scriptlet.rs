@@ -151,6 +151,24 @@ pub fn run_scriptlet(
     scriptlet: &Scriptlet,
     options: ScriptletExecOptions,
 ) -> Result<ScriptletResult, String> {
+    let capability_issues = crate::scripts::validate_legacy_scriptlet_capabilities(scriptlet);
+    if let Some(issue) = capability_issues
+        .iter()
+        .find(|issue| issue.severity == crate::scripts::ValidationSeverity::Fatal)
+        .or_else(|| capability_issues.first())
+    {
+        warn!(
+            target: "script_kit::execution",
+            scriptlet = %scriptlet.name,
+            issue = ?issue.kind,
+            "legacy_scriptlet_capability_preflight_refused_before_execution"
+        );
+        return Err(format!(
+            "Scriptlet `{}` cannot run: {}",
+            scriptlet.name, issue.message
+        ));
+    }
+
     let start = Instant::now();
     debug!(tool = %scriptlet.tool, name = %scriptlet.name, "Running scriptlet");
     info!(

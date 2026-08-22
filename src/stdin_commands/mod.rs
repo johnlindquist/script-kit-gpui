@@ -795,6 +795,21 @@ pub enum BuiltinRef<'a> {
 }
 
 impl ExternalCommand {
+    /// Commands permitted while release/CI probes promise not to take over the
+    /// operator's machine. This is deliberately an allowlist: a future command
+    /// is unsafe until its hidden, side-effect-free behavior is reviewed.
+    fn is_noninteractive_safe(&self) -> bool {
+        matches!(
+            self,
+            Self::Hide { .. }
+                | Self::SetFilter { .. }
+                | Self::SetMenuSyntaxFormField { .. }
+                | Self::GetAiWindowState { .. }
+                | Self::GetAgentChatVariations { .. }
+                | Self::GetConfigFingerprint { .. }
+        )
+    }
+
     /// Extract the canonical-id-or-legacy-alias pair from a
     /// `TriggerBuiltin` payload, rejecting ambiguous combinations up
     /// front (both present, neither present).
@@ -1001,6 +1016,40 @@ pub enum StdinCommand {
 }
 
 impl StdinCommand {
+    /// Fail closed before dispatching any operation that could reveal a
+    /// window, capture a display, deliver global input, launch a provider, or
+    /// perform a command while `SCRIPT_KIT_NONINTERACTIVE=1`.
+    fn is_noninteractive_safe(&self) -> bool {
+        match self {
+            Self::External(command) => command.is_noninteractive_safe(),
+            Self::Protocol(message) => match message.as_ref() {
+                crate::protocol::Message::GetState { target, .. }
+                | crate::protocol::Message::GetElements { target, .. }
+                | crate::protocol::Message::GetLayoutInfo { target, .. }
+                | crate::protocol::Message::GetAgentChatState { target, .. }
+                | crate::protocol::Message::GetAiReliabilityState { target, .. }
+                | crate::protocol::Message::GetAgentChatTestProbe { target, .. } => {
+                    noninteractive_target_is_safe(target.as_ref())
+                }
+                crate::protocol::Message::GetLogs { .. }
+                | crate::protocol::Message::ListAutomationWindows { .. } => true,
+                crate::protocol::Message::WaitFor {
+                    condition, target, ..
+                } => {
+                    noninteractive_target_is_safe(target.as_ref())
+                        && noninteractive_wait_condition_is_safe(condition)
+                }
+                crate::protocol::Message::Batch {
+                    commands, target, ..
+                } => {
+                    noninteractive_target_is_safe(target.as_ref())
+                        && commands.iter().all(noninteractive_batch_command_is_safe)
+                }
+                _ => false,
+            },
+        }
+    }
+
     pub fn command_type(&self) -> &'static str {
         match self {
             Self::External(command) => command.command_type(),
@@ -1055,6 +1104,39 @@ impl StdinCommand {
                 _ => message.id(),
             },
         }
+    }
+}
+
+fn noninteractive_target_is_safe(target: Option<&crate::protocol::AutomationWindowTarget>) -> bool {
+    !matches!(
+        target,
+        Some(crate::protocol::AutomationWindowTarget::Focused)
+    )
+}
+
+fn noninteractive_batch_command_is_safe(command: &crate::protocol::BatchCommand) -> bool {
+    match command {
+        crate::protocol::BatchCommand::SetInput { .. }
+        | crate::protocol::BatchCommand::SelectByValue { submit: false, .. }
+        | crate::protocol::BatchCommand::SelectBySemanticId { submit: false, .. }
+        | crate::protocol::BatchCommand::FilterAndSelect { submit: false, .. } => true,
+        crate::protocol::BatchCommand::WaitFor { condition, .. } => {
+            noninteractive_wait_condition_is_safe(condition)
+        }
+        _ => false,
+    }
+}
+
+fn noninteractive_wait_condition_is_safe(condition: &crate::protocol::WaitCondition) -> bool {
+    match condition {
+        crate::protocol::WaitCondition::Named(
+            crate::protocol::WaitNamedCondition::WindowVisible
+            | crate::protocol::WaitNamedCondition::WindowFocused,
+        ) => false,
+        crate::protocol::WaitCondition::Detailed(
+            crate::protocol::WaitDetailedCondition::StateMatch { state },
+        ) => state.window_visible != Some(true),
+        _ => true,
     }
 }
 
@@ -1313,6 +1395,36 @@ pub fn start_stdin_listener(
                                 .unwrap_or_else(|| format!("stdin:{}", Uuid::new_v4()));
                             let _guard = logging::set_correlation_id(correlation_id.clone());
 
+                            if std::env::var("SCRIPT_KIT_NONINTERACTIVE").ok().as_deref()
+                                == Some("1")
+                                && !cmd.is_noninteractive_safe()
+                            {
+                                let command_type = cmd.command_type();
+                                tracing::warn!(
+                                    category = "STDIN",
+                                    event_type = "stdin_noninteractive_operation_refused",
+                                    command_type,
+                                    correlation_id = %correlation_id,
+                                    "Refused operator-visible or side-effecting automation command"
+                                );
+                                if let (Some(sender), Some(request_id)) =
+                                    (response_sender.as_ref(), cmd.request_id())
+                                {
+                                    let response = crate::protocol::Message::external_command_result(
+                                        request_id.to_owned(),
+                                        command_type.to_owned(),
+                                        false,
+                                        Some("noninteractive_operation_refused".to_owned()),
+                                        Some(
+                                            "This command is disabled by noninteractive operator-safety policy."
+                                                .to_owned(),
+                                        ),
+                                    );
+                                    let _ = sender.try_send(response);
+                                }
+                                continue;
+                            }
+
                             tracing::info!(
                                 category = "STDIN",
                                 event_type = "stdin_command_parsed",
@@ -1450,6 +1562,49 @@ mod tests {
     use tempfile::TempDir;
 
     static PROTOCOL_VERSION_STATS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn noninteractive_policy_allows_only_hidden_read_only_and_filter_operations() {
+        let safe = [
+            r#"{"type":"hide"}"#,
+            r#"{"type":"setFilter","text":"notes"}"#,
+            r#"{"type":"getState","requestId":"state"}"#,
+            r#"{"type":"getElements","requestId":"elements"}"#,
+            r#"{"type":"listAutomationWindows","requestId":"windows"}"#,
+            r#"{"type":"batch","requestId":"batch","commands":[{"type":"setInput","text":"notes"}]}"#,
+        ];
+        for payload in safe {
+            assert!(
+                parse_stdin_command(payload)
+                    .unwrap()
+                    .is_noninteractive_safe(),
+                "safe hidden automation was refused: {payload}"
+            );
+        }
+
+        let unsafe_payloads = [
+            r#"{"type":"show"}"#,
+            r#"{"type":"simulateKey","key":"enter"}"#,
+            r#"{"type":"openNotes"}"#,
+            r#"{"type":"captureWindow","title":"Script Kit","path":"capture.png"}"#,
+            r#"{"type":"captureScreenshot","requestId":"capture"}"#,
+            r#"{"type":"inspectAutomationWindow","requestId":"inspect","target":{"type":"main"}}"#,
+            r#"{"type":"getState","requestId":"focused","target":{"type":"focused"}}"#,
+            r#"{"type":"setAiInput","text":"hello","submit":true}"#,
+            r#"{"type":"waitFor","requestId":"visible","condition":"windowVisible"}"#,
+            r#"{"type":"batch","requestId":"batch","commands":[{"type":"openActions"}]}"#,
+            r#"{"type":"batch","requestId":"batch","commands":[{"type":"typeAndSubmit","text":"danger"}]}"#,
+            r#"{"type":"batch","requestId":"batch","commands":[{"type":"selectByValue","value":"danger","submit":true}]}"#,
+        ];
+        for payload in unsafe_payloads {
+            assert!(
+                !parse_stdin_command(payload)
+                    .unwrap()
+                    .is_noninteractive_safe(),
+                "unsafe operator-facing automation escaped policy: {payload}"
+            );
+        }
+    }
 
     /// Pins `EXTERNAL_COMMAND_VERBS` to the exhaustive
     /// [`ExternalCommand::command_type`] match: every sample variant's verb

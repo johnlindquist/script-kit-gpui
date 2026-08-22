@@ -83,7 +83,7 @@ fn schema_trace_modes_match_documented_values() {
 
     assert!(modes.contains(&"off".to_string()));
     assert!(modes.contains(&"on".to_string()));
-    assert!(modes.contains(&"on_failure".to_string()));
+    assert!(modes.contains(&"onFailure".to_string()));
 }
 
 // ── Latest resource (empty state) ────────────────────────────────────────

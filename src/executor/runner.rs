@@ -29,6 +29,9 @@ mod unix_process {
     /// Returns Ok(()) if signal was sent successfully.
     /// Returns Err with errno description on failure.
     pub fn kill_process_group(pgid: u32, signal: c_int) -> Result<(), &'static str> {
+        if pgid == 0 || pgid > i32::MAX as u32 {
+            return Err("Invalid owned process group");
+        }
         // SAFETY: kill() is a simple syscall with no memory safety concerns.
         // Negative PID targets the process group. pgid is a valid u32 from Child::id().
         let rc = unsafe { libc::kill(-(pgid as pid_t), signal) };
@@ -53,6 +56,9 @@ mod unix_process {
     /// Note: EPERM (permission denied) also means the process exists but we
     /// don't have permission to signal it - we still count this as "alive".
     pub fn process_group_alive(pgid: u32) -> bool {
+        if pgid == 0 || pgid > i32::MAX as u32 {
+            return true;
+        }
         // SAFETY: kill() with signal 0 is safe — it only checks process group existence
         // without sending an actual signal. pgid is a valid u32 from Child::id().
         let rc = unsafe { libc::kill(-(pgid as pid_t), 0) };
@@ -318,8 +324,6 @@ impl ProcessHandle {
             );
             return;
         }
-        self.killed = true;
-        super::telemetry::log_script_killed("executor::process_handle_kill", self.pid, "SIGTERM");
 
         #[cfg(unix)]
         {
@@ -327,6 +331,13 @@ impl ProcessHandle {
 
             // Since we spawned with process_group(0), the PGID equals the PID
             let pgid = self.pid;
+            if pgid == 0 || pgid > i32::MAX as u32 {
+                error!(
+                    category = "EXEC",
+                    pgid, "Refusing invalid owned process group"
+                );
+                return;
+            }
 
             // Step 1: Send SIGTERM for graceful shutdown
             info!(
@@ -346,7 +357,9 @@ impl ProcessHandle {
                     );
                 }
                 Err("No such process group") => {
-                    info!(category = "EXEC", pgid, "Process group already exited");
+                    if self.confirm_group_cleanup("SIGTERM") {
+                        info!(category = "EXEC", pgid, "Process group already exited");
+                    }
                     return;
                 }
                 Err(e) => {
@@ -370,12 +383,14 @@ impl ProcessHandle {
                 // CRITICAL: Check if process GROUP is alive, not just the leader PID
                 // This prevents orphan processes when the leader exits but children remain
                 if !process_group_alive(pgid) {
-                    info!(
-                        category = "EXEC",
-                        pgid,
-                        signal = "SIGTERM",
-                        "Process group terminated gracefully"
-                    );
+                    if self.confirm_group_cleanup("SIGTERM") {
+                        info!(
+                            category = "EXEC",
+                            pgid,
+                            signal = "SIGTERM",
+                            "Process group terminated gracefully"
+                        );
+                    }
                     return;
                 }
                 std::thread::sleep(poll_interval);
@@ -396,7 +411,7 @@ impl ProcessHandle {
                         category = "EXEC",
                         pgid,
                         signal = "SIGKILL",
-                        "Process group killed"
+                        "Force-stop signal delivered; awaiting owned group cleanup"
                     );
                 }
                 Err("No such process group") => {
@@ -417,6 +432,13 @@ impl ProcessHandle {
                     );
                 }
             }
+
+            if !self.confirm_group_cleanup("SIGKILL") {
+                error!(
+                    category = "EXEC",
+                    pgid, "Owned process group remains tracked because cleanup was not verified"
+                );
+            }
         }
 
         #[cfg(not(unix))]
@@ -431,6 +453,17 @@ impl ProcessHandle {
         }
     }
 
+    #[cfg(unix)]
+    fn confirm_group_cleanup(&mut self, signal: &'static str) -> bool {
+        let state = crate::process_manager::observe_owned_process_group(self.pid);
+        if !owned_group_cleanup_confirmed(state) {
+            return false;
+        }
+        self.killed = true;
+        super::telemetry::log_script_killed("executor::process_handle_kill", self.pid, signal);
+        true
+    }
+
     /// Check if process group is still running (Unix only)
     ///
     /// Checks the entire process group, not just the leader PID.
@@ -442,14 +475,27 @@ impl ProcessHandle {
     }
 }
 
+#[cfg(unix)]
+fn owned_group_cleanup_confirmed(
+    observation: crate::process_manager::OwnedProcessGroupLiveness,
+) -> bool {
+    observation == crate::process_manager::OwnedProcessGroupLiveness::Exited
+}
+
 impl Drop for ProcessHandle {
     fn drop(&mut self) {
         info!(category = "EXEC", pid = self.pid, "Dropping process handle");
 
-        // Unregister from global process manager BEFORE killing
-        PROCESS_MANAGER.unregister_process(self.pid);
-
         self.kill();
+        if self.killed {
+            PROCESS_MANAGER.unregister_process(self.pid);
+        } else {
+            error!(
+                category = "EXEC",
+                pid = self.pid,
+                "Retaining unverified owned process in the global cleanup registry"
+            );
+        }
     }
 }
 
@@ -523,6 +569,16 @@ impl SplitSession {
         self.process_handle.kill();
         // Also try the standard kill for good measure
         let _ = self.child.kill();
+        #[cfg(unix)]
+        {
+            if !self.process_handle.killed && !self.process_handle.confirm_group_cleanup("SIGKILL")
+            {
+                return Err(
+                    "Owned script process group is still alive; cleanup remains pending"
+                        .to_string(),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -829,6 +885,25 @@ pub fn is_javascript(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext == "js")
         .unwrap_or(false)
+}
+
+#[cfg(all(test, unix))]
+mod process_cleanup_contract_tests {
+    use super::owned_group_cleanup_confirmed;
+    use crate::process_manager::OwnedProcessGroupLiveness;
+
+    #[test]
+    fn owned_script_cleanup_requires_observed_process_group_exit() {
+        assert!(!owned_group_cleanup_confirmed(
+            OwnedProcessGroupLiveness::Alive
+        ));
+        assert!(!owned_group_cleanup_confirmed(
+            OwnedProcessGroupLiveness::Unverified
+        ));
+        assert!(owned_group_cleanup_confirmed(
+            OwnedProcessGroupLiveness::Exited
+        ));
+    }
 }
 
 #[cfg(test)]

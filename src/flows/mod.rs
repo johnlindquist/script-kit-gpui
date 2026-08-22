@@ -55,6 +55,7 @@ pub fn last_flow_cwd() -> Option<String> {
 /// 2. the caller's context cwd (spine chip) when it has one,
 /// 3. the last cwd a flow was launched from,
 /// 4. `$HOME`.
+///
 /// Surfaces that disagree about cwd show different flow lists for no visible
 /// reason — never resolve cwd any other way.
 pub fn resolve_flow_cwd(context_cwd: Option<String>) -> String {

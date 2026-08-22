@@ -205,6 +205,10 @@ impl Message {
     }
 
     /// Create an elements result response with observation receipt metadata.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the public wire-compatible constructor preserves each stable projection-envelope field"
+    )]
     pub fn elements_result_with_projection(
         request_id: String,
         semantic_surface: String,

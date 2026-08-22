@@ -108,6 +108,7 @@ pub fn flow_ux_state(inputs: FlowUxSnapshotInputs<'_>) -> Value {
                 // process-group death, not just registry phase.
                 "pid": run.pid,
                 "enginePid": run.engine_pid,
+                "execution": run.execution_receipt(),
                 "overrideNames": run.override_names,
                 "outputTail": run.last_output_line(),
                 "outputLineCount": run.stdout_tail.line_count() + run.stderr_tail.line_count(),

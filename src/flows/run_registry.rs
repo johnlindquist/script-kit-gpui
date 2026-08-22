@@ -13,6 +13,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::Mutex;
+use sk_protocol::command_contract::{CommandAvailability, CommandIdentity, CommandSource};
+use sk_protocol::execution_contract::{
+    ExecutionCleanupProof, ExecutionEvent, ExecutionLifecycle, ExecutionReceipt,
+};
 
 use super::model::{
     EngagementMode, FlowUxVariant, OutputTail, RunEvent, RunEventEnvelope, RunPhase, RunTimings,
@@ -76,6 +80,9 @@ pub struct FlowRun {
     pub timings: RunTimings,
     pub launched_at: Instant,
     pub duration_ms: Option<u64>,
+    /// Exact owner-observed process-group cleanup; absent until the full
+    /// group is gone, never set from a child event or signal dispatch.
+    pub cancellation_cleanup: Option<ExecutionCleanupProof>,
 }
 
 impl FlowRun {
@@ -103,6 +110,77 @@ impl FlowRun {
             .or_else(|| self.stdout_tail.last_line())
             .or_else(|| self.stderr_tail.last_line())
     }
+
+    /// Project terminal Flow state through the same typed execution contract
+    /// used by other command families without replacing Flow's richer reducer.
+    /// A cancellation has no receipt until exact cleanup proof is present.
+    pub fn execution_receipt(&self) -> Option<ExecutionReceipt> {
+        if !self.phase.is_terminal() {
+            return None;
+        }
+        let command_id = CommandIdentity::new(CommandSource::Flow, &self.flow_id).ok()?;
+        let run_id = self
+            .protocol_run_id
+            .clone()
+            .unwrap_or_else(|| format!("flow-local-{}", self.local_id));
+        let mut lifecycle = ExecutionLifecycle::new(run_id, command_id).ok()?;
+        lifecycle.preflight(&CommandAvailability::Ready).ok()?;
+        lifecycle.apply(ExecutionEvent::Prepare).ok()?;
+
+        match self.phase {
+            RunPhase::Succeeded => {
+                lifecycle.apply(ExecutionEvent::Start).ok()?;
+                if let Some(process_group_id) = self.pid {
+                    lifecycle.bind_process_group(process_group_id).ok()?;
+                }
+                lifecycle.apply(ExecutionEvent::Complete).ok()?;
+            }
+            RunPhase::Failed => {
+                if let Some(process_group_id) = self.pid {
+                    lifecycle.apply(ExecutionEvent::Start).ok()?;
+                    lifecycle.bind_process_group(process_group_id).ok()?;
+                }
+                lifecycle.apply(ExecutionEvent::Fail).ok()?;
+            }
+            RunPhase::Cancelled => {
+                if let Some(process_group_id) = self.pid {
+                    lifecycle.apply(ExecutionEvent::Start).ok()?;
+                    lifecycle.bind_process_group(process_group_id).ok()?;
+                }
+                lifecycle.apply(ExecutionEvent::Cancel).ok()?;
+                lifecycle
+                    .confirm_cancellation(self.cancellation_cleanup.clone()?)
+                    .ok()?;
+            }
+            RunPhase::Starting | RunPhase::Running | RunPhase::Cancelling => return None,
+        }
+
+        let fingerprint = self.failure.as_ref().and_then(|failure| {
+            failure
+                .failure
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.fingerprint.0.clone())
+        });
+        lifecycle.receipt(self.elapsed_ms(), fingerprint).ok()
+    }
+}
+
+fn observed_cancellation_cleanup(run: &FlowRun) -> Option<ExecutionCleanupProof> {
+    if run.pid.is_some_and(super::runner::process_group_alive) {
+        return None;
+    }
+
+    Some(ExecutionCleanupProof {
+        run_id: run
+            .protocol_run_id
+            .clone()
+            .unwrap_or_else(|| format!("flow-local-{}", run.local_id)),
+        command_id: CommandIdentity::new(CommandSource::Flow, &run.flow_id).ok()?,
+        process_group_id: run.pid,
+        process_group_alive: false,
+        resources_released: true,
+    })
 }
 
 /// Lightweight row-facing view of one run (see `run_summaries`).
@@ -193,6 +271,7 @@ impl FlowRunRegistry {
             timings: RunTimings::default(),
             launched_at: Instant::now(),
             duration_ms: None,
+            cancellation_cleanup: None,
         };
         let mut state = self.state.lock();
         state.order.push(local_id);
@@ -324,13 +403,10 @@ impl FlowRunRegistry {
                 exit_code,
                 duration_ms,
             } => {
-                // A cancel in flight resolves to Cancelled regardless of how
-                // the SIGTERM'd process reports its death (an engine dying
-                // 143 is the cancel outcome, not a new failure). Exit code
-                // and duration are still recorded for transparency.
-                if run.phase == RunPhase::Cancelling {
-                    run.phase = RunPhase::Cancelled;
-                } else if !run.phase.is_terminal() {
+                // A child completion cannot prove that its descendants are
+                // gone. Preserve Cancelling until the owning group observer
+                // confirms exact cleanup; retain exit details meanwhile.
+                if run.phase != RunPhase::Cancelling && !run.phase.is_terminal() {
                     run.phase = if *exit_code == 0 {
                         RunPhase::Succeeded
                     } else {
@@ -345,9 +421,7 @@ impl FlowRunRegistry {
                 message,
                 duration_ms,
             } => {
-                if run.phase == RunPhase::Cancelling {
-                    run.phase = RunPhase::Cancelled;
-                } else if !run.phase.is_terminal() {
+                if run.phase != RunPhase::Cancelling && !run.phase.is_terminal() {
                     run.phase = RunPhase::Failed;
                     run.failure = Some(crate::ai::reliability::provider_failure(
                         sk_protocol::ai_reliability::ProtocolComponent::Mdflow,
@@ -359,7 +433,12 @@ impl FlowRunRegistry {
             }
             RunEvent::RunCancelled { duration_ms, .. } => {
                 if !run.phase.is_terminal() {
-                    run.phase = RunPhase::Cancelled;
+                    if let Some(cleanup) = observed_cancellation_cleanup(run) {
+                        run.cancellation_cleanup = Some(cleanup);
+                        run.phase = RunPhase::Cancelled;
+                    } else {
+                        run.phase = RunPhase::Cancelling;
+                    }
                 }
                 run.duration_ms = *duration_ms;
             }
@@ -373,7 +452,7 @@ impl FlowRunRegistry {
     pub fn mark_failed(&self, local_id: u64, failure: crate::ai::reliability::AppFailureRecord) {
         let mut state = self.state.lock();
         if let Some(run) = state.runs.get_mut(&local_id) {
-            if !run.phase.is_terminal() {
+            if !run.phase.is_terminal() && run.phase != RunPhase::Cancelling {
                 run.phase = RunPhase::Failed;
                 run.failure = Some(failure);
                 run.duration_ms = Some(run.launched_at.elapsed().as_millis() as u64);
@@ -382,15 +461,24 @@ impl FlowRunRegistry {
         self.bump_and_notify(&mut state);
     }
 
-    pub fn mark_cancelled(&self, local_id: u64) {
+    /// Settle cancellation only after a read-only signal-0 probe verifies
+    /// that this run's exact owned process group no longer exists.
+    pub fn mark_cancelled(&self, local_id: u64) -> bool {
         let mut state = self.state.lock();
-        if let Some(run) = state.runs.get_mut(&local_id) {
-            if !run.phase.is_terminal() {
-                run.phase = RunPhase::Cancelled;
-                run.duration_ms = Some(run.launched_at.elapsed().as_millis() as u64);
-            }
+        let Some(run) = state.runs.get_mut(&local_id) else {
+            return false;
+        };
+        if run.phase.is_terminal() {
+            return run.phase == RunPhase::Cancelled;
         }
+        let Some(cleanup) = observed_cancellation_cleanup(run) else {
+            return false;
+        };
+        run.cancellation_cleanup = Some(cleanup);
+        run.phase = RunPhase::Cancelled;
+        run.duration_ms = Some(run.launched_at.elapsed().as_millis() as u64);
         self.bump_and_notify(&mut state);
+        true
     }
 
     /// Cancel was REQUESTED: the run enters the non-terminal `Cancelling`
@@ -895,11 +983,11 @@ mod tests {
 
     // ---- Cancelling truth (2026-07-11 audit) ----
 
-    /// Cancel request → Cancelling (non-terminal). The SIGTERM'd process's
-    /// own terminal event resolves it to Cancelled, never Failed — an engine
-    /// dying 143 during cancel is the cancel outcome, not a new failure.
+    /// Child terminal events record exit details but cannot attest that every
+    /// process-group descendant has exited. Only owner-observed cleanup can
+    /// settle the cancellation, and cancellation is never reclassified failure.
     #[test]
-    fn cancelling_resolves_to_cancelled_on_any_terminal_event() {
+    fn cancelling_child_terminal_events_wait_for_verified_group_cleanup() {
         let registry = fresh();
         let id = insert(&registry);
         registry.mark_cancelling(id);
@@ -913,8 +1001,30 @@ mod tests {
             .unwrap(),
         );
         let run = registry.get(id).unwrap();
-        assert_eq!(run.phase, RunPhase::Cancelled);
+        assert_eq!(run.phase, RunPhase::Cancelling);
         assert_eq!(run.exit_code, Some(143), "exit code stays for transparency");
+        assert!(run.execution_receipt().is_none());
+        assert!(registry.mark_cancelled(id));
+        let settled = registry.get(id).unwrap();
+        assert_eq!(settled.phase, RunPhase::Cancelled);
+        assert!(settled.execution_receipt().unwrap().cleanup_verified);
+
+        let mut tampered = settled.clone();
+        tampered
+            .cancellation_cleanup
+            .as_mut()
+            .expect("settled cancellation owns cleanup proof")
+            .process_group_id = Some(42);
+        assert!(
+            tampered.execution_receipt().is_none(),
+            "an in-process cancellation must reject fabricated process-group cleanup"
+        );
+
+        tampered.pid = Some(7);
+        assert!(
+            tampered.execution_receipt().is_none(),
+            "cleanup for another process group cannot settle an owned Flow"
+        );
 
         let id2 = insert(&registry);
         registry.mark_cancelling(id2);
@@ -925,6 +1035,8 @@ mod tests {
             )
             .unwrap(),
         );
+        assert_eq!(registry.get(id2).unwrap().phase, RunPhase::Cancelling);
+        assert!(registry.mark_cancelled(id2));
         assert_eq!(registry.get(id2).unwrap().phase, RunPhase::Cancelled);
     }
 
@@ -959,6 +1071,52 @@ mod tests {
         let run = registry.get(id).unwrap();
         assert_eq!(run.phase, RunPhase::Cancelled);
         assert_eq!(run.stdout_tail.last_line(), Some("flush"));
+        assert!(run.execution_receipt().unwrap().cleanup_verified);
+    }
+
+    #[test]
+    fn live_owned_process_group_refuses_every_optimistic_cancellation_claim() {
+        let registry = fresh();
+        let id = insert(&registry);
+        // SAFETY: getpgrp only reads this process's group; this test never
+        // signals, mutates, or terminates it.
+        let live_group = unsafe { libc::getpgrp() } as u32;
+        registry.set_pid(id, live_group);
+        registry.mark_cancelling(id);
+
+        assert!(super::super::runner::process_group_alive(live_group));
+        assert!(!registry.mark_cancelled(id));
+        assert_eq!(registry.get(id).unwrap().phase, RunPhase::Cancelling);
+
+        registry.apply_event(
+            id,
+            &parse_event_line(
+                r#"{"protocolVersion":1,"seq":0,"runId":"live-group","ts":1,"event":"run.cancelled","signal":"SIGTERM","durationMs":9}"#,
+            )
+            .unwrap(),
+        );
+        let run = registry.get(id).unwrap();
+        assert_eq!(run.phase, RunPhase::Cancelling);
+        assert!(run.cancellation_cleanup.is_none());
+        assert!(run.execution_receipt().is_none());
+    }
+
+    #[test]
+    fn terminal_execution_receipts_never_expose_private_output_or_failure_text() {
+        let registry = fresh();
+        let id = insert(&registry);
+        registry.mark_failed(id, failure("private-provider-token-super-secret"));
+        let run = registry.get(id).unwrap();
+        let receipt = run.execution_receipt().expect("typed terminal receipt");
+        let json = serde_json::to_string(&receipt).expect("serialize safe receipt");
+
+        assert_eq!(receipt.command_id.as_str(), "flow/project:demo");
+        assert_eq!(
+            receipt.outcome,
+            sk_protocol::execution_contract::ExecutionPhase::Failed
+        );
+        assert!(!json.contains("private-provider-token"));
+        assert!(!json.contains("/tmp/p/flows"));
     }
 
     // ---- Conversation capture (2026-07-11 audit P0: cursor corruption) ----

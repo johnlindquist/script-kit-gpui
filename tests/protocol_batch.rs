@@ -507,7 +507,7 @@ fn batch_result_success_with_trace_omits_when_absent() {
 }
 
 #[test]
-fn batch_trace_helper_preserves_result_shape_and_payloads() {
+fn batch_trace_helper_preserves_shape_without_exposing_private_payloads() {
     use script_kit_gpui::protocol::transaction_trace::build_batch_trace_from_results;
     use script_kit_gpui::protocol::{
         BatchCommand, BatchResultEntry, TransactionError, TransactionErrorCode,
@@ -564,9 +564,22 @@ fn batch_trace_helper_preserves_result_shape_and_payloads() {
     assert_eq!(trace.total_elapsed_ms, 1002);
     assert_eq!(trace.failed_at, Some(1));
     assert_eq!(trace.commands.len(), 2);
-    assert_eq!(trace.commands[0].command_payload, Some(commands[0].clone()));
+    let Some(BatchCommand::SetInput { text }) = &trace.commands[0].command_payload else {
+        panic!("setInput trace must preserve its command shape");
+    };
+    assert!(text.starts_with("[REDACTED sha256:"));
+    assert!(!text.contains("apple"));
     assert_eq!(trace.commands[1].command_payload, Some(commands[1].clone()));
-    assert_eq!(trace.commands[1].error, Some(timeout_error));
+    let error = trace.commands[1]
+        .error
+        .as_ref()
+        .expect("failure must preserve its typed error");
+    assert_eq!(error.code, timeout_error.code);
+    assert_eq!(
+        error.message,
+        "The requested UI condition was not met before the timeout."
+    );
+    assert!(trace.command_fingerprint.starts_with("sha256:"));
 }
 
 #[test]

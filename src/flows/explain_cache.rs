@@ -292,6 +292,10 @@ pub(crate) struct MdExplainJson {
     #[serde(flatten)]
     pub(crate) info: ExplainInfo,
     #[serde(default)]
+    #[expect(
+        dead_code,
+        reason = "the mdflow wire schema retains complete template-variable metadata for compatibility"
+    )]
     pub(crate) template_vars: Vec<String>,
     #[serde(default)]
     pub(crate) missing_template_vars: Vec<String>,
@@ -463,6 +467,7 @@ fn fetch_explain_blocking(path: &str, cwd: &str) -> ExplainState {
     }
 }
 
+#[cfg(test)]
 fn parse_explain_output(stdout: &str) -> ExplainState {
     match serde_json::from_str::<ExplainInfo>(stdout) {
         Ok(info) if info.protocol_version == FLOW_UX_PROTOCOL_VERSION => {

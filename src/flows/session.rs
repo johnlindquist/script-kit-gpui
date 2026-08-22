@@ -1754,11 +1754,10 @@ fn sanitize_component(raw: &str) -> String {
         .collect()
 }
 
-/// Conversation file name: flow id PLUS definition path, so two projects
-/// with the same `project:review` id can never share (or steal) a
-/// transcript. The path portion keeps its most distinctive tail when it
-/// would push the file name over conservative filesystem limits.
-fn conversation_file_name(flow_id: &str, flow_path: &str) -> String {
+/// Previous path-qualified names were lossy: punctuation collapsed to `-`
+/// and long paths discarded their prefixes. Keep the exact old spelling only
+/// for owner-verified, one-shot migration into the digest-qualified store.
+fn legacy_path_qualified_conversation_file_name(flow_id: &str, flow_path: &str) -> String {
     let id = sanitize_component(flow_id);
     let mut path = sanitize_component(flow_path.trim_start_matches('/'));
     const PATH_PORTION_MAX: usize = 160;
@@ -1766,6 +1765,33 @@ fn conversation_file_name(flow_id: &str, flow_path: &str) -> String {
         path = path[path.len() - PATH_PORTION_MAX..].to_string();
     }
     format!("{id}--{path}.json")
+}
+
+/// The readable slug is diagnostic only; a length-framed SHA-256 of BOTH
+/// original identity components prevents punctuation, delimiter, Unicode,
+/// and truncated-path collisions from sharing a private conversation.
+fn conversation_file_name(flow_id: &str, flow_path: &str) -> String {
+    use sha2::Digest;
+
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"script-kit-flow-conversation-v1\0");
+    for component in [flow_id, flow_path] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component.as_bytes());
+    }
+
+    let mut id = sanitize_component(flow_id);
+    const ID_PORTION_MAX: usize = 60;
+    if id.len() > ID_PORTION_MAX {
+        id.truncate(ID_PORTION_MAX);
+    }
+    let mut path = sanitize_component(flow_path.trim_start_matches('/'));
+    const PATH_PORTION_MAX: usize = 120;
+    if path.len() > PATH_PORTION_MAX {
+        path = path[path.len() - PATH_PORTION_MAX..].to_string();
+    }
+
+    format!("{id}--{path}--{:x}.json", digest.finalize())
 }
 
 /// Legacy (pre path-qualified identity) file name, keyed by flow id alone.
@@ -1810,6 +1836,7 @@ fn snapshot_from_turns(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PersistedConversationLoadError {
     FutureVersion(u32),
+    IdentityMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1867,6 +1894,12 @@ pub fn canonicalize_persisted_conversation(
 ) -> Result<CanonicalizedConversation, PersistedConversationLoadError> {
     if raw.version > SNAPSHOT_VERSION {
         return Err(PersistedConversationLoadError::FutureVersion(raw.version));
+    }
+    if raw.flow_id != expected_flow_id
+        || (raw.flow_path != expected_flow_path
+            && !(raw.version < SNAPSHOT_VERSION && raw.flow_path.is_empty()))
+    {
+        return Err(PersistedConversationLoadError::IdentityMismatch);
     }
 
     let original = raw.clone();
@@ -2006,11 +2039,19 @@ pub fn canonicalize_persisted_conversation(
         });
     }
 
-    if threads.is_empty() {
+    let active_thread_id = if let Some(active_position) = threads
+        .iter()
+        .position(|thread| thread.state == PersistedFlowThreadState::Active)
+    {
+        let active = threads.remove(active_position);
+        let active_thread_id = active.id.clone();
+        threads.push(active);
+        active_thread_id
+    } else {
         let thread_id = migrated_thread_id(expected_flow_id, expected_flow_path);
         let turns = canonical_persisted_turns(SNAPSHOT_VERSION, &raw.turns);
         threads.push(PersistedFlowThread {
-            id: thread_id,
+            id: thread_id.clone(),
             state: PersistedFlowThreadState::Active,
             parent_thread_id: None,
             created_at: saved_at.clone(),
@@ -2018,20 +2059,10 @@ pub fn canonicalize_persisted_conversation(
             inherited_turn_count: 0,
             turns: turns.iter().map(PersistedFlowTurn::from).collect(),
         });
-    } else if let Some(active_position) = threads
-        .iter()
-        .position(|thread| thread.state == PersistedFlowThreadState::Active)
-    {
-        let active = threads.remove(active_position);
-        threads.push(active);
-    }
+        thread_id
+    };
 
     remove_retained_parent_cycles(&mut threads);
-    let active_thread_id = threads
-        .last()
-        .expect("canonical v4 always has an active thread")
-        .id
-        .clone();
     let snapshot = PersistedFlowConversation {
         flow_id: expected_flow_id.to_string(),
         flow_path: expected_flow_path.to_string(),
@@ -2058,7 +2089,7 @@ pub fn persist_conversation_snapshot_to(
         &snapshot.flow_path,
     ));
     let bytes = serde_json::to_vec_pretty(snapshot).map_err(std::io::Error::other)?;
-    crate::atomic_file::write_atomic(&path, &bytes)
+    crate::atomic_file::write_private_atomic(&path, &bytes)
 }
 
 pub fn persist_conversation_to(
@@ -2076,24 +2107,63 @@ pub fn load_persisted_conversation_from(
     flow_path: &str,
 ) -> Option<PersistedFlowConversation> {
     let path = dir.join(conversation_file_name(flow_id, flow_path));
-    if let Ok(raw) = std::fs::read_to_string(&path) {
-        let snapshot: PersistedFlowConversation = serde_json::from_str(&raw).ok()?;
-        let canonical =
-            canonicalize_persisted_conversation(snapshot, flow_id, flow_path, chrono::Utc::now())
-                .ok()?;
-        if canonical.changed {
-            let _ = persist_conversation_snapshot_to(dir, &canonical.snapshot);
+    match crate::atomic_file::read_private_file(&path) {
+        Ok(raw) => {
+            let snapshot: PersistedFlowConversation = serde_json::from_str(&raw).ok()?;
+            let canonical = canonicalize_persisted_conversation(
+                snapshot,
+                flow_id,
+                flow_path,
+                chrono::Utc::now(),
+            )
+            .ok()?;
+            if canonical.changed {
+                let _ = persist_conversation_snapshot_to(dir, &canonical.snapshot);
+            }
+            return Some(canonical.snapshot);
         }
-        return Some(canonical.snapshot);
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
     }
-    // Legacy adoption (one-shot): a pre-identity snapshot keyed by id alone
-    // is claimed by the FIRST flow that opens it, re-persisted under the
-    // path-qualified name, and the legacy file removed — so it can never
-    // silently leak into another project again.
+    // Existing path-qualified files predate the collision-resistant digest.
+    // Their embedded owner must match EXACTLY before they can be adopted;
+    // a colliding project's snapshot is never relabeled or overwritten.
+    let qualified_legacy = dir.join(legacy_path_qualified_conversation_file_name(
+        flow_id, flow_path,
+    ));
+    match crate::atomic_file::read_private_file(&qualified_legacy) {
+        Ok(raw) => {
+            let snapshot: PersistedFlowConversation = serde_json::from_str(&raw).ok()?;
+            if snapshot.flow_id != flow_id || snapshot.flow_path != flow_path {
+                return None;
+            }
+            let snapshot = canonicalize_persisted_conversation(
+                snapshot,
+                flow_id,
+                flow_path,
+                chrono::Utc::now(),
+            )
+            .ok()?
+            .snapshot;
+            // Claim the old name FIRST. Atomic same-directory rename closes the
+            // race where two colliding projects both read an unconsumed legacy file.
+            std::fs::rename(&qualified_legacy, &path).ok()?;
+            let _ = persist_conversation_snapshot_to(dir, &snapshot);
+            return Some(snapshot);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+
+    // Pre-path snapshots can carry an empty legacy path, but their embedded
+    // flow ID must still match. Consume the shared name BEFORE returning any
+    // private turns so another project can never adopt the same transcript.
     let legacy = dir.join(legacy_conversation_file_name(flow_id));
-    let raw = std::fs::read_to_string(&legacy).ok()?;
+    let raw = crate::atomic_file::read_private_file(&legacy).ok()?;
     let snapshot: PersistedFlowConversation = serde_json::from_str(&raw).ok()?;
-    if !snapshot.flow_path.is_empty() && snapshot.flow_path != flow_path {
+    if snapshot.flow_id != flow_id
+        || (!snapshot.flow_path.is_empty() && snapshot.flow_path != flow_path)
+    {
         return None;
     }
     if snapshot.version < SNAPSHOT_VERSION && snapshot.turns.is_empty() {
@@ -2104,9 +2174,8 @@ pub fn load_persisted_conversation_from(
         canonicalize_persisted_conversation(snapshot, flow_id, flow_path, chrono::Utc::now())
             .ok()?
             .snapshot;
-    if persist_conversation_snapshot_to(dir, &snapshot).is_ok() {
-        let _ = std::fs::remove_file(&legacy);
-    }
+    std::fs::rename(&legacy, &path).ok()?;
+    let _ = persist_conversation_snapshot_to(dir, &snapshot);
     Some(snapshot)
 }
 
@@ -2117,6 +2186,7 @@ pub fn load_persisted_conversation_from(
 /// from the UI thread, so on-disk order always matches user-visible order.
 pub struct FlowConversationStore {
     tx: std::sync::mpsc::Sender<ConversationStoreCommand>,
+    #[cfg(test)]
     helper_revision: std::sync::atomic::AtomicU64,
 }
 
@@ -2303,6 +2373,7 @@ impl FlowConversationStore {
         }
         Self {
             tx,
+            #[cfg(test)]
             helper_revision: std::sync::atomic::AtomicU64::new(1),
         }
     }
@@ -3228,8 +3299,8 @@ mod tests {
             failure: None,
         };
         let mut raw = PersistedFlowConversation {
-            flow_id: "stale:id".into(),
-            flow_path: "/stale/path.md".into(),
+            flow_id: "project:test".into(),
+            flow_path: "/w/flows/test.md".into(),
             saved_at: "not-a-time".into(),
             version: SNAPSHOT_VERSION,
             revision: 0,
@@ -3684,6 +3755,253 @@ mod tests {
         assert_eq!(canonical_session_turns(&beta)[0].user, "beta question");
     }
 
+    #[test]
+    fn conversation_identity_digest_prevents_lossy_slug_and_truncated_path_collisions() {
+        let punctuated_path = "/work/a-b/flows/review.md";
+        let nested_path = "/work/a/b-flows/review.md";
+        assert_eq!(
+            legacy_path_qualified_conversation_file_name("project:review", punctuated_path),
+            legacy_path_qualified_conversation_file_name("project:review", nested_path),
+            "the old filesystem slug really collides"
+        );
+        assert_ne!(
+            conversation_file_name("project:review", punctuated_path),
+            conversation_file_name("project:review", nested_path),
+            "full original paths must own distinct private files"
+        );
+
+        let shared_tail = format!("/{}/review.md", "x".repeat(180));
+        let alpha = format!("/work/alpha{shared_tail}");
+        let beta = format!("/work/beta{shared_tail}");
+        assert_eq!(
+            legacy_path_qualified_conversation_file_name("project:review", &alpha),
+            legacy_path_qualified_conversation_file_name("project:review", &beta),
+            "the old 160-byte tail discards the distinct projects"
+        );
+        assert_ne!(
+            conversation_file_name("project:review", &alpha),
+            conversation_file_name("project:review", &beta)
+        );
+        assert_ne!(
+            conversation_file_name("project:a/b", punctuated_path),
+            conversation_file_name("project:a-b", punctuated_path),
+            "flow IDs cannot collide after filesystem sanitization either"
+        );
+        assert!(
+            conversation_file_name(&"i".repeat(500), &"p".repeat(500)).len() <= 255,
+            "long identities must remain valid on conservative filesystems"
+        );
+    }
+
+    #[test]
+    fn colliding_legacy_flow_paths_keep_their_conversations_isolated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let alpha_path = "/work/a-b/flows/review.md";
+        let beta_path = "/work/a/b-flows/review.md";
+        let turn = |user: &str| {
+            vec![SessionTurn {
+                user: user.to_string(),
+                assistant: "private answer".into(),
+                outcome: PersistedTurnOutcome::Ok,
+                failure: None,
+            }]
+        };
+
+        persist_conversation_to(
+            dir.path(),
+            "project:review",
+            alpha_path,
+            &turn("alpha secret"),
+        )
+        .expect("persist alpha");
+        persist_conversation_to(
+            dir.path(),
+            "project:review",
+            beta_path,
+            &turn("beta secret"),
+        )
+        .expect("persist beta");
+
+        let alpha = load_persisted_conversation_from(dir.path(), "project:review", alpha_path)
+            .expect("alpha conversation");
+        let beta = load_persisted_conversation_from(dir.path(), "project:review", beta_path)
+            .expect("beta conversation");
+        assert_eq!(canonical_session_turns(&alpha)[0].user, "alpha secret");
+        assert_eq!(canonical_session_turns(&beta)[0].user, "beta secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_flow_snapshots_are_owner_only_and_repair_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("isolated flow privacy fixture");
+        let flow_id = "project:private";
+        let flow_path = "/workspace/private/flow.md";
+        let turns = vec![SessionTurn {
+            user: "private flow question".to_owned(),
+            assistant: "private flow answer".to_owned(),
+            outcome: PersistedTurnOutcome::Ok,
+            failure: None,
+        }];
+        persist_conversation_to(directory.path(), flow_id, flow_path, &turns)
+            .expect("private flow persistence");
+        let path = directory
+            .path()
+            .join(conversation_file_name(flow_id, flow_path));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let loaded = load_persisted_conversation_from(directory.path(), flow_id, flow_path)
+            .expect("legacy permissions repair before transcript exposure");
+        assert_eq!(
+            canonical_session_turns(&loaded)[0].user,
+            "private flow question"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_flow_snapshots_refuse_primary_and_both_legacy_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("isolated flow symlink fixture");
+        let flow_id = "project:private";
+        let flow_path = "/workspace/private/flow.md";
+        let external = directory.path().join("another-project.json");
+        let snapshot = snapshot_from_turns(flow_id, flow_path, &[]);
+        let original = serde_json::to_vec_pretty(&snapshot).unwrap();
+        std::fs::write(&external, &original).unwrap();
+
+        let primary = directory
+            .path()
+            .join(conversation_file_name(flow_id, flow_path));
+        symlink(&external, &primary).unwrap();
+        assert!(load_persisted_conversation_from(directory.path(), flow_id, flow_path).is_none());
+        assert!(persist_conversation_snapshot_to(directory.path(), &snapshot).is_err());
+        assert_eq!(std::fs::read(&external).unwrap(), original);
+        std::fs::remove_file(&primary).unwrap();
+
+        let qualified = directory
+            .path()
+            .join(legacy_path_qualified_conversation_file_name(
+                flow_id, flow_path,
+            ));
+        symlink(&external, &qualified).unwrap();
+        assert!(load_persisted_conversation_from(directory.path(), flow_id, flow_path).is_none());
+        assert!(std::fs::symlink_metadata(&qualified)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::remove_file(&qualified).unwrap();
+
+        let legacy = directory
+            .path()
+            .join(legacy_conversation_file_name(flow_id));
+        symlink(&external, &legacy).unwrap();
+        assert!(load_persisted_conversation_from(directory.path(), flow_id, flow_path).is_none());
+        assert!(std::fs::symlink_metadata(&legacy)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&external).unwrap(), original);
+    }
+
+    #[test]
+    fn canonical_conversation_refuses_foreign_flow_identity() {
+        let snapshot = snapshot_with(SNAPSHOT_VERSION, Vec::new());
+        assert_eq!(
+            canonicalize_persisted_conversation(
+                snapshot.clone(),
+                "project:another",
+                "/w/flows/test.md",
+                fixed_canonical_now(),
+            ),
+            Err(PersistedConversationLoadError::IdentityMismatch)
+        );
+        assert_eq!(
+            canonicalize_persisted_conversation(
+                snapshot,
+                "project:test",
+                "/w/another/test.md",
+                fixed_canonical_now(),
+            ),
+            Err(PersistedConversationLoadError::IdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn foreign_snapshot_at_primary_path_is_never_returned_or_rewritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let foreign = snapshot_from_turns("project:foreign", "/w/foreign.md", &[]);
+        let path = dir
+            .path()
+            .join(conversation_file_name("project:expected", "/w/expected.md"));
+        let original = serde_json::to_vec_pretty(&foreign).expect("serialize foreign snapshot");
+        std::fs::write(&path, &original).expect("install foreign snapshot");
+
+        assert!(
+            load_persisted_conversation_from(dir.path(), "project:expected", "/w/expected.md")
+                .is_none()
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("foreign snapshot remains untouched"),
+            original
+        );
+    }
+
+    #[test]
+    fn path_qualified_legacy_snapshot_migrates_only_for_its_exact_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner_path = "/work/a-b/flows/review.md";
+        let colliding_path = "/work/a/b-flows/review.md";
+        let turns = vec![SessionTurn {
+            user: "owner-only secret".into(),
+            assistant: "owner-only answer".into(),
+            outcome: PersistedTurnOutcome::Ok,
+            failure: None,
+        }];
+        let snapshot = snapshot_from_turns("project:review", owner_path, &turns);
+        let legacy = dir
+            .path()
+            .join(legacy_path_qualified_conversation_file_name(
+                "project:review",
+                owner_path,
+            ));
+        std::fs::write(&legacy, serde_json::to_vec_pretty(&snapshot).unwrap()).unwrap();
+
+        assert!(
+            load_persisted_conversation_from(dir.path(), "project:review", colliding_path)
+                .is_none(),
+            "a colliding slug cannot claim another project's snapshot"
+        );
+        assert!(
+            legacy.exists(),
+            "refusal must not destroy the owner's history"
+        );
+
+        let migrated = load_persisted_conversation_from(dir.path(), "project:review", owner_path)
+            .expect("the exact owner adopts its own legacy snapshot");
+        assert_eq!(
+            canonical_session_turns(&migrated)[0].user,
+            "owner-only secret"
+        );
+        assert!(!legacy.exists(), "legacy name is consumed exactly once");
+        assert!(
+            dir.path()
+                .join(conversation_file_name("project:review", owner_path))
+                .exists(),
+            "the collision-resistant destination owns the migrated transcript"
+        );
+    }
+
     /// Legacy id-only snapshots are adopted once (re-keyed under the
     /// path-qualified name, legacy file removed) so they can never leak
     /// into a second project later.
@@ -3729,6 +4047,74 @@ mod tests {
             .is_none(),
             "a second project must not inherit the adopted transcript"
         );
+    }
+
+    #[test]
+    fn id_only_legacy_snapshot_with_foreign_flow_id_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy = dir
+            .path()
+            .join(legacy_conversation_file_name("project:review"));
+        let mut snapshot = snapshot_with(0, legacy_turns_for_version(0));
+        snapshot.flow_id = "project:someone-else".into();
+        snapshot.flow_path.clear();
+        std::fs::write(&legacy, serde_json::to_vec_pretty(&snapshot).unwrap()).unwrap();
+
+        assert!(load_persisted_conversation_from(
+            dir.path(),
+            "project:review",
+            "/work/alpha/flows/review.md",
+        )
+        .is_none());
+        assert!(
+            legacy.exists(),
+            "foreign history must never be claimed or removed"
+        );
+    }
+
+    #[test]
+    fn failed_legacy_claim_never_returns_or_shares_private_turns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let flow_id = "project:review";
+        let flow_path = "/work/alpha/flows/review.md";
+        let legacy = dir.path().join(legacy_conversation_file_name(flow_id));
+        let snapshot = PersistedFlowConversation {
+            flow_id: flow_id.into(),
+            flow_path: String::new(),
+            saved_at: "2026-07-10T00:00:00Z".into(),
+            version: 0,
+            revision: 0,
+            active_thread_id: String::new(),
+            threads: Vec::new(),
+            turns: vec![PersistedFlowTurn {
+                user: "unclaimed private turn".into(),
+                assistant: "unclaimed private answer".into(),
+                outcome: PersistedTurnOutcome::Ok,
+                error: None,
+                failure: None,
+            }],
+        };
+        std::fs::write(&legacy, serde_json::to_vec_pretty(&snapshot).unwrap()).unwrap();
+        let destination = dir.path().join(conversation_file_name(flow_id, flow_path));
+        std::fs::create_dir(&destination).expect("block the atomic file claim");
+
+        assert!(
+            load_persisted_conversation_from(dir.path(), flow_id, flow_path).is_none(),
+            "private turns cannot be exposed before their old shared name is consumed"
+        );
+        assert!(
+            legacy.exists(),
+            "failed migration preserves the original history"
+        );
+
+        std::fs::remove_dir(&destination).expect("remove isolated test obstruction");
+        let adopted = load_persisted_conversation_from(dir.path(), flow_id, flow_path)
+            .expect("history recovers after a later successful atomic claim");
+        assert_eq!(
+            canonical_session_turns(&adopted)[0].user,
+            "unclaimed private turn"
+        );
+        assert!(!legacy.exists());
     }
 
     #[test]

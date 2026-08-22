@@ -5,7 +5,9 @@
 //! elapsed timings, and actionable failure suggestions.
 
 use crate::protocol::transaction_trace::{
-    append_transaction_trace, now_epoch_ms, read_latest_transaction_trace, should_include_trace,
+    append_transaction_trace, now_epoch_ms, read_latest_transaction_trace,
+    remember_persisted_transaction_results, restore_persisted_transaction_result,
+    sanitize_transaction_trace, should_include_trace, transaction_content_fingerprint,
 };
 use crate::protocol::types::batch_wait::{
     BatchCommand, BatchOptions, BatchResultEntry, StateMatchSpec, TransactionCommandTrace,
@@ -102,6 +104,67 @@ mod state_match_tests {
             };
             assert!(matches_state_spec(&snapshot, &spec));
         }
+    }
+
+    #[test]
+    fn replay_trace_policy_never_overrides_the_current_privacy_mode() {
+        for status in [TransactionTraceStatus::Ok, TransactionTraceStatus::Failed] {
+            assert!(!should_expose_replayed_trace(
+                TransactionTraceMode::Off,
+                &status
+            ));
+        }
+        assert!(!should_expose_replayed_trace(
+            TransactionTraceMode::OnFailure,
+            &TransactionTraceStatus::Ok
+        ));
+        assert!(should_expose_replayed_trace(
+            TransactionTraceMode::OnFailure,
+            &TransactionTraceStatus::Failed
+        ));
+    }
+
+    #[test]
+    fn continued_batch_failures_preserve_the_first_failed_index() {
+        let mut failed_at = None;
+        record_first_batch_failure(&mut failed_at, 1);
+        record_first_batch_failure(&mut failed_at, 3);
+        assert_eq!(failed_at, Some(1));
+    }
+
+    #[test]
+    fn unsupported_batch_command_is_present_in_its_replay_trace() {
+        let command = BatchCommand::OpenActions;
+        let error = TransactionError {
+            code: TransactionErrorCode::UnsupportedCommand,
+            message: "unsupported".to_owned(),
+            suggestion: None,
+        };
+        let trace = unsupported_command_trace(4, &command, &error, UiStateSnapshot::default());
+        assert_eq!(trace.index, 4);
+        assert_eq!(trace.command, "openActions");
+        assert_eq!(trace.command_payload, Some(command));
+        assert_eq!(trace.error, Some(error));
+    }
+
+    #[test]
+    fn transaction_provider_error_preserves_a_fingerprint_without_private_text() {
+        let error = anyhow::anyhow!("provider rejected private-provider-error-canary");
+        let message = safe_transaction_action_error("setInput", &error);
+        assert!(message.contains("setInput failed"));
+        assert!(message.contains("sha256:"));
+        assert!(!message.contains("private-provider-error-canary"));
+    }
+
+    #[test]
+    fn wait_suggestion_never_echoes_a_private_semantic_identifier() {
+        let condition = WaitCondition::Detailed(WaitDetailedCondition::ElementExists {
+            semantic_id: "private-semantic-canary".to_owned(),
+        });
+        let suggestion = build_wait_suggestion(&condition, &UiStateSnapshot::default())
+            .expect("missing element has actionable guidance");
+        assert!(suggestion.contains("requested element"));
+        assert!(!suggestion.contains("private-semantic-canary"));
     }
 }
 
@@ -272,19 +335,21 @@ fn build_wait_suggestion(condition: &WaitCondition, snapshot: &UiStateSnapshot) 
                 .iter()
                 .any(|id| id == semantic_id) =>
         {
-            Some(format!(
-                "Element '{semantic_id}' was not visible at timeout. Inspect \
+            Some(
+                "The requested element was not visible at timeout. Inspect \
                  getAccessibilityTree or switch to stateMatch if the exact \
                  semanticId is unstable."
-            ))
+                    .to_owned(),
+            )
         }
         WaitCondition::Detailed(WaitDetailedCondition::ElementFocused { semantic_id })
             if snapshot.focused_semantic_id.as_deref() != Some(semantic_id.as_str()) =>
         {
-            Some(format!(
-                "Element '{semantic_id}' never received focus. Add a focus action \
+            Some(
+                "The requested element never received focus. Add a focus action \
                  before waiting for elementFocused."
-            ))
+                    .to_owned(),
+            )
         }
         _ => None,
     }
@@ -400,7 +465,9 @@ fn run_wait_for_command<P: TransactionStateProvider>(
         if elapsed_ms >= timeout {
             let error = TransactionError {
                 code: TransactionErrorCode::WaitConditionTimeout,
-                message: format!("Timeout after {timeout}ms waiting for {condition:?}"),
+                message: format!(
+                    "Timeout after {timeout}ms waiting for the requested UI condition"
+                ),
                 suggestion: build_wait_suggestion(condition, &snapshot),
             };
 
@@ -408,7 +475,8 @@ fn run_wait_for_command<P: TransactionStateProvider>(
                 target: "script_kit::transaction",
                 index = index,
                 elapsed_ms = elapsed_ms,
-                message = %error.message,
+                timeout_ms = timeout,
+                condition_fingerprint = %transaction_content_fingerprint(&format!("{condition:?}")),
                 "transaction_wait_timeout"
             );
 
@@ -442,7 +510,9 @@ pub fn stable_transaction_fingerprint(
         "commands": commands,
         "options": options,
     });
-    Ok(serde_json::to_string(&payload)?)
+    Ok(transaction_content_fingerprint(&serde_json::to_string(
+        &payload,
+    )?))
 }
 
 pub fn stable_wait_fingerprint(
@@ -455,11 +525,14 @@ pub fn stable_wait_fingerprint(
         "timeout": timeout,
         "pollInterval": poll_interval,
     });
-    Ok(serde_json::to_string(&payload)?)
+    Ok(transaction_content_fingerprint(&serde_json::to_string(
+        &payload,
+    )?))
 }
 
 impl BatchOutput {
     pub fn from_trace(trace: TransactionTrace) -> Self {
+        let trace = sanitize_transaction_trace(&trace);
         let success = trace.status == TransactionTraceStatus::Ok;
         Self {
             request_id: trace.request_id.clone(),
@@ -472,7 +545,15 @@ impl BatchOutput {
                     success: command.error.is_none(),
                     command: command.command.clone(),
                     elapsed: Some(command.elapsed_ms),
-                    value: None,
+                    value: if command.error.is_none() {
+                        restore_persisted_transaction_result(
+                            &trace.request_id,
+                            &trace.command_fingerprint,
+                            command.index,
+                        )
+                    } else {
+                        None
+                    },
                     error: command.error.clone(),
                 })
                 .collect(),
@@ -481,6 +562,41 @@ impl BatchOutput {
             trace: Some(trace),
         }
     }
+}
+
+fn should_expose_replayed_trace(
+    trace_mode: TransactionTraceMode,
+    status: &TransactionTraceStatus,
+) -> bool {
+    should_include_trace(trace_mode, status == &TransactionTraceStatus::Ok)
+}
+
+fn record_first_batch_failure(failed_at: &mut Option<usize>, index: usize) {
+    failed_at.get_or_insert(index);
+}
+
+fn unsupported_command_trace(
+    index: usize,
+    command: &BatchCommand,
+    error: &TransactionError,
+    snapshot: UiStateSnapshot,
+) -> TransactionCommandTrace {
+    TransactionCommandTrace {
+        index,
+        command: command_name(command).to_owned(),
+        command_payload: Some(command.clone()),
+        started_at_ms: now_epoch_ms(),
+        elapsed_ms: 0,
+        before: snapshot.clone(),
+        after: snapshot,
+        polls: Vec::new(),
+        error: Some(error.clone()),
+    }
+}
+
+fn safe_transaction_action_error(action: &str, error: &anyhow::Error) -> String {
+    let fingerprint = transaction_content_fingerprint(&error.to_string());
+    format!("{action} failed (diagnostic {fingerprint})")
 }
 
 // ── Trace persistence helper ───────────────────────────────────────────────
@@ -531,6 +647,7 @@ pub fn execute_wait_for<P: TransactionStateProvider>(
             );
         } else if existing.command_fingerprint == command_fingerprint {
             let success = existing.status == TransactionTraceStatus::Ok;
+            let include_trace = should_expose_replayed_trace(trace_mode, &existing.status);
             return Ok(WaitForOutput {
                 request_id,
                 success,
@@ -539,7 +656,7 @@ pub fn execute_wait_for<P: TransactionStateProvider>(
                     .commands
                     .iter()
                     .find_map(|command| command.error.clone()),
-                trace: Some(existing),
+                trace: include_trace.then_some(existing),
             });
         } else {
             return Err(anyhow::anyhow!(
@@ -572,7 +689,7 @@ pub fn execute_wait_for<P: TransactionStateProvider>(
         success: result.success,
         elapsed: result.elapsed_ms,
         error: result.error,
-        trace: if include_trace { Some(trace) } else { None },
+        trace: include_trace.then(|| sanitize_transaction_trace(&trace)),
     })
 }
 
@@ -604,7 +721,12 @@ pub fn execute_batch<P: TransactionStateProvider>(
                 "Ignoring legacy transaction trace without fingerprint"
             );
         } else if existing.command_fingerprint == command_fingerprint {
-            return Ok(BatchOutput::from_trace(existing));
+            let include_trace = should_expose_replayed_trace(trace_mode, &existing.status);
+            let mut replay = BatchOutput::from_trace(existing);
+            if !include_trace {
+                replay.trace = None;
+            }
+            return Ok(replay);
         } else {
             return Err(anyhow::anyhow!(
                 "requestId {request_id} was already used for a different transaction payload"
@@ -638,7 +760,7 @@ pub fn execute_batch<P: TransactionStateProvider>(
                     Err(e) => {
                         error = Some(TransactionError {
                             code: TransactionErrorCode::ActionFailed,
-                            message: format!("setInput failed: {e}"),
+                            message: safe_transaction_action_error("setInput", &e),
                             suggestion: Some(
                                 "Verify the active prompt exposes a writable input \
                                  field before issuing setInput."
@@ -673,7 +795,7 @@ pub fn execute_batch<P: TransactionStateProvider>(
                 });
 
                 if !success {
-                    failed_at = Some(index);
+                    record_first_batch_failure(&mut failed_at, index);
                     if stop_on_error {
                         break;
                     }
@@ -703,7 +825,7 @@ pub fn execute_batch<P: TransactionStateProvider>(
                 command_traces.push(trace);
 
                 if !wr.success {
-                    failed_at = Some(index);
+                    record_first_batch_failure(&mut failed_at, index);
                     if stop_on_error {
                         break;
                     }
@@ -734,7 +856,7 @@ pub fn execute_batch<P: TransactionStateProvider>(
                     Err(e) => {
                         error = Some(TransactionError {
                             code: TransactionErrorCode::ActionFailed,
-                            message: format!("selectByValue failed: {e}"),
+                            message: safe_transaction_action_error("selectByValue", &e),
                             suggestion: Some(
                                 "Verify the current choice is selectable and the \
                                  window is focused before selecting."
@@ -770,7 +892,7 @@ pub fn execute_batch<P: TransactionStateProvider>(
                 });
 
                 if !success {
-                    failed_at = Some(index);
+                    record_first_batch_failure(&mut failed_at, index);
                     if stop_on_error {
                         break;
                     }
@@ -803,7 +925,7 @@ pub fn execute_batch<P: TransactionStateProvider>(
                     Err(e) => {
                         error = Some(TransactionError {
                             code: TransactionErrorCode::ActionFailed,
-                            message: format!("selectBySemanticId failed: {e}"),
+                            message: safe_transaction_action_error("selectBySemanticId", &e),
                             suggestion: Some(
                                 "Verify the current view supports element selection \
                                  and the window is focused."
@@ -839,7 +961,7 @@ pub fn execute_batch<P: TransactionStateProvider>(
                 });
 
                 if !success {
-                    failed_at = Some(index);
+                    record_first_batch_failure(&mut failed_at, index);
                     if stop_on_error {
                         break;
                     }
@@ -873,6 +995,8 @@ pub fn execute_batch<P: TransactionStateProvider>(
                             .to_string(),
                     ),
                 };
+                let snapshot = provider.snapshot();
+                command_traces.push(unsupported_command_trace(index, command, &error, snapshot));
                 results.push(BatchResultEntry {
                     index,
                     success: false,
@@ -881,7 +1005,7 @@ pub fn execute_batch<P: TransactionStateProvider>(
                     value: None,
                     error: Some(error),
                 });
-                failed_at = Some(index);
+                record_first_batch_failure(&mut failed_at, index);
                 if stop_on_error {
                     break;
                 }
@@ -917,6 +1041,13 @@ pub fn execute_batch<P: TransactionStateProvider>(
     };
 
     let include_trace = maybe_persist_trace(trace_mode, success, &trace, None)?;
+    if include_trace {
+        remember_persisted_transaction_results(
+            &trace.request_id,
+            &trace.command_fingerprint,
+            &results,
+        );
+    }
 
     Ok(BatchOutput {
         request_id,
@@ -924,6 +1055,6 @@ pub fn execute_batch<P: TransactionStateProvider>(
         results,
         failed_at,
         total_elapsed: total_elapsed_ms,
-        trace: if include_trace { Some(trace) } else { None },
+        trace: include_trace.then(|| sanitize_transaction_trace(&trace)),
     })
 }

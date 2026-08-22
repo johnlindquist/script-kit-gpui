@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
-use std::sync::{LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use sysinfo::{Pid, System};
 use tracing::{debug, info, warn};
 /// Global singleton process manager
@@ -32,15 +32,77 @@ pub struct ProcessInfo {
     pub started_at: DateTime<Utc>,
 }
 /// Thread-safe process manager for tracking bun script processes
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProcessManager {
     /// Map of PID -> ProcessInfo for active child processes
-    active_processes: RwLock<HashMap<u32, ProcessInfo>>,
+    active_processes: Arc<RwLock<HashMap<u32, ProcessInfo>>>,
     /// Path to main app PID file
     main_pid_path: PathBuf,
     /// Path to active child PIDs JSON file
     active_pids_path: PathBuf,
 }
+
+/// A failed liveness probe is never evidence that owned work stopped.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnedProcessGroupLiveness {
+    Alive,
+    Exited,
+    Unverified,
+}
+
+#[cfg(unix)]
+fn owned_process_signal_is_authorized(pid: u32, tracked: bool) -> bool {
+    tracked && pid > 0 && pid <= i32::MAX as u32
+}
+
+#[cfg(unix)]
+pub(crate) fn classify_owned_process_group_probe(
+    result: i32,
+    errno: Option<i32>,
+) -> OwnedProcessGroupLiveness {
+    if result == 0 || errno == Some(libc::EPERM) {
+        OwnedProcessGroupLiveness::Alive
+    } else if errno == Some(libc::ESRCH) {
+        OwnedProcessGroupLiveness::Exited
+    } else {
+        OwnedProcessGroupLiveness::Unverified
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn observe_owned_process_group(pid: u32) -> OwnedProcessGroupLiveness {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return OwnedProcessGroupLiveness::Unverified;
+    }
+    // SAFETY: signal zero only observes this exact positive process group;
+    // it never sends a signal or touches the caller's own implicit group.
+    let result = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+    let errno = if result == 0 {
+        None
+    } else {
+        std::io::Error::last_os_error().raw_os_error()
+    };
+    classify_owned_process_group_probe(result, errno)
+}
+
+#[cfg(unix)]
+fn observe_tracked_process(pid: u32) -> OwnedProcessGroupLiveness {
+    let group = observe_owned_process_group(pid);
+    if group != OwnedProcessGroupLiveness::Exited {
+        return group;
+    }
+    // Some legacy children never created a dedicated group. A missing group
+    // is not proof that the tracked individual process has also exited.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    let errno = if result == 0 {
+        None
+    } else {
+        std::io::Error::last_os_error().raw_os_error()
+    };
+    classify_owned_process_group_probe(result, errno)
+}
+
 impl ProcessManager {
     const DIR_PERMISSIONS: u32 = 0o700;
     const FILE_PERMISSIONS: u32 = 0o600;
@@ -55,7 +117,7 @@ impl ProcessManager {
             });
 
         Self {
-            active_processes: RwLock::new(HashMap::new()),
+            active_processes: Arc::new(RwLock::new(HashMap::new())),
             main_pid_path: kit_dir.join("script-kit.pid"),
             // Per-instance file: parallel dev instances must not clobber each
             // other's registrations (a dying instance's cleanup would delete a
@@ -300,7 +362,18 @@ impl ProcessManager {
         );
         for info in &processes {
             let Some(process) = system.process(Pid::from_u32(info.pid)) else {
-                debug!(pid = info.pid, "process_manager.kill_all.already_exited");
+                #[cfg(unix)]
+                if self.reconcile_owned_process_cleanup(info.pid, observe_tracked_process(info.pid))
+                {
+                    debug!(pid = info.pid, "process_manager.kill_all.already_exited");
+                } else {
+                    warn!(
+                        pid = info.pid,
+                        "process_manager.kill_all.descendants_still_owned"
+                    );
+                }
+                #[cfg(not(unix))]
+                self.unregister_process(info.pid);
                 continue;
             };
             if !cmdline_matches_recorded(process.cmd(), &info.script_path) {
@@ -309,14 +382,30 @@ impl ProcessManager {
                     script_path = info.script_path.as_str(),
                     "process_manager.kill_all.pid_recycled_skip"
                 );
+                // This PID now belongs to somebody else, not our recorded
+                // child. Forget the stale claim without signalling it.
+                self.unregister_process(info.pid);
                 continue;
             }
             self.kill_process(info.pid);
+            #[cfg(unix)]
+            if !self.reconcile_owned_process_cleanup(info.pid, observe_tracked_process(info.pid)) {
+                warn!(
+                    pid = info.pid,
+                    "process_manager.kill_all.cleanup_unverified_retained"
+                );
+            }
+            #[cfg(not(unix))]
+            self.unregister_process(info.pid);
         }
 
-        // Clear the in-memory map
-        if let Ok(mut procs) = self.active_processes.write() {
-            procs.clear();
+        let remaining = self.active_count();
+        if remaining > 0 {
+            warn!(
+                remaining,
+                "process_manager.kill_all_processes.retaining_unverified_owned_processes"
+            );
+            return;
         }
 
         // Remove the active PIDs file
@@ -343,6 +432,13 @@ impl ProcessManager {
 
         #[cfg(unix)]
         {
+            if !owned_process_signal_is_authorized(pid, self.is_tracked_process(pid)) {
+                warn!(
+                    pid,
+                    "process_manager.kill_process.refused_invalid_or_unowned_group"
+                );
+                return;
+            }
             let pgid = -(pid as i32);
             // SAFETY: libc::kill with a negative PID targets the process group.
             // The PID is validated as a tracked process before calling.
@@ -372,15 +468,20 @@ impl ProcessManager {
         }
     }
 
-    /// Gracefully terminate a single process by PID and unregister it.
+    /// Request graceful termination without dropping ownership prematurely.
     ///
-    /// Sends SIGTERM to the process group on Unix, allowing cleanup.
-    /// Returns Ok(()) on success, Err with message on failure.
+    /// `Ok(())` acknowledges the request; the process stays tracked until a
+    /// background watcher independently observes the exact group as exited.
+    /// Failed signals or uncertain liveness retain ownership for retry.
     /// Timeout in seconds before escalating from SIGTERM to SIGKILL.
     const SIGKILL_TIMEOUT_SECS: u64 = 5;
 
     pub fn terminate_process(&self, pid: u32) -> Result<(), String> {
         info!(pid, "process_manager.terminate_process.start");
+
+        if pid == 0 || pid > i32::MAX as u32 {
+            return Err("Refusing to terminate an invalid process-group identity".to_string());
+        }
 
         // Check if process is still tracked
         let is_tracked = if let Ok(procs) = self.active_processes.read() {
@@ -402,36 +503,81 @@ impl ProcessManager {
 
             if ret == 0 {
                 info!(pid, "process_manager.terminate_process.sigterm_sent");
-                self.unregister_process(pid);
+                if self.reconcile_owned_process_cleanup(pid, observe_owned_process_group(pid)) {
+                    return Ok(());
+                }
 
-                // Spawn a background thread to escalate to SIGKILL if the process
-                // doesn't exit within the timeout.
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(
-                        ProcessManager::SIGKILL_TIMEOUT_SECS,
-                    ));
-                    // SAFETY: libc::kill with signal 0 checks if the process group
-                    // still exists without sending a signal.
-                    let still_running = unsafe { libc::kill(pgid, 0) } == 0;
-                    if still_running {
+                // Cloning shares the same exact process registry and persistence
+                // paths; unlike a detached PID-only watcher, it cannot lose the
+                // ownership record while graceful cancellation is pending.
+                let manager = self.clone();
+                std::thread::Builder::new()
+                    .name(format!("owned-process-cleanup-{pid}"))
+                    .spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(
+                            ProcessManager::SIGKILL_TIMEOUT_SECS,
+                        ));
+
+                        if !manager.is_tracked_process(pid) {
+                            return;
+                        }
+                        match observe_owned_process_group(pid) {
+                            OwnedProcessGroupLiveness::Exited => {
+                                manager.reconcile_owned_process_cleanup(
+                                    pid,
+                                    OwnedProcessGroupLiveness::Exited,
+                                );
+                                return;
+                            }
+                            OwnedProcessGroupLiveness::Unverified => {
+                                warn!(pid, "process_manager.terminate_process.cleanup_unverified");
+                                return;
+                            }
+                            OwnedProcessGroupLiveness::Alive => {}
+                        }
+
                         warn!(
                             pid,
                             timeout_secs = ProcessManager::SIGKILL_TIMEOUT_SECS,
                             "process_manager.terminate_process.sigkill_escalation"
                         );
-                        // SAFETY: libc::kill with SIGKILL forcefully terminates the
-                        // process group. The PID was validated as a tracked process.
-                        unsafe { libc::kill(pgid, libc::SIGKILL) };
-                    }
-                });
-
-                Ok(())
+                        // SAFETY: `pid` is still tracked, positive, and owns
+                        // this exact dedicated process group.
+                        let result = unsafe { libc::kill(pgid, libc::SIGKILL) };
+                        if result != 0 {
+                            warn!(
+                                pid,
+                                error = %std::io::Error::last_os_error(),
+                                "process_manager.terminate_process.sigkill_failed_retaining_owner"
+                            );
+                        }
+                        for _ in 0..10 {
+                            let state = observe_owned_process_group(pid);
+                            if manager.reconcile_owned_process_cleanup(pid, state) {
+                                return;
+                            }
+                            if state == OwnedProcessGroupLiveness::Unverified {
+                                return;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                        }
+                        warn!(pid, "process_manager.terminate_process.group_still_owned");
+                    })
+                    .map(|_| ())
+                    .map_err(|error| {
+                        format!("Failed to monitor owned process-group cleanup: {error}")
+                    })
             } else {
                 let err = std::io::Error::last_os_error();
                 if err.kind() == ErrorKind::NotFound {
-                    info!(pid, "process_manager.terminate_process.already_exited");
-                    self.unregister_process(pid);
-                    Ok(())
+                    if self.reconcile_owned_process_cleanup(pid, observe_owned_process_group(pid)) {
+                        info!(pid, "process_manager.terminate_process.already_exited");
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "Process group {pid} could not be proven stopped; ownership retained"
+                        ))
+                    }
                 } else {
                     warn!(pid, %err, "process_manager.terminate_process.failed");
                     Err(format!("Failed to terminate PID {}: {}", pid, err))
@@ -444,6 +590,29 @@ impl ProcessManager {
             let _ = pid;
             Err("Process termination not supported on this platform".to_string())
         }
+    }
+
+    #[cfg(unix)]
+    fn is_tracked_process(&self, pid: u32) -> bool {
+        self.active_processes
+            .read()
+            .map(|processes| processes.contains_key(&pid))
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    fn reconcile_owned_process_cleanup(
+        &self,
+        pid: u32,
+        observation: OwnedProcessGroupLiveness,
+    ) -> bool {
+        if observation != OwnedProcessGroupLiveness::Exited {
+            return false;
+        }
+        if self.is_tracked_process(pid) {
+            self.unregister_process(pid);
+        }
+        true
     }
 
     /// Check if a process is currently running
@@ -559,8 +728,25 @@ impl ProcessManager {
                     script_path = info.script_path.as_str(),
                     "process_manager.cleanup_orphans.kill_orphan"
                 );
+                // Adopt only after independently checking the persisted
+                // command identity and dead parent. The signalling boundary
+                // accepts exclusively groups owned by this live registry.
+                self.register_process(info.pid, &info.script_path);
                 self.kill_process(info.pid);
-                killed_count += 1;
+                #[cfg(unix)]
+                if self.reconcile_owned_process_cleanup(info.pid, observe_tracked_process(info.pid))
+                {
+                    killed_count += 1;
+                } else {
+                    warn!(
+                        pid = info.pid,
+                        "process_manager.cleanup_orphans.cleanup_unverified_retained"
+                    );
+                }
+                #[cfg(not(unix))]
+                {
+                    self.unregister_process(info.pid);
+                }
             }
 
             if let Err(e) = fs::remove_file(&path) {
@@ -612,6 +798,7 @@ impl ProcessManager {
     }
 
     /// Load persisted PIDs from this manager's own registry file
+    #[cfg(test)]
     fn load_persisted_pids(&self) -> Vec<ProcessInfo> {
         load_pids_from(&self.active_pids_path)
     }
@@ -672,7 +859,17 @@ impl ChildRegistration {
 impl Drop for ChildRegistration {
     fn drop(&mut self) {
         #[cfg(not(test))]
-        PROCESS_MANAGER.unregister_process(self.pid);
+        {
+            #[cfg(unix)]
+            if observe_tracked_process(self.pid) != OwnedProcessGroupLiveness::Exited {
+                warn!(
+                    pid = self.pid,
+                    "process_manager.child_registration.live_owner_retained"
+                );
+                return;
+            }
+            PROCESS_MANAGER.unregister_process(self.pid);
+        }
         #[cfg(test)]
         let _ = self.pid;
     }
@@ -708,7 +905,7 @@ mod tests {
     fn create_test_manager() -> (ProcessManager, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let manager = ProcessManager {
-            active_processes: RwLock::new(HashMap::new()),
+            active_processes: Arc::new(RwLock::new(HashMap::new())),
             main_pid_path: temp_dir.path().join("script-kit.pid"),
             active_pids_path: temp_dir.path().join("active-bun-pids.json"),
         };
@@ -761,6 +958,59 @@ mod tests {
         // Check it's gone
         let active = manager.get_active_processes();
         assert!(active.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_process_group_probe_never_treats_failure_as_verified_cleanup() {
+        assert_eq!(
+            classify_owned_process_group_probe(0, None),
+            OwnedProcessGroupLiveness::Alive
+        );
+        assert_eq!(
+            classify_owned_process_group_probe(-1, Some(libc::EPERM)),
+            OwnedProcessGroupLiveness::Alive
+        );
+        assert_eq!(
+            classify_owned_process_group_probe(-1, Some(libc::EINVAL)),
+            OwnedProcessGroupLiveness::Unverified
+        );
+        assert_eq!(
+            classify_owned_process_group_probe(-1, None),
+            OwnedProcessGroupLiveness::Unverified
+        );
+        assert_eq!(
+            classify_owned_process_group_probe(-1, Some(libc::ESRCH)),
+            OwnedProcessGroupLiveness::Exited
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_signals_require_a_valid_explicitly_owned_group() {
+        assert!(!owned_process_signal_is_authorized(0, true));
+        assert!(!owned_process_signal_is_authorized(
+            i32::MAX as u32 + 1,
+            true
+        ));
+        assert!(!owned_process_signal_is_authorized(4242, false));
+        assert!(owned_process_signal_is_authorized(4242, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_process_tracking_survives_cancellation_until_exact_group_exit() {
+        let (manager, _temp_dir) = create_test_manager();
+        manager.register_process(4242, "/isolated/synthetic-owner.ts");
+
+        assert!(!manager.reconcile_owned_process_cleanup(4242, OwnedProcessGroupLiveness::Alive));
+        assert_eq!(manager.active_count(), 1);
+        assert!(
+            !manager.reconcile_owned_process_cleanup(4242, OwnedProcessGroupLiveness::Unverified)
+        );
+        assert_eq!(manager.active_count(), 1);
+        assert!(manager.reconcile_owned_process_cleanup(4242, OwnedProcessGroupLiveness::Exited));
+        assert_eq!(manager.active_count(), 0);
     }
 
     #[test]

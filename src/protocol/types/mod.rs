@@ -53,7 +53,8 @@ pub use automation_inspect_geometry::{
 };
 pub use automation_surface::{
     ActiveFooterButtonSnapshot, ActiveFooterCwdChipSnapshot, ActiveFooterLeftInfoSnapshot,
-    ActiveFooterSnapshot, AutomationSurfaceSnapshot, LauncherSurfaceContractSnapshot,
+    ActiveFooterSnapshot, AutomationSurfaceSnapshot, AutomationTargetIdentitySnapshot,
+    LauncherSurfaceContractSnapshot, SurfacePresentationSnapshot, SurfaceRowPrimitive,
     ACTIVE_FOOTER_SCHEMA_VERSION, AUTOMATION_SURFACE_SCHEMA_VERSION,
     LAUNCHER_SURFACE_CONTRACT_SCHEMA_VERSION,
 };

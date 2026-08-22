@@ -274,9 +274,7 @@ fn run_flow_process(
         );
         // A cancel already in flight keeps its outcome; otherwise the run
         // fails closed. Either way the untrustworthy process is killed.
-        if registry.get(local_id).map(|run| run.phase) == Some(RunPhase::Cancelling) {
-            registry.mark_cancelled(local_id);
-        } else {
+        if registry.get(local_id).map(|run| run.phase) != Some(RunPhase::Cancelling) {
             registry.mark_failed(local_id, failure);
         }
         unsafe {
@@ -287,6 +285,11 @@ fn run_flow_process(
 
     let status = child.wait();
     crate::process_manager::PROCESS_MANAGER.unregister_process(pid);
+    if registry.get(local_id).map(|run| run.phase) == Some(RunPhase::Cancelling)
+        && !process_group_alive(pid)
+    {
+        registry.mark_cancelled(local_id);
+    }
     if !validator.saw_terminal() && protocol_failure.is_none() {
         // Process died without a terminal event (killed, crashed, legacy
         // binary). Preserve cancellation if we initiated it, and surface
@@ -297,9 +300,11 @@ fn run_flow_process(
                 // cancel_run already settled it.
             }
             Some(RunPhase::Cancelling) => {
-                // We initiated the kill and the process is now confirmed
-                // dead — the cancel receipt becomes truthful here.
-                registry.mark_cancelled(local_id);
+                // Child EOF proves only that its leader exited. Descendants
+                // may remain alive; the group watcher owns final cleanup.
+                if !process_group_alive(pid) {
+                    registry.mark_cancelled(local_id);
+                }
             }
             _ => {
                 let stderr_note = registry
@@ -384,7 +389,9 @@ fn spawn_kill_escalation(local_id: u64, pgid: u32) {
         .spawn(move || {
             let registry = flow_run_registry();
             let finalize = |registry: &crate::flows::run_registry::FlowRunRegistry| {
-                if registry.get(local_id).map(|run| run.phase) == Some(RunPhase::Cancelling) {
+                if registry.get(local_id).map(|run| run.phase) == Some(RunPhase::Cancelling)
+                    && !process_group_alive(pgid)
+                {
                     registry.mark_cancelled(local_id);
                 }
             };
@@ -421,7 +428,14 @@ fn spawn_kill_escalation(local_id: u64, pgid: u32) {
 
 /// True while any process in the group is alive (signal 0 probe).
 pub fn process_group_alive(pgid: u32) -> bool {
-    unsafe { libc::killpg(pgid as libc::pid_t, 0) == 0 }
+    if pgid == 0 {
+        // Never probe the caller's implicit process group for an invalid id.
+        return true;
+    }
+    // SAFETY: signal 0 only observes the explicitly supplied process group;
+    // it delivers no signal and cannot alter any process.
+    let result = unsafe { libc::killpg(pgid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 #[cfg(test)]
