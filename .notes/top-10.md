@@ -246,13 +246,18 @@ Evidence in this checkpoint is intentionally time- and source-qualified:
   approximately 20-minute recheck at 12:27 worsened to **281.47 / 149.11 /
   83.88**; a second recheck at 12:46 improved to **43.49 / 19.09 / 31.07**
   but remained too expensive for a fresh application compile. These newest
-  changes remain **source-only and unverified** until a safe capacity window
+  Rust changes remain **uncompiled and behavior-unverified** until a safe
+  capacity window
   returns; the requested implementation was checkpointed in four grouped
   source commits after `rustfmt --check` and `git diff --check` passed, but
-  those static checks are not executable behavior evidence. The previous
-  **15/75** proof checkpoint belongs to its older source commit and must be
-  regenerated after build/test verification; no interactive runtime work is
-  authorized.
+  those static checks are not executable Rust behavior evidence. Lightweight,
+  genuinely rerun facade-governance suites did execute **50 passing Bun tests
+  with 115 assertions**, and the existing non-GUI design exporter produced
+  byte-identical generated outputs; refreshed source-bound facade and export
+  receipts restored the exact current clean commit to **15/75 accepted,
+  60 missing, zero stale/invalid/failed receipts, and zero auditor errors**.
+  This verifies the safe DevTools/code-generation obligations, not the 29
+  newest Rust regressions or any interactive runtime task.
 - The actual full library and application check completed successfully through
   the prescribed two-job Cargo wrapper. The main binary still reports eight
   preexisting binary-only unused-import warnings; the release-required
