@@ -4,8 +4,10 @@
  *
  * Audits the 75-task consistency program (28-task cons-proof-gov primary
  * scope) against durable receipts under `.artifacts/consistency/**`, the
- * exact task catalog in `.notes/CONSISTENCY-FIXES.md`, and the progress
- * ledger `.notes/CONSISTENCY-PROGRESS.md`.
+ * tracked task catalog in `scripts/devtools/consistency-catalog.md`, and the
+ * tracked progress ledger `.notes/CONSISTENCY-PROGRESS.md`. An ignored local
+ * investigation document may still be selected explicitly with `--fixes`, but
+ * clean checkout and CI behavior must never depend on that optional file.
  *
  * Truth rules (from .notes/oracle/cons-finish-six-lane/lanes/06-gov-integrate-audit/plan.md §2.5–2.9):
  * - Freshness is decided ONLY by identity (registry version/fingerprint,
@@ -37,7 +39,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   RECEIPT_REGISTRY_VERSION,
   RECEIPT_SCHEMA_VERSION,
@@ -48,6 +50,17 @@ import {
   type ReceiptDisposition,
 } from "./lib/receipt-schema.ts";
 import type { JsonObject } from "./lib/privacy.ts";
+import { classifyReceiptEvidence } from "./lib/evidence-class.ts";
+import {
+  TASK_PROOF_POLICIES,
+  taskProofPolicy,
+  type TaskProofPolicy,
+} from "./lib/task-proof-policy.ts";
+import { validateCompleteFacadeMigrationScope } from "./facade-migrations.ts";
+import {
+  GENERATED_BYTE_COMPARE_OUTPUT_PATHS,
+  validateGeneratedByteCompareReceipt,
+} from "./generated-byte-compare.ts";
 
 // ── Canonical ID sets ───────────────────────────────────────────────────────
 
@@ -81,11 +94,21 @@ if (PROGRAM_IDS.size !== 75) {
 if (CONS_PROOF_GOV_IDS.size !== 28) {
   throw new Error(`canonical cons-proof-gov ID set must contain 28 IDs, found ${CONS_PROOF_GOV_IDS.size}`);
 }
+if (
+  TASK_PROOF_POLICIES.size !== PROGRAM_IDS.size ||
+  [...PROGRAM_IDS].some((taskId) => !TASK_PROOF_POLICIES.has(taskId)) ||
+  [...TASK_PROOF_POLICIES.keys()].some((taskId) => !PROGRAM_IDS.has(taskId))
+) {
+  throw new Error("every canonical consistency task must have exactly one proof policy");
+}
 
 export const KNOWN_SCOPES: Record<string, ReadonlySet<string>> = {
   "cons-proof-gov": CONS_PROOF_GOV_IDS,
   program: PROGRAM_IDS,
 };
+
+export const DEFAULT_CONSISTENCY_CATALOG_PATH =
+  "scripts/devtools/consistency-catalog.md";
 
 export const FAMILY_IDS = [
   "main-menu",
@@ -114,7 +137,13 @@ const ARCHIVED_DIRECTORY_NAMES = new Set([
 
 export type ConsistencyCommand =
   | { kind: "catalog"; fixesPath: string }
-  | { kind: "verify-task"; taskId: string; receiptsRoot: string; outPath: string }
+  | {
+      kind: "verify-task";
+      taskId: string;
+      fixesPath: string;
+      receiptsRoot: string;
+      outPath: string;
+    }
   | { kind: "verify-family"; familyId: string; receiptsRoot: string; outPath?: string }
   | { kind: "verify-scope"; scope: string; fixesPath: string; receiptsRoot: string; outPath: string }
   | { kind: "verify-all"; fixesPath: string; receiptsRoot: string; outPath: string };
@@ -133,16 +162,30 @@ function flagValue(argv: string[], flag: string): string | undefined {
 
 export function parseArgs(argv: string[]): ConsistencyCommand {
   const [command, ...rest] = argv;
-  const fixes = () => flagValue(rest, "--fixes") ?? ".notes/CONSISTENCY-FIXES.md";
+  const fixes = () =>
+    flagValue(rest, "--fixes") ?? DEFAULT_CONSISTENCY_CATALOG_PATH;
   const receipts = () => flagValue(rest, "--receipts") ?? ".artifacts/consistency";
   switch (command) {
     case "catalog":
       return { kind: "catalog", fixesPath: fixes() };
     case "verify-task": {
-      const taskId = rest.find((value) => !value.startsWith("--") && value !== flagValue(rest, "--receipts") && value !== flagValue(rest, "--out"));
+      const optionValues = new Set(
+        ["--receipts", "--out", "--fixes"]
+          .map((flag) => flagValue(rest, flag))
+          .filter((value): value is string => typeof value === "string"),
+      );
+      const taskId = rest.find(
+        (value) => !value.startsWith("--") && !optionValues.has(value),
+      );
       if (!taskId) throw new UsageError("verify-task requires a task ID argument");
       const outPath = flagValue(rest, "--out") ?? join(receipts(), taskId, "task.json");
-      return { kind: "verify-task", taskId, receiptsRoot: receipts(), outPath };
+      return {
+        kind: "verify-task",
+        taskId,
+        fixesPath: fixes(),
+        receiptsRoot: receipts(),
+        outPath,
+      };
     }
     case "verify-family": {
       const familyId = flagValue(rest, "--family") ?? rest.find((value) => !value.startsWith("--"));
@@ -299,7 +342,10 @@ export interface TaskCatalog extends ParsedSections {
   catalogSha256: string;
 }
 
-export function parseTaskCatalog(markdown: string, path = ".notes/CONSISTENCY-FIXES.md"): TaskCatalog {
+export function parseTaskCatalog(
+  markdown: string,
+  path = DEFAULT_CONSISTENCY_CATALOG_PATH,
+): TaskCatalog {
   const parsed = scanSections(markdown, { expectedIds: PROGRAM_IDS });
   return { ...parsed, path, catalogSha256: sha256(markdown) };
 }
@@ -370,6 +416,53 @@ export interface DiscoveredReceipt {
   archived: boolean;
 }
 
+const FACADE_LEDGER_ASSERTIONS = [
+  "allFacadesValueFree",
+  "allProductionCallersMigrated",
+  "allTestCallersMigrated",
+  "zeroCallerFacadesRemoved",
+  "persistedNamesLiveAtCanonicalOwnersOnly",
+] as const;
+
+function isAuthenticFacadeLedger(
+  taskDir: string,
+  path: string,
+  receipt: JsonObject | null,
+): boolean {
+  if (
+    basename(taskDir) !== "GOV-002" ||
+    resolve(path) !== resolve(join(taskDir, "facade-ledger.json")) ||
+    receipt === null ||
+    receipt.schemaVersion !== 1 ||
+    receipt.generatedBy !== "scripts/devtools/facade-ledger.ts" ||
+    receipt.taskId !== "GOV-002" ||
+    receipt.evidenceClass !== "STATIC_INVENTORY" ||
+    receipt.provesRuntimeBehavior !== false ||
+    receipt.provesExporterByteEquality !== false ||
+    !["EVALUABLE_PASS", "EVALUABLE_FAIL"].includes(String(receipt.disposition)) ||
+    ["primitiveId", "tool", "command", "catalogBinding", "transaction"]
+      .some((field) => Object.prototype.hasOwnProperty.call(receipt, field))
+  ) {
+    return false;
+  }
+  const assertions = asObject(receipt.assertions);
+  if (
+    !FACADE_LEDGER_ASSERTIONS.every((field) =>
+      typeof assertions[field] === "boolean"
+    )
+  ) {
+    return false;
+  }
+  const scope = asObject(receipt.facadeMigrations);
+  if (validateCompleteFacadeMigrationScope(scope).length > 0) {
+    return false;
+  }
+  return (
+    Array.isArray(receipt.facades) &&
+    JSON.stringify(receipt.facades) === JSON.stringify(scope.facades)
+  );
+}
+
 function walkJsonFiles(root: string, archived: boolean, out: Array<{ path: string; archived: boolean }>) {
   let entries: string[];
   try {
@@ -417,6 +510,29 @@ export function discoverReceipts(taskDir: string): {
     const receipt = parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as JsonObject)
       : null;
+    if (
+      basename(taskDir) === "GOV-002" &&
+      resolve(file.path) === resolve(join(taskDir, "facade-ledger.json"))
+    ) {
+      if (isAuthenticFacadeLedger(taskDir, file.path, receipt)) {
+        evidenceArtifactPaths.push(file.path);
+      } else {
+        unreadablePaths.push(file.path);
+      }
+      continue;
+    }
+    if (
+      basename(taskDir) === "GOV-005" &&
+      resolve(file.path) ===
+        resolve(join(taskDir, "generated-byte-compare.json"))
+    ) {
+      if (validateGeneratedByteCompareReceipt(receipt).pass) {
+        evidenceArtifactPaths.push(file.path);
+      } else {
+        unreadablePaths.push(file.path);
+      }
+      continue;
+    }
     const disposition = receipt && typeof receipt.disposition === "string" &&
         (receiptDispositions as readonly string[]).includes(receipt.disposition)
       ? (receipt.disposition as ReceiptDisposition)
@@ -465,6 +581,30 @@ export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentId
   if (typeof receipt.tool === "string" && typeof repository.producerSourceFingerprint === "string") {
     if (current.producerFingerprint(receipt.tool) !== repository.producerSourceFingerprint) {
       reasons.push({ code: "stale-producer", detail: `${receipt.tool} (${entry.path})` });
+    }
+  }
+  if (receipt.primitiveId === "devtools.consistency.safe-task-proof") {
+    for (const [path, expected] of Object.entries(asObject(receipt.sourceFingerprints))) {
+      if (
+        !(
+          path.startsWith("src/") ||
+          path.startsWith("scripts/devtools/") ||
+          path.startsWith("crates/sk-protocol/src/") ||
+          path.startsWith("design/mockups/generated/")
+        ) ||
+        path.split("/").includes("..") ||
+        typeof expected !== "string" ||
+        !/^[a-f0-9]{64}$/.test(expected)
+      ) {
+        reasons.push({ code: "stale-proof-source-owner", detail: `${path} (${entry.path})` });
+        continue;
+      }
+      const actual = current.fileSha256(path);
+      if (actual === null) {
+        reasons.push({ code: "stale-proof-source-missing", detail: `${path} (${entry.path})` });
+      } else if (actual !== expected) {
+        reasons.push({ code: "stale-proof-source", detail: `${path} (${entry.path})` });
+      }
     }
   }
   const binary = asObject(receipt.binary);
@@ -674,6 +814,7 @@ export function verifyTask(input: VerifyTaskInput): { receipt: JsonObject; exitC
   const { taskId, scope, receiptsRoot, catalog, progress, current } = input;
   const errors: Array<{ code: string; detail: unknown }> = [];
   const staleReasons: StaleReason[] = [];
+  const proofPolicy: TaskProofPolicy | null = taskProofPolicy(taskId);
 
   if (!PROGRAM_IDS.has(taskId)) {
     errors.push({ code: "unknown-task-id", detail: taskId });
@@ -745,6 +886,66 @@ export function verifyTask(input: VerifyTaskInput): { receipt: JsonObject; exitC
     }
     if (entry.disposition === "EVALUABLE_PASS" && receipt.pass === false) {
       errors.push({ code: "pass-disposition-marked-fail", detail: entry.path });
+    }
+
+    if (entry.disposition === "EVALUABLE_PASS" && proofPolicy) {
+      const observation = classifyReceiptEvidence(receipt);
+      const binding = asObject(receipt.catalogBinding);
+      const declaredTaskIds = [
+        ...(typeof receipt.taskId === "string" ? [receipt.taskId] : []),
+        ...(
+          Array.isArray(receipt.taskIds)
+            ? receipt.taskIds.filter((value): value is string => typeof value === "string")
+            : []
+        ),
+      ];
+      if (
+        !declaredTaskIds.includes(taskId) ||
+        binding.taskId !== taskId ||
+        binding.sectionSha256 !== catalogEntry?.sectionSha256 ||
+        binding.title !== catalogEntry?.title
+      ) {
+        errors.push({
+          code: "task-canonical-catalog-binding-mismatch",
+          detail:
+            `${entry.path}: ${String(binding.taskId ?? "missing-task-id")} / ` +
+            `${String(binding.sectionSha256 ?? "missing-section-hash")}`,
+        });
+      }
+      if (!proofPolicy.acceptedEvidenceClasses.includes(observation.evidenceClass)) {
+        errors.push({
+          code: "task-evidence-class-not-accepted",
+          detail:
+            `${taskId} requires ${proofPolicy.requirement}; ` +
+            `${entry.path} provides ${observation.evidenceClass}`,
+        });
+      }
+      if (observation.errors.length > 0) {
+        errors.push({
+          code: "task-evidence-observation-invalid",
+          detail: `${entry.path}: ${observation.errors.join("; ")}`,
+        });
+      }
+      if (
+        proofPolicy.provesRuntimeBehavior &&
+        proofPolicy.acceptedEvidenceClasses.includes(observation.evidenceClass)
+      ) {
+        const primitiveId =
+          typeof receipt.primitiveId === "string" ? receipt.primitiveId : null;
+        const validation = primitiveId ? validateReceipt(primitiveId, receipt) : null;
+        if (
+          !validation?.valid ||
+          validation.disposition !== "EVALUABLE_PASS" ||
+          asObject(receipt.producerValidation).valid !== true
+        ) {
+          errors.push({
+            code: "task-runtime-proof-not-registry-validated",
+            detail:
+              `${entry.path}: ${primitiveId ?? "missing primitiveId"}; ` +
+              `${validation?.errors.join("; ") ?? "no registered producer"}`,
+          });
+        }
+      }
     }
 
     const missing = Array.isArray(receipt.missingPrimitives) ? receipt.missingPrimitives : [];
@@ -872,6 +1073,10 @@ export function verifyTask(input: VerifyTaskInput): { receipt: JsonObject; exitC
       "missing-progress-section",
       "duplicate-progress-section",
       "unreadable-receipt",
+      "task-evidence-class-not-accepted",
+      "task-evidence-observation-invalid",
+      "task-runtime-proof-not-registry-validated",
+      "task-canonical-catalog-binding-mismatch",
     ].includes(error.code),
   ) || receiptDispositionList.some((d) => d.startsWith("INVALID_") || d === "ANALYSIS_PENDING");
 
@@ -901,6 +1106,7 @@ export function verifyTask(input: VerifyTaskInput): { receipt: JsonObject; exitC
   const body: JsonObject = {
     taskId,
     scope,
+    proofPolicy,
     implementationCommit: current.headCommit,
     implementationFingerprint,
     owners: [],
@@ -969,12 +1175,37 @@ export interface VerifyFamilyInput {
   current: CurrentIdentity;
 }
 
+function resolveFamilyMemberReceiptPath(
+  receiptsRoot: string,
+  declaredPath: string,
+): string | null {
+  const rootPath = resolve(receiptsRoot);
+  const cwdPath = resolve(declaredPath);
+  const candidate = isAbsolute(declaredPath)
+    ? cwdPath
+    : cwdPath === rootPath || cwdPath.startsWith(`${rootPath}${sep}`)
+      ? cwdPath
+      : resolve(rootPath, declaredPath);
+  const relativePath = relative(rootPath, candidate);
+  if (
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  ) {
+    return null;
+  }
+  return candidate;
+}
+
 export function verifyFamily(input: VerifyFamilyInput): { receipt: JsonObject; exitCode: number } {
-  const { familyId, receiptsRoot } = input;
+  const { familyId, receiptsRoot, current } = input;
   const errors: Array<{ code: string; detail: unknown }> = [];
   const fixturePath = join(receiptsRoot, "families", familyId, "fixture.json");
   let binding: JsonObject | null = null;
   let memberReceiptCount = 0;
+  let runtimeProofCount = 0;
+  const runtimeProofPaths: string[] = [];
+  const unprovenMemberReceiptPaths: string[] = [];
   let disposition: ReceiptDisposition;
 
   if (!(FAMILY_IDS as readonly string[]).includes(familyId)) {
@@ -1014,7 +1245,155 @@ export function verifyFamily(input: VerifyFamilyInput): { receipt: JsonObject; e
         errors.push({ code: "missing-family-member-receipts", detail: fixturePath });
         disposition = "BLOCKED_MISSING_PRIMITIVE";
       } else {
-        disposition = "EVALUABLE_PASS";
+        const memberDispositions: ReceiptDisposition[] = [];
+        for (const declaredPath of members) {
+          if (typeof declaredPath !== "string" || declaredPath.trim().length === 0) {
+            errors.push({ code: "invalid-family-member-path", detail: declaredPath });
+            memberDispositions.push("INVALID_SCHEMA");
+            continue;
+          }
+          const memberPath = resolveFamilyMemberReceiptPath(
+            receiptsRoot,
+            declaredPath,
+          );
+          if (memberPath === null) {
+            errors.push({
+              code: "family-member-path-escapes-receipts-root",
+              detail: declaredPath,
+            });
+            unprovenMemberReceiptPaths.push(declaredPath);
+            memberDispositions.push("INVALID_SCHEMA");
+            continue;
+          }
+          let member: JsonObject;
+          try {
+            member = asObject(JSON.parse(readFileSync(memberPath, "utf8")));
+          } catch {
+            errors.push({
+              code: "missing-or-unreadable-family-member-receipt",
+              detail: memberPath,
+            });
+            unprovenMemberReceiptPaths.push(memberPath);
+            memberDispositions.push("BLOCKED_MISSING_PRIMITIVE");
+            continue;
+          }
+
+          if (
+            member.evidenceClass !== "RUNTIME_HIDDEN" &&
+            member.evidenceClass !== "RUNTIME_VISIBLE" &&
+            member.evidenceClass !== "PACKAGED_APP"
+          ) {
+            errors.push({
+              code: "family-member-not-direct-runtime-evidence",
+              detail: `${memberPath}: ${String(member.evidenceClass ?? "undeclared")}`,
+            });
+            unprovenMemberReceiptPaths.push(memberPath);
+            memberDispositions.push("INVALID_SCHEMA");
+            continue;
+          }
+          if (member.disposition !== "EVALUABLE_PASS" || member.pass !== true) {
+            errors.push({
+              code: "family-member-not-passing",
+              detail: `${memberPath}: ${String(member.disposition ?? "missing")}`,
+            });
+            unprovenMemberReceiptPaths.push(memberPath);
+            memberDispositions.push("EVALUABLE_FAIL");
+            continue;
+          }
+
+          const primitiveId =
+            typeof member.primitiveId === "string" ? member.primitiveId : "";
+          const validation = validateReceipt(primitiveId, member);
+          const producerValidation = asObject(member.producerValidation);
+          if (!validation.valid || producerValidation.valid !== true) {
+            errors.push({
+              code: "invalid-family-member-producer-receipt",
+              detail: `${memberPath}: ${validation.errors.join(", ") || "producer validation is not passing"}`,
+            });
+            unprovenMemberReceiptPaths.push(memberPath);
+            memberDispositions.push(validation.valid ? "INVALID_SCHEMA" : validation.disposition);
+            continue;
+          }
+
+          const transaction = asObject(member.transaction);
+          const hostMatches =
+            transaction.hostKind === host ||
+            transaction.windowKind === host ||
+            (host === "MainWindow" && transaction.windowKind === "Main");
+          if (transaction.appViewVariant !== appView || !hostMatches) {
+            errors.push({
+              code: "family-member-target-identity-mismatch",
+              detail:
+                `${memberPath}: expected ${appView}@${host}, got ` +
+                `${String(transaction.appViewVariant ?? "missing")}@` +
+                `${String(transaction.hostKind ?? transaction.windowKind ?? "missing")}`,
+            });
+            unprovenMemberReceiptPaths.push(memberPath);
+            memberDispositions.push("INVALID_IDENTITY");
+            continue;
+          }
+
+          const privacy = asObject(member.privacy);
+          const privacyScan = asObject(privacy.recursiveCanaryScan);
+          if (
+            privacy.rawContentReturned === true ||
+            privacyScan.performed !== true ||
+            privacyScan.pass !== true ||
+            Number(privacy.canaryMatches ?? 0) > 0
+          ) {
+            errors.push({ code: "family-member-privacy-violation", detail: memberPath });
+            unprovenMemberReceiptPaths.push(memberPath);
+            memberDispositions.push("INVALID_PRIVACY");
+            continue;
+          }
+          const cleanup = asObject(member.cleanup);
+          const survivors = Array.isArray(cleanup.survivors)
+            ? cleanup.survivors
+            : [];
+          if (cleanup.closed !== true || survivors.length > 0) {
+            errors.push({ code: "family-member-cleanup-not-closed", detail: memberPath });
+            unprovenMemberReceiptPaths.push(memberPath);
+            memberDispositions.push("INVALID_CLEANUP");
+            continue;
+          }
+
+          const stale = receiptStaleReasons(
+            {
+              path: memberPath,
+              receipt: member,
+              disposition: "EVALUABLE_PASS",
+              archived: false,
+            },
+            current,
+          );
+          const repository = asObject(member.repository);
+          if (
+            current.headCommit &&
+            repository.gitCommit !== current.headCommit
+          ) {
+            stale.push({
+              code: "stale-repository-source-commit",
+              detail: `${String(repository.gitCommit ?? "missing")} != ${current.headCommit}`,
+            });
+          }
+          if (stale.length > 0) {
+            errors.push({
+              code: "stale-family-member-receipt",
+              detail: { path: memberPath, reasons: stale },
+            });
+            unprovenMemberReceiptPaths.push(memberPath);
+            memberDispositions.push("BLOCKED_STALE_GENERATION");
+            continue;
+          }
+
+          runtimeProofCount += 1;
+          runtimeProofPaths.push(memberPath);
+        }
+
+        disposition =
+          memberDispositions.length === 0 && runtimeProofCount === memberReceiptCount
+            ? "EVALUABLE_PASS"
+            : rollupDisposition(memberDispositions, "BLOCKED_MISSING_PRIMITIVE");
       }
     } else {
       disposition = "INVALID_SCHEMA";
@@ -1022,10 +1401,14 @@ export function verifyFamily(input: VerifyFamilyInput): { receipt: JsonObject; e
   }
 
   const body: JsonObject = {
+    evidenceClass: "DIRECT_RUNTIME_PROOF",
     familyId,
     binding: binding ?? {},
     bindingPath: fixturePath,
     memberReceiptCount,
+    runtimeProofCount,
+    runtimeProofPaths,
+    unprovenMemberReceiptPaths,
     errors,
   };
   return finalizeAggregate("devtools.consistency.verify-family", "consistency.verify-family", disposition!, body);
@@ -1057,6 +1440,45 @@ interface TaskRunResult {
   taskId: string;
   disposition: ReceiptDisposition;
   receipt: JsonObject;
+}
+
+function proofRequirementCensus(results: readonly TaskRunResult[]): JsonObject {
+  const requirementNames = [
+    "static-inventory",
+    "unit-behavior",
+    "fixture-contract",
+    "direct-runtime",
+  ] as const;
+  const requirements: Record<string, JsonObject> = {};
+  for (const requirement of requirementNames) {
+    const expectedIds = [...TASK_PROOF_POLICIES.values()]
+      .filter((policy) => policy.requirement === requirement)
+      .map((policy) => policy.taskId)
+      .sort();
+    const matching = results.filter((result) =>
+      taskProofPolicy(result.taskId)?.requirement === requirement
+    );
+    const passedIds = matching
+      .filter((result) => result.disposition === "EVALUABLE_PASS")
+      .map((result) => result.taskId)
+      .sort();
+    const passing = new Set(passedIds);
+    requirements[requirement] = {
+      requiredTaskCount: expectedIds.length,
+      passingTaskCount: passedIds.length,
+      passingTaskIds: passedIds,
+      unprovenTaskIds: expectedIds.filter((taskId) => !passing.has(taskId)),
+    };
+  }
+  const directRuntime = requirements["direct-runtime"]!;
+  return {
+    requirements,
+    runtimeInteractionRequiredTaskCount: directRuntime.requiredTaskCount,
+    runtimeInteractionProvenTaskCount: directRuntime.passingTaskCount,
+    runtimeInteractionBlockedTaskIds: directRuntime.unprovenTaskIds,
+    note:
+      "Static inventories, unit behavior, and deterministic fixture contracts never count as direct runtime interaction evidence.",
+  };
 }
 
 function runTasks(
@@ -1238,11 +1660,25 @@ export function verifyAll(input: VerifyAllInput): { receipt: JsonObject; exitCod
   } else if (byteCompare.byteEqual !== true || byteCompare.handEditedGeneratedOutput === true) {
     errors.push({ code: "hand-edited-generated-output", detail: "generated outputs are not exporter-derived byte-stable" });
   } else {
-    generatedOutputsPass = true;
-    for (const [path, expected] of Object.entries(asObject(byteCompare.outputHashes))) {
-      if (typeof expected === "string" && input.current.fileSha256(path) !== expected) {
-        generatedOutputsPass = false;
-        errors.push({ code: "stale-generated-output", detail: path });
+    const verification = validateGeneratedByteCompareReceipt(byteCompare, {
+      currentSourceSha: input.current.headCommit,
+      currentFileSha256: input.current.fileSha256,
+    });
+    if (!verification.pass) {
+      errors.push({
+        code: "invalid-generated-byte-compare",
+        detail: verification.errors,
+      });
+    } else {
+      generatedOutputsPass = true;
+      // Keep the existing stable stale-output error code as an independent
+      // defense; the typed validator already requires both exact output paths.
+      for (const path of GENERATED_BYTE_COMPARE_OUTPUT_PATHS) {
+        const expected = asObject(byteCompare.outputHashes)[path];
+        if (input.current.fileSha256(path) !== expected) {
+          generatedOutputsPass = false;
+          errors.push({ code: "stale-generated-output", detail: path });
+        }
       }
     }
   }
@@ -1270,23 +1706,53 @@ export function verifyAll(input: VerifyAllInput): { receipt: JsonObject; exitCod
     }
   }
 
-  // Façade lifecycle: GOV-002 executable ledger with all assertions true.
+  // Façade lifecycle: GOV-002 executable ledger must prove both retired
+  // modules, canonical owners, real migrated callers, and exact source bytes.
   const facadeLedger = readJson(join(input.receiptsRoot, "GOV-002", "facade-ledger.json"));
   let facadeLifecyclePass = false;
   if (!facadeLedger) {
     errors.push({ code: "missing-facade-ledger", detail: "GOV-002/facade-ledger.json" });
   } else {
     const assertions = asObject(facadeLedger.assertions);
-    const required = [
-      "allFacadesValueFree",
-      "allProductionCallersMigrated",
-      "allTestCallersMigrated",
-      "zeroCallerFacadesRemoved",
-      "persistedNamesLiveAtCanonicalOwnersOnly",
-    ];
-    const failed = required.filter((field) => assertions[field] !== true);
-    if (failed.length > 0 || facadeLedger.disposition !== "EVALUABLE_PASS") {
-      errors.push({ code: "incomplete-facade-lifecycle", detail: failed });
+    const failed = FACADE_LEDGER_ASSERTIONS.filter((field) => assertions[field] !== true);
+    const scope = asObject(facadeLedger.facadeMigrations);
+    const scopeFailures = validateCompleteFacadeMigrationScope(scope);
+    if (
+      !Array.isArray(facadeLedger.facades) ||
+      JSON.stringify(facadeLedger.facades) !== JSON.stringify(scope.facades)
+    ) {
+      scopeFailures.push("top-level-facade-records-disagree-with-scope");
+    }
+    if (
+      facadeLedger.evidenceClass !== "STATIC_INVENTORY" ||
+      facadeLedger.provesRuntimeBehavior !== false ||
+      facadeLedger.provesExporterByteEquality !== false
+    ) {
+      scopeFailures.push("facade-ledger-overclaims-proof-class");
+    }
+    // Never let an untrusted malformed ledger turn identity verification into
+    // reads of arbitrary absolute paths or files outside the Rust source tree.
+    if (scopeFailures.length === 0) {
+      for (const candidate of Array.isArray(scope.sourceDigests) ? scope.sourceDigests : []) {
+        const record = asObject(candidate);
+        const path = typeof record.path === "string" ? record.path : "";
+        if (path.length === 0) continue;
+        const actual = input.current.fileSha256(path);
+        const expected = record.state === "ABSENT" ? null : record.sha256;
+        if (actual !== expected) {
+          scopeFailures.push("facade-source-identity-drift:" + path);
+        }
+      }
+    }
+    if (
+      failed.length > 0 ||
+      scopeFailures.length > 0 ||
+      facadeLedger.disposition !== "EVALUABLE_PASS"
+    ) {
+      errors.push({
+        code: "incomplete-facade-lifecycle",
+        detail: { failedAssertions: failed, scopeFailures },
+      });
     } else {
       facadeLifecyclePass = true;
     }
@@ -1323,6 +1789,7 @@ export function verifyAll(input: VerifyAllInput): { receipt: JsonObject; exitCod
     invalidTaskIds,
     failedTaskIds,
     taskDispositions,
+    proofCoverage: proofRequirementCensus(results),
     privacyPass,
     cleanup: { closed: cleanupClosed },
     protectedHashesPass,
@@ -1377,6 +1844,8 @@ export async function main(argv: string[]): Promise<number> {
         "consistency.catalog",
         disposition,
         {
+          evidenceClass: "STATIC_INVENTORY",
+          provesRuntimeBehavior: false,
           catalogPath: command.fixesPath,
           catalogSha256: catalog.catalogSha256,
           catalogTaskCount: catalog.tasks.length,
@@ -1398,10 +1867,12 @@ export async function main(argv: string[]): Promise<number> {
       return exitCode;
     }
     case "verify-task": {
-      const fixesMarkdown = readMarkdown(".notes/CONSISTENCY-FIXES.md");
+      const fixesMarkdown = readMarkdown(command.fixesPath);
       const progressMarkdown = readMarkdown(DEFAULT_PROGRESS_PATH);
       if (fixesMarkdown === null || progressMarkdown === null) {
-        console.error("usage error: catalog or progress file missing");
+        console.error(
+          `usage error: catalog or progress file missing: ${command.fixesPath}, ${DEFAULT_PROGRESS_PATH}`,
+        );
         return 64;
       }
       const scope = CONS_PROOF_GOV_IDS.has(command.taskId) ? "cons-proof-gov" : "program";
@@ -1409,7 +1880,7 @@ export async function main(argv: string[]): Promise<number> {
         taskId: command.taskId,
         scope,
         receiptsRoot: command.receiptsRoot,
-        catalog: parseTaskCatalog(fixesMarkdown),
+        catalog: parseTaskCatalog(fixesMarkdown, command.fixesPath),
         progress: parseProgressSections(progressMarkdown, DEFAULT_PROGRESS_PATH),
         current,
       });

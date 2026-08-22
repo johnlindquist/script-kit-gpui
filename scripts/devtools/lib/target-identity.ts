@@ -28,6 +28,10 @@ import {
   run,
 } from "./client.ts";
 import { externalContent, productStatic } from "./privacy.ts";
+import {
+  assertNoninteractiveProtocolCommand,
+  NoninteractiveSafetyError,
+} from "./operator-safety.ts";
 
 export function stableWindowKind(value: unknown) {
   if (value === "actionsDialog") return "ActionsDialog";
@@ -285,13 +289,24 @@ export interface ProofTransactionIdentity extends JsonObject {
 
 function processStartTime(pid: unknown): string | null {
   if (typeof pid !== "number" || !Number.isFinite(pid)) return null;
-  const result = Bun.spawnSync(["ps", "-p", String(pid), "-o", "lstart="], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (result.exitCode !== 0) return null;
-  const value = new TextDecoder().decode(result.stdout).trim();
-  return value || null;
+  if (pid === process.pid) {
+    // Self-owned unit fixtures have a direct process clock. They must not
+    // depend on sandbox permission to enumerate host processes.
+    return new Date(Date.now() - process.uptime() * 1_000).toISOString();
+  }
+  try {
+    const result = Bun.spawnSync(["ps", "-p", String(pid), "-o", "lstart="], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (result.exitCode !== 0) return null;
+    const value = new TextDecoder().decode(result.stdout).trim();
+    return value || null;
+  } catch {
+    // Restricted CI/sandboxes may deny process enumeration. Leave the proof
+    // incomplete so strict identity blocks; never invent another PID's start.
+    return null;
+  }
 }
 
 export function proofTransactionIdentity(
@@ -486,6 +501,147 @@ export interface TargetReceipt extends JsonObject {
   errors: JsonObject[];
 }
 
+function record(value: unknown): JsonObject {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as JsonObject
+    : {};
+}
+
+function hiddenTargetWindow(
+  selector: JsonObject,
+  windows: JsonObject,
+): JsonObject {
+  const selectorType = selector.type;
+  if (selectorType !== "main" && selectorType !== "id" && selectorType !== "instance") {
+    throw new NoninteractiveSafetyError(
+      "resolveTargetReceipt",
+      "hidden target resolution requires an explicit main, id, or exact instance selector",
+    );
+  }
+  const matches = pickWindows(windows).filter((window) => {
+    if (selectorType === "main") {
+      return window.automationId === "main" || window.windowKind === "Main";
+    }
+    if (window.automationId !== selector.id) return false;
+    return selectorType !== "instance" || window.windowGeneration === selector.generation;
+  });
+  if (matches.length !== 1) {
+    throw new NoninteractiveSafetyError(
+      "resolveTargetReceipt",
+      `explicit hidden target resolved to ${matches.length} windows instead of exactly one`,
+    );
+  }
+  const window = matches[0]!;
+  if (window.visible !== false) {
+    throw new NoninteractiveSafetyError(
+      "resolveTargetReceipt",
+      "the explicit target is visible or its visibility is unknown",
+    );
+  }
+  return window;
+}
+
+/**
+ * Compose the capture-free equivalent of an automation inspection. Generations
+ * come only from the runtime's canonical state surface contract. Missing
+ * generations stay null and make strict proof BLOCKED_MISSING_PRIMITIVE.
+ */
+export function hiddenTargetInspectionSnapshot(
+  window: JsonObject,
+  state: JsonObject,
+): JsonObject {
+  if (window.visible !== false || state.windowVisible !== false) {
+    throw new NoninteractiveSafetyError(
+      "resolveTargetReceipt",
+      "both the automation registry and state response must observe a hidden target",
+    );
+  }
+  const surfaceContract = record(state.surfaceContract);
+  const canonicalIdentity = record(surfaceContract.targetIdentity);
+  const topLevelIdentity = record(state.targetIdentity);
+  const generationFields = [
+    "targetGeneration",
+    "surfaceGeneration",
+    "dataGeneration",
+    "layoutGeneration",
+    "selectionGeneration",
+    "scrollGeneration",
+    "frameGeneration",
+  ] as const;
+  for (const [location, identity] of [
+    ["state.surfaceContract.targetIdentity", canonicalIdentity],
+    ["state.targetIdentity", topLevelIdentity],
+    ["state", state],
+  ] as const) {
+    if (
+      typeof identity.windowId === "string" &&
+      identity.windowId !== window.automationId
+    ) {
+      throw new NoninteractiveSafetyError(
+        "resolveTargetReceipt",
+        `${location} target identity belongs to a different automation window`,
+      );
+    }
+    if (
+      typeof identity.windowGeneration === "number" &&
+      identity.windowGeneration !== window.windowGeneration
+    ) {
+      throw new NoninteractiveSafetyError(
+        "resolveTargetReceipt",
+        `${location} target identity belongs to a stale automation window generation`,
+      );
+    }
+    if (identity !== canonicalIdentity) {
+      for (const field of generationFields) {
+        if (
+          identity[field] != null &&
+          canonicalIdentity[field] != null &&
+          identity[field] !== canonicalIdentity[field]
+        ) {
+          throw new NoninteractiveSafetyError(
+            "resolveTargetReceipt",
+            `${location}.${field} conflicts with the canonical target identity`,
+          );
+        }
+      }
+    }
+  }
+  const identityMetadata = (key: string): unknown =>
+    canonicalIdentity[key] ?? topLevelIdentity[key] ?? state[key] ?? null;
+
+  return {
+    windowId: window.automationId ?? null,
+    windowKind: window.windowKind ?? null,
+    windowGeneration: canonicalIdentity.windowGeneration ?? window.windowGeneration ?? null,
+    parentAutomationId: window.parentAutomationId ?? null,
+    resolvedBounds: window.bounds ?? null,
+    visible: false,
+    focused: typeof state.isFocused === "boolean" ? state.isFocused : window.focused ?? null,
+    pid: window.pid ?? null,
+    surfaceKind:
+      identityMetadata("surfaceKind") ?? surfaceContract.surfaceKind ?? window.surfaceKind ?? null,
+    semanticSurface:
+      identityMetadata("semanticSurface") ??
+      surfaceContract.automationSemanticSurface ??
+      window.semanticSurface ??
+      null,
+    appViewVariant:
+      identityMetadata("appViewVariant") ??
+      surfaceContract.appViewVariant ??
+      window.appViewVariant ??
+      null,
+    targetGeneration: canonicalIdentity.targetGeneration ?? null,
+    surfaceGeneration: canonicalIdentity.surfaceGeneration ?? null,
+    dataGeneration: canonicalIdentity.dataGeneration ?? null,
+    layoutGeneration: canonicalIdentity.layoutGeneration ?? null,
+    selectionGeneration: canonicalIdentity.selectionGeneration ?? null,
+    scrollGeneration: canonicalIdentity.scrollGeneration ?? null,
+    frameGeneration: canonicalIdentity.frameGeneration ?? null,
+    surfaceContract,
+    observationMode: "capture-free-hidden-state",
+  };
+}
+
 /**
  * Resolve strict target identity in-process: listAutomationWindows +
  * inspectAutomationWindow, then the identity/classification pipeline. Returns
@@ -494,10 +650,26 @@ export interface TargetReceipt extends JsonObject {
  */
 export async function resolveTargetReceipt(
   args: Pick<TargetArgs, "session" | "target" | "strict" | "expectedSurfaceKind" | "timeoutMs">,
-  opts: { tool?: string; hiDpi?: boolean } = {},
+  opts: {
+    tool?: string;
+    hiDpi?: boolean;
+    noninteractive?: boolean;
+    rpcFn?: typeof rpc;
+  } = {},
 ): Promise<TargetReceipt> {
   const tool = opts.tool ?? "targets";
-  const windowsEnvelope = await rpc(
+  const invokeRpc = opts.rpcFn ?? rpc;
+  const noninteractive =
+    opts.noninteractive ?? process.env.SCRIPT_KIT_NONINTERACTIVE === "1";
+  const target = args.target ?? { type: "focused" };
+  if (noninteractive) {
+    assertNoninteractiveProtocolCommand(
+      { type: "getState", target },
+      { noninteractive: true },
+    );
+  }
+
+  const windowsEnvelope = await invokeRpc(
     args.session,
     { type: "listAutomationWindows", requestId: requestId(tool, "list") },
     "automationWindowListResult",
@@ -506,21 +678,41 @@ export async function resolveTargetReceipt(
   const windows = responseOf(windowsEnvelope);
   const errors = [windowsEnvelope].filter((value) => value.status === "error");
 
-  const target = args.target ?? { type: "focused" };
-  const inspectEnvelope = await rpc(
-    args.session,
-    {
-      type: "inspectAutomationWindow",
-      requestId: requestId(tool, "inspect"),
-      target,
-      hiDpi: opts.hiDpi ?? false,
-      probes: [],
-    },
-    "automationInspectResult",
-    args.timeoutMs,
-  );
-  const inspect = responseOf(inspectEnvelope);
-  const windowsAfterEnvelope = await rpc(
+  let inspectEnvelope: JsonObject;
+  let inspect: JsonObject;
+  if (noninteractive) {
+    const window = hiddenTargetWindow(target, windows);
+    inspectEnvelope = await invokeRpc(
+      args.session,
+      {
+        type: "getState",
+        requestId: requestId(tool, "hidden-state"),
+        target,
+        summaryOnly: true,
+      },
+      "stateResult",
+      args.timeoutMs,
+    );
+    const state = responseOf(inspectEnvelope);
+    inspect = inspectEnvelope.status === "error"
+      ? {}
+      : hiddenTargetInspectionSnapshot(window, state);
+  } else {
+    inspectEnvelope = await invokeRpc(
+      args.session,
+      {
+        type: "inspectAutomationWindow",
+        requestId: requestId(tool, "inspect"),
+        target,
+        hiDpi: opts.hiDpi ?? false,
+        probes: [],
+      },
+      "automationInspectResult",
+      args.timeoutMs,
+    );
+    inspect = responseOf(inspectEnvelope);
+  }
+  const windowsAfterEnvelope = await invokeRpc(
     args.session,
     { type: "listAutomationWindows", requestId: requestId(tool, "list-after") },
     "automationWindowListResult",
@@ -566,5 +758,6 @@ export async function resolveTargetReceipt(
     sessionLifecycle: primarySessionLifecycle(inspectErrors),
     parsedError: primaryParsedError(inspectErrors),
     errors: inspectErrors,
+    inspectionMode: noninteractive ? "capture-free-hidden-state" : "automation-window-inspection",
   };
 }

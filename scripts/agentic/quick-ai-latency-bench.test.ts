@@ -556,11 +556,96 @@ describe("parseCli", () => {
     expect(() => parseCli(["--mode", "bogus"])).toThrow();
   });
 
+  test("recognizes safe help and contract inspection without treating either as a live run", () => {
+    expect(parseCli(["--help"]).help).toBe(true);
+    expect(parseCli(["-h"]).help).toBe(true);
+    expect(parseCli(["--describe-contract"]).describeContract).toBe(true);
+  });
+
+  test("unknown switches, missing values, and invalid counts fail closed", () => {
+    expect(() => parseCli(["--future-live-mode"])).toThrow("unknown option");
+    expect(() => parseCli(["--mode"])).toThrow("requires a value");
+    expect(() => parseCli(["--reps", "0"])).toThrow("positive integer");
+    expect(() => parseCli(["--max-attempts", "nope"])).toThrow("positive integer");
+    expect(() => parseCli(["--seed", "-1"])).toThrow();
+  });
+
   test("reads refs, seed, and out path", () => {
     const cli = parseCli(["--mode", "paired", "--baseline-ref", "abc123", "--candidate-ref", "WORKTREE", "--seed", "7", "--out", "/tmp/x.json"]);
     expect(cli.baselineRef).toBe("abc123");
     expect(cli.candidateRef).toBe("WORKTREE");
     expect(cli.seed).toBe(7);
     expect(cli.out).toBe("/tmp/x.json");
+  });
+});
+
+describe("Quick AI benchmark provider-call safety", () => {
+  function invoke(
+    args: string[],
+    extraEnvironment: Record<string, string> = {},
+  ) {
+    const environment = {
+      ...process.env,
+      SCRIPT_KIT_ALLOW_LIVE_AI: "0",
+      SCRIPT_KIT_NONINTERACTIVE: "0",
+      ...extraEnvironment,
+    };
+    return Bun.spawnSync(
+      [process.execPath, "scripts/agentic/quick-ai-latency-bench.ts", ...args],
+      {
+        cwd: resolve(import.meta.dir, "../.."),
+        env: environment,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+  }
+
+  test("help cannot fall through to the six-repetition paid benchmark", () => {
+    const result = invoke(["--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("Safe inspection");
+    expect(result.stdout.toString()).toContain("SCRIPT_KIT_ALLOW_LIVE_AI=1");
+    expect(result.stderr.toString()).not.toContain("[bench] mode=");
+  });
+
+  test("contract inspection is static, network-free, and never claims paint", () => {
+    const result = invoke(["--describe-contract"]);
+    expect(result.exitCode).toBe(0);
+    const contract = JSON.parse(result.stdout.toString());
+    expect(contract.evidenceClass).toBe("STATIC_INVENTORY");
+    expect(contract.runtimeEvidenceClass).toBe("LIVE_AI");
+    expect(contract.metricKind).toBe("quick_ai_provider_event_phases");
+    expect(contract.observationClass).toBe("PROVIDER_EVENT_STREAM");
+    expect(contract.measuresPaint).toBe(false);
+    expect(contract.safety.startsProviderProcess).toBe(false);
+    expect(contract.safety.makesNetworkRequest).toBe(false);
+  });
+
+  test("default invocation refuses before provider startup without explicit approval", () => {
+    const result = invoke([]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("refused before provider startup");
+    expect(result.stderr.toString()).not.toContain("[bench] mode=");
+  });
+
+  test("noninteractive mode refuses provider calls even if live AI was opted in", () => {
+    const result = invoke(["--mode", "single", "--reps", "1"], {
+      SCRIPT_KIT_ALLOW_LIVE_AI: "1",
+      SCRIPT_KIT_NONINTERACTIVE: "1",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("categorically refuses live Quick AI");
+    expect(result.stderr.toString()).not.toContain("[bench] mode=");
+  });
+
+  test("print-command remains safe under noninteractive mode", () => {
+    const result = invoke(["--print-command"], {
+      SCRIPT_KIT_NONINTERACTIVE: "1",
+    });
+    expect(result.exitCode).toBe(0);
+    const command = JSON.parse(result.stdout.toString());
+    expect(command.command[0]).toBe("codex");
+    expect(command.commandSha256).toHaveLength(64);
   });
 });

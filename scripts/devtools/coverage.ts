@@ -17,6 +17,8 @@
  * `shortcuts`), which remain human reporting.
  */
 
+import { existsSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { receiptSchemaRegistry } from "./lib/receipt-schema.ts";
 
 export type CoverageStatus = "supported" | "partial" | "missing" | "planned";
@@ -362,7 +364,11 @@ export const coverageProfiles: CoverageProfile[] = [
     name: "Main launcher and prompt host",
     status: "partial",
     domains: ["targets", "elements", "layout", "input", "screenshots", "console", "sources"],
-    sourceFiles: ["src/app.rs", "src/app_impl/render_impl.rs", "src/widgets/script_list.rs"],
+    sourceFiles: [
+      "src/main_sections/render_impl.rs",
+      "src/main_sections/app_state.rs",
+      "src/render_script_list/mod.rs",
+    ],
     features: ["script list", "prompt state", "footer", "input", "preview", "surface contract", "source chips"],
     shortcuts: ["Cmd+K", "Escape", "Enter", "Tab", "ArrowUp", "ArrowDown"],
     supportedNow: [
@@ -674,7 +680,11 @@ export const coverageProfiles: CoverageProfile[] = [
     name: "Dictation History surface",
     status: "planned",
     domains: ["targets", "elements", "layout", "storage", "input", "screenshots", "accessibility"],
-    sourceFiles: ["src/dictation/history.rs", "src/dictation/types.rs", "src/builtin/resources.rs"],
+    sourceFiles: [
+      "src/dictation/history.rs",
+      "src/dictation/types.rs",
+      "src/mcp_resources/mod.rs",
+    ],
     features: ["transcript rows", "search/filter", "preview", "redaction", "missing audio fallback", "selection reanchor", "portal attachment"],
     shortcuts: ["Enter", "Escape", "Tab", "ArrowUp", "ArrowDown"],
     supportedNow: ["kit://dictation-history", "filterable surface architecture"],
@@ -709,8 +719,14 @@ const coverageStatuses: readonly CoverageStatus[] = ["supported", "partial", "mi
  */
 export function validateCoverageProfiles(
   profiles: readonly CoverageProfile[] = coverageProfiles,
+  options: {
+    repoRoot?: string;
+    ownerExists?: (absolutePath: string) => boolean;
+  } = {},
 ): string[] {
   const errors: string[] = [];
+  const repoRoot = resolve(options.repoRoot ?? resolve(import.meta.dir, "../.."));
+  const ownerExists = options.ownerExists ?? existsSync;
   const seenIds = new Set<string>();
   const knownPrimitiveIds = new Set(receiptSchemaRegistry.map((entry) => entry.primitiveId));
   const knownDomainIds = new Set(coverageDomains.map((domain) => domain.id));
@@ -720,6 +736,34 @@ export function validateCoverageProfiles(
     seenIds.add(profile.id);
     if (!coverageStatuses.includes(profile.status)) {
       errors.push(`profile ${profile.id} has unknown status: ${profile.status}`);
+    }
+    if (profile.sourceFiles.length === 0) {
+      errors.push(`profile ${profile.id} has no source owners`);
+    }
+    const seenOwners = new Set<string>();
+    for (const owner of profile.sourceFiles) {
+      if (typeof owner !== "string" || owner.trim().length === 0) {
+        errors.push(`profile ${profile.id} has an empty source owner`);
+        continue;
+      }
+      const absoluteOwner = resolve(repoRoot, owner);
+      const relativeOwner = relative(repoRoot, absoluteOwner);
+      if (
+        isAbsolute(owner) ||
+        relativeOwner === ".." ||
+        relativeOwner.startsWith(`..${sep}`)
+      ) {
+        errors.push(`profile ${profile.id} source owner escapes repository: ${owner}`);
+        continue;
+      }
+      if (seenOwners.has(relativeOwner)) {
+        errors.push(`profile ${profile.id} lists source owner twice: ${owner}`);
+        continue;
+      }
+      seenOwners.add(relativeOwner);
+      if (!ownerExists(absoluteOwner)) {
+        errors.push(`profile ${profile.id} references missing source owner: ${owner}`);
+      }
     }
     for (const primitiveId of profile.availablePrimitiveIds) {
       if (!knownPrimitiveIds.has(primitiveId)) {
@@ -795,6 +839,12 @@ export function buildCoverageReport(args: CoverageReportArgs = {}) {
     tool: "script-kit-devtools.coverage",
     generatedAt: new Date().toISOString(),
     evidenceStatus: "SOURCE-CONFIRMED" as const,
+    evidenceClass: "STATIC_INVENTORY" as const,
+    runtimeProof: {
+      disposition: "NOT_EVALUATED" as const,
+      provenSurfaceCount: 0,
+      note: "A Direct profile binding and a valid source-owner inventory do not prove runtime behavior.",
+    },
     philosophy: "Chrome DevTools-style protocol and API coverage first; recipes are smoke/regression wrappers after direct primitives exist.",
     inventoryNamespaces: {
       runtimeCoverageProfileCount: coverageProfiles.length,
@@ -804,6 +854,7 @@ export function buildCoverageReport(args: CoverageReportArgs = {}) {
     },
     registryValidation: {
       errors: validateCoverageProfiles(),
+      validatesSourceOwners: true,
     },
     primitiveFamilies: ["devtools.inspect", "devtools.measure", "devtools.act", "devtools.compare", "devtools.investigate"],
     domains: scopedDomains,

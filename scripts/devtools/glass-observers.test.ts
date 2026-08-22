@@ -139,6 +139,8 @@ describe("locked envelope integration (evaluator unchanged)", () => {
     );
     expect(envelope.underResolved).toBe(false);
     expect(envelope.pass).toBe(true);
+    expect(envelope.firstVisible?.widthScale).toBeCloseTo(1.0305, 6);
+    expect(envelope.onsetTailVisible?.widthScale).toBeCloseTo(1.012, 6);
   });
 
   test("a single rendered frame is under-resolved by the LOCKED evaluator", () => {

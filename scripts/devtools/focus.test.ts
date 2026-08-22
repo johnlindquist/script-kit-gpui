@@ -84,6 +84,29 @@ describe("semantic to AppKit accessibility parity", () => {
     expect(invalid.complete).toBe(false);
     expect(invalid.peers[0].errors).toContain("missingDisabledReason");
   });
+
+  test("duplicate semantic owners cannot share one native AX peer", () => {
+    const duplicate = structuredClone(state);
+    duplicate.activeFooter.buttons.push(structuredClone(duplicate.activeFooter.buttons[0]));
+    const parity = semanticAxParity(duplicate, layout);
+    expect(parity.peerCount).toBe(2);
+    expect(parity.duplicateSemanticIds).toEqual(["footer-action:run"]);
+    expect(parity.complete).toBe(false);
+  });
+
+  test("native AX parity needs a real semantic action and accessibility name", () => {
+    const noAction = structuredClone(state);
+    delete (noAction.activeFooter.buttons[0] as Record<string, unknown>).action;
+    const actionParity = semanticAxParity(noAction, layout);
+    expect(actionParity.complete).toBe(false);
+    expect(actionParity.peers[0].errors).toContain("missingSemanticAction");
+
+    const noName = structuredClone(state);
+    noName.activeFooter.buttons[0].label = "";
+    const labelParity = semanticAxParity(noName, layout);
+    expect(labelParity.complete).toBe(false);
+    expect(labelParity.peers[0].errors).toContain("missingAccessibilityLabel");
+  });
 });
 
 test("semantic focus graph has reciprocal forward and backward edges", () => {
@@ -106,6 +129,24 @@ test("focus graph rejects hidden focusables and duplicate identities", () => {
   expect(graph.reciprocal).toBe(false);
   expect(graph.hiddenFocusableIds).toEqual(["footer-action:run"]);
   expect(graph.duplicateSemanticIds).toEqual(["input:filter"]);
+});
+
+test("focus graph rejects multiple owners or a focused non-focusable node", () => {
+  const multiple = semanticFocusGraph([
+    { semanticId: "input:filter", type: "input", focused: true },
+    { semanticId: "footer-action:run", type: "button", focused: true },
+  ]);
+  expect(multiple.focusedSemanticIds).toEqual([
+    "input:filter",
+    "footer-action:run",
+  ]);
+  expect(multiple.reciprocal).toBe(false);
+
+  const inaccessible = semanticFocusGraph([
+    { semanticId: "footer-action:disabled", type: "button", selectable: false, focused: true },
+  ]);
+  expect(inaccessible.focusedSemanticIds).toEqual(["footer-action:disabled"]);
+  expect(inaccessible.reciprocal).toBe(false);
 });
 
 describe("native footer activation proof", () => {

@@ -3,6 +3,10 @@
 import { classifyEnvelopeError } from "./lib/client.ts";
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
 import { diagnostic } from "./lib/privacy.ts";
+import {
+  assertNoninteractiveProtocolCommand,
+  assertNoninteractiveSessionCommand,
+} from "./lib/operator-safety.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -87,6 +91,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 async function run(command: string[], label: string, env: Record<string, string> = {}): Promise<JsonObject> {
+  assertNoninteractiveSessionCommand(command);
   const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -324,6 +329,7 @@ function requestId(prefix: string) {
 }
 
 async function rpc(session: string, payload: JsonObject, expect: string, timeoutMs: number) {
+  assertNoninteractiveProtocolCommand(payload);
   return run([
     "bash",
     "scripts/agentic/session.sh",

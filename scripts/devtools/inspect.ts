@@ -4,6 +4,10 @@ import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
 import { diagnostic, externalContent, productStatic, userContent } from "./lib/privacy.ts";
 import { classifyTransportError } from "./lib/transport-errors.ts";
 import {
+  assertNoninteractiveProtocolCommand,
+  assertNoninteractiveSessionCommand,
+} from "./lib/operator-safety.ts";
+import {
   compareWindowLifetimeSnapshots,
   proofTransactionIdentity,
   strictTransactionMissingFields,
@@ -75,6 +79,7 @@ function parseArgs(argv: string[]): InspectArgs {
 }
 
 async function run(command: string[], label: string): Promise<JsonObject> {
+  assertNoninteractiveSessionCommand(command);
   const proc = Bun.spawn(command, {
     stdout: "pipe",
     stderr: "pipe",
@@ -114,6 +119,7 @@ function requestId(prefix: string) {
 }
 
 async function rpc(session: string, payload: JsonObject, expect: string, timeoutMs: number) {
+  assertNoninteractiveProtocolCommand(payload);
   return run(
     [
       "bash",

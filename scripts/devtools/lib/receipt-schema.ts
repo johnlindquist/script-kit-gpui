@@ -13,6 +13,8 @@ import {
   type JsonObject,
   type ReceiptPrivacyMode,
 } from "./privacy.ts";
+import { classifyReceiptEvidence } from "./evidence-class.ts";
+import { taskProofPolicy } from "./task-proof-policy.ts";
 
 export const RECEIPT_SCHEMA_VERSION = 2;
 export const RECEIPT_REGISTRY_VERSION = 1;
@@ -175,6 +177,35 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
         }
         if (disposition === "EVALUABLE_PASS" && projection.proofAllowed !== true) {
           errors.push("pass receipt must explicitly allow semantic proof");
+        }
+        if (disposition === "EVALUABLE_PASS") {
+          const nodes = Array.isArray(receipt.nodes)
+            ? receipt.nodes.map((node) => asObject(node))
+            : [];
+          if (
+            projection.proofMode === "ax" &&
+            projection.nativeAccessibilityObserved !== true
+          ) {
+            errors.push("AX projection proof requires independently observed native accessibility peers");
+          }
+          if (
+            projection.proofMode === "action" &&
+            !nodes.some((node) => node.activatable === true)
+          ) {
+            errors.push("action projection proof requires an enabled activatable semantic node");
+          }
+          if (
+            projection.proofMode === "focus" &&
+            nodes.filter((node) => node.focused === true).length !== 1
+          ) {
+            errors.push("focus projection proof requires exactly one focused semantic node");
+          }
+          if (
+            Array.isArray(receipt.privacyViolationSemanticIds) &&
+            receipt.privacyViolationSemanticIds.length > 0
+          ) {
+            errors.push("semantic receipt contains invalid or cleartext production privacy descriptors");
+          }
         }
         return errors;
       },
@@ -409,12 +440,364 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
     forbidMissingPrimitivesOnPass: true,
     description: "Orchestrate a fail-closed target-scoped investigation stack.",
   }),
+  schema({
+    primitiveId: "devtools.coverage.bindings",
+    tool: "script-kit-devtools.surfaces",
+    commands: ["surfaces.coverage-bindings"],
+    requiredPaths: [
+      "evidenceClass",
+      "catalogBinding.taskId",
+      "catalogBinding.title",
+      "catalogBinding.sectionSha256",
+      "census.expected.contractKindCount",
+      "census.expected.contractMappingCount",
+      "census.actual.contractKindCount",
+      "census.actual.contractMappingCount",
+      "sourceParity.pass",
+      "featureMapGate.pass",
+      "profileRegistry.validationErrorCount",
+      "bindingSetUsable",
+      "bindings",
+      "aliases",
+      "summary.staticDirectBindingCount",
+      "summary.freshDirectRuntimeProofCount",
+      "summary.runtimeProofDisposition",
+      "negativeControls",
+    ],
+    identityPolicy: "none",
+    privacyPolicy: "metadata-only",
+    predicates: [{
+      id: "binding-inventory-is-complete-fail-closed-and-never-runtime-proof",
+      validate(receipt, disposition) {
+        if (disposition !== "EVALUABLE_PASS") return [];
+        const errors: string[] = [];
+        const census = asObject(receipt.census);
+        const expected = asObject(census.expected);
+        const actual = asObject(census.actual);
+        const sourceParity = asObject(receipt.sourceParity);
+        const featureMapGate = asObject(receipt.featureMapGate);
+        const profileRegistry = asObject(receipt.profileRegistry);
+        const summary = asObject(receipt.summary);
+        const bindings = Array.isArray(receipt.bindings) ? receipt.bindings : [];
+        const negativeControls = Array.isArray(receipt.negativeControls)
+          ? receipt.negativeControls
+          : [];
+
+        if (receipt.evidenceClass !== "STATIC_INVENTORY") {
+          errors.push("coverage bindings are static inventory, never direct runtime proof");
+        }
+        const catalogBinding = asObject(receipt.catalogBinding);
+        if (
+          catalogBinding.taskId !== "PF-009" ||
+          typeof catalogBinding.title !== "string" ||
+          !/^[a-f0-9]{64}$/.test(String(catalogBinding.sectionSha256 ?? ""))
+        ) {
+          errors.push("coverage bindings must bind to the canonical PF-009 catalog section");
+        }
+        if (
+          expected.contractKindCount !== 37 ||
+          expected.contractMappingCount !== 54 ||
+          actual.contractKindCount !== 37 ||
+          actual.contractMappingCount !== 54
+        ) {
+          errors.push("coverage bindings require the exact 37-kind / 54-mapping census");
+        }
+        if (sourceParity.pass !== true) {
+          errors.push("coverage bindings require exact source-contract parity");
+        }
+        if (featureMapGate.pass !== true) {
+          errors.push("coverage bindings require a valid real feature map");
+        }
+        if (profileRegistry.validationErrorCount !== 0) {
+          errors.push("coverage bindings require valid repository-contained source owners");
+        }
+        if (receipt.bindingSetUsable !== true || bindings.length !== 54) {
+          errors.push("coverage bindings require 54 usable canonical mappings");
+        }
+        if (
+          summary.freshDirectRuntimeProofCount !== 0 ||
+          summary.runtimeProofDisposition !== "NOT_EVALUATED"
+        ) {
+          errors.push("static coverage bindings cannot claim fresh direct runtime proof");
+        }
+        if (
+          negativeControls.length === 0 ||
+          negativeControls.some((control) => asObject(control).pass !== true)
+        ) {
+          errors.push("coverage bindings require passing deterministic negative controls");
+        }
+        return errors;
+      },
+    }],
+    description:
+      "Validate the complete static 37-kind / 54-mapping surface binding inventory without claiming runtime proof.",
+  }),
+  schema({
+    primitiveId: "devtools.consistency.safe-task-proof",
+    tool: "script-kit-devtools.safe-task-proofs",
+    commands: ["safe-task-proofs.verify"],
+    requiredPaths: [
+      "taskId",
+      "taskIds",
+      "evidenceClass",
+      "provesRuntimeBehavior",
+      "catalogBinding.taskId",
+      "catalogBinding.title",
+      "catalogBinding.sectionSha256",
+      "testCommand",
+      "testRun.pass",
+      "testRun.exitCode",
+      "testRun.passedTestCount",
+      "testRun.failedTestCount",
+      "testRun.expectationCount",
+      "testRun.suiteFiles",
+      "testRun.executedSuiteFiles",
+      "testRun.outputSha256",
+      "sourceFingerprints",
+      "assertions",
+      "negativeControls",
+      "safety.noninteractive",
+      "safety.startsApplication",
+      "safety.revealsWindow",
+      "safety.focusesWindow",
+      "safety.drivesNativeInput",
+      "safety.capturesScreen",
+      "safety.accessesNetwork",
+      "safety.usesLiveAi",
+    ],
+    identityPolicy: "none",
+    privacyPolicy: "metadata-only",
+    predicates: [{
+      id: "offline-task-proof-must-run-fresh-owned-behavior-tests",
+      validate(receipt, disposition) {
+        if (disposition !== "EVALUABLE_PASS") return [];
+        const errors: string[] = [];
+        const taskId = typeof receipt.taskId === "string" ? receipt.taskId : "";
+        const policy = taskProofPolicy(taskId);
+        const evidenceClass = String(receipt.evidenceClass ?? "");
+        if (
+          !policy ||
+          policy.provesRuntimeBehavior ||
+          !policy.acceptedEvidenceClasses.includes(evidenceClass as never) ||
+          (evidenceClass !== "STATIC_INVENTORY" && evidenceClass !== "UNIT_BEHAVIOR") ||
+          receipt.provesRuntimeBehavior !== false
+        ) {
+          errors.push("offline task proof cannot discharge a runtime interaction obligation");
+        }
+        const binding = asObject(receipt.catalogBinding);
+        const taskIds = stringArray(receipt.taskIds);
+        if (
+          binding.taskId !== taskId ||
+          !taskIds.includes(taskId) ||
+          typeof binding.title !== "string" ||
+          !/^[a-f0-9]{64}$/.test(String(binding.sectionSha256 ?? ""))
+        ) {
+          errors.push("offline task proof requires one exact canonical catalog section binding");
+        }
+        const testRun = asObject(receipt.testRun);
+        const suiteFiles = stringArray(testRun.suiteFiles);
+        const executedSuiteFiles = stringArray(testRun.executedSuiteFiles);
+        const testCommand = stringArray(receipt.testCommand);
+        if (
+          testRun.pass !== true ||
+          testRun.exitCode !== 0 ||
+          Number(testRun.passedTestCount) < 1 ||
+          testRun.failedTestCount !== 0 ||
+          Number(testRun.expectationCount) < 1 ||
+          suiteFiles.length === 0 ||
+          executedSuiteFiles.length === 0 ||
+          new Set(executedSuiteFiles).size !== executedSuiteFiles.length ||
+          suiteFiles.some((path) => !executedSuiteFiles.includes(path)) ||
+          testCommand[0] !== "bun" ||
+          testCommand[1] !== "test" ||
+          testCommand.length !== executedSuiteFiles.length + 2 ||
+          executedSuiteFiles.some((path, index) => testCommand[index + 2] !== path) ||
+          !/^[a-f0-9]{64}$/.test(String(testRun.outputSha256 ?? ""))
+        ) {
+          errors.push("offline task proof requires executed passing nonempty behavior tests");
+        }
+        const hashes = asObject(receipt.sourceFingerprints);
+        const productionSources = stringArray(receipt.productionSources);
+        if (
+          executedSuiteFiles.some((path) =>
+            !path.startsWith("scripts/devtools/") ||
+            !path.endsWith(".test.ts") ||
+            path.split("/").includes("..") ||
+            !/^[a-f0-9]{64}$/.test(String(hashes[path] ?? "")) ||
+            fileFingerprint(resolve(process.cwd(), path)) !== hashes[path]
+          )
+        ) {
+          errors.push("offline task proof requires exact current fingerprinted owned DevTools test suites");
+        }
+        if (
+          productionSources.some((path) =>
+            !(
+              path.startsWith("src/") ||
+              path.startsWith("scripts/devtools/") ||
+              path.startsWith("crates/sk-protocol/src/") ||
+              path.startsWith("design/mockups/generated/")
+            ) ||
+            path.split("/").includes("..") ||
+            !/^[a-f0-9]{64}$/.test(String(hashes[path] ?? "")) ||
+            fileFingerprint(resolve(process.cwd(), path)) !== hashes[path]
+          ) ||
+          (taskId === "GOV-002" &&
+            (
+              !productionSources.includes(
+                "scripts/devtools/facade-ledger.ts",
+              ) ||
+              !productionSources.includes(
+                "scripts/devtools/facade-migrations.ts",
+              ) ||
+              !productionSources.includes("src/components/conversation_style.rs") ||
+              !productionSources.includes("src/components/inline_popup_window.rs") ||
+              !productionSources.includes(
+                "src/ai/agent_chat/ui/popup_automation.rs",
+              ) ||
+              !suiteFiles.includes("scripts/devtools/facade-ledger.test.ts") ||
+              !suiteFiles.includes(
+                "scripts/devtools/facade-migrations.test.ts",
+              )
+            )) ||
+          (taskId === "GOV-003" && !productionSources.includes("src/theme/alpha.rs")) ||
+          (taskId === "GOV-005" &&
+            !productionSources.includes("design/mockups/generated/tokens.json"))
+        ) {
+          errors.push("offline governance proof requires fingerprints for its actual production owner");
+        }
+        const safety = asObject(receipt.safety);
+        if (safety.noninteractive !== true) {
+          errors.push("offline task proof must enforce noninteractive execution");
+        }
+        for (const field of [
+          "startsApplication",
+          "revealsWindow",
+          "focusesWindow",
+          "drivesNativeInput",
+          "capturesScreen",
+          "accessesNetwork",
+          "usesLiveAi",
+        ]) {
+          if (safety[field] !== false) errors.push(`offline task proof must prohibit ${field}`);
+        }
+        const negatives = Array.isArray(receipt.negativeControls)
+          ? receipt.negativeControls
+          : [];
+        if (
+          negatives.length === 0 ||
+          negatives.some((negative) => asObject(negative).pass !== true)
+        ) {
+          errors.push("offline task proof requires passing deterministic negative controls");
+        }
+        return errors;
+      },
+    }],
+    description:
+      "Fresh, canonical-section-bound offline behavior proof for explicitly safe infrastructure tasks only.",
+  }),
+  schema({
+    primitiveId: "devtools.consistency.family-fixtures",
+    tool: "script-kit-devtools.family-fixtures",
+    commands: ["family-fixtures.verify"],
+    requiredPaths: [
+      "evidenceClass",
+      "provesRuntimeBehavior",
+      "catalogBinding.taskId",
+      "catalogBinding.title",
+      "catalogBinding.sectionSha256",
+      "expectedFamilyCount",
+      "auditedFamilyCount",
+      "expectedCanonicalBindingCount",
+      "auditedCanonicalBindingCount",
+      "expectedAliasBindingCount",
+      "auditedAliasBindingCount",
+      "verifiedRuntimeProofCount",
+      "safety.startsApplication",
+      "safety.revealsWindow",
+      "safety.focusesWindow",
+      "safety.drivesNativeInput",
+      "safety.capturesScreen",
+      "safety.accessesNetwork",
+      "safety.usesLiveAi",
+      "families",
+      "negativeControls",
+    ],
+    identityPolicy: "none",
+    privacyPolicy: "metadata-only",
+    predicates: [{
+      id: "fixture-families-are-exhaustive-safe-and-never-runtime-proof",
+      validate(receipt, disposition) {
+        if (disposition !== "EVALUABLE_PASS") return [];
+        const errors: string[] = [];
+        const families = Array.isArray(receipt.families) ? receipt.families : [];
+        const negatives = Array.isArray(receipt.negativeControls)
+          ? receipt.negativeControls
+          : [];
+        if (
+          receipt.evidenceClass !== "FIXTURE_CONTRACT" ||
+          receipt.provesRuntimeBehavior !== false ||
+          receipt.verifiedRuntimeProofCount !== 0
+        ) {
+          errors.push("fixture contracts cannot claim direct runtime behavior proof");
+        }
+        const catalogBinding = asObject(receipt.catalogBinding);
+        if (
+          catalogBinding.taskId !== "PF-010" ||
+          typeof catalogBinding.title !== "string" ||
+          !/^[a-f0-9]{64}$/.test(String(catalogBinding.sectionSha256 ?? ""))
+        ) {
+          errors.push("fixture contracts must bind to the canonical PF-010 catalog section");
+        }
+        if (
+          receipt.expectedFamilyCount !== 9 ||
+          receipt.auditedFamilyCount !== 9 ||
+          families.length !== 9 ||
+          families.some((family) => asObject(family).pass !== true)
+        ) {
+          errors.push("fixture contracts require all nine validated surface families");
+        }
+        if (
+          receipt.expectedCanonicalBindingCount !== 54 ||
+          receipt.auditedCanonicalBindingCount !== 54 ||
+          receipt.expectedAliasBindingCount !== 5 ||
+          receipt.auditedAliasBindingCount !== 5
+        ) {
+          errors.push("fixture contracts require all 54 canonical and five alias bindings");
+        }
+        const safety = asObject(receipt.safety);
+        for (const field of [
+          "startsApplication",
+          "revealsWindow",
+          "focusesWindow",
+          "drivesNativeInput",
+          "capturesScreen",
+          "accessesNetwork",
+          "usesLiveAi",
+        ]) {
+          if (safety[field] !== false) {
+            errors.push(`fixture contracts must prohibit ${field}`);
+          }
+        }
+        if (
+          negatives.length === 0 ||
+          negatives.some((negative) => asObject(negative).pass !== true)
+        ) {
+          errors.push("fixture contracts require passing deterministic negative controls");
+        }
+        return errors;
+      },
+    }],
+    description:
+      "Verify all nine deterministic family fixtures against canonical bindings without runtime interaction.",
+  }),
   // ── GOV-006 consistency completion auditor (metadata-only; identity none) ──
   schema({
     primitiveId: "devtools.consistency.catalog",
     tool: "script-kit-devtools.consistency",
     commands: ["consistency.catalog"],
     requiredPaths: [
+      "evidenceClass",
+      "provesRuntimeBehavior",
       "catalogPath",
       "catalogTaskCount",
       "expectedProgramTaskCount",
@@ -430,6 +813,12 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
       validate(receipt, disposition) {
         if (disposition !== "EVALUABLE_PASS") return [];
         const errors: string[] = [];
+        if (receipt.evidenceClass !== "STATIC_INVENTORY") {
+          errors.push("catalog evidence must be classified as static inventory");
+        }
+        if (receipt.provesRuntimeBehavior !== false) {
+          errors.push("catalog inventory must never claim runtime behavior proof");
+        }
         if (receipt.catalogTaskCount !== 75) errors.push("catalog pass requires exactly 75 tasks");
         if (receipt.expectedProgramTaskCount !== 75) errors.push("catalog pass requires the 75-ID program set");
         if (receipt.expectedScopeTaskCount !== 28) errors.push("catalog pass requires the 28-ID primary scope set");
@@ -492,7 +881,15 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
     primitiveId: "devtools.consistency.verify-family",
     tool: "script-kit-devtools.consistency",
     commands: ["consistency.verify-family"],
-    requiredPaths: ["familyId", "binding", "memberReceiptCount"],
+    requiredPaths: [
+      "evidenceClass",
+      "familyId",
+      "binding",
+      "memberReceiptCount",
+      "runtimeProofCount",
+      "runtimeProofPaths",
+      "unprovenMemberReceiptPaths",
+    ],
     identityPolicy: "none",
     privacyPolicy: "metadata-only",
     predicates: [{
@@ -500,11 +897,34 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
       validate(receipt, disposition) {
         if (disposition !== "EVALUABLE_PASS") return [];
         const binding = asObject(receipt.binding);
-        return typeof binding.familyId === "string" && binding.familyId === receipt.familyId &&
-            typeof binding.appView === "string" && binding.appView.length > 0 &&
-            typeof binding.host === "string" && binding.host.length > 0
-          ? []
-          : ["family pass requires a declared binding with matching familyId, AppView, and host"];
+        const errors: string[] = [];
+        if (!(
+          typeof binding.familyId === "string" && binding.familyId === receipt.familyId &&
+          typeof binding.appView === "string" && binding.appView.length > 0 &&
+          typeof binding.host === "string" && binding.host.length > 0
+        )) {
+          errors.push(
+            "family pass requires a declared binding with matching familyId, AppView, and host",
+          );
+        }
+        const runtimeProofPaths = Array.isArray(receipt.runtimeProofPaths)
+          ? receipt.runtimeProofPaths
+          : [];
+        const unproven = Array.isArray(receipt.unprovenMemberReceiptPaths)
+          ? receipt.unprovenMemberReceiptPaths
+          : [];
+        if (
+          receipt.evidenceClass !== "DIRECT_RUNTIME_PROOF" ||
+          Number(receipt.memberReceiptCount) < 1 ||
+          receipt.runtimeProofCount !== receipt.memberReceiptCount ||
+          runtimeProofPaths.length !== Number(receipt.runtimeProofCount) ||
+          unproven.length > 0
+        ) {
+          errors.push(
+            "family pass requires a fresh target-matched direct runtime receipt for every member",
+          );
+        }
+        return errors;
       },
     }],
     description: "Verify one deterministic family fixture binding and its member receipts.",
@@ -550,6 +970,9 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
       "blockedTaskIds",
       "invalidTaskIds",
       "failedTaskIds",
+      "proofCoverage.runtimeInteractionRequiredTaskCount",
+      "proofCoverage.runtimeInteractionProvenTaskCount",
+      "proofCoverage.runtimeInteractionBlockedTaskIds",
       "privacyPass",
       "cleanup.closed",
       "protectedHashesPass",
@@ -566,6 +989,15 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
         const errors: string[] = [];
         if (receipt.programTaskCount !== 75 || receipt.passedTaskCount !== 75) {
           errors.push("program pass requires exactly 75 of 75 passing tasks");
+        }
+        const proofCoverage = asObject(receipt.proofCoverage);
+        if (
+          proofCoverage.runtimeInteractionRequiredTaskCount !==
+            proofCoverage.runtimeInteractionProvenTaskCount ||
+          !Array.isArray(proofCoverage.runtimeInteractionBlockedTaskIds) ||
+          proofCoverage.runtimeInteractionBlockedTaskIds.length > 0
+        ) {
+          errors.push("program pass requires direct runtime proof for every interaction task");
         }
         for (const field of ["missingTaskIds", "blockedTaskIds", "invalidTaskIds", "failedTaskIds"]) {
           const value = receipt[field];
@@ -706,11 +1138,187 @@ function transactionIdentityErrors(receipt: JsonObject): string[] {
   if (transaction.surfaceKind == null && transaction.semanticSurface == null) {
     errors.push("missing proof transaction field: surfaceKind|semanticSurface");
   }
+
+  if (
+    transaction.binarySha256 != null &&
+    !/^[a-fA-F0-9]{64}$/.test(String(transaction.binarySha256))
+  ) {
+    errors.push("invalid binary proof transaction fingerprint");
+  }
+  if (
+    transaction.pid != null &&
+    (!Number.isSafeInteger(transaction.pid) || Number(transaction.pid) <= 0)
+  ) {
+    errors.push("invalid proof transaction process identity");
+  }
+  for (const field of [
+    "windowGeneration",
+    "targetGeneration",
+    "surfaceGeneration",
+    "dataGeneration",
+  ]) {
+    if (
+      transaction[field] != null &&
+      (!Number.isSafeInteger(transaction[field]) || Number(transaction[field]) < 0)
+    ) {
+      errors.push(`invalid proof transaction generation: ${field}`);
+    }
+  }
+
+  const explicitRunId =
+    typeof receipt.runId === "string"
+      ? receipt.runId
+      : typeof receipt.session === "string"
+        ? receipt.session
+        : null;
+  if (
+    explicitRunId !== null &&
+    typeof transaction.runId === "string" &&
+    explicitRunId !== transaction.runId
+  ) {
+    errors.push("proof transaction run identity disagrees with receipt run identity");
+  }
+
+  const targetFields = [
+    "automationId",
+    "windowInstanceId",
+    "pid",
+    "windowGeneration",
+    "targetGeneration",
+    "surfaceGeneration",
+    "dataGeneration",
+    "surfaceKind",
+    "semanticSurface",
+    "appViewVariant",
+  ] as const;
+  const candidates: Array<[string, JsonObject]> = [
+    ["target", asObject(receipt.target)],
+    ["resolvedTarget", asObject(receipt.resolvedTarget)],
+    ["targetBefore", asObject(receipt.targetBefore)],
+    ["targetAfter", asObject(receipt.targetAfter)],
+    ["targetIdentity", asObject(receipt.targetIdentity)],
+    [
+      "surfaceContract.targetIdentity",
+      asObject(asObject(receipt.surfaceContract).targetIdentity),
+    ],
+    [
+      "state.targetIdentity",
+      asObject(asObject(receipt.state).targetIdentity),
+    ],
+    [
+      "state.surfaceContract.targetIdentity",
+      asObject(asObject(asObject(receipt.state).surfaceContract).targetIdentity),
+    ],
+    [
+      "target.surfaceContract.targetIdentity",
+      asObject(asObject(asObject(receipt.target).surfaceContract).targetIdentity),
+    ],
+    [
+      "resolvedTarget.surfaceContract.targetIdentity",
+      asObject(asObject(asObject(receipt.resolvedTarget).surfaceContract).targetIdentity),
+    ],
+  ];
+  for (const [location, candidate] of candidates) {
+    if (
+      candidate.windowId != null &&
+      transaction.automationId != null &&
+      candidate.windowId !== transaction.automationId
+    ) {
+      errors.push(
+        `proof transaction identity disagrees with ${location}.windowId`,
+      );
+    }
+    if (
+      candidate.stableTargetId != null &&
+      transaction.automationId != null &&
+      candidate.stableTargetId !== transaction.automationId
+    ) {
+      errors.push(
+        `proof transaction identity disagrees with ${location}.stableTargetId`,
+      );
+    }
+    for (const field of targetFields) {
+      if (
+        candidate[field] != null &&
+        transaction[field] != null &&
+        candidate[field] !== transaction[field]
+      ) {
+        const kind = field.endsWith("Generation") ? "generation" : "identity";
+        errors.push(
+          `proof transaction ${kind} disagrees with ${location}.${field}`,
+        );
+      }
+    }
+  }
+
+  const requestedTarget = asObject(receipt.requestedTarget);
+  const requestedSelector = asObject(requestedTarget.selector);
+  const selector = Object.keys(requestedSelector).length > 0
+    ? requestedSelector
+    : requestedTarget;
+  if (selector.type === "id") {
+    if (typeof selector.id !== "string" || selector.id.length === 0) {
+      errors.push("proof transaction identity disagrees with empty requested target selector id");
+    } else if (
+      transaction.automationId != null &&
+      selector.id !== transaction.automationId
+    ) {
+      errors.push("proof transaction identity disagrees with requestedTarget.selector.id");
+    }
+  } else if (
+    selector.type === "main" &&
+    transaction.automationId != null &&
+    transaction.automationId !== "main"
+  ) {
+    errors.push("proof transaction identity disagrees with requested main target");
+  }
+  if (
+    process.env.SCRIPT_KIT_NONINTERACTIVE === "1" &&
+    selector.type === "focused"
+  ) {
+    errors.push("proof transaction identity disagrees with noninteractive focused target policy");
+  }
+  for (const field of ["id", "windowId", "automationId"] as const) {
+    if (
+      requestedTarget[field] != null &&
+      transaction.automationId != null &&
+      requestedTarget[field] !== transaction.automationId
+    ) {
+      errors.push(
+        `proof transaction identity disagrees with requestedTarget.${field}`,
+      );
+    }
+  }
+
+  const binary = asObject(receipt.binary);
+  const reportedBinarySha = binary.sha256 ?? binary.binarySha256;
+  if (
+    reportedBinarySha != null &&
+    transaction.binarySha256 != null &&
+    reportedBinarySha !== transaction.binarySha256
+  ) {
+    errors.push("invalid binary: receipt fingerprint disagrees with proof transaction");
+  }
   return errors;
 }
 
 function invalidDispositionFor(errors: string[]): ReceiptDisposition {
-  if (errors.some((error) => error.includes("duplicate semantic IDs"))) return "INVALID_IDENTITY";
+  if (errors.some((error) => error.includes("invalid binary"))) {
+    return "INVALID_BINARY";
+  }
+  if (errors.some((error) => error.includes("generation"))) {
+    return "INVALID_GENERATION";
+  }
+  if (
+    errors.some(
+      (error) =>
+        error.includes("duplicate semantic IDs") ||
+        error.includes("identity disagrees") ||
+        error.includes("process identity"),
+    )
+  ) {
+    return "INVALID_IDENTITY";
+  }
   return "INVALID_SCHEMA";
 }
 
@@ -743,6 +1351,8 @@ export function validateReceipt(
     errors.push(`command must be one of ${definition.commands.join(", ")}`);
   }
   if (typeof receipt.classification !== "string") errors.push("classification is required");
+  const evidenceObservation = classifyReceiptEvidence(receipt);
+  errors.push(...evidenceObservation.errors);
   const requestedDisposition = dispositionForClassification(receipt.classification);
   if (!definition.allowedDispositions.includes(requestedDisposition)) {
     errors.push(`disposition ${requestedDisposition} is not allowed`);
@@ -812,6 +1422,7 @@ function gitCommit(): string | null {
 const producerFileByTool: Record<string, string> = {
   "script-kit-devtools.targets": "targets.ts",
   "script-kit-devtools.surface": "surface.ts",
+  "script-kit-devtools.surfaces": "surfaces.ts",
   "script-kit-devtools.elements": "elements.ts",
   "script-kit-devtools.layout": "layout.ts",
   "script-kit-devtools.scroll": "scroll.ts",
@@ -825,6 +1436,8 @@ const producerFileByTool: Record<string, string> = {
   "script-kit-devtools.dictation": "dictation.ts",
   "script-kit-devtools.inspect": "inspect.ts",
   "script-kit-devtools.consistency": "consistency.ts",
+  "script-kit-devtools.family-fixtures": "family-fixtures.ts",
+  "script-kit-devtools.safe-task-proofs": "safe-task-proofs.ts",
   "script-kit-devtools.glass-observers": "glass-observers.ts",
 };
 
@@ -840,11 +1453,33 @@ function fileFingerprint(path: string): string | null {
   }
 }
 
+const sharedReceiptPolicyOwners = [
+  "receipt-schema.ts",
+  "privacy.ts",
+  "evidence-class.ts",
+  "task-proof-policy.ts",
+] as const;
+let cachedReceiptPolicyFingerprint: string | null = null;
+
+function receiptPolicySourceFingerprint(): string {
+  if (cachedReceiptPolicyFingerprint !== null) {
+    return cachedReceiptPolicyFingerprint;
+  }
+  cachedReceiptPolicyFingerprint = sha256(
+    sharedReceiptPolicyOwners
+      .map((filename) => {
+        const fingerprint = fileFingerprint(resolve(import.meta.dir, filename));
+        return `${filename}:${fingerprint ?? "missing"}`;
+      })
+      .join(":"),
+  );
+  return cachedReceiptPolicyFingerprint;
+}
+
 function producerSourceFingerprint(tool: unknown): string {
   const filename = producerFileByTool[String(tool ?? "")];
   const producerPath = filename ? resolve(import.meta.dir, "..", filename) : null;
-  const schemaPath = resolve(import.meta.dir, "receipt-schema.ts");
-  const fingerprints = [fileFingerprint(schemaPath), producerPath ? fileFingerprint(producerPath) : null]
+  const fingerprints = [receiptPolicySourceFingerprint(), producerPath ? fileFingerprint(producerPath) : null]
     .filter((value): value is string => Boolean(value));
   return sha256(fingerprints.join(":"));
 }
@@ -963,11 +1598,14 @@ function buildEnvelope(
   const definition = receiptSchema(primitiveId)!;
   const startedAt = typeof sanitized.startedAt === "string" ? sanitized.startedAt : new Date().toISOString();
   const endedAt = typeof sanitized.endedAt === "string" ? sanitized.endedAt : new Date().toISOString();
+  const transaction = asObject(sanitized.transaction);
   const runId = typeof sanitized.runId === "string"
     ? sanitized.runId
     : typeof sanitized.session === "string"
       ? sanitized.session
-      : `process-${process.pid}`;
+      : typeof transaction.runId === "string"
+        ? transaction.runId
+        : `process-${process.pid}`;
   const taskIds = stringArray(sanitized.taskIds).length > 0
     ? stringArray(sanitized.taskIds)
     : (process.env.SCRIPT_KIT_RECEIPT_TASK_IDS ?? "")
@@ -983,11 +1621,18 @@ function buildEnvelope(
   const receiptId = typeof sanitized.receiptId === "string"
     ? sanitized.receiptId
     : `${primitiveId}:${sha256(`${runId}:${startedAt}:${sanitized.command}`).slice(0, 20)}`;
+  const evidenceObservation = classifyReceiptEvidence(sanitized);
 
   return {
     ...sanitized,
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     primitiveId,
+    evidenceClass: evidenceObservation.evidenceClass,
+    evidenceObservation: {
+      observedWindowVisible: evidenceObservation.observedWindowVisible,
+      visibilitySources: evidenceObservation.visibilitySources,
+      errors: evidenceObservation.errors,
+    },
     receiptId,
     runId,
     taskIds,
@@ -1198,17 +1843,15 @@ export function validateReceiptFile(primitiveId: string, path: string) {
 }
 
 /// Stable identity for the receipt registry itself: version plus a
-/// fingerprint over this schema file's exact bytes. Any schema, predicate,
-/// or mapping change (including additive sibling reconciliation) changes the
-/// fingerprint, so downstream auditors detect stale-by-identity receipts
-/// without trusting timestamps.
+/// fingerprint over the schema and its actual shared privacy/evidence/policy
+/// owners. Any schema, redaction, classification, or proof-policy change
+/// invalidates stale receipts without trusting timestamps or producer claims.
 export function receiptRegistryIdentity(): {
   schemaVersion: number;
   registryVersion: number;
   registryFingerprint: string;
 } {
-  const schemaPath = resolve(import.meta.dir, "receipt-schema.ts");
-  const fingerprint = fileFingerprint(schemaPath) ?? "missing-receipt-schema-source";
+  const fingerprint = receiptPolicySourceFingerprint();
   return {
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     registryVersion: RECEIPT_REGISTRY_VERSION,
@@ -1217,8 +1860,9 @@ export function receiptRegistryIdentity(): {
 }
 
 /// Producer identity for one tool name: the resolved producer source path
-/// (null when the tool is unknown) and the same schema+producer fingerprint
-/// the receipt envelope records, so auditors never duplicate hashing rules.
+/// (null when the tool is unknown) and the same shared-policy/producer
+/// fingerprint the receipt envelope records, so auditors never duplicate
+/// hashing rules or omit privacy policy from source provenance.
 export function producerIdentityForTool(tool: string): {
   producerPath: string | null;
   fingerprint: string;

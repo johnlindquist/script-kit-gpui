@@ -118,6 +118,50 @@ describe("finishReceipt", () => {
     expect(receipt.binary === null || typeof receipt.binary === "object").toBe(true);
     expect(receipt.classification).toBe("ok");
     expect(receipt.custom).toBe(42);
+    expect(receipt.evidenceClass).toBe("UNCLASSIFIED");
+  });
+
+  test("derives hidden versus visible runtime evidence from observed target visibility", () => {
+    const meta = {
+      tool: "script-kit-devtools.test",
+      command: "test.run",
+      session: "unit-test-session",
+      clock: startClock(),
+    };
+    const hidden = finishReceipt(meta, {
+      transaction: { transactionId: "proof:hidden" },
+      target: { visible: false },
+    });
+    expect(hidden.evidenceClass).toBe("RUNTIME_HIDDEN");
+    expect(hidden.evidenceObservation).toEqual({
+      observedWindowVisible: false,
+      visibilitySources: ["target.visible"],
+      errors: [],
+    });
+
+    const visible = finishReceipt(meta, {
+      transaction: { transactionId: "proof:visible" },
+      resolvedTarget: { visible: true },
+    });
+    expect(visible.evidenceClass).toBe("RUNTIME_VISIBLE");
+
+    const unobserved = finishReceipt(meta, {
+      transaction: { transactionId: "proof:unobserved" },
+    });
+    expect(unobserved.evidenceClass).toBe("RUNTIME_VISIBILITY_UNVERIFIED");
+  });
+
+  test("an unscoped live target inventory is never advertised as static or direct proof", () => {
+    const receipt = finishReceipt(
+      {
+        tool: "script-kit-devtools.targets",
+        command: "targets.list",
+        session: "unit-test-session",
+        clock: startClock(),
+      },
+      { targetCount: 1, targets: [{ automationId: "main", visible: false }] },
+    );
+    expect(receipt.evidenceClass).toBe("RUNTIME_UNSCOPED");
   });
 });
 

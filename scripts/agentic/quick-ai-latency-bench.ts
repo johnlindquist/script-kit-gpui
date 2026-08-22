@@ -34,6 +34,7 @@
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { assertPerformanceContract } from "../devtools/lib/performance-contract.ts";
 
 export const ROOT = resolve(import.meta.dir, "../..");
 
@@ -808,16 +809,44 @@ type Cli = {
   out: string | null;
   label: string;
   printCommand: boolean;
+  describeContract: boolean;
+  help: boolean;
 };
 
 export function parseCli(args: string[]): Cli {
+  const valueFlags = new Set([
+    "--mode",
+    "--reps",
+    "--max-attempts",
+    "--seed",
+    "--baseline-ref",
+    "--candidate-ref",
+    "--out",
+    "--label",
+  ]);
+  const switches = new Set([
+    "--print-command",
+    "--describe-contract",
+    "--help",
+    "-h",
+  ]);
+  for (let index = 0; index < args.length; index += 1) {
+    const flag = args[index]!;
+    if (switches.has(flag)) continue;
+    if (!valueFlags.has(flag)) throw new Error(`unknown option ${flag}`);
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("-")) {
+      throw new Error(`option ${flag} requires a value`);
+    }
+    index += 1;
+  }
   const arg = (f: string): string | null => {
     const i = args.indexOf(f);
     return i >= 0 ? (args[i + 1] ?? null) : null;
   };
   const mode = (arg("--mode") ?? "single") as Cli["mode"];
   if (!["single", "paired", "aa"].includes(mode)) throw new Error(`unknown --mode ${mode}`);
-  return {
+  const cli: Cli = {
     mode,
     reps: Number(arg("--reps") ?? (mode === "single" ? "6" : "15")),
     maxAttempts: Number(arg("--max-attempts") ?? "24"),
@@ -827,7 +856,42 @@ export function parseCli(args: string[]): Cli {
     out: arg("--out"),
     label: arg("--label") ?? "before",
     printCommand: args.includes("--print-command"),
+    describeContract: args.includes("--describe-contract"),
+    help: args.includes("--help") || args.includes("-h"),
   };
+  if (!Number.isSafeInteger(cli.reps) || cli.reps < 1) {
+    throw new Error("--reps must be a positive integer");
+  }
+  if (!Number.isSafeInteger(cli.maxAttempts) || cli.maxAttempts < 1) {
+    throw new Error("--max-attempts must be a positive integer");
+  }
+  if (!Number.isSafeInteger(cli.seed) || cli.seed < 0) {
+    throw new Error("--seed must be a nonnegative integer");
+  }
+  return cli;
+}
+
+function usage(): string {
+  return `Usage: bun scripts/agentic/quick-ai-latency-bench.ts [options]
+
+Safe inspection:
+  --help, -h              Print this help without contacting a provider
+  --describe-contract     Print static measurement and operator-safety metadata
+  --print-command         Inspect the source-derived provider command without running it
+
+Live benchmark, only when explicitly approved:
+  --mode <single|paired|aa>
+  --reps <count>
+  --max-attempts <count>
+  --seed <number>
+  --baseline-ref <git-ref>
+  --candidate-ref <git-ref|WORKTREE>
+  --out <receipt-path>
+  --label <label>
+
+Live calls require SCRIPT_KIT_ALLOW_LIVE_AI=1.
+SCRIPT_KIT_NONINTERACTIVE=1 always refuses provider execution, even with an opt-in.
+This benchmark measures provider NDJSON phases, not screen paint.`;
 }
 
 export function refToSource(ref: string | null): SourceRef {
@@ -846,7 +910,43 @@ const liveDeps: MeasureDeps = {
 async function main(): Promise<void> {
   const cli = parseCli(process.argv.slice(2));
   const scratchRoot = "/tmp/quick-ai-latency-bench";
-  mkdirSync(scratchRoot, { recursive: true });
+
+  if (cli.help) {
+    console.log(usage());
+    return;
+  }
+
+  if (cli.describeContract) {
+    const contract = {
+          schemaVersion: 1,
+          tool: "quick-ai-latency-benchmark",
+          evidenceClass: "STATIC_INVENTORY",
+          runtimeEvidenceClass: "LIVE_AI",
+          metricKind: "quick_ai_provider_event_phases",
+          observationClass: "PROVIDER_EVENT_STREAM",
+          observationPoints: [
+            "provider_process_spawn",
+            "first_provider_event",
+            "web_search_started",
+            "web_search_completed",
+            "agent_message_completed",
+          ],
+          measuresPaint: false,
+          queryClassCount: QUERIES.length,
+          defaultRepetitions: 6,
+          safety: {
+            startsProviderProcess: false,
+            makesNetworkRequest: false,
+            revealsWindow: false,
+            capturesScreen: false,
+            liveExecutionRequires: "SCRIPT_KIT_ALLOW_LIVE_AI=1",
+            noninteractiveExecutionAlwaysRefused: true,
+          },
+        };
+    assertPerformanceContract(contract);
+    console.log(JSON.stringify(contract, null, 2));
+    return;
+  }
 
   if (cli.printCommand) {
     const contract = loadContract(refToSource(cli.candidateRef));
@@ -870,6 +970,20 @@ async function main(): Promise<void> {
     );
     return;
   }
+
+  if (process.env.SCRIPT_KIT_NONINTERACTIVE === "1") {
+    throw new Error(
+      "SCRIPT_KIT_NONINTERACTIVE=1 categorically refuses live Quick AI provider calls",
+    );
+  }
+  if (process.env.SCRIPT_KIT_ALLOW_LIVE_AI !== "1") {
+    throw new Error(
+      "live Quick AI benchmark refused before provider startup; set " +
+        "SCRIPT_KIT_ALLOW_LIVE_AI=1 only for an explicitly approved paid/network run",
+    );
+  }
+
+  mkdirSync(scratchRoot, { recursive: true });
 
   const baselineSource = refToSource(cli.mode === "single" ? cli.candidateRef : cli.baselineRef);
   const candidateSource = refToSource(cli.candidateRef);
@@ -949,6 +1063,11 @@ async function main(): Promise<void> {
 
   const receipt = {
     schemaVersion: 2,
+    evidenceClass: "LIVE_AI",
+    metricKind: "quick_ai_provider_event_phases",
+    observationClass: "PROVIDER_EVENT_STREAM",
+    observationPoint: "provider.ndjson.item.lifecycle",
+    measuresPaint: false,
     mode: cli.mode,
     label: cli.label,
     seed: cli.seed,
@@ -960,6 +1079,7 @@ async function main(): Promise<void> {
     perQuery,
     attempts,
   };
+  assertPerformanceContract(receipt);
 
   if (cli.out) {
     mkdirSync(dirname(cli.out), { recursive: true });

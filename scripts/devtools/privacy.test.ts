@@ -71,6 +71,47 @@ describe("recursive receipt privacy", () => {
     expect(result.redactedCount).toBe(1);
   });
 
+  test("undeclared credential fields and bare provider tokens never escape receipt redaction", () => {
+    const privateValues = [
+      "sk-proj-private-provider-secret",
+      "unregistered-private-password",
+      "unregistered-private-passphrase",
+      "unregistered-private-cookie",
+      "Bearer unregistered-private-bearer",
+      "-----BEGIN PRIVATE KEY-----\nprivate-key-material\n-----END PRIVATE KEY-----",
+      "gsk_unregistered_private_provider_token",
+    ];
+    const result = sanitizeReceipt({
+      nested: {
+        apiKey: privateValues[0],
+        password: privateValues[1],
+        passphrase: privateValues[2],
+        cookie: privateValues[3],
+        authorizationHeader: privateValues[4],
+        privateKey: privateValues[5],
+        unrelatedField: privateValues[6],
+      },
+    });
+
+    const serialized = JSON.stringify(result.sanitized);
+    for (const privateValue of privateValues) {
+      expect(serialized).not.toContain(privateValue);
+    }
+    expect(result.redactedCount).toBe(privateValues.length);
+    expect(result.unclassifiedSensitivePaths).toContain("nested.apiKey");
+    expect(result.unclassifiedSensitivePaths).toContain("nested.password");
+    expect(result.unclassifiedSensitivePaths).toContain("nested.unrelatedField");
+  });
+
+  test("known product crate paths never masquerade as provider credentials", () => {
+    const path = "crates/sk-protocol/src/command_contract.rs";
+    const result = sanitizeReceipt({ productionSources: [path] });
+
+    expect(result.sanitized).toEqual({ productionSources: [path] });
+    expect(result.redactedCount).toBe(0);
+    expect(result.unclassifiedSensitivePaths).toEqual([]);
+  });
+
   test("fixture cleartext fails closed unless every sandbox gate is explicit", () => {
     const denied = sanitizeReceipt(
       { note: userContent(canaries.note) },
@@ -87,6 +128,34 @@ describe("recursive receipt privacy", () => {
     expect(denied.rawContentReturned).toBe(false);
     expect(denied.unclassifiedSensitivePaths).toContain("$privacy.fixtureCleartextPolicy");
     expect(JSON.stringify(denied.sanitized)).not.toContain(canaries.note);
+  });
+
+  test("authorized synthetic cleartext can never include actual credential bytes", () => {
+    const password = "private-fixture-password";
+    const providerKey = "sk-proj-private-fixture-provider-key";
+    const result = sanitizeReceipt(
+      {
+        note: userContent("approved synthetic fixture text"),
+        credential: secret(password),
+        nested: { apiKey: providerKey },
+      },
+      {
+        mode: "fixture-cleartext",
+        fixtureId: "privacy-fixture-v1",
+        sandboxHome: true,
+        fixtureAllowsCleartext: true,
+        callerAllowsCleartext: true,
+        nativeDataInvolved: false,
+      },
+    );
+
+    const serialized = JSON.stringify(result.sanitized);
+    expect(result.mode).toBe("fixture-cleartext");
+    expect(serialized).toContain("approved synthetic fixture text");
+    expect(serialized).not.toContain(password);
+    expect(serialized).not.toContain(providerKey);
+    expect(result.redactedCount).toBe(2);
+    expect(result.rawContentReturned).toBe(true);
   });
 
   test("cleartext canary assertion fails after downstream mutation", () => {

@@ -11,6 +11,7 @@ import {
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { assertPerformanceContract } from "../devtools/lib/performance-contract.ts";
 import {
   buildArtifactLifecycle,
   claimOutput,
@@ -83,6 +84,8 @@ const forceBrowserTabFailure = process.argv.includes(
   "--force-browser-tabs-failure",
 );
 const inputMode = argValue("--input-mode", "setFilter");
+const ratifiedBudgetId = argValue("--ratified-budget-id", "");
+const visibleProbeOptIn = process.env.SCRIPT_KIT_ALLOW_VISIBLE_PROBES === "1";
 const metricKind =
   inputMode === "printable-key"
     ? "protocol_simulated_gpui_key_to_state_echo"
@@ -118,15 +121,59 @@ Options:
   --poll <ms>                            State polling interval (default: 4)
   --legacy-polling                       Report legacy client polling; never enforce its echo budget
   --hidden-dry-run                       Verify startup/protocol wiring, then stop before showing/focusing
+  --describe-contract                    Print safe static metric/safety metadata without starting the app
   --state-probe-every <count>            Probe detailed state every N keys (default: 1)
   --scenarios <csv>                      Comma-separated queries
-  --enforce                              Exit non-zero when diagnostic thresholds fail
+  --enforce                              Enforce only an explicitly ratified state-echo budget
+  --ratified-budget-id <id>              Product-owner approval reference required by --enforce
   --no-trace                             Disable internal performance logs
   --passive-refresh-overlap              Delay the browser-tab fixture refresh
   --force-browser-tabs-failure           Force the browser-tab fixture to fail
 
+Safety: visible/focused runs require SCRIPT_KIT_ALLOW_VISIBLE_PROBES=1.
 This benchmark observes inputValue through event-driven waitFor by default. It does not measure paint.`);
   process.exit(0);
+}
+if (process.argv.includes("--describe-contract")) {
+  const contract = {
+    schemaVersion: 1,
+    tool: "root-typing-lag-benchmark",
+    evidenceClass: "STATIC_INVENTORY",
+    runtimeEvidenceClass: "RUNTIME_VISIBLE",
+    metricKind,
+    observationPoint,
+    observationMode,
+    observationClass: "STATE_ECHO",
+    measuresPaint: false,
+    proposedBudget: {
+      p50Ms: 25,
+      p95Ms: 50,
+      maxMs: 150,
+      ratificationStatus: "USER_RATIFICATION_PENDING",
+    },
+    safety: {
+      startsApplication: false,
+      revealsWindow: false,
+      drivesNativeInput: false,
+      visibleRuntimeRequires: "SCRIPT_KIT_ALLOW_VISIBLE_PROBES=1",
+      budgetEnforcementRequires: "--ratified-budget-id <product-owner-approval>",
+    },
+  };
+  assertPerformanceContract(contract);
+  console.log(JSON.stringify(contract, null, 2));
+  process.exit(0);
+}
+if (process.env.SCRIPT_KIT_NONINTERACTIVE === "1") {
+  throw new Error(
+    "SCRIPT_KIT_NONINTERACTIVE=1 categorically refuses the root typing benchmark " +
+      "before app/session launch; use only --help or --describe-contract",
+  );
+}
+if (!hiddenDryRun && !visibleProbeOptIn) {
+  throw new Error(
+    "visible root typing benchmark refused before app launch; " +
+      "set SCRIPT_KIT_ALLOW_VISIBLE_PROBES=1 only for an explicitly approved isolated run",
+  );
 }
 if (!["setFilter", "printable-key"].includes(inputMode)) {
   throw new Error(`unknown --input-mode '${inputMode}'`);
@@ -182,6 +229,31 @@ if (enforce && hiddenDryRun) {
     "--hidden-dry-run is diagnostic and cannot be combined with --enforce",
   );
 }
+if (enforce && ratifiedBudgetId.trim().length === 0) {
+  throw new Error(
+    "root typing state-echo budget is USER_RATIFICATION_PENDING; " +
+      "--enforce requires --ratified-budget-id with an explicitly approved product-owner reference",
+  );
+}
+assertPerformanceContract(
+  {
+    metricKind,
+    observationPoint,
+    observationClass: "STATE_ECHO",
+    measuresPaint,
+    runtimeEvidenceClass: "RUNTIME_VISIBLE",
+    proposedBudget: {
+      p50Ms: 25,
+      p95Ms: 50,
+      maxMs: 150,
+      ratificationStatus: ratifiedBudgetId
+        ? "USER_DECLARED_RATIFIED"
+        : "USER_RATIFICATION_PENDING",
+      approvalId: ratifiedBudgetId || null,
+    },
+  },
+  { enforce, sampleCount: samples },
+);
 
 let sessionStatus: Json | null = null;
 let mainFocusPoint: { x: number; y: number } | null = null;
@@ -1159,7 +1231,14 @@ async function runBenchmark() {
     metricKind,
     observationPoint,
     observationMode,
+    observationClass: "STATE_ECHO",
     measuresPaint,
+    budgetRatification: {
+      status: ratifiedBudgetId
+        ? "USER_DECLARED_RATIFIED"
+        : "USER_RATIFICATION_PENDING",
+      approvalId: ratifiedBudgetId || null,
+    },
     traceEnabled,
     passiveRefreshOverlap,
     forceBrowserTabFailure,
@@ -1230,7 +1309,13 @@ function evaluateFinalizedBehavior(
     inputEchoP50Ms: 25,
     inputEchoP95Ms: 50,
     inputEchoMaxMs: 150,
-    inputEchoEnforced: !legacyPolling,
+    inputEchoEnforced: enforce && !legacyPolling,
+    observationClass: "STATE_ECHO",
+    measuresPaint: false,
+    ratificationStatus: ratifiedBudgetId
+      ? "USER_DECLARED_RATIFIED"
+      : "USER_RATIFICATION_PENDING",
+    ratificationReference: ratifiedBudgetId || null,
     cadenceOverrunMaxMs: 75,
     groupDoneP95Ms: 35,
     searchTotalP95Ms: 15,
@@ -1354,7 +1439,14 @@ async function main() {
     metricKind,
     observationPoint,
     observationMode,
+    observationClass: "STATE_ECHO",
     measuresPaint,
+    budgetRatification: {
+      status: ratifiedBudgetId
+        ? "USER_DECLARED_RATIFIED"
+        : "USER_RATIFICATION_PENDING",
+      approvalId: ratifiedBudgetId || null,
+    },
     traceEnabled,
     passiveRefreshOverlap,
     forceBrowserTabFailure,

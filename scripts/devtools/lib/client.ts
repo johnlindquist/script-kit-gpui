@@ -12,6 +12,11 @@
 import { createHash } from "node:crypto";
 import { statSync, readFileSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
+import {
+  assertNoninteractiveProtocolCommand,
+  assertNoninteractiveSessionCommand,
+} from "./operator-safety.ts";
+import { classifyReceiptEvidence } from "./evidence-class.ts";
 import { classifyTransportError } from "./transport-errors.ts";
 
 export type JsonObject = Record<string, unknown>;
@@ -84,6 +89,7 @@ export function triggerActionCommand(actionId: string, host?: string): JsonObjec
  * classify dead-session states precisely.
  */
 export async function run(command: string[], label: string): Promise<JsonObject> {
+  assertNoninteractiveSessionCommand(command);
   const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -122,6 +128,7 @@ export async function rpc(
   expect: string,
   timeoutMs: number,
 ): Promise<JsonObject> {
+  assertNoninteractiveProtocolCommand(payload);
   return run(
     [
       "bash",
@@ -313,6 +320,7 @@ export function finishReceipt(
   body: JsonObject,
 ): JsonObject {
   const endedAt = new Date().toISOString();
+  const evidence = classifyReceiptEvidence(body);
   return {
     schemaVersion: 2,
     tool: meta.tool,
@@ -323,6 +331,12 @@ export function finishReceipt(
     durationMs: Math.round(performance.now() - meta.clock.t0),
     binary: binaryFingerprint(meta.session),
     ...body,
+    evidenceClass: evidence.evidenceClass,
+    evidenceObservation: {
+      observedWindowVisible: evidence.observedWindowVisible,
+      visibilitySources: evidence.visibilitySources,
+      errors: evidence.errors,
+    },
   };
 }
 

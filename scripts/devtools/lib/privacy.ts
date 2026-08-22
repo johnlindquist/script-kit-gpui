@@ -184,7 +184,13 @@ const userContentKeys = new Set([
   "selectionText",
 ]);
 
+const secretKeyPattern =
+  /(?:api[_-]?key|(?:access|refresh|bearer|auth|id|session)?[_-]?token|secret|password|passwd|passphrase|credential|authorization|cookie|private[_-]?key)(?:value|text|content|data|header)?$/i;
+const secretValuePattern =
+  /(?:\bbearer\s+[a-z0-9._~-]{8,}\b|\b(?:sk-(?:proj-[a-z0-9_-]{8,}|ant-api\d{2}-[a-z0-9_-]{8,}|[a-z0-9_-]{20,})|gsk_[a-z0-9_-]{8,}|gh[pousr]_[a-z0-9_]{8,}|github_pat_[a-z0-9_]{8,}|xox[baprs]-[a-z0-9-]{8,}|AIza[a-z0-9_-]{20,})\b|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)/i;
+
 function inferredKindForKey(key: string): ReceiptContentKind | null {
+  if (secretKeyPattern.test(key)) return "Secret";
   if (
     diagnosticKeys.has(key)
     || /^(?:raw|diagnostic)/i.test(key)
@@ -255,7 +261,7 @@ export function sanitizeReceipt(
         return sanitize(current.value, path, "ProductStatic");
       }
       if (typeof current.value === "string") {
-        if (context.cleartextAllowed) {
+        if (context.cleartextAllowed && current.kind !== "Secret") {
           rawContentReturned = true;
           return current.value;
         }
@@ -269,12 +275,13 @@ export function sanitizeReceipt(
     if (typeof current === "string") {
       const canary = canaries.find((candidate) => current.includes(candidate));
       const secretValue = secrets.find((candidate) => current.includes(candidate));
+      const looksLikeCredential = secretValuePattern.test(current);
       if (canary) canariesRedacted += 1;
       const key = path[path.length - 1] ?? "";
       const inferredFromKey = inferredKindForKey(key);
       const inferredKind = inheritedKind && inheritedKind !== "ProductStatic"
         ? inheritedKind
-        : inferredFromKey ?? (secretValue
+        : inferredFromKey ?? (secretValue || looksLikeCredential
           ? "Secret"
           : looksLikeAbsolutePath(current) && /(?:path|uri|file|cwd|home)/i.test(key)
             ? "FilePath"
@@ -282,12 +289,12 @@ export function sanitizeReceipt(
               ? "UserContent"
               : null);
       if (inferredKind) {
-        if (context.cleartextAllowed) {
+        if (context.cleartextAllowed && inferredKind !== "Secret") {
           rawContentReturned = true;
           return current;
         }
         redactedCount += 1;
-        if (!inheritedKind && inferredFromKey) {
+        if (!inheritedKind && (inferredFromKey || looksLikeCredential)) {
           unclassifiedSensitivePaths.add(path.join("."));
         }
         return textDescriptor(inferredKind, current, context.key);

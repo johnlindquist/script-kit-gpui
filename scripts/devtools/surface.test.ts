@@ -13,6 +13,10 @@ test("generated surface inventory includes every AI recovery host", () => {
   expect(result.exitCode).toBe(0);
   const report = JSON.parse(result.stdout.toString());
   expect(report.evidenceStatus).toBe("SOURCE-CONFIRMED");
+  expect(report.evidenceClass).toBe("STATIC_INVENTORY");
+  expect(report.runtimeCoverage.directRuntimeMappingCount).toBe(0);
+  expect(report.runtimeCoverage.totalMappingCount).toBe(54);
+  expect(report.runtimeCoverage.disposition).toBe("BLOCKED_MISSING_PRIMITIVE");
   expect(report.inventoryNamespaces).toEqual({
     contractKindCount: 37,
     contractMappingCount: 54,
@@ -49,6 +53,16 @@ test("coverage reports runtime profiles as a separate inventory namespace", () =
   expect(result.exitCode).toBe(0);
   const report = JSON.parse(result.stdout.toString());
   expect(report.evidenceStatus).toBe("SOURCE-CONFIRMED");
+  expect(report.evidenceClass).toBe("STATIC_INVENTORY");
+  expect(report.runtimeProof).toEqual({
+    disposition: "NOT_EVALUATED",
+    provenSurfaceCount: 0,
+    note: "A Direct profile binding and a valid source-owner inventory do not prove runtime behavior.",
+  });
+  expect(report.registryValidation).toEqual({
+    errors: [],
+    validatesSourceOwners: true,
+  });
   expect(report.inventoryNamespaces).toEqual({
     runtimeCoverageProfileCount: 11,
     selectedRuntimeCoverageProfileCount: 11,

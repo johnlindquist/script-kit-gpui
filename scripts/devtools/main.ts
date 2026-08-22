@@ -1,5 +1,10 @@
 #!/usr/bin/env bun
 
+import {
+  assertNoninteractiveProtocolCommand,
+  assertNoninteractiveSessionCommand,
+} from "./lib/operator-safety.ts";
+
 type JsonObject = Record<string, unknown>;
 
 type Args = {
@@ -66,6 +71,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 async function run(command: string[], label: string): Promise<JsonObject> {
+  assertNoninteractiveSessionCommand(command);
   const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -87,6 +93,7 @@ function requestId(prefix: string) {
 }
 
 async function rpc(session: string, payload: JsonObject, expect: string, timeoutMs: number) {
+  assertNoninteractiveProtocolCommand(payload);
   return run(["bash", "scripts/agentic/session.sh", "rpc", session, JSON.stringify(payload), "--expect", expect, "--timeout", String(timeoutMs)], String(payload.type ?? "rpc"));
 }
 

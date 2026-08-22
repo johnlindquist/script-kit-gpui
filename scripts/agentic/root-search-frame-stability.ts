@@ -4,6 +4,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
 import { Driver } from "../devtools/driver";
+import { assertNoninteractiveProtocolCommand } from "../devtools/lib/operator-safety.ts";
+import { assertPerformanceContract } from "../devtools/lib/performance-contract.ts";
 import {
   buildArtifactLifecycle,
   claimOutput,
@@ -38,13 +40,65 @@ Options:
   --timeout <ms>              Protocol timeout (default: 10000)
   --poll <ms>                 Sample interval (default: 25)
   --inject-forbidden-shift    Deterministically fail the frame-identity gate
-  -h, --help                  Show this help`;
+  --describe-contract         Print static hidden-runtime safety/metric metadata
+  -h, --help                  Show this help
+
+Runtime app launch requires CI=true, SCRIPT_KIT_NONINTERACTIVE=1, and
+SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=1. Static inspection never starts the app.`;
 }
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log(usage());
   process.exit(0);
 }
+if (process.argv.includes("--describe-contract")) {
+  const contract = {
+    schemaVersion: 1,
+    tool: "root-search-frame-stability",
+    evidenceClass: "STATIC_INVENTORY",
+    runtimeEvidenceClass: "RUNTIME_HIDDEN",
+    metricKind: "semantic_frame_identity",
+    observationClass: "SEMANTIC_FRAME",
+    observationPoint: "stateResult.mainWindowPreflight.semanticFingerprint",
+    measuresPaint: false,
+    safety: {
+      startsApplication: false,
+      runtimeStartsApplication: true,
+      runtimeRequiresSandboxHome: true,
+      runtimeRequiresHiddenWindow: true,
+      runtimeRequiresNoninteractive: true,
+      runtimeRequiresCiEnvironment: true,
+      runtimeRequiresIsolatedAppLaunchOptIn:
+        "SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=1",
+      revealsWindow: false,
+      focusesWindow: false,
+      drivesNativeInput: false,
+      capturesScreen: false,
+    },
+  };
+  assertPerformanceContract(contract);
+  console.log(JSON.stringify(contract, null, 2));
+  process.exit(0);
+}
+if (process.env.SCRIPT_KIT_NONINTERACTIVE !== "1") {
+  throw new Error(
+    "hidden root frame benchmark refused before app launch; " +
+      "SCRIPT_KIT_NONINTERACTIVE=1 is required for the capture-free sandbox",
+  );
+}
+if (process.env.SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH !== "1") {
+  throw new Error(
+    "hidden root frame benchmark refused before app launch; " +
+      "SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=1 is required for an explicitly approved isolated CI run",
+  );
+}
+if (process.env.CI !== "true") {
+  throw new Error(
+    "hidden root frame benchmark refused before app launch; " +
+      "CI=true is required and operator-local app launches are forbidden",
+  );
+}
+assertNoninteractiveProtocolCommand({ type: "getState", target: { type: "main" } });
 
 const binaryArg = argValue("--binary");
 const receiptArg = argValue("--receipt");
@@ -68,6 +122,7 @@ const timeoutMs = Number(argValue("--timeout") ?? "10000");
 const pollMs = Number(argValue("--poll") ?? "25");
 const injectForbiddenShift = process.argv.includes("--inject-forbidden-shift");
 const fixtureResultPath = `/tmp/${query}-late-provider-result.txt`;
+let hiddenStateAssertionCount = 0;
 
 if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
   throw new Error(`--timeout must be a positive number, got ${JSON.stringify(timeoutMs)}`);
@@ -105,6 +160,7 @@ function elementsFingerprint(elementsResult: Json): string {
 }
 
 function requirePreflight(state: Json, label: string): Json {
+  requireHiddenState(state, label);
   const preflight = state.mainWindowPreflight;
   if (!preflight) {
     throw new Error(`${label}: missing mainWindowPreflight in getState receipt`);
@@ -123,6 +179,17 @@ function requirePreflight(state: Json, label: string): Json {
     }
   }
   return preflight;
+}
+
+function requireHiddenState(state: Json, label: string): void {
+  if (state.windowVisible !== false) {
+    throw new Error(
+      `${label}: hidden semantic proof refused a visible or unknown window state: ${JSON.stringify({
+        windowVisible: state.windowVisible ?? null,
+      })}`,
+    );
+  }
+  hiddenStateAssertionCount += 1;
 }
 
 async function comparable(driver: Driver, state: Json, tag: string): Promise<Json> {
@@ -219,6 +286,7 @@ async function sampleUntilRootFileSettled(
 
   while (Date.now() < deadline) {
     const state = (await driver.getState({ timeoutMs })) as Json;
+    requireHiddenState(state, `provider-sample-${samples.length}`);
     const status = state.rootFileSearch;
     if (status?.query === query && status?.mode === "GlobalQuery") {
       if (status.loading === true) observedLoading = true;
@@ -259,7 +327,11 @@ const claim = claimOutput(outputPlan);
 const receipt: Json = {
   schemaVersion: 3,
   gateId: "root-frame-stable",
+  evidenceClass: "RUNTIME_HIDDEN",
   metricKind: "semantic_frame_identity",
+  observationClass: "SEMANTIC_FRAME",
+  observationPoint: "stateResult.mainWindowPreflight.semanticFingerprint",
+  measuresPaint: false,
   status: "fail",
   behavior: { status: "fail", failure: null },
   query,
@@ -272,6 +344,16 @@ const receipt: Json = {
     sourceDirty: git(["status", "--porcelain"]).length > 0,
   },
   session: { name: sessionName, pid: null },
+  safety: {
+    startsApplication: true,
+    isolatedCiLaunchAuthorized: true,
+    sandboxHome: true,
+    windowRevealAllowed: false,
+    windowFocusAllowed: false,
+    nativeInputAllowed: false,
+    screenCaptureAllowed: false,
+    hiddenStateAssertionCount: 0,
+  },
   samples: [],
 };
 
@@ -305,6 +387,8 @@ try {
     },
   });
   receipt.session.pid = driver.pid ?? null;
+  const initialState = (await driver.getState({ timeoutMs })) as Json;
+  requireHiddenState(initialState, "initial protocol-ready state");
   await driver.setFilterAndWait(query, { timeoutMs });
 
   const before = (await driver.getState({ timeoutMs })) as Json;
@@ -335,6 +419,7 @@ try {
 } catch (error) {
   receipt.behavior.failure = error instanceof Error ? error.message : String(error);
 } finally {
+  receipt.safety.hiddenStateAssertionCount = hiddenStateAssertionCount;
   receipt.cleanup = {
     attempted: driver !== null,
     hidden: false,

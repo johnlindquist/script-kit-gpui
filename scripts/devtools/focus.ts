@@ -67,6 +67,11 @@ export function semanticAxParity(state: JsonObject, layout: JsonObject) {
   const fidelity = asObject(info.fidelity);
   const appkit = asObject(fidelity.appKit ?? fidelity.appkit);
   const axNodes = asArray(appkit.nodes);
+  const semanticIds = semanticButtons
+    .map((button) => String(button.id ?? ""))
+    .filter(Boolean);
+  const duplicateSemanticIds = semanticIds
+    .filter((id, index) => semanticIds.indexOf(id) !== index);
   const peers = semanticButtons.map((button) => {
     const semanticId = typeof button.id === "string" ? button.id : null;
     const peer = semanticId == null
@@ -78,6 +83,11 @@ export function semanticAxParity(state: JsonObject, layout: JsonObject) {
     const enabled = button.enabled === true;
     const disabledReason = button.actionDisabled ?? null;
     const errors = [
+      semanticId == null || semanticId.length === 0 ? "missingSemanticIdentity" : "",
+      typeof button.action !== "string" || button.action.length === 0
+        ? "missingSemanticAction"
+        : "",
+      label.length === 0 ? "missingAccessibilityLabel" : "",
       peer == null ? "missingAxPeer" : "",
       peer && peer.accessibilityRole !== "AXButton" ? "wrongAxRole" : "",
       peer && peer.accessibilityLabelSha256 !== labelSha256 ? "labelMismatch" : "",
@@ -121,10 +131,12 @@ export function semanticAxParity(state: JsonObject, layout: JsonObject) {
     axNodeCount: axNodes.length,
     peerCount: peers.filter((peer) => peer.axPeer != null).length,
     duplicateAxIds,
+    duplicateSemanticIds,
     peers,
     complete: semanticButtons.length > 0 &&
       peers.every((peer) => peer.parityPass) &&
-      duplicateAxIds.length === 0,
+      duplicateAxIds.length === 0 &&
+      duplicateSemanticIds.length === 0,
   };
 }
 
@@ -142,12 +154,19 @@ export function semanticFocusGraph(nodes: JsonObject[]) {
   );
   const ids = focusable.map((node) => String(node.semanticId));
   const duplicateSemanticIds = ids.filter((id, index) => ids.indexOf(id) !== index);
+  const focusedSemanticIds = nodes
+    .filter((node) => node.focused === true)
+    .map((node) => String(node.semanticId ?? ""));
   const edges = focusable.map((node, index) => ({
     semanticId: String(node.semanticId),
     previous: index > 0 ? String(focusable[index - 1].semanticId) : null,
     next: index + 1 < focusable.length ? String(focusable[index + 1].semanticId) : null,
   }));
-  const reciprocal = duplicateSemanticIds.length === 0 && hiddenFocusableIds.length === 0 && edges.every((edge) => {
+  const reciprocal = duplicateSemanticIds.length === 0 &&
+    hiddenFocusableIds.length === 0 &&
+    focusedSemanticIds.length <= 1 &&
+    focusedSemanticIds.every((id) => ids.includes(id)) &&
+    edges.every((edge) => {
     const previous = edge.previous == null ? null : edges.find((candidate) => candidate.semanticId === edge.previous);
     const next = edge.next == null ? null : edges.find((candidate) => candidate.semanticId === edge.next);
     return (previous == null || previous.next === edge.semanticId) &&
@@ -158,7 +177,7 @@ export function semanticFocusGraph(nodes: JsonObject[]) {
     reciprocal,
     duplicateSemanticIds,
     hiddenFocusableIds,
-    focusedSemanticIds: nodes.filter((node) => node.focused === true).map((node) => node.semanticId),
+    focusedSemanticIds,
   };
 }
 

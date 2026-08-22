@@ -26,7 +26,7 @@ function usage() {
 }
 
 function nodeLabel(node: JsonObject) {
-  return node.text ?? node.value ?? node.semanticId ?? null;
+  return node.text ?? node.value ?? null;
 }
 
 function contentMeasurement(value: unknown) {
@@ -48,9 +48,47 @@ function contentMeasurement(value: unknown) {
 function inferredAction(node: JsonObject): string | null {
   if (typeof node.action === "string") return node.action;
   if (node.type === "button") return "activate";
-  if (node.type === "choice") return "select";
+  if (node.type === "choice" && node.selectable !== false) return "select";
   if (node.type === "input") return "edit";
   return null;
+}
+
+function productionContentMeasurement(node: JsonObject) {
+  const descriptors = node.content && typeof node.content === "object" &&
+      !Array.isArray(node.content)
+    ? node.content as JsonObject
+    : null;
+  const candidate = descriptors?.text ?? descriptors?.value;
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    return {
+      measurement: contentMeasurement(nodeLabel(node)),
+      privacyViolation: descriptors !== null,
+    };
+  }
+  const content = candidate as JsonObject;
+  const valid =
+    typeof content.contentKind === "string" &&
+    Number.isSafeInteger(content.charLength) && Number(content.charLength) >= 0 &&
+    Number.isSafeInteger(content.byteLength) && Number(content.byteLength) >= 0 &&
+    typeof content.fingerprint === "string" &&
+    /^sha256:[a-f0-9]{64}$/.test(content.fingerprint) &&
+    content.rawContentReturned === false &&
+    node.text == null && node.value == null;
+  return {
+    measurement: valid
+      ? {
+        contentKind: content.contentKind,
+        redacted: true,
+        length: content.charLength,
+        byteLength: content.byteLength,
+        lineCount: null,
+        fingerprint: content.fingerprint,
+        rawContentReturned: false,
+        source: "production-protocol-redaction",
+      }
+      : contentMeasurement(null),
+    privacyViolation: !valid,
+  };
 }
 
 export function snapshot(nodes: JsonObject[]) {
@@ -64,21 +102,31 @@ export function snapshot(nodes: JsonObject[]) {
     return false;
   });
 
-  return {
-    nodes: nodes.map((node) => {
+  const privacyViolationSemanticIds: string[] = [];
+  const projectedNodes = nodes.map((node) => {
       const action = inferredAction(node);
       const disabledReason = node.actionDisabled ?? null;
-      const enabled = disabledReason == null;
+      const explicitlyDisabled = node.enabled === false ||
+        ((node.type === "choice" || node.type === "button") && node.selectable === false);
+      const enabled = !explicitlyDisabled && disabledReason == null;
       const selectable = node.selectable ?? node.type === "choice";
-      const focusable = node.focused != null || node.type === "input" || action != null;
-      const activatable = enabled && action != null && node.type !== "input";
+      const focusable = typeof node.focusable === "boolean"
+        ? node.focusable
+        : node.focused === true || node.type === "input" ||
+          (enabled && selectable !== false && action != null);
+      const activatable = enabled && action != null && node.type !== "input" &&
+        selectable !== false;
       const semanticId = node.semanticId ?? null;
+      const content = productionContentMeasurement(node);
+      if (content.privacyViolation) {
+        privacyViolationSemanticIds.push(String(semanticId ?? "(missing-semantic-id)"));
+      }
       return {
         semanticId,
         measurementId: semanticId == null ? null : `semantic:${String(semanticId)}`,
         role: node.role ?? node.type ?? null,
         type: node.type ?? null,
-        content: contentMeasurement(nodeLabel(node)),
+        content: content.measurement,
         selected: node.selected ?? null,
         focused: node.focused ?? null,
         index: node.index ?? null,
@@ -92,10 +140,18 @@ export function snapshot(nodes: JsonObject[]) {
         style: node.style ?? null,
         bounds: node.bounds ?? null,
       };
-    }),
+    });
+
+  return {
+    nodes: projectedNodes,
     duplicateSemanticIds: [...new Set(duplicateSemanticIds)],
     missingSemanticIdCount: nodes.length - ids.length,
     missingBoundsCount: nodes.filter((node) => node.bounds == null).length,
+    focusedSemanticIds: projectedNodes
+      .filter((node) => node.focused === true)
+      .map((node) => String(node.semanticId ?? ""))
+      .filter(Boolean),
+    privacyViolationSemanticIds,
   };
 }
 
@@ -109,6 +165,16 @@ export function semanticProjection(elements: JsonObject, proofMode: ProjectionPr
       ? ["collectorUnavailable"]
       : [];
   const complete = quality === "complete";
+  const accessibility = elements.accessibilityProjection &&
+      typeof elements.accessibilityProjection === "object" &&
+      !Array.isArray(elements.accessibilityProjection)
+    ? elements.accessibilityProjection as JsonObject
+    : null;
+  const nativeAccessibilityObserved =
+    accessibility?.source === "native-appkit-accessibility" &&
+    accessibility.complete === true &&
+    Number.isSafeInteger(accessibility.peerCount) &&
+    Number(accessibility.peerCount) > 0;
   return {
     semanticSurface: elements.semanticSurface ?? null,
     version: elements.projectionVersion ?? null,
@@ -116,7 +182,9 @@ export function semanticProjection(elements: JsonObject, proofMode: ProjectionPr
     reasonCodes,
     proofMode,
     complete,
-    proofAllowed: complete,
+    proofAllowed: complete &&
+      (proofMode !== "ax" || nativeAccessibilityObserved),
+    nativeAccessibilityObserved,
     limitationsExplicit: complete || reasonCodes.length > 0,
   };
 }
@@ -137,11 +205,28 @@ export function classify(
   if (elementSnapshot.duplicateSemanticIds.length > 0) {
     return "invalid-identity";
   }
+  if (elementSnapshot.privacyViolationSemanticIds.length > 0) {
+    return "invalid-privacy";
+  }
+  if (elementSnapshot.focusedSemanticIds.length > 1) {
+    return "invalid-identity";
+  }
   if (elementSnapshot.missingSemanticIdCount > 0) {
     return "blocked-by-missing-primitive";
   }
   if (!projection.complete || !projection.limitationsExplicit) {
     return "blocked-by-unsupported-projection";
+  }
+  if (projection.proofMode === "action" &&
+      !elementSnapshot.nodes.some((node) => node.activatable)) {
+    return "blocked-by-missing-primitive";
+  }
+  if (projection.proofMode === "focus" &&
+      elementSnapshot.focusedSemanticIds.length !== 1) {
+    return "blocked-by-missing-primitive";
+  }
+  if (projection.proofMode === "ax" && !projection.nativeAccessibilityObserved) {
+    return "blocked-by-missing-primitive";
   }
   return "ok";
 }
@@ -206,11 +291,21 @@ async function main() {
       focusedSemanticId: elements.focusedSemanticId ?? null,
       selectedSemanticId: elements.selectedSemanticId ?? null,
       duplicateSemanticIds: elementSnapshot.duplicateSemanticIds,
+      privacyViolationSemanticIds: elementSnapshot.privacyViolationSemanticIds,
       missingPrimitives: [
         elementSnapshot.missingSemanticIdCount > 0 ? "semanticId" : "",
         elementSnapshot.missingBoundsCount > 0 ? "elementBounds" : "",
         projection.complete ? "" : "completeSemanticProjection",
         projection.limitationsExplicit ? "" : "projectionReasonCodes",
+        proofMode === "action" && !elementSnapshot.nodes.some((node) => node.activatable)
+          ? "enabledSemanticAction"
+          : "",
+        proofMode === "focus" && elementSnapshot.focusedSemanticIds.length !== 1
+          ? "uniqueFocusedSemanticNode"
+          : "",
+        proofMode === "ax" && !projection.nativeAccessibilityObserved
+          ? "nativeAccessibilityProjection"
+          : "",
         elementsEnvelope.status === "error" ? "elementsResult" : "",
         targetReceipt.classification !== "ok" ? "strictTargetIdentity" : "",
       ].filter(Boolean),

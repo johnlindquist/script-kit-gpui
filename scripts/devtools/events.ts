@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { outputSummary, summarizeText, tryParseJson as summarizeJsonText } from "./lib/receipt-output";
+import { assertNoninteractiveSessionCommand } from "./lib/operator-safety.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -150,6 +151,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 async function runCommand(command: string[], label: string): Promise<{ receipt: JsonObject; stdout: string; stderr: string; exitCode: number }> {
+  assertNoninteractiveSessionCommand(command);
   const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),

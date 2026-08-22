@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { inspectAiReliabilityFixture } from "./ai_reliability_cli.ts";
+import { assertNoninteractiveSessionCommand } from "./lib/operator-safety.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -85,6 +86,7 @@ async function inspectEmbeddedAgentChatTarget(args: Args) {
 }
 
 async function run(command: string[], label: string): Promise<JsonObject> {
+  assertNoninteractiveSessionCommand(command);
   const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),

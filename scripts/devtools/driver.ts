@@ -60,6 +60,11 @@ import {
   gpuiKeyDownCommand,
   triggerActionCommand,
 } from "./lib/client.ts";
+import {
+  assertNoninteractiveDriverLaunch,
+  assertNoninteractiveProtocolCommand,
+  assertNoninteractiveUnownedSessionCommand,
+} from "./lib/operator-safety.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dir, "../..");
 /**
@@ -288,6 +293,7 @@ export abstract class ProtocolCore {
 
   /** Fire-and-forget: write one command line to the transport. */
   send(command: Json): void {
+    assertNoninteractiveProtocolCommand(command);
     this.writeCommand(command);
   }
 
@@ -301,6 +307,7 @@ export abstract class ProtocolCore {
     command: Json,
     opts: { expect?: string; timeoutMs?: number } = {},
   ): Promise<Json> {
+    assertNoninteractiveProtocolCommand(command);
     const requestId: string =
       typeof command.requestId === "string" && command.requestId.length > 0
         ? command.requestId
@@ -706,6 +713,7 @@ export class Driver extends ProtocolCore {
   }
 
   static async launch(options: DriverOptions = {}): Promise<Driver> {
+    assertNoninteractiveDriverLaunch(options);
     const binary = options.binary ?? resolveDefaultBinary();
     if (!existsSync(binary)) {
       throw new Error(
@@ -1107,6 +1115,7 @@ export class AttachedDriver extends ProtocolCore {
   // --- transport -------------------------------------------------------------
 
   protected writeCommand(payload: Json): void {
+    assertNoninteractiveUnownedSessionCommand(payload, "AttachedDriver");
     if (this.closed) {
       throw new Error("AttachedDriver closed");
     }

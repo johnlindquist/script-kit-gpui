@@ -3,6 +3,10 @@
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
 import { diagnostic, userContent } from "./lib/privacy.ts";
 import { classifyTransportError } from "./lib/transport-errors.ts";
+import {
+  assertNoninteractiveProtocolCommand,
+  assertNoninteractiveSessionCommand,
+} from "./lib/operator-safety.ts";
 
 type JsonObject = Record<string, unknown>;
 type Rect = { x: number; y: number; width: number; height: number };
@@ -196,6 +200,7 @@ function openForwarded(args: Args): string[] {
 }
 
 async function run(command: string[], label: string, env?: Record<string, string>): Promise<JsonObject> {
+  assertNoninteractiveSessionCommand(command);
   const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe", env: env ? { ...process.env, ...env } : process.env });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -217,6 +222,7 @@ function requestId(prefix: string) {
 }
 
 async function rpc(session: string, payload: JsonObject, expect: string, timeoutMs: number) {
+  assertNoninteractiveProtocolCommand(payload);
   return run(["bash", "scripts/agentic/session.sh", "rpc", session, JSON.stringify(payload), "--expect", expect, "--timeout", String(timeoutMs)], String(payload.type ?? "rpc"));
 }
 
@@ -311,13 +317,18 @@ function shortcutTokens(shortcut: unknown) {
     .filter(Boolean);
 }
 
-function visibleActionRows(actionsDialog: JsonObject | null) {
+export function visibleActionRows(actionsDialog: JsonObject | null) {
   const actions = (actionsDialog?.actions as JsonObject | undefined) ?? {};
-  const rows = asArray(actionsDialog?.visibleActions).length > 0
+  const rows = Array.isArray(actionsDialog?.visibleActions)
     ? asArray(actionsDialog?.visibleActions)
     : asArray(actions.visibleSample);
   return rows.map((action, index) => {
     const shortcut = action.shortcut ?? null;
+    const disabledReason = action.actionDisabled ?? action.disabledReason ?? null;
+    const declaredEnabled = typeof action.enabled === "boolean"
+      ? action.enabled
+      : null;
+    const enabled = disabledReason == null ? declaredEnabled : false;
     return {
       index,
       id: action.id ?? null,
@@ -326,13 +337,47 @@ function visibleActionRows(actionsDialog: JsonObject | null) {
       shortcut,
       shortcutTokens: shortcutTokens(shortcut),
       destructive: action.destructive ?? false,
-      enabled: action.enabled ?? null,
-      disabledReason: action.actionDisabled ?? action.disabledReason ?? null,
+      enabled,
+      disabledReason,
+      stateConsistent: !(declaredEnabled === true && disabledReason != null),
+      activatable: enabled === true && typeof action.id === "string" &&
+        action.id.length > 0,
     };
   });
 }
 
-function groupSections(rows: ReturnType<typeof visibleActionRows>) {
+export function auditActionProjection(rows: ReturnType<typeof visibleActionRows>) {
+  const ids = rows
+    .map((row) => typeof row.id === "string" ? row.id : "")
+    .filter(Boolean);
+  const duplicateActionIds = ids.filter((id, index) => ids.indexOf(id) !== index);
+  const missingActionIds = rows
+    .filter((row) => typeof row.id !== "string" || row.id.length === 0)
+    .map((row) => row.index);
+  const unknownAvailabilityIds = rows
+    .filter((row) => row.enabled == null)
+    .map((row) => row.id ?? `(row:${row.index})`);
+  const contradictoryAvailabilityIds = rows
+    .filter((row) => row.stateConsistent !== true)
+    .map((row) => row.id ?? `(row:${row.index})`);
+  return {
+    rowCount: rows.length,
+    activatableActionIds: rows
+      .filter((row) => row.activatable)
+      .map((row) => String(row.id)),
+    duplicateActionIds: [...new Set(duplicateActionIds)],
+    missingActionIds,
+    unknownAvailabilityIds,
+    contradictoryAvailabilityIds,
+    complete:
+      duplicateActionIds.length === 0 &&
+      missingActionIds.length === 0 &&
+      unknownAvailabilityIds.length === 0 &&
+      contradictoryAvailabilityIds.length === 0,
+  };
+}
+
+export function groupActionSections(rows: ReturnType<typeof visibleActionRows>) {
   const sections = new Map<string, { title: string; rowCount: number; firstIndex: number; lastIndex: number }>();
   rows.forEach((row, index) => {
     const title = typeof row.section === "string" && row.section ? row.section : "default";
@@ -1839,7 +1884,8 @@ async function main() {
   const parentRect = rectFrom(attachedGeometry.parentRect) ?? rectFrom(parent?.bounds);
   const anchorRect = rectFrom(attachedGeometry.anchorRect);
   const rows = visibleActionRows(actionsDialog);
-  const sections = groupSections(rows);
+  const actionProjection = auditActionProjection(rows);
+  const sections = groupActionSections(rows);
   const clipping = edgeClipping(popupRect, parentRect);
   const dialogRoute = (actionsDialog?.route as JsonObject | undefined) ?? {};
   const targetRouteStack = asArray(target.routeStack);
@@ -1864,6 +1910,7 @@ async function main() {
     hoverRowAvailable ? "" : "hover row",
     shortcutBoundsAvailable ? "" : "shortcut layout bounds",
     disabledReasonBoundsRequired && !disabledReasonBoundsAvailable ? "disabled reason bounds" : "",
+    actionProjection.complete ? "" : "complete executable action projection",
   ].filter(Boolean);
   const classification = classify(targetReceipt, stateEnvelope, missing);
   const hoverProof = args.proveHover
@@ -1975,6 +2022,7 @@ async function main() {
       rows,
       destructiveRows,
       disabledRows,
+      projection: actionProjection,
     },
     shortcutLayout: {
       primitive: "runtime shortcut layout bounds",
@@ -2023,4 +2071,4 @@ async function main() {
   });
 }
 
-await main();
+if (import.meta.main) await main();

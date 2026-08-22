@@ -7,17 +7,25 @@
  * cache never sees two states of one path.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   RECEIPT_REGISTRY_VERSION,
+  prepareValidatedReceipt,
   receiptRegistryIdentity,
   validateReceipt,
 } from "./lib/receipt-schema.ts";
 import {
   AUTHORIZED_CONFLICT_COUNT,
   CONS_PROOF_GOV_IDS,
+  DEFAULT_CONSISTENCY_CATALOG_PATH,
   FAMILY_IDS,
   PROGRAM_IDS,
   UsageError,
@@ -25,6 +33,7 @@ import {
   parseArgs,
   parseProgressSections,
   parseTaskCatalog,
+  receiptStaleReasons,
   stalenessReasons,
   verifyAll,
   verifyFamily,
@@ -32,6 +41,21 @@ import {
   verifyTask,
   type CurrentIdentity,
 } from "./consistency.ts";
+import {
+  TASK_PROOF_POLICIES,
+  taskProofPolicy,
+} from "./lib/task-proof-policy.ts";
+import {
+  attachFacadeMigrationScope,
+  auditFacadeMigrationScope,
+  CONVERSATION_STYLE_FACADE,
+  CONVERSATION_STYLE_OWNER,
+  POPUP_AUTOMATION_POLICY,
+  POPUP_WINDOW_FACADE,
+  POPUP_WINDOW_OWNER,
+  REQUIRED_POPUP_CONSUMERS,
+  SHARED_COMPONENTS_MODULE,
+} from "./facade-migrations.ts";
 
 const HEAD = "f".repeat(40);
 const WRONG_SHA = "0".repeat(64);
@@ -48,16 +72,75 @@ function progressMarkdown(ids: Iterable<string> = PROGRAM_IDS, duplicates: strin
   return `# Synthetic progress\n\n## Completed recommendations\n\n${sections.join("\n")}\n`;
 }
 
+const syntheticCatalogBindings = parseTaskCatalog(catalogMarkdown()).byId;
+
+function passingFacadeLedger(): Record<string, unknown> {
+  const sources = [
+    {
+      path: SHARED_COMPONENTS_MODULE,
+      content: "pub mod conversation_style;\npub mod inline_popup_window;\n",
+    },
+    { path: CONVERSATION_STYLE_FACADE, content: undefined },
+    { path: CONVERSATION_STYLE_OWNER, content: "pub struct ConversationStyle;" },
+    { path: POPUP_WINDOW_FACADE, content: undefined },
+    { path: POPUP_WINDOW_OWNER, content: "pub struct InlinePopupWindow;" },
+    {
+      path: POPUP_AUTOMATION_POLICY,
+      content: "pub(crate) fn agent_chat_popup_policy() {}",
+    },
+    {
+      path: "src/ai/agent_chat/ui/components/transcript.rs",
+      content: "use crate::components::conversation_style::ConversationStyle;",
+    },
+    ...REQUIRED_POPUP_CONSUMERS.map((path) => ({
+      path,
+      content: "use crate::components::inline_popup_window::InlinePopupWindow;",
+    })),
+  ];
+  const scope = auditFacadeMigrationScope(sources, [
+    "crate::components::conversation_style::ASSISTANT_MESSAGE_PADDING",
+  ]);
+  return attachFacadeMigrationScope(
+    {
+      schemaVersion: 1,
+      generatedBy: "scripts/devtools/facade-ledger.ts",
+      taskId: "GOV-002",
+      evidenceClass: "STATIC_INVENTORY",
+      provesRuntimeBehavior: false,
+      provesExporterByteEquality: false,
+      assertions: {
+        allFacadesValueFree: true,
+        allProductionCallersMigrated: true,
+        allTestCallersMigrated: true,
+        zeroCallerFacadesRemoved: true,
+        persistedNamesLiveAtCanonicalOwnersOnly: true,
+      },
+      disposition: "EVALUABLE_PASS",
+    },
+    scope,
+  );
+}
+
 interface ReceiptOverrides {
   [key: string]: unknown;
 }
 
 function passingReceipt(taskId: string, overrides: ReceiptOverrides = {}): Record<string, unknown> {
-  return {
+  const policy = taskProofPolicy(taskId);
+  const canonicalTask = syntheticCatalogBindings.get(taskId);
+  const common = {
     schemaVersion: 2,
     tool: "synthetic-producer",
     command: "synthetic.prove",
     taskId,
+    catalogBinding: canonicalTask
+      ? {
+          taskId,
+          title: canonicalTask.title,
+          sectionSha256: canonicalTask.sectionSha256,
+        }
+      : null,
+    evidenceClass: policy?.acceptedEvidenceClasses[0] ?? "UNIT_BEHAVIOR",
     disposition: "EVALUABLE_PASS",
     pass: true,
     classification: "ok",
@@ -70,8 +153,56 @@ function passingReceipt(taskId: string, overrides: ReceiptOverrides = {}): Recor
     interference: { monitored: true, disposition: null },
     cleanup: { closed: true, ownedPids: [], ownedSessions: [], ownedBrowserPids: [], survivors: [] },
     producerValidation: { registryVersion: RECEIPT_REGISTRY_VERSION },
+  };
+  if (!policy?.provesRuntimeBehavior) {
+    return { ...common, ...overrides };
+  }
+
+  const bounds = { x: 0, y: 0, width: 800, height: 600 };
+  const candidate = {
+    ...common,
+    tool: "script-kit-devtools.layout",
+    command: "layout.measure",
+    proofMode: "inspection",
+    requestedTarget: { selector: { type: "main" } },
+    target: { automationId: "main", visible: false, bounds },
+    window: { rect: bounds },
+    regions: [],
+    resizePressure: { windowCanGrow: true },
+    pressure: { pressureScore: 0 },
+    truthLayers: {
+      model: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+      rendered: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+      joins: [],
+      comparableJoinCount: 1,
+    },
+    repository: { gitCommit: HEAD },
+    transaction: {
+      transactionId: `proof:${taskId.toLowerCase()}`,
+      runId: `proof-run-${taskId.toLowerCase()}`,
+      pid: 42,
+      processStartTime: "Fri Aug 7 00:00:00 2026",
+      binarySha256: "a".repeat(64),
+      automationId: "main",
+      windowInstanceId: "main@1",
+      windowGeneration: 1,
+      windowKind: "Main",
+      hostKind: "mainWindow",
+      surfaceKind: "ScriptList",
+      semanticSurface: "scriptList",
+      appViewVariant: "ScriptList",
+      bounds,
+      targetGeneration: 1,
+      surfaceGeneration: 1,
+      dataGeneration: 1,
+    },
+    missingPrimitives: [],
+    errors: [],
     ...overrides,
   };
+  delete (candidate as Record<string, unknown>).producerValidation;
+  return prepareValidatedReceipt("devtools.layout.measure", candidate)
+    .receipt as Record<string, unknown>;
 }
 
 interface Tree {
@@ -115,7 +246,10 @@ function setup(options: {
     return path;
   };
 
-  const receiptIds = options.receiptTaskIds ?? CONS_PROOF_GOV_IDS;
+  // Most mutation tests inspect GOV-002 only. Materializing every scope task
+  // for each case performs thousands of unrelated filesystem writes and makes
+  // honest per-test timeouts flaky under an unrelated Rust compile.
+  const receiptIds = options.receiptTaskIds ?? ["GOV-002"];
   for (const taskId of receiptIds) {
     if (options.skipReceiptsFor?.has(taskId)) continue;
     writeReceipt(taskId, "proof.json", passingReceipt(taskId));
@@ -178,11 +312,37 @@ describe("canonical ID sets", () => {
     expect(CONS_PROOF_GOV_IDS.has("SAFE-001")).toBe(false);
   });
 
+  test("every canonical task has an explicit evidence policy", () => {
+    expect(TASK_PROOF_POLICIES.size).toBe(75);
+    expect([...TASK_PROOF_POLICIES.keys()].sort()).toEqual(
+      [...PROGRAM_IDS].sort(),
+    );
+    expect(taskProofPolicy("PF-009")?.requirement).toBe("static-inventory");
+    expect(taskProofPolicy("PF-010")?.requirement).toBe("fixture-contract");
+    expect(taskProofPolicy("GOV-002")?.requirement).toBe("unit-behavior");
+    for (const taskId of ["SAFE-001", "PF-004", "UX-001", "WF-001", "GEO-002"]) {
+      expect(taskProofPolicy(taskId)?.requirement).toBe("direct-runtime");
+      expect(taskProofPolicy(taskId)?.acceptedEvidenceClasses).not.toContain(
+        "STATIC_INVENTORY",
+      );
+    }
+  });
+
   test("the real repository catalog parses to the exact 75-ID set", () => {
-    const markdown = require("node:fs").readFileSync(".notes/CONSISTENCY-FIXES.md", "utf8");
-    const catalog = parseTaskCatalog(markdown);
+    const markdown = require("node:fs").readFileSync(
+      DEFAULT_CONSISTENCY_CATALOG_PATH,
+      "utf8",
+    );
+    const catalog = parseTaskCatalog(markdown, DEFAULT_CONSISTENCY_CATALOG_PATH);
     expect(catalog.tasks.length).toBe(75);
     expect(catalog.errors).toEqual([]);
+    expect(catalog.path).toBe("scripts/devtools/consistency-catalog.md");
+    expect(catalog.byId.get("PF-009")?.title).toBe(
+      "Generate typed coverage bindings for all 37 kinds and 54 mappings",
+    );
+    expect(catalog.byId.get("GOV-006")?.title).toBe(
+      "Add a final consistency completion auditor",
+    );
   });
 });
 
@@ -232,6 +392,93 @@ describe("verify-task mutations", () => {
     expect(receipt.pass).toBe(true);
     expect(exitCode).toBe(0);
     expect(receipt.producerValidation.valid).toBe(true);
+    expect(receipt.proofPolicy.requirement).toBe("unit-behavior");
+  });
+
+  test("unit and static receipts can never complete a runtime interaction task", () => {
+    for (const evidenceClass of ["UNIT_BEHAVIOR", "STATIC_INVENTORY", "FIXTURE_CONTRACT"]) {
+      const tree = setup({ receiptTaskIds: ["SAFE-001"] });
+      tree.writeReceipt("SAFE-001", "proof.json", {
+        ...passingReceipt("GOV-002"),
+        taskId: "SAFE-001",
+        evidenceClass,
+      });
+      const { codes, receipt, exitCode } = taskErrorCodes(tree, "SAFE-001");
+      expect(codes).toContain("task-evidence-class-not-accepted");
+      expect(receipt.disposition).toBe("INVALID_SCHEMA");
+      expect(exitCode).toBe(4);
+    }
+  });
+
+  test("claimed hidden runtime proof requires observed visibility and registry validation", () => {
+    const unobserved = setup({ receiptTaskIds: ["UX-001"] });
+    unobserved.writeReceipt("UX-001", "proof.json", {
+      ...passingReceipt("GOV-002"),
+      taskId: "UX-001",
+      evidenceClass: "RUNTIME_HIDDEN",
+    });
+    const badObservation = taskErrorCodes(unobserved, "UX-001");
+    expect(badObservation.codes).toContain("task-evidence-observation-invalid");
+    expect(badObservation.codes).toContain(
+      "task-runtime-proof-not-registry-validated",
+    );
+    expect(badObservation.exitCode).toBe(4);
+
+    const unregistered = setup({ receiptTaskIds: ["WF-001"] });
+    unregistered.writeReceipt("WF-001", "proof.json", {
+      ...passingReceipt("GOV-002"),
+      taskId: "WF-001",
+      evidenceClass: "RUNTIME_HIDDEN",
+      target: { visible: false },
+      transaction: { transactionId: "invented" },
+      producerValidation: { registryVersion: RECEIPT_REGISTRY_VERSION, valid: true },
+    });
+    const badProducer = taskErrorCodes(unregistered, "WF-001");
+    expect(badProducer.codes).toContain(
+      "task-runtime-proof-not-registry-validated",
+    );
+    expect(badProducer.exitCode).toBe(4);
+  });
+
+  test("registered hidden producer evidence can discharge a runtime task", () => {
+    const tree = setup({ receiptTaskIds: ["PF-004"] });
+    const { receipt, exitCode } = tree.runTask("PF-004");
+    expect(receipt.proofPolicy.requirement).toBe("direct-runtime");
+    expect(receipt.disposition).toBe("EVALUABLE_PASS");
+    expect(exitCode).toBe(0);
+  });
+
+  test("swapped GOV-006/GOV-007 obligation IDs and section hashes never pass", () => {
+    for (const [requested, substituted] of [
+      ["GOV-006", "GOV-007"],
+      ["GOV-007", "GOV-006"],
+    ]) {
+      const tree = setup();
+      const wrong = passingReceipt(substituted!);
+      tree.writeReceipt(requested!, "proof.json", {
+        ...wrong,
+        taskId: requested,
+      });
+      const result = taskErrorCodes(tree, requested!);
+      expect(result.codes).toContain("task-canonical-catalog-binding-mismatch");
+      expect(result.receipt.disposition).toBe("INVALID_SCHEMA");
+      expect(result.exitCode).toBe(4);
+    }
+  });
+
+  test("matching task text without its canonical section identity is not proof", () => {
+    const tree = setup();
+    tree.writeReceipt("GOV-006", "proof.json", {
+      ...passingReceipt("GOV-006"),
+      catalogBinding: {
+        taskId: "GOV-006",
+        title: "Synthetic GOV-006",
+        sectionSha256: "0".repeat(64),
+      },
+    });
+    const result = taskErrorCodes(tree, "GOV-006");
+    expect(result.codes).toContain("task-canonical-catalog-binding-mismatch");
+    expect(result.exitCode).toBe(4);
   });
 
   test("missing task receipt blocks with missing-task-receipt", () => {
@@ -311,6 +558,32 @@ describe("verify-task mutations", () => {
     const { receipt, exitCode } = tree.runTask("GOV-002");
     expect(receipt.staleReasons.map((reason: any) => reason.code)).toContain("stale-producer");
     expect(exitCode).toBe(3);
+  });
+
+  test("offline behavior evidence rejects stale suite bytes and unowned source paths", () => {
+    const tree = setup();
+    const sourcePath = "scripts/devtools/privacy.test.ts";
+    const stale = receiptStaleReasons({
+      path: "synthetic-proof.json",
+      disposition: "EVALUABLE_PASS",
+      archived: false,
+      receipt: {
+        primitiveId: "devtools.consistency.safe-task-proof",
+        sourceFingerprints: { [sourcePath]: WRONG_SHA },
+      },
+    }, tree.current);
+    expect(stale.map((reason) => reason.code)).toContain("stale-proof-source");
+
+    const unowned = receiptStaleReasons({
+      path: "synthetic-proof.json",
+      disposition: "EVALUABLE_PASS",
+      archived: false,
+      receipt: {
+        primitiveId: "devtools.consistency.safe-task-proof",
+        sourceFingerprints: { "../../private-user-data": "a".repeat(64) },
+      },
+    }, tree.current);
+    expect(unowned.map((reason) => reason.code)).toContain("stale-proof-source-owner");
   });
 
   test("stale implementation fingerprint is detected on a re-read aggregate", () => {
@@ -435,26 +708,249 @@ describe("verify-task mutations", () => {
     expect(receipt.disposition).toBe("BLOCKED_MISSING_PRIMITIVE");
     expect(receipt.archivedReceiptCount).toBe(1);
   });
+
+  test("the exact typed GOV-002 facade ledger is an auxiliary artifact, never task proof", () => {
+    const tree = setup();
+    tree.writeFile(
+      "GOV-002/facade-ledger.json",
+      JSON.stringify(passingFacadeLedger()),
+    );
+    const { receipt, exitCode } = tree.runTask("GOV-002");
+    expect(exitCode).toBe(0);
+    expect(receipt.positiveReceiptPaths.length).toBe(1);
+    expect(receipt.evidenceArtifactPaths[0]).toContain("facade-ledger.json");
+  });
+
+  test("a malformed or task-receipt-shaped facade-ledger filename fails closed", () => {
+    const complete = passingFacadeLedger();
+    const scope = complete.facadeMigrations as Record<string, unknown>;
+    const facades = scope.facades as Array<Record<string, unknown>>;
+    for (const collision of [
+      passingReceipt("GOV-002"),
+      {
+        schemaVersion: 1,
+        generatedBy: "scripts/devtools/facade-ledger.ts",
+        taskId: "GOV-002",
+        evidenceClass: "RUNTIME_HIDDEN",
+        provesRuntimeBehavior: true,
+        assertions: {},
+        disposition: "EVALUABLE_PASS",
+      },
+      {
+        ...complete,
+        facadeMigrations: { ...scope, facades: facades.slice(0, 1) },
+        facades: facades.slice(0, 1),
+      },
+      {
+        ...complete,
+        facades: facades.slice(0, 1),
+      },
+      {
+        ...complete,
+        facadeMigrations: {
+          ...scope,
+          facades: facades.map((facade) =>
+            facade.id === "popup-window"
+              ? { ...facade, canonicalOwner: CONVERSATION_STYLE_OWNER }
+              : facade,
+          ),
+        },
+      },
+      {
+        ...complete,
+        provesExporterByteEquality: true,
+      },
+    ]) {
+      const tree = setup();
+      tree.writeFile("GOV-002/facade-ledger.json", JSON.stringify(collision));
+      const { codes, receipt, exitCode } = taskErrorCodes(tree, "GOV-002");
+      expect(codes).toContain("unreadable-receipt");
+      expect(receipt.disposition).toBe("INVALID_SCHEMA");
+      expect(exitCode).toBe(4);
+    }
+  });
 });
 
 describe("verify-family mutations", () => {
   const binding = (familyId: string) => ({
     familyId,
-    appView: "MainMenu",
-    host: "main-window",
+    appView: "ScriptList",
+    host: "MainWindow",
     memberReceiptPaths: ["families/main-menu/member-0.json"],
   });
+
+  const runtimeMember = (
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> => {
+    const candidate = {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.layout",
+      command: "layout.measure",
+      classification: "ok",
+      evidenceClass: "RUNTIME_HIDDEN",
+      proofMode: "inspection",
+      requestedTarget: { selector: { type: "main" } },
+      target: {
+        automationId: "main",
+        visible: false,
+        bounds: { x: 0, y: 0, width: 800, height: 600 },
+      },
+      window: { rect: { x: 0, y: 0, width: 800, height: 600 } },
+      regions: [],
+      resizePressure: { windowCanGrow: true },
+      pressure: { pressureScore: 0 },
+      truthLayers: {
+        model: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+        rendered: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+        joins: [],
+        comparableJoinCount: 1,
+      },
+      repository: { gitCommit: HEAD },
+      transaction: {
+        transactionId: "proof:family-member",
+        runId: "family-member-test",
+        pid: 42,
+        processStartTime: "Fri Aug 7 00:00:00 2026",
+        binarySha256: "a".repeat(64),
+        automationId: "main",
+        windowInstanceId: "main@1",
+        windowGeneration: 1,
+        windowKind: "Main",
+        hostKind: "MainWindow",
+        surfaceKind: "ScriptList",
+        semanticSurface: "scriptList",
+        appViewVariant: "ScriptList",
+        bounds: { x: 0, y: 0, width: 800, height: 600 },
+        targetGeneration: 1,
+        surfaceGeneration: 1,
+        dataGeneration: 1,
+      },
+      missingPrimitives: [],
+      errors: [],
+      ...overrides,
+    };
+    return prepareValidatedReceipt("devtools.layout.measure", candidate)
+      .receipt as Record<string, unknown>;
+  };
 
   test("declared binding passes", () => {
     const tree = setup();
     tree.writeFile("families/main-menu/fixture.json", JSON.stringify(binding("main-menu")));
+    tree.writeFile(
+      "families/main-menu/member-0.json",
+      JSON.stringify(runtimeMember()),
+    );
     const { receipt, exitCode } = verifyFamily({
       familyId: "main-menu",
       receiptsRoot: tree.receiptsRoot,
       current: tree.current,
     });
     expect(receipt.disposition).toBe("EVALUABLE_PASS");
+    expect(receipt.evidenceClass).toBe("DIRECT_RUNTIME_PROOF");
+    expect(receipt.runtimeProofCount).toBe(1);
     expect(exitCode).toBe(0);
+  });
+
+  test("a declared receipt path is not evidence when the file is missing", () => {
+    const tree = setup();
+    tree.writeFile(
+      "families/main-menu/fixture.json",
+      JSON.stringify(binding("main-menu")),
+    );
+    const { receipt, exitCode } = verifyFamily({
+      familyId: "main-menu",
+      receiptsRoot: tree.receiptsRoot,
+      current: tree.current,
+    });
+    expect(errorCodes(receipt)).toContain(
+      "missing-or-unreadable-family-member-receipt",
+    );
+    expect(receipt.runtimeProofCount).toBe(0);
+    expect(receipt.disposition).toBe("BLOCKED_MISSING_PRIMITIVE");
+    expect(exitCode).toBe(3);
+  });
+
+  test("static family inventories cannot masquerade as target-scoped runtime proof", () => {
+    const tree = setup();
+    tree.writeFile(
+      "families/main-menu/fixture.json",
+      JSON.stringify(binding("main-menu")),
+    );
+    tree.writeFile(
+      "families/main-menu/member-0.json",
+      JSON.stringify(runtimeMember({ evidenceClass: "STATIC_INVENTORY" })),
+    );
+    const { receipt, exitCode } = verifyFamily({
+      familyId: "main-menu",
+      receiptsRoot: tree.receiptsRoot,
+      current: tree.current,
+    });
+    expect(errorCodes(receipt)).toContain(
+      "family-member-not-direct-runtime-evidence",
+    );
+    expect(receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(exitCode).toBe(4);
+  });
+
+  test("runtime receipts for another AppView cannot prove this family", () => {
+    const tree = setup();
+    tree.writeFile(
+      "families/main-menu/fixture.json",
+      JSON.stringify(binding("main-menu")),
+    );
+    const member = runtimeMember();
+    (member.transaction as Record<string, unknown>).appViewVariant = "SettingsView";
+    tree.writeFile("families/main-menu/member-0.json", JSON.stringify(member));
+    const { receipt, exitCode } = verifyFamily({
+      familyId: "main-menu",
+      receiptsRoot: tree.receiptsRoot,
+      current: tree.current,
+    });
+    expect(errorCodes(receipt)).toContain(
+      "family-member-target-identity-mismatch",
+    );
+    expect(receipt.disposition).toBe("INVALID_IDENTITY");
+    expect(exitCode).toBe(4);
+  });
+
+  test("stale source identity cannot satisfy a family runtime proof", () => {
+    const tree = setup();
+    tree.writeFile(
+      "families/main-menu/fixture.json",
+      JSON.stringify(binding("main-menu")),
+    );
+    const member = runtimeMember();
+    (member.repository as Record<string, unknown>).gitCommit = "0".repeat(40);
+    tree.writeFile("families/main-menu/member-0.json", JSON.stringify(member));
+    const { receipt, exitCode } = verifyFamily({
+      familyId: "main-menu",
+      receiptsRoot: tree.receiptsRoot,
+      current: tree.current,
+    });
+    expect(errorCodes(receipt)).toContain("stale-family-member-receipt");
+    expect(receipt.disposition).toBe("BLOCKED_STALE_GENERATION");
+    expect(exitCode).toBe(3);
+  });
+
+  test("family member receipts cannot escape their owned receipts root", () => {
+    const tree = setup();
+    tree.writeFile(
+      "families/main-menu/fixture.json",
+      JSON.stringify({
+        ...binding("main-menu"),
+        memberReceiptPaths: ["../someone-elses-receipt.json"],
+      }),
+    );
+    const { receipt, exitCode } = verifyFamily({
+      familyId: "main-menu",
+      receiptsRoot: tree.receiptsRoot,
+      current: tree.current,
+    });
+    expect(errorCodes(receipt)).toContain(
+      "family-member-path-escapes-receipts-root",
+    );
+    expect(receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(exitCode).toBe(4);
   });
 
   test("missing family binding is blocked with missing-family-binding", () => {
@@ -500,7 +996,7 @@ describe("verify-family mutations", () => {
 
 describe("verify-scope and verify-all", () => {
   test("complete synthetic scope passes and registry validation agrees", () => {
-    const tree = setup();
+    const tree = setup({ receiptTaskIds: CONS_PROOF_GOV_IDS });
     const { receipt, exitCode } = tree.runScope();
     expect(receipt.disposition).toBe("EVALUABLE_PASS");
     expect(receipt.scopePassedTaskCount).toBe(28);
@@ -512,7 +1008,10 @@ describe("verify-scope and verify-all", () => {
   });
 
   test("one missing scope task keeps the scope nonzero with its exact ID", () => {
-    const tree = setup({ skipReceiptsFor: new Set(["PF-007"]) });
+    const tree = setup({
+      receiptTaskIds: CONS_PROOF_GOV_IDS,
+      skipReceiptsFor: new Set(["PF-007"]),
+    });
     const { receipt, exitCode } = tree.runScope();
     expect(receipt.missingScopeTaskIds).toEqual(["PF-007"]);
     expect(receipt.disposition).toBe("BLOCKED_MISSING_PRIMITIVE");
@@ -520,7 +1019,7 @@ describe("verify-scope and verify-all", () => {
   });
 
   test("a passing 28-task scope NEVER makes verify-all pass; the 47 absent program tasks are named", () => {
-    const tree = setup();
+    const tree = setup({ receiptTaskIds: CONS_PROOF_GOV_IDS });
     const scope = tree.runScope();
     expect(scope.exitCode).toBe(0);
     const all = tree.runAll();
@@ -529,6 +1028,12 @@ describe("verify-scope and verify-all", () => {
     expect(expectedMissing.length).toBe(47);
     expect([...all.receipt.missingTaskIds].sort()).toEqual(expectedMissing);
     expect(errorCodes(all.receipt)).toContain("missing-run-manifest");
+    expect(all.receipt.proofCoverage.runtimeInteractionRequiredTaskCount).toBeGreaterThan(50);
+    expect(all.receipt.proofCoverage.runtimeInteractionProvenTaskCount).toBeGreaterThan(0);
+    expect(all.receipt.proofCoverage.runtimeInteractionBlockedTaskIds).toContain("SAFE-001");
+    expect(all.receipt.proofCoverage.runtimeInteractionBlockedTaskIds).toContain("UX-001");
+    expect(all.receipt.proofCoverage.runtimeInteractionBlockedTaskIds).toContain("WF-001");
+    expect(all.receipt.proofCoverage.note).toContain("never count as direct runtime");
   });
 
   test("protected hash drift fails verify-all with protected-hash-drift", () => {
@@ -588,6 +1093,48 @@ describe("verify-scope and verify-all", () => {
     expect(all.receipt.facadeLifecyclePass).toBe(false);
     expect(all.exitCode).not.toBe(0);
   });
+
+  test("green legacy assertions cannot hide the unmigrated second facade", () => {
+    const tree = setup();
+    const complete = passingFacadeLedger();
+    const scope = complete.facadeMigrations as Record<string, unknown>;
+    const oneFacade = (scope.facades as unknown[]).slice(0, 1);
+    tree.writeFile(
+      "GOV-002/facade-ledger.json",
+      JSON.stringify({
+        ...complete,
+        facadeMigrations: { ...scope, facades: oneFacade },
+        facades: oneFacade,
+      }),
+    );
+    const all = tree.runAll();
+    const lifecycle = all.receipt.errors.find(
+      (error: Record<string, unknown>) =>
+        error.code === "incomplete-facade-lifecycle",
+    );
+    expect(lifecycle).toBeDefined();
+    expect(lifecycle.detail.scopeFailures).toContain(
+      "incomplete-required-facade-migration-set",
+    );
+    expect(all.receipt.facadeLifecyclePass).toBe(false);
+  });
+
+  test("facade source hashes are reconciled with current canonical production bytes", () => {
+    const tree = setup();
+    tree.writeFile(
+      "GOV-002/facade-ledger.json",
+      JSON.stringify(passingFacadeLedger()),
+    );
+    const all = tree.runAll();
+    const lifecycle = all.receipt.errors.find(
+      (error: Record<string, unknown>) =>
+        error.code === "incomplete-facade-lifecycle",
+    );
+    expect(lifecycle.detail.scopeFailures).toContain(
+      "facade-source-identity-drift:" + POPUP_WINDOW_OWNER,
+    );
+    expect(all.receipt.facadeLifecyclePass).toBe(false);
+  });
 });
 
 describe("CLI contract", () => {
@@ -600,12 +1147,31 @@ describe("CLI contract", () => {
   });
 
   test("parseArgs accepts the documented command forms", () => {
+    expect(parseArgs(["catalog"])).toEqual({
+      kind: "catalog",
+      fixesPath: "scripts/devtools/consistency-catalog.md",
+    });
     expect(parseArgs(["catalog", "--fixes", "x.md"])).toEqual({ kind: "catalog", fixesPath: "x.md" });
     expect(parseArgs(["verify-task", "GOV-002", "--receipts", "r", "--out", "o"])).toEqual({
       kind: "verify-task",
       taskId: "GOV-002",
+      fixesPath: "scripts/devtools/consistency-catalog.md",
       receiptsRoot: "r",
       outPath: "o",
+    });
+    expect(
+      parseArgs([
+        "verify-task",
+        "--fixes",
+        "reviewed-catalog.md",
+        "GOV-002",
+      ]),
+    ).toEqual({
+      kind: "verify-task",
+      taskId: "GOV-002",
+      fixesPath: "reviewed-catalog.md",
+      receiptsRoot: ".artifacts/consistency",
+      outPath: ".artifacts/consistency/GOV-002/task.json",
     });
     expect(parseArgs(["verify-family", "--family", "main-menu", "--receipts", "r"])).toEqual({
       kind: "verify-family",
@@ -621,5 +1187,59 @@ describe("CLI contract", () => {
       stderr: "pipe",
     });
     expect(result.exitCode).toBe(64);
+  });
+
+  test("verify-task succeeds in a clean checkout without the ignored fixes note", () => {
+    const tree = setup();
+    const cleanCheckout = dirname(tree.receiptsRoot);
+    const portableCatalog = join(cleanCheckout, DEFAULT_CONSISTENCY_CATALOG_PATH);
+    const trackedProgress = join(
+      cleanCheckout,
+      ".notes/CONSISTENCY-PROGRESS.md",
+    );
+    mkdirSync(dirname(portableCatalog), { recursive: true });
+    mkdirSync(dirname(trackedProgress), { recursive: true });
+    writeFileSync(
+      portableCatalog,
+      readFileSync(DEFAULT_CONSISTENCY_CATALOG_PATH, "utf8"),
+    );
+    writeFileSync(trackedProgress, readFileSync(tree.progressPath, "utf8"));
+    const realCatalog = parseTaskCatalog(
+      readFileSync(portableCatalog, "utf8"),
+      portableCatalog,
+    );
+    const canonical = realCatalog.byId.get("GOV-002")!;
+    tree.writeReceipt("GOV-002", "proof.json", {
+      ...passingReceipt("GOV-002"),
+      catalogBinding: {
+        taskId: canonical.id,
+        title: canonical.title,
+        sectionSha256: canonical.sectionSha256,
+      },
+    });
+    expect(
+      existsSync(join(cleanCheckout, ".notes/CONSISTENCY-FIXES.md")),
+    ).toBe(false);
+
+    const outPath = join(tree.receiptsRoot, "GOV-002", "task.json");
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "consistency.ts"),
+        "verify-task",
+        "GOV-002",
+        "--receipts",
+        tree.receiptsRoot,
+        "--out",
+        outPath,
+      ],
+      { cwd: cleanCheckout, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(0);
+    const receipt = JSON.parse(result.stdout.toString());
+    expect(receipt.disposition).toBe("EVALUABLE_PASS");
+    expect(receipt.taskId).toBe("GOV-002");
+    expect(existsSync(outPath)).toBe(true);
   });
 });

@@ -89,7 +89,98 @@ describe("executable receipt registry", () => {
     const prepared = prepareValidatedReceipt("devtools.layout.measure", baseReceipt());
     expect(prepared.exitCode).toBe(0);
     expect(prepared.receipt.disposition).toBe("EVALUABLE_PASS");
+    expect(prepared.receipt.evidenceClass).toBe("RUNTIME_VISIBILITY_UNVERIFIED");
     expect((prepared.receipt.validation as Record<string, unknown>).passed).toBe(true);
+  });
+
+  test("observed target visibility classifies real target-scoped runtime evidence", () => {
+    const hidden = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({
+        target: {
+          automationId: "main",
+          visible: false,
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+        },
+      }),
+    );
+    expect(hidden.exitCode).toBe(0);
+    expect(hidden.receipt.evidenceClass).toBe("RUNTIME_HIDDEN");
+
+    const visible = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({
+        target: {
+          automationId: "main",
+          visible: true,
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+        },
+      }),
+    );
+    if (process.env.SCRIPT_KIT_NONINTERACTIVE === "1") {
+      expect(visible.exitCode).toBe(4);
+      expect(visible.receipt.disposition).toBe("INVALID_SCHEMA");
+      expect(visible.validation.errors).toContain(
+        "noninteractive runtime evidence cannot inspect a visible target",
+      );
+    } else {
+      expect(visible.exitCode).toBe(0);
+      expect(visible.receipt.evidenceClass).toBe("RUNTIME_VISIBLE");
+    }
+  });
+
+  test("hidden claims without hidden observations fail closed", () => {
+    const unobserved = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({ evidenceClass: "RUNTIME_HIDDEN" }),
+    );
+    expect(unobserved.receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(unobserved.validation.errors).toContain(
+      "hidden runtime evidence requires an observed hidden target",
+    );
+
+    const contradictory = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({
+        evidenceClass: "RUNTIME_HIDDEN",
+        target: {
+          automationId: "main",
+          visible: true,
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+        },
+      }),
+    );
+    expect(contradictory.receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(contradictory.validation.errors).toContain(
+      "hidden runtime evidence observed a visible target",
+    );
+  });
+
+  test("conflicting target visibility and invented evidence classes cannot pass", () => {
+    const conflicting = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({
+        target: {
+          automationId: "main",
+          visible: false,
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+        },
+        windowVisible: true,
+      }),
+    );
+    expect(conflicting.receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(conflicting.validation.errors.join("\n")).toContain(
+      "target visibility observations disagree",
+    );
+
+    const invented = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({ evidenceClass: "VERY_CONFIDENT_RUNTIME_PROOF" }),
+    );
+    expect(invented.receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(invented.validation.errors).toContain(
+      "unsupported receipt evidence class: VERY_CONFIDENT_RUNTIME_PROOF",
+    );
   });
 
   test("missing target bounds is INVALID_SCHEMA", () => {
@@ -107,6 +198,211 @@ describe("executable receipt registry", () => {
     );
     expect(prepared.receipt.disposition).toBe("INVALID_SCHEMA");
     expect(JSON.stringify(prepared.receipt)).toContain("missing proof transaction field");
+  });
+
+  test("target identity cannot disagree with its proof transaction", () => {
+    const prepared = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({
+        target: {
+          automationId: "notes",
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+        },
+      }),
+    );
+    expect(prepared.receipt.disposition).toBe("INVALID_IDENTITY");
+    expect(JSON.stringify(prepared.receipt)).toContain("target.automationId");
+  });
+
+  test("requested selector identity cannot silently target another window", () => {
+    const mismatchedId = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({
+        requestedTarget: { selector: { type: "id", id: "notes" } },
+      }),
+    );
+    expect(mismatchedId.receipt.disposition).toBe("INVALID_IDENTITY");
+    expect(mismatchedId.validation.errors).toContain(
+      "proof transaction identity disagrees with requestedTarget.selector.id",
+    );
+
+    const emptyId = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({ requestedTarget: { selector: { type: "id", id: "" } } }),
+    );
+    expect(emptyId.receipt.disposition).toBe("INVALID_IDENTITY");
+    expect(emptyId.validation.errors.join("\n")).toContain(
+      "empty requested target selector id",
+    );
+
+    const validId = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({ requestedTarget: { selector: { type: "id", id: "main" } } }),
+    );
+    expect(validId.receipt.disposition).toBe("EVALUABLE_PASS");
+  });
+
+  test("main selectors and direct requested window identifiers bind their transaction", () => {
+    const wrongMain = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({
+        target: {
+          automationId: "notes",
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+        },
+        transaction: proofTransaction({ automationId: "notes" }),
+      }),
+    );
+    expect(wrongMain.receipt.disposition).toBe("INVALID_IDENTITY");
+    expect(wrongMain.validation.errors).toContain(
+      "proof transaction identity disagrees with requested main target",
+    );
+
+    for (const field of ["id", "windowId", "automationId"]) {
+      const mismatched = prepareValidatedReceipt(
+        "devtools.layout.measure",
+        baseReceipt({
+          requestedTarget: {
+            selector: { type: "main" },
+            [field]: "notes",
+          },
+        }),
+      );
+      expect(mismatched.receipt.disposition).toBe("INVALID_IDENTITY");
+      expect(mismatched.validation.errors).toContain(
+        `proof transaction identity disagrees with requestedTarget.${field}`,
+      );
+    }
+  });
+
+  test("after-target and canonical nested hidden identities cannot forge window lineage", () => {
+    for (const [location, extra] of [
+      ["targetAfter.windowId", { targetAfter: { windowId: "notes" } }],
+      ["targetIdentity.windowId", { targetIdentity: { windowId: "notes" } }],
+      [
+        "surfaceContract.targetIdentity.windowId",
+        { surfaceContract: { targetIdentity: { windowId: "notes" } } },
+      ],
+      [
+        "state.surfaceContract.targetIdentity.windowId",
+        { state: { surfaceContract: { targetIdentity: { windowId: "notes" } } } },
+      ],
+      [
+        "resolvedTarget.surfaceContract.targetIdentity.windowId",
+        {
+          resolvedTarget: {
+            automationId: "main",
+            surfaceContract: { targetIdentity: { windowId: "notes" } },
+          },
+        },
+      ],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const prepared = prepareValidatedReceipt(
+        "devtools.layout.measure",
+        baseReceipt(extra),
+      );
+
+      expect(prepared.receipt.disposition, location).toBe("INVALID_IDENTITY");
+      expect(prepared.validation.errors.join("\n"), location).toContain(location);
+    }
+  });
+
+  test("canonical hidden-state generations must match the proof transaction", () => {
+    for (const field of [
+      "windowGeneration",
+      "targetGeneration",
+      "surfaceGeneration",
+      "dataGeneration",
+    ]) {
+      const prepared = prepareValidatedReceipt(
+        "devtools.layout.measure",
+        baseReceipt({
+          state: {
+            surfaceContract: {
+              targetIdentity: {
+                windowId: "main",
+                [field]: 2,
+              },
+            },
+          },
+        }),
+      );
+
+      expect(prepared.receipt.disposition, field).toBe("INVALID_GENERATION");
+      expect(prepared.validation.errors.join("\n"), field).toContain(
+        `state.surfaceContract.targetIdentity.${field}`,
+      );
+    }
+    const valid = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({
+        state: {
+          surfaceContract: {
+            targetIdentity: {
+              windowId: "main",
+              windowGeneration: 1,
+              targetGeneration: 1,
+              surfaceGeneration: 1,
+              dataGeneration: 1,
+            },
+          },
+        },
+      }),
+    );
+    expect(valid.receipt.disposition).toBe("EVALUABLE_PASS");
+  });
+
+  test("reopened window instances cannot reuse an earlier target proof", () => {
+    const prepared = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({
+        target: {
+          automationId: "main",
+          windowInstanceId: "main@2",
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+        },
+      }),
+    );
+    expect(prepared.receipt.disposition).toBe("INVALID_IDENTITY");
+    expect(JSON.stringify(prepared.receipt)).toContain("target.windowInstanceId");
+  });
+
+  test("target generation drift is invalid rather than evaluable", () => {
+    const prepared = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({
+        target: {
+          automationId: "main",
+          targetGeneration: 2,
+          bounds: { x: 0, y: 0, width: 800, height: 600 },
+        },
+      }),
+    );
+    expect(prepared.receipt.disposition).toBe("INVALID_GENERATION");
+    expect(JSON.stringify(prepared.receipt)).toContain("target.targetGeneration");
+  });
+
+  test("malformed and mismatched binary fingerprints fail closed", () => {
+    const malformed = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({ transaction: proofTransaction({ binarySha256: "not-a-sha" }) }),
+    );
+    expect(malformed.receipt.disposition).toBe("INVALID_BINARY");
+
+    const mismatched = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({ binary: { sha256: "b".repeat(64) } }),
+    );
+    expect(mismatched.receipt.disposition).toBe("INVALID_BINARY");
+  });
+
+  test("receipt and proof transaction run IDs must agree", () => {
+    const prepared = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({ runId: "another-run" }),
+    );
+    expect(prepared.receipt.disposition).toBe("INVALID_IDENTITY");
+    expect(JSON.stringify(prepared.receipt)).toContain("run identity");
   });
 
   test("required null and pass-with-missing-primitives fail closed", () => {
@@ -196,6 +492,49 @@ describe("executable receipt registry", () => {
     expect(falsePass.exitCode).toBe(4);
   });
 
+  test("semantic action, focus, AX, and privacy proof cannot be asserted without observed evidence", () => {
+    const base = {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.elements",
+      command: "elements.snapshot",
+      classification: "ok",
+      requestedTarget: { selector: { type: "main" } },
+      target: { automationId: "main" },
+      semanticSurface: { collectorSurface: "fixture" },
+      semanticProjection: {
+        semanticSurface: "fixture",
+        version: 1,
+        quality: "complete",
+        reasonCodes: [],
+        proofMode: "inspection",
+        proofAllowed: true,
+      },
+      nodes: [{ semanticId: "node:one", focused: false, activatable: false }],
+      duplicateSemanticIds: [],
+      transaction: proofTransaction(),
+      missingPrimitives: [],
+      errors: [],
+    };
+    for (const [mode, expected] of [
+      ["action", "enabled activatable semantic node"],
+      ["focus", "exactly one focused semantic node"],
+      ["ax", "independently observed native accessibility peers"],
+    ]) {
+      const invalid = validateReceipt("devtools.elements.snapshot", {
+        ...base,
+        semanticProjection: { ...base.semanticProjection, proofMode: mode },
+      });
+      expect(invalid.valid).toBe(false);
+      expect(invalid.errors.some((error) => error.includes(expected))).toBe(true);
+    }
+    const leaked = validateReceipt("devtools.elements.snapshot", {
+      ...base,
+      privacyViolationSemanticIds: ["node:one"],
+    });
+    expect(leaked.valid).toBe(false);
+    expect(leaked.errors.some((error) => error.includes("privacy descriptors"))).toBe(true);
+  });
+
   test("duplicate keyboard key requires explicit routing priority", () => {
     const receipt = {
       schemaVersion: 2,
@@ -262,6 +601,20 @@ describe("executable receipt registry", () => {
     expect(JSON.stringify(classified.receipt)).not.toContain("provider detail");
   });
 
+  test("undeclared password and provider-token receipt fields fail closed without leaking bytes", () => {
+    const secrets = ["unregistered-private-password", "sk-proj-private-provider-token"];
+    const prepared = prepareValidatedReceipt(
+      "devtools.layout.measure",
+      baseReceipt({ credentials: { password: secrets[0], arbitrary: secrets[1] } }),
+    );
+
+    expect(prepared.receipt.disposition).toBe("INVALID_PRIVACY");
+    expect(prepared.exitCode).toBe(4);
+    const serialized = JSON.stringify(prepared.receipt);
+    for (const value of secrets) expect(serialized).not.toContain(value);
+    expect(serialized).toContain("unclassified sensitive fields");
+  });
+
   test("blocked evidence retains a precise disposition and exits three", () => {
     const prepared = prepareValidatedReceipt(
       "devtools.layout.measure",
@@ -302,6 +655,7 @@ describe("executable receipt registry", () => {
     expect(prepared.receipt.schemaVersion).toBe(2);
     expect(typeof prepared.receipt.receiptId).toBe("string");
     expect(typeof prepared.receipt.runId).toBe("string");
+    expect(prepared.receipt.runId).toBe("receipt-schema-test");
     expect(Array.isArray(prepared.receipt.taskIds)).toBe(true);
     expect(typeof prepared.receipt.repository).toBe("object");
     expect(typeof prepared.receipt.evidence).toBe("object");

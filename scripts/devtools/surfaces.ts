@@ -29,7 +29,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   coverageProfiles,
@@ -38,11 +38,19 @@ import {
   type CoverageStatus,
 } from "./coverage.ts";
 import {
+  DEFAULT_CONSISTENCY_CATALOG_PATH,
+  parseTaskCatalog,
+} from "./consistency.ts";
+import {
   emitValidatedReceipt,
   receiptSchemaRegistry,
   validateReceiptFile,
   RECEIPT_SCHEMA_VERSION,
 } from "./lib/receipt-schema.ts";
+import {
+  buildRuntimeCoverageScorecard,
+  discoverRuntimeCoverageReceipts,
+} from "./lib/runtime-coverage.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1296,6 +1304,7 @@ export async function runBindingsPipeline(): Promise<BindingsPipeline> {
   const canonicalMappings = buildCanonicalMappings(registry, rust);
   const build = buildCoverageBindingSet(canonicalMappings);
   const validation = validateCoverageBindingSet(build.set);
+  const coverageRegistryErrors = validateCoverageProfiles();
 
   const censusPass =
     rust.kinds.length === EXPECTED_CENSUS.contractKindCount &&
@@ -1325,6 +1334,11 @@ export async function runBindingsPipeline(): Promise<BindingsPipeline> {
       `feature map is not a real nonempty source (status: ${featureMapGate.status}; attempted: ${featureMapGate.attemptedPaths.join(", ")})`,
     );
   }
+  if (coverageRegistryErrors.length > 0) {
+    blockReasons.push(
+      ...coverageRegistryErrors.map((error) => `coverage registry: ${error}`),
+    );
+  }
 
   const surfacesText = await readText(paths.surfacesModule);
   const coverageText = await readText(paths.coverage);
@@ -1340,7 +1354,8 @@ export async function runBindingsPipeline(): Promise<BindingsPipeline> {
     validation,
     censusPass,
     usable: censusPass && parity.pass && featureMapGate.pass && registry.rustSourceExists
-      && build.errors.length === 0 && validation.pass,
+      && build.errors.length === 0 && validation.pass
+      && coverageRegistryErrors.length === 0,
     blockReasons,
     fingerprints: {
       rustSourcePath: paths.rustSource,
@@ -1362,6 +1377,11 @@ export function buildBindingsReceipt(
   negativeControls: NegativeControlResult[],
 ) {
   const { rust, parity, featureMapGate, build, validation } = pipeline;
+  const catalog = parseTaskCatalog(
+    readFileSync(DEFAULT_CONSISTENCY_CATALOG_PATH, "utf8"),
+    DEFAULT_CONSISTENCY_CATALOG_PATH,
+  );
+  const task = catalog.byId.get("PF-009");
   const statusCounts = coverageProfiles.reduce<Record<CoverageStatus, number>>(
     (counts, profile) => {
       counts[profile.status] += 1;
@@ -1373,7 +1393,10 @@ export function buildBindingsReceipt(
     counts[binding.evidenceGrade] = (counts[binding.evidenceGrade] ?? 0) + 1;
     return counts;
   }, {});
-  const blocked = pipeline.blockReasons.length > 0;
+  const blocked =
+    pipeline.blockReasons.length > 0 ||
+    catalog.errors.length > 0 ||
+    !task;
   const negativesPass = negativeControls.every((control) => control.pass);
   const classification = blocked
     ? "blocked-by-scope-drift"
@@ -1385,6 +1408,16 @@ export function buildBindingsReceipt(
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     tool: "script-kit-devtools.surfaces",
     command: "surfaces.coverage-bindings",
+    evidenceClass: "STATIC_INVENTORY",
+    taskIds: ["PF-009"],
+    catalogBinding: task
+      ? {
+          catalogPath: DEFAULT_CONSISTENCY_CATALOG_PATH,
+          taskId: task.id,
+          title: task.title,
+          sectionSha256: task.sectionSha256,
+        }
+      : null,
     classification,
     census: {
       expected: { ...EXPECTED_CENSUS },
@@ -1430,6 +1463,9 @@ export function buildBindingsReceipt(
       invalidPrimitiveReferenceCount: validation.invalidPrimitiveReferenceCount,
       supportInvariantViolationCount: validation.supportInvariantViolationCount,
       evidenceGradeCounts: gradeCounts,
+      staticDirectBindingCount: gradeCounts.Direct ?? 0,
+      freshDirectRuntimeProofCount: 0,
+      runtimeProofDisposition: "NOT_EVALUATED",
       plannedBindingCount: build.set.bindings.filter((binding) => binding.profileStatus === "planned").length,
       supportedBindingCount: build.set.bindings.filter((binding) => binding.supported).length,
     },
@@ -1721,6 +1757,7 @@ export function buildSurfaceReport(inputs: SurfaceReportInputs) {
       },
     ],
     evidenceStatus: "SOURCE-CONFIRMED" as const,
+    evidenceClass: "STATIC_INVENTORY" as const,
     inventoryNamespaces: {
       contractKindCount: contracts.entries.length,
       contractMappingCount: contractMappings.length,
@@ -1762,6 +1799,11 @@ export function buildSurfaceReport(inputs: SurfaceReportInputs) {
       fingerprint: pipeline.build.set.fingerprint,
       blockReasons: pipeline.blockReasons,
     },
+    runtimeCoverage: buildRuntimeCoverageScorecard(
+      pipeline.build.set.bindings,
+      [],
+      { ownerValidationErrors: validateCoverageProfiles() },
+    ),
     surfaceContracts: contracts.entries.map(serializeContract),
     auditSurfaceContracts: auditContracts.map(serializeContract),
     liquidGlassAuditExclusions,
@@ -1878,6 +1920,30 @@ export async function main(argv: string[] = Bun.argv.slice(2)) {
     const negatives = runCoverageNegativeControls(pipeline.build.set, negativeDir);
     const receipt = buildBindingsReceipt(pipeline, negatives);
     emitValidatedReceipt("devtools.coverage.bindings", receipt, out);
+    return;
+  }
+
+  if (subcommand === "scorecard") {
+    const receiptsRoot = argValue(argv, "--receipts");
+    if (!receiptsRoot) {
+      console.error("Usage: surfaces.ts scorecard --receipts <directory> [--source-sha <sha>] [--binary-sha <sha>]");
+      process.exitCode = 64;
+      return;
+    }
+    const pipeline = await runBindingsPipeline();
+    const scorecard = buildRuntimeCoverageScorecard(
+      pipeline.build.set.bindings,
+      discoverRuntimeCoverageReceipts(receiptsRoot),
+      {
+        sourceCommit: argValue(argv, "--source-sha"),
+        binarySha256: argValue(argv, "--binary-sha"),
+        ownerValidationErrors: validateCoverageProfiles(),
+      },
+    );
+    console.log(JSON.stringify(scorecard, null, 2));
+    if (scorecard.disposition !== "EVALUABLE_PASS") {
+      process.exitCode = 3;
+    }
     return;
   }
 

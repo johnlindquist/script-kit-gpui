@@ -369,11 +369,15 @@ function syntheticFrame(
   };
 }
 
-/** A rendered frame set the LOCKED evaluator accepts (shrink-in, six frames). */
+/**
+ * Synthetic samples of the EXISTING locked 103.05% → 101.2% → 98.7%
+ * main-entry shape. These are test observations, never production animation
+ * values or a substitute for a real composited-frame receipt.
+ */
 export function syntheticValidMainEntryFrames(windowId = 77) {
   return [
-    syntheticFrame(0, 1.012, 0.85, windowId),
-    syntheticFrame(1, 1.004, 0.95, windowId),
+    syntheticFrame(0, 1.0305, 0.85, windowId),
+    syntheticFrame(1, 1.012, 0.95, windowId),
     syntheticFrame(2, 0.995, 0.97, windowId),
     syntheticFrame(3, 0.987, 0.985, windowId),
     syntheticFrame(4, 0.993, 0.99, windowId),
