@@ -449,27 +449,16 @@ impl DayPageDocumentSession {
             // Non-append divergence (an external edit rewrote earlier content).
             // Keep both versions: the editor buffer wins the bound file, and the
             // on-disk version is copied to the brain trash for recovery.
-            let trash_dir = self.substrate.paths().trash_dir();
-            let stem = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("day");
-            let ext = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .unwrap_or("md");
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0);
-            let conflict_path = trash_dir.join(format!("{stem}.conflict-{ts}.{ext}"));
-            io::atomic_write(&conflict_path, &disk_now).with_context(|| {
-                format!("writing day page conflict copy {}", conflict_path.display())
-            })?;
+            let conflict_path = io::preserve_private_conflict_copy(&path, &disk_now)?;
+            let safe_path = crate::logging::log_private_user_value(&path.display().to_string());
+            let safe_conflict =
+                crate::logging::log_private_user_value(&conflict_path.display().to_string());
             tracing::warn!(
                 target: "script_kit::brain",
-                path = %path.display(),
-                conflict_copy = %conflict_path.display(),
+                path_bytes = safe_path.raw_bytes,
+                path_sha256 = %safe_path.sha256,
+                conflict_bytes = safe_conflict.raw_bytes,
+                conflict_sha256 = %safe_conflict.sha256,
                 "day page diverged on disk in a non-append way; kept editor buffer and copied the disk version to trash"
             );
             io::atomic_write(&path, content)
@@ -1275,6 +1264,43 @@ mod tests {
             session.last_save_merged(),
             Some("line one edited\nline two"),
             "conflict save exposes the written editor content for adoption"
+        );
+    }
+
+    #[test]
+    fn day_page_private_conflicts_preserve_every_repeated_external_version() {
+        let (_fixture, mut session) = test_session();
+        let now = utc("2026-06-11T09:42:00Z");
+        session.bind_today(now).expect("bind owned day");
+        let path = session.path().expect("day path").clone();
+        session.apply_editor_content("initial private day");
+        session
+            .save_content("initial private day", now)
+            .expect("seed nonempty private baseline");
+
+        for index in 0..3 {
+            let external = format!("external private rewrite {index}");
+            let editor = format!("editor private version {index}");
+            io::atomic_write(&path, &external).expect("simulate private external edit");
+            session.apply_editor_content(&editor);
+            session
+                .save_content(&editor, now)
+                .expect("preserve private conflicting version");
+            assert_eq!(io::read_private_document(&path).unwrap(), editor);
+        }
+
+        let mut conflicts = fs::read_dir(session.substrate().paths().trash_dir())
+            .expect("private trash")
+            .map(|entry| io::read_private_document(&entry.expect("owned entry").path()).unwrap())
+            .collect::<Vec<_>>();
+        conflicts.sort();
+        assert_eq!(
+            conflicts,
+            vec![
+                "external private rewrite 0".to_string(),
+                "external private rewrite 1".to_string(),
+                "external private rewrite 2".to_string(),
+            ]
         );
     }
 }

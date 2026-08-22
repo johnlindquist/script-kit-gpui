@@ -341,8 +341,20 @@ impl NotesApp {
                     io::atomic_write(&path, &merged)?;
                     return Ok((merged, true));
                 }
-                // Non-append divergence: editor buffer wins the bound file (a
-                // future improvement could trash the disk copy like DayPageView).
+                // Preserve the conflicting disk version through the same
+                // private, collision-safe owner used by the main Day Page.
+                let conflict_path = io::preserve_private_conflict_copy(&path, &disk_now)?;
+                let safe_path = crate::logging::log_private_user_value(&path.display().to_string());
+                let safe_conflict =
+                    crate::logging::log_private_user_value(&conflict_path.display().to_string());
+                tracing::warn!(
+                    target: "script_kit::notes",
+                    path_bytes = safe_path.raw_bytes,
+                    path_sha256 = %safe_path.sha256,
+                    conflict_bytes = safe_conflict.raw_bytes,
+                    conflict_sha256 = %safe_conflict.sha256,
+                    "day note diverged on disk; preserved the conflicting private document"
+                );
                 io::atomic_write(&path, &editor_content)?;
                 Ok((editor_content.clone(), false))
             });

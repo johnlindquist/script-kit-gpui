@@ -1,9 +1,14 @@
 //! Atomic filesystem writes for the brain substrate.
 
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
+
+use super::paths::BrainPaths;
 
 /// Process-wide serialization for every mutation of files under the brain
 /// substrate. Day/note/fragment files have multiple concurrent writers (editor
@@ -73,6 +78,97 @@ pub(crate) fn read_private_document_if_present(path: &Path) -> Result<Option<Str
         return Ok(None);
     }
     read_private_document(path).map(Some)
+}
+
+/// Preserve a conflicting on-disk document under the same Brain owner's
+/// private trash without overwriting another conflict created this second.
+/// Callers already hold the Brain write lock, so this primitive deliberately
+/// does not reacquire it.
+pub(crate) fn preserve_private_conflict_copy(path: &Path, contents: &str) -> Result<PathBuf> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    preserve_private_conflict_copy_at(path, contents, timestamp)
+}
+
+pub(crate) fn preserve_private_conflict_copy_at(
+    path: &Path,
+    contents: &str,
+    timestamp: u64,
+) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("private conflict source has no parent: {}", path.display()))?;
+    let root = parent.parent().with_context(|| {
+        format!(
+            "private conflict source has no Brain root: {}",
+            path.display()
+        )
+    })?;
+    let paths = BrainPaths::new(root);
+    let trash = paths.trash_dir();
+    if !paths.contains(path) || parent == trash.as_path() {
+        bail!(
+            "private conflict source must be an owned Brain document: {}",
+            path.display()
+        );
+    }
+
+    prepare_private_document_directory(path)?;
+    if !crate::atomic_file::inspect_private_file(path)? {
+        bail!("private conflict source is missing: {}", path.display());
+    }
+    crate::atomic_file::ensure_private_directory(&trash)
+        .with_context(|| format!("preparing private Brain trash {}", trash.display()))?;
+
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .context("private conflict source has no valid filename stem")?;
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("md");
+
+    for attempt in 1..=1024 {
+        let suffix = if attempt == 1 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
+        let destination = trash.join(format!("{stem}.conflict-{timestamp}{suffix}.{extension}"));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+
+        match options.open(&destination) {
+            Ok(mut file) => {
+                if let Err(error) = file
+                    .write_all(contents.as_bytes())
+                    .and_then(|_| file.sync_all())
+                {
+                    let _ = std::fs::remove_file(&destination);
+                    return Err(error).with_context(|| {
+                        format!("writing private Brain conflict {}", destination.display())
+                    });
+                }
+                return Ok(destination);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("creating private Brain conflict {}", destination.display())
+                });
+            }
+        }
+    }
+
+    bail!("no unused private Brain conflict filename remained")
 }
 
 /// Write `contents` to `path` atomically via a temp file in the same directory.

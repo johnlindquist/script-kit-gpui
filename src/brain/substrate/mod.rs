@@ -791,6 +791,118 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn brain_private_conflict_preserves_every_same_second_recovery_copy() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_fixture, substrate) = test_substrate();
+        let day = substrate.paths().day_page(fixed_now().date_naive());
+        io::atomic_write(&day, "current private day").expect("seed owned day");
+
+        let first = io::preserve_private_conflict_copy_at(&day, "first private edit", 123456)
+            .expect("preserve first conflict");
+        let second = io::preserve_private_conflict_copy_at(&day, "second private edit", 123456)
+            .expect("preserve second conflict");
+        let third = io::preserve_private_conflict_copy_at(&day, "third private edit", 123456)
+            .expect("preserve third conflict");
+
+        assert_eq!(
+            first.file_name().unwrap().to_string_lossy(),
+            "2026-06-11.conflict-123456.md"
+        );
+        assert_eq!(
+            second.file_name().unwrap().to_string_lossy(),
+            "2026-06-11.conflict-123456-2.md"
+        );
+        assert_eq!(
+            third.file_name().unwrap().to_string_lossy(),
+            "2026-06-11.conflict-123456-3.md"
+        );
+        for (path, expected) in [
+            (first, "first private edit"),
+            (second, "second private edit"),
+            (third, "third private edit"),
+        ] {
+            assert_eq!(io::read_private_document(&path).unwrap(), expected);
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            fs::metadata(substrate.paths().trash_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brain_private_conflict_refuses_foreign_sources_and_hostile_trash_directories() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let (fixture, substrate) = test_substrate();
+        let outside = fixture.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let foreign_source = outside.join("foreign.md");
+        fs::write(&foreign_source, "foreign day content").unwrap();
+        assert!(
+            io::preserve_private_conflict_copy_at(&foreign_source, "never save this", 42).is_err()
+        );
+
+        let day = substrate.paths().day_page(fixed_now().date_naive());
+        io::atomic_write(&day, "owned day").unwrap();
+        let foreign_trash = fixture.path().join("foreign-trash");
+        fs::create_dir(&foreign_trash).unwrap();
+        fs::set_permissions(&foreign_trash, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&foreign_trash, substrate.paths().trash_dir()).unwrap();
+
+        assert!(io::preserve_private_conflict_copy_at(&day, "private version", 42).is_err());
+        assert_eq!(
+            fs::metadata(&foreign_trash).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(fs::read_dir(foreign_trash).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brain_private_conflict_skips_hostile_collision_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let (fixture, substrate) = test_substrate();
+        let day = substrate.paths().day_page(fixed_now().date_naive());
+        io::atomic_write(&day, "owned day").unwrap();
+        crate::atomic_file::ensure_private_directory(&substrate.paths().trash_dir()).unwrap();
+        let foreign = fixture.path().join("foreign-private-target.md");
+        fs::write(&foreign, "never overwrite this private file").unwrap();
+        let hostile = substrate
+            .paths()
+            .trash_dir()
+            .join("2026-06-11.conflict-42.md");
+        symlink(&foreign, &hostile).unwrap();
+
+        let safe = io::preserve_private_conflict_copy_at(&day, "safe private conflict", 42)
+            .expect("skip hostile collision");
+
+        assert_eq!(
+            safe.file_name().unwrap().to_string_lossy(),
+            "2026-06-11.conflict-42-2.md"
+        );
+        assert_eq!(
+            fs::read_to_string(foreign).unwrap(),
+            "never overwrite this private file"
+        );
+        assert!(fs::symlink_metadata(hostile)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
     #[test]
     fn trash_and_restore_round_trip() {
         let (_dir, substrate) = test_substrate();
