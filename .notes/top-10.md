@@ -188,6 +188,18 @@ Evidence in this checkpoint is intentionally time- and source-qualified:
   `BLOCKED_STALE_GENERATION`, and all 60 runtime receipts remained absent.
   Regenerate actual safe producer receipts after the final grouped commits;
   do not reuse, timestamp-edit, or relabel stale evidence.
+- A subsequent document-conflict audit found two real user-data loss paths:
+  the main Day Page used a predictable, second-resolution recovery filename
+  and could overwrite an earlier conflict; the separate Notes-window day
+  editor discarded a non-append external rewrite without preserving it at
+  all. Both real save paths now call the same Brain-owned conflict writer,
+  which validates the source/root, creates private `0700` trash and exclusive
+  `0600`/`O_NOFOLLOW` recovery files, suffixes every same-second collision,
+  refuses hostile directory links, preserves planted-file targets, and logs
+  only process-keyed path fingerprints. **Three isolated production-owner
+  regressions, the real repeated Day Page save, its existing non-append
+  compatibility case, and all 13 private Brain behaviors pass** without
+  starting an application or touching live user data.
 - The actual full library and application check completed successfully through
   the prescribed two-job Cargo wrapper. The main binary still reports eight
   preexisting binary-only unused-import warnings; the release-required
@@ -1973,7 +1985,12 @@ modes of the same reliable assistant.
    clear must preflight and remove conversations, index, prompt history,
    and generated attachments as four owned stores. Notes conflict recovery
    must exclusively create private no-follow files and suffix same-second
-   collisions without overwriting an existing recovery artifact.
+   collisions without overwriting an existing recovery artifact. Route both
+   the main Day Page session and the independent Notes-window day editor
+   through the same validated Brain-owned private conflict writer: a
+   non-append external edit must be preserved before either editor replaces
+   the bound file, hostile source/trash paths fail closed, same-second copies
+   remain independent, and diagnostics expose only keyed path fingerprints.
 5. Show included context before submission and distinguish user-selected
    context from context that is merely available to add.
 6. Introduce one profile/model readiness contract that validates sidecar
