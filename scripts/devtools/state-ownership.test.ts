@@ -17,12 +17,14 @@ function passingSources(): StateOwnershipSource[] {
       "pub enum CommandSource {} pub struct CommandIdentity; pub struct CommandDescriptor; pub enum CommandAvailability {}",
     "crates/sk-protocol/src/filter_coalescer.rs":
       "pub struct FilterCoalescer;",
+    "crates/sk-protocol/src/query_prefix.rs":
+      "pub struct ParsedQuery; pub fn parse_query_prefix() {} pub fn builtin_passes_prefix_filter() {} pub fn app_passes_prefix_filter() {} pub fn window_passes_prefix_filter() {} pub fn flow_passes_prefix_filter() {} pub fn skill_passes_prefix_filter() {} pub fn should_search_scripts() {} pub fn should_search_scriptlets() {}",
     "crates/sk-protocol/src/search_contract.rs":
       "pub struct ProviderRequest; pub struct ProviderGenerationFence; pub struct RootOwnedProviderRefresh; pub struct RootOwnedProviderRefreshLifecycle; pub struct RootProviderCoordinator;",
     "crates/sk-protocol/src/sentence_search.rs":
       "pub struct LongTextQuery; pub struct LongTextMatchEvidence;",
     "crates/sk-protocol/src/lib.rs":
-      "pub mod ascii_search; pub mod command_contract; pub mod filter_coalescer; pub mod search_contract; pub mod sentence_search;",
+      "pub mod ascii_search; pub mod command_contract; pub mod filter_coalescer; pub mod query_prefix; pub mod search_contract; pub mod sentence_search;",
     "src/scripts/types.rs":
       "pub enum SearchResult {} pub struct MatchEvidence;",
     "src/scripts/command_contract.rs":
@@ -30,9 +32,11 @@ function passingSources(): StateOwnershipSource[] {
     "src/scripts/root_search_contract.rs":
       "pub(crate) use sk_protocol::search_contract::{RootProviderCoordinator, RootOwnedProviderRefresh, RootOwnedProviderRefreshLifecycle};",
     "src/scripts/search.rs":
-      "mod ascii; pub(crate) use ascii::{contains_ignore_ascii_case, find_ignore_ascii_case, fuzzy_match_with_indices_ascii, is_fuzzy_match, is_word_boundary_match};",
+      "mod ascii; mod prefix_filters; pub(crate) use ascii::{contains_ignore_ascii_case, find_ignore_ascii_case, fuzzy_match_with_indices_ascii, is_fuzzy_match, is_word_boundary_match}; pub(crate) use prefix_filters::{parse_query_prefix, builtin_passes_prefix_filter, app_passes_prefix_filter, window_passes_prefix_filter, skill_passes_prefix_filter, should_search_scripts, should_search_scriptlets};",
     "src/scripts/search/ascii.rs":
       "pub(crate) use sk_protocol::ascii_search::{contains_ignore_ascii_case, find_ignore_ascii_case, fuzzy_match_with_indices_ascii, is_fuzzy_match, is_word_boundary_match};",
+    "src/scripts/search/prefix_filters.rs":
+      "pub(crate) use sk_protocol::query_prefix::{ParsedQuery, parse_query_prefix, builtin_passes_prefix_filter, app_passes_prefix_filter, window_passes_prefix_filter, flow_passes_prefix_filter, skill_passes_prefix_filter, should_search_scripts, should_search_scriptlets};",
     "src/scripts/search/sentence.rs":
       "pub(crate) use sk_protocol::sentence_search::*;",
     "src/filter_coalescer.rs":
@@ -69,6 +73,8 @@ function passingSources(): StateOwnershipSource[] {
       "fn filter() { app.root_search.begin_provider_request(sk_protocol::command_contract::CommandSource::BrowserTab); app.root_search.invalidate_provider_request(source); }",
     "src/app_impl/filter_input_updates.rs":
       "fn filter() { app.filter_coalescer.queue(value); app.filter_coalescer.take_latest(); app.filter_coalescer.reset(); }",
+    "src/scripts/search/unified.rs":
+      "fn search() { parse_query_prefix(query); builtin_passes_prefix_filter(parsed); app_passes_prefix_filter(parsed); window_passes_prefix_filter(parsed); flow_passes_prefix_filter(parsed); skill_passes_prefix_filter(parsed); should_search_scripts(parsed); should_search_scriptlets(parsed); }",
   };
   return REQUIRED_STATE_OWNERSHIP_PATHS.map((path) => ({
     path,
@@ -154,6 +160,57 @@ describe("GOV-001 canonical state ownership and sanctioned exceptions", () => {
     );
   });
 
+  test("structured launcher queries have one domain owner, adapter, and real search consumer", () => {
+    const audit = auditStateOwnership(passingSources());
+
+    expect(audit.pass).toBe(true);
+    expect(audit.owners).toContainEqual(
+      expect.objectContaining({
+        id: "domain-query-prefix",
+        path: "crates/sk-protocol/src/query_prefix.rs",
+        symbols: expect.arrayContaining([
+          "ParsedQuery",
+          "parse_query_prefix",
+          "should_search_scripts",
+          "should_search_scriptlets",
+        ]),
+      }),
+    );
+    expect(audit.consumers).toContainEqual(
+      expect.objectContaining({
+        id: "launcher-search-canonical-query-prefix-routing",
+        path: "src/scripts/search/unified.rs",
+        pass: true,
+      }),
+    );
+  });
+
+  test("refuses a launcher prefix adapter that no longer imports the domain parser", () => {
+    const audit = auditStateOwnership(
+      mutateSource("src/scripts/search/prefix_filters.rs", (source) =>
+        source.replace("parse_query_prefix, ", ""),
+      ),
+    );
+
+    expect(audit.failures).toContain(
+      "query-prefix-adapter-missing-domain-owner:parse_query_prefix",
+    );
+    expect(audit.pass).toBe(false);
+  });
+
+  test("refuses a launcher search that skips a canonical structured category", () => {
+    const audit = auditStateOwnership(
+      mutateSource("src/scripts/search/unified.rs", (source) =>
+        source.replace("flow_passes_prefix_filter(parsed); ", ""),
+      ),
+    );
+
+    expect(audit.failures).toContain(
+      "missing-canonical-consumer:launcher-search-canonical-query-prefix-routing:src/scripts/search/unified.rs",
+    );
+    expect(audit.pass).toBe(false);
+  });
+
   test("bounded collection cannot invoke an injected external discovery runner", () => {
     const sources = new Map(
       passingSources().map(({ path, content }) => [path, content!]),
@@ -227,7 +284,7 @@ describe("GOV-001 canonical state ownership and sanctioned exceptions", () => {
     expect(audit.failures).toContain(`duplicate-search-result-projection:${path}`);
   });
 
-  test.each(["command_contract", "search_contract"])(
+  test.each(["command_contract", "query_prefix", "search_contract"])(
     "rejects missing domain registry %s",
     (module) => {
       const audit = auditStateOwnership(

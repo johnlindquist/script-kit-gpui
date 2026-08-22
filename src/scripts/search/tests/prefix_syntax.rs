@@ -3,58 +3,6 @@ use std::path::PathBuf;
 use super::super::*;
 
 #[test]
-fn test_parse_query_prefix_tag() {
-    let parsed = parse_query_prefix("tag:productivity");
-    assert_eq!(parsed.filter_kind.as_deref(), Some("tag"));
-    assert_eq!(parsed.filter_value.as_deref(), Some("productivity"));
-    assert_eq!(parsed.remainder, "");
-}
-
-#[test]
-fn test_parse_query_prefix_tag_with_remainder() {
-    let parsed = parse_query_prefix("tag:productivity notes");
-    assert_eq!(parsed.filter_kind.as_deref(), Some("tag"));
-    assert_eq!(parsed.filter_value.as_deref(), Some("productivity"));
-    assert_eq!(parsed.remainder, "notes");
-}
-
-#[test]
-fn test_parse_query_prefix_no_prefix() {
-    let parsed = parse_query_prefix("hello world");
-    assert_eq!(parsed.filter_kind, None);
-    assert_eq!(parsed.filter_value, None);
-    assert_eq!(parsed.remainder, "hello world");
-}
-
-#[test]
-fn test_parse_query_prefix_empty_value() {
-    let parsed = parse_query_prefix("tag:");
-    assert_eq!(parsed.filter_kind, None); // empty value = not a filter
-}
-
-#[test]
-fn test_parse_query_prefix_is_cron() {
-    let parsed = parse_query_prefix("is:cron");
-    assert_eq!(parsed.filter_kind.as_deref(), Some("is"));
-    assert_eq!(parsed.filter_value.as_deref(), Some("cron"));
-}
-
-#[test]
-fn test_parse_query_prefix_type_script() {
-    let parsed = parse_query_prefix("type:script");
-    assert_eq!(parsed.filter_kind.as_deref(), Some("type"));
-    assert_eq!(parsed.filter_value.as_deref(), Some("script"));
-}
-
-#[test]
-fn test_parse_query_prefix_author() {
-    let parsed = parse_query_prefix("author:john search term");
-    assert_eq!(parsed.filter_kind.as_deref(), Some("author"));
-    assert_eq!(parsed.filter_value.as_deref(), Some("john"));
-    assert_eq!(parsed.remainder, "search term");
-}
-
-#[test]
 fn test_script_passes_tag_filter() {
     use crate::metadata_parser::TypedMetadata;
     let mut script = Script {
@@ -257,27 +205,6 @@ fn test_type_filter_snippet_excludes_scripts() {
         ..Default::default()
     };
     assert!(!script_passes_prefix_filter(&script, &parsed));
-}
-
-#[test]
-fn test_builtin_prefix_filter_allows_command_type_and_rejects_non_builtin_types() {
-    let command_filter = parse_query_prefix("type:command");
-    assert!(
-        builtin_passes_prefix_filter(&command_filter),
-        "type:command should include built-ins"
-    );
-
-    let builtin_filter = parse_query_prefix("type:builtins");
-    assert!(
-        builtin_passes_prefix_filter(&builtin_filter),
-        "type:builtins should include built-ins"
-    );
-
-    let script_filter = parse_query_prefix("type:script");
-    assert!(
-        !builtin_passes_prefix_filter(&script_filter),
-        "type:script should exclude built-ins"
-    );
 }
 
 #[test]

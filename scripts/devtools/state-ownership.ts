@@ -25,6 +25,21 @@ export const CANONICAL_STATE_OWNERS = [
     symbols: ["CommandSource", "CommandIdentity", "CommandDescriptor", "CommandAvailability"],
   },
   {
+    id: "domain-query-prefix",
+    path: "crates/sk-protocol/src/query_prefix.rs",
+    symbols: [
+      "ParsedQuery",
+      "parse_query_prefix",
+      "builtin_passes_prefix_filter",
+      "app_passes_prefix_filter",
+      "window_passes_prefix_filter",
+      "flow_passes_prefix_filter",
+      "skill_passes_prefix_filter",
+      "should_search_scripts",
+      "should_search_scriptlets",
+    ],
+  },
+  {
     id: "domain-search-contract",
     path: "crates/sk-protocol/src/search_contract.rs",
     symbols: [
@@ -91,6 +106,7 @@ export const REQUIRED_STATE_REGISTRIES = [
   "src/scripts/root_search_contract.rs",
   "src/scripts/search.rs",
   "src/scripts/search/ascii.rs",
+  "src/scripts/search/prefix_filters.rs",
   "src/scripts/search/sentence.rs",
   "src/filter_coalescer.rs",
   "src/scripts/mod.rs",
@@ -107,6 +123,7 @@ export const REQUIRED_STATE_CONSUMERS = [
   "src/render_script_list/mod.rs",
   "src/app_impl/filtering_cache.rs",
   "src/app_impl/filter_input_updates.rs",
+  "src/scripts/search/unified.rs",
 ] as const;
 
 export const REQUIRED_STATE_OWNERSHIP_PATHS = [
@@ -281,6 +298,7 @@ export function auditStateOwnership(
     "ascii_search",
     "command_contract",
     "filter_coalescer",
+    "query_prefix",
     "search_contract",
     "sentence_search",
   ]) {
@@ -338,6 +356,9 @@ export function auditStateOwnership(
   if (!hasModule(searchRegistry, "ascii")) {
     failures.push("missing-launcher-ascii-search-module");
   }
+  if (!hasModule(searchRegistry, "prefix_filters")) {
+    failures.push("missing-launcher-query-prefix-module");
+  }
   const asciiAdapter = code("src/scripts/search/ascii.rs");
   for (const symbol of [
     "contains_ignore_ascii_case",
@@ -351,6 +372,29 @@ export function auditStateOwnership(
     }
     if (!hasGroupedSymbol(searchRegistry, "ascii", symbol)) {
       failures.push(`launcher-search-missing-canonical-ascii-import:${symbol}`);
+    }
+  }
+  const prefixAdapter = code("src/scripts/search/prefix_filters.rs");
+  for (const symbol of [
+    "ParsedQuery",
+    "parse_query_prefix",
+    "builtin_passes_prefix_filter",
+    "app_passes_prefix_filter",
+    "window_passes_prefix_filter",
+    "flow_passes_prefix_filter",
+    "skill_passes_prefix_filter",
+    "should_search_scripts",
+    "should_search_scriptlets",
+  ]) {
+    if (!hasGroupedSymbol(prefixAdapter, "sk_protocol::query_prefix", symbol)) {
+      failures.push(`query-prefix-adapter-missing-domain-owner:${symbol}`);
+    }
+    if (
+      symbol !== "ParsedQuery" &&
+      symbol !== "flow_passes_prefix_filter" &&
+      !hasGroupedSymbol(searchRegistry, "prefix_filters", symbol)
+    ) {
+      failures.push(`launcher-search-missing-canonical-prefix-import:${symbol}`);
     }
   }
   const coalescerAdapter = code("src/filter_coalescer.rs");
@@ -389,6 +433,7 @@ export function auditStateOwnership(
     "crates/sk-protocol/src/ascii_search.rs",
     "crates/sk-protocol/src/command_contract.rs",
     "crates/sk-protocol/src/filter_coalescer.rs",
+    "crates/sk-protocol/src/query_prefix.rs",
     "crates/sk-protocol/src/search_contract.rs",
     "crates/sk-protocol/src/sentence_search.rs",
   ]) {
@@ -491,6 +536,20 @@ export function auditStateOwnership(
         /\bfilter_coalescer\s*\.\s*queue\s*\(/,
         /\bfilter_coalescer\s*\.\s*take_latest\s*\(/,
         /\bfilter_coalescer\s*\.\s*reset\s*\(/,
+      ],
+    },
+    {
+      id: "launcher-search-canonical-query-prefix-routing",
+      path: "src/scripts/search/unified.rs",
+      patterns: [
+        /\bparse_query_prefix\s*\(/,
+        /\bbuiltin_passes_prefix_filter\s*\(/,
+        /\bapp_passes_prefix_filter\s*\(/,
+        /\bwindow_passes_prefix_filter\s*\(/,
+        /\bflow_passes_prefix_filter\s*\(/,
+        /\bskill_passes_prefix_filter\s*\(/,
+        /\bshould_search_scripts\s*\(/,
+        /\bshould_search_scriptlets\s*\(/,
       ],
     },
   ];
