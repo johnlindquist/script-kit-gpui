@@ -1572,8 +1572,7 @@ fn setup_state_handles_capability_mismatch_without_alternative() {
 #[test]
 fn delete_conversation_removes_file_and_rewrites_index() {
     use super::history::{
-        delete_conversation, load_history, save_conversation, save_history_entry,
-        AgentChatHistoryEntry, SavedConversation, SavedMessage,
+        delete_conversation, load_history, AgentChatHistoryEntry, SavedConversation, SavedMessage,
     };
 
     let dir = tempfile::tempdir().expect("create temp dir");

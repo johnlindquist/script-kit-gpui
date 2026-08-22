@@ -29,6 +29,7 @@ pub(crate) struct RootAgentChatHistorySnapshot {
 
 static AGENT_CHAT_HISTORY_INDEX_CACHE: OnceLock<Mutex<Option<AgentChatHistoryIndexCache>>> =
     OnceLock::new();
+static AGENT_CHAT_HISTORY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static AGENT_CHAT_HISTORY_REFRESH_LIFECYCLE: OnceLock<Mutex<AgentChatHistoryRefreshLifecycle>> =
     OnceLock::new();
 
@@ -393,10 +394,14 @@ pub(crate) fn try_begin_root_agent_chat_history_refresh() -> Option<RootAgentCha
 fn read_root_agent_chat_history_snapshot_at(
     path: &std::path::Path,
 ) -> RootAgentChatHistorySnapshot {
-    let signature = history_file_signature(path);
-    let entries = read_private_history_file(path)
-        .map(|content| parse_history_entries(&content))
-        .unwrap_or_default();
+    let parsed =
+        read_private_history_file(path).and_then(|content| parse_history_entries(&content));
+    let signature = if parsed.is_ok() {
+        history_file_signature(path)
+    } else {
+        None
+    };
+    let entries = parsed.unwrap_or_default();
     RootAgentChatHistorySnapshot {
         cache: AgentChatHistoryIndexCache { signature, entries },
     }
@@ -495,18 +500,23 @@ const PROMPT_HISTORY_MAX_LINES: usize = 200;
 /// Append a submitted composer prompt to the flat recall store. Consecutive
 /// duplicates are skipped; the file compacts to the newest
 /// `PROMPT_HISTORY_MAX_LINES` entries once it doubles that size.
-pub(crate) fn append_prompt_history(prompt: &str) {
-    if let Err(error) = append_prompt_history_at(&crate::setup::get_kit_path(), prompt) {
-        tracing::debug!(reason = %error, "agent_chat_prompt_history_write_failed");
-    }
+pub(super) fn append_prompt_history(
+    prompt: &str,
+) -> Result<(), AgentChatConversationPersistenceError> {
+    append_prompt_history_at(&crate::setup::get_kit_path(), prompt)
 }
 
 fn append_prompt_history_at(
     kit_root: &std::path::Path,
     prompt: &str,
 ) -> Result<(), AgentChatConversationPersistenceError> {
-    use std::io::Write as _;
+    with_agent_chat_history_write_lock(|| append_prompt_history_at_locked(kit_root, prompt))
+}
 
+fn append_prompt_history_at_locked(
+    kit_root: &std::path::Path,
+    prompt: &str,
+) -> Result<(), AgentChatConversationPersistenceError> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Ok(());
@@ -529,31 +539,22 @@ fn append_prompt_history_at(
     let json = serde_json::to_string(&line)
         .map_err(|_| AgentChatConversationPersistenceError::SerializationFailed)?;
 
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(&path)
+    crate::atomic_file::append_private_jsonl_record(&path, json.as_bytes())
         .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
-    ensure_private_regular_history_file(&file)?;
-    writeln!(file, "{json}")
-        .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
-    drop(file);
 
     let content = read_private_history_file(&path)?;
-    if content.lines().count() > PROMPT_HISTORY_MAX_LINES * 2 {
-        let keep: Vec<&str> = content
-            .lines()
+    let entries = parse_prompt_history_lines(&content)?;
+    if entries.len() > PROMPT_HISTORY_MAX_LINES * 2 {
+        let keep: Vec<&PromptHistoryLine> = entries
+            .iter()
             .rev()
             .take(PROMPT_HISTORY_MAX_LINES)
             .collect();
         let mut rewritten = String::new();
         for entry in keep.iter().rev() {
-            rewritten.push_str(entry);
+            let json = serde_json::to_string(entry)
+                .map_err(|_| AgentChatConversationPersistenceError::SerializationFailed)?;
+            rewritten.push_str(&json);
             rewritten.push('\n');
         }
         write_private_history_file_atomically(&path, &rewritten)?;
@@ -582,10 +583,9 @@ fn load_prompt_history_at(
         return Ok(Vec::new());
     }
     let content = read_private_history_file(&path)?;
-    let mut prompts: Vec<String> = content
-        .lines()
+    let mut prompts: Vec<String> = parse_prompt_history_lines(&content)?
+        .into_iter()
         .rev()
-        .filter_map(|line| serde_json::from_str::<PromptHistoryLine>(line).ok())
         .map(|line| line.prompt)
         .take(limit)
         .collect();
@@ -593,8 +593,17 @@ fn load_prompt_history_at(
     Ok(prompts)
 }
 
-fn conversations_dir() -> std::path::PathBuf {
-    crate::setup::get_kit_path().join("agent_chat-conversations")
+fn parse_prompt_history_lines(
+    content: &str,
+) -> Result<Vec<PromptHistoryLine>, AgentChatConversationPersistenceError> {
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<PromptHistoryLine>(line)
+                .map_err(|_| AgentChatConversationPersistenceError::InvalidPromptHistoryPayload)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -605,6 +614,8 @@ pub(super) enum AgentChatConversationPersistenceError {
     SessionIdMismatch,
     SerializationFailed,
     InvalidConversationPayload,
+    InvalidHistoryIndexPayload,
+    InvalidPromptHistoryPayload,
     Io(std::io::ErrorKind),
 }
 
@@ -624,6 +635,12 @@ impl std::fmt::Display for AgentChatConversationPersistenceError {
             }
             Self::InvalidConversationPayload => {
                 formatter.write_str("invalid saved Agent Chat conversation")
+            }
+            Self::InvalidHistoryIndexPayload => {
+                formatter.write_str("invalid saved Agent Chat conversation index")
+            }
+            Self::InvalidPromptHistoryPayload => {
+                formatter.write_str("invalid saved Agent Chat prompt history")
             }
             Self::Io(kind) => write!(formatter, "Agent Chat history I/O failed ({kind:?})"),
         }
@@ -787,52 +804,41 @@ pub(super) fn write_private_history_file_atomically(
     result
 }
 
-/// Append a history entry to the JSONL index file.
-/// Compacts the file when it exceeds 200 lines.
-pub(crate) fn save_history_entry(entry: &AgentChatHistoryEntry) {
-    if let Err(error) = save_history_entry_at(&crate::setup::get_kit_path(), entry) {
-        tracing::debug!(reason = %error, "agent_chat_history_write_failed");
-    }
+fn with_agent_chat_history_write_lock<T, E>(
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let _guard = AGENT_CHAT_HISTORY_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    operation()
 }
 
 fn save_history_entry_at(
     kit_root: &std::path::Path,
     entry: &AgentChatHistoryEntry,
 ) -> Result<(), AgentChatConversationPersistenceError> {
-    use std::io::Write as _;
-
     validate_agent_chat_session_id(&entry.session_id)?;
     let path = kit_root.join("agent_chat-history.jsonl");
     let json = serde_json::to_string(entry)
         .map_err(|_| AgentChatConversationPersistenceError::SerializationFailed)?;
-    let _ = inspect_regular_history_file(&path)?;
-
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    if inspect_regular_history_file(&path)? {
+        let existing = read_private_history_file(&path)?;
+        parse_history_entries(&existing)?;
     }
-    let mut file = options
-        .open(&path)
+    crate::atomic_file::append_private_jsonl_record(&path, json.as_bytes())
         .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
-    ensure_private_regular_history_file(&file)?;
-    writeln!(file, "{json}")
-        .map_err(|error| AgentChatConversationPersistenceError::Io(error.kind()))?;
-    drop(file);
     invalidate_history_cache();
 
     // Compact when file grows too large (>200 lines)
     let content = read_private_history_file(&path)?;
+    let compacted = parse_history_entries(&content)?;
     if content.lines().count() > 200 {
-        let compacted = parse_history_entries(&content);
         let mut rewritten = String::new();
         for compacted_entry in compacted.iter().rev() {
-            if let Ok(json) = serde_json::to_string(compacted_entry) {
-                rewritten.push_str(&json);
-                rewritten.push('\n');
-            }
+            let json = serde_json::to_string(compacted_entry)
+                .map_err(|_| AgentChatConversationPersistenceError::SerializationFailed)?;
+            rewritten.push_str(&json);
+            rewritten.push('\n');
         }
         write_private_history_file_atomically(&path, &rewritten)?;
         invalidate_history_cache();
@@ -841,14 +847,34 @@ fn save_history_entry_at(
     Ok(())
 }
 
-/// Save full conversation messages to a session-specific JSON file.
-pub(crate) fn save_conversation(conversation: &SavedConversation) {
-    match save_conversation_at(&crate::setup::get_kit_path(), conversation) {
-        Ok(()) => cleanup_old_conversations(50),
-        Err(error) => {
-            tracing::debug!(reason = %error, "agent_chat_conversation_write_failed");
+/// Save a complete turn and its searchable index as one serialized ownership
+/// transaction. No corrupted index may silently erase or orphan a conversation.
+pub(super) fn save_completed_conversation(
+    conversation: &SavedConversation,
+    entry: &AgentChatHistoryEntry,
+) -> Result<(), AgentChatConversationPersistenceError> {
+    save_completed_conversation_at(&crate::setup::get_kit_path(), conversation, entry)
+}
+
+fn save_completed_conversation_at(
+    kit_root: &std::path::Path,
+    conversation: &SavedConversation,
+    entry: &AgentChatHistoryEntry,
+) -> Result<(), AgentChatConversationPersistenceError> {
+    with_agent_chat_history_write_lock(|| {
+        if conversation.session_id != entry.session_id {
+            return Err(AgentChatConversationPersistenceError::SessionIdMismatch);
         }
-    }
+        let index = kit_root.join("agent_chat-history.jsonl");
+        if inspect_regular_history_file(&index)? {
+            let existing = read_private_history_file(&index)?;
+            parse_history_entries(&existing)?;
+        }
+        save_conversation_at(kit_root, conversation)?;
+        save_history_entry_at(kit_root, entry)?;
+        cleanup_old_conversations_at(kit_root, 50);
+        Ok(())
+    })
 }
 
 fn save_conversation_at(
@@ -879,7 +905,7 @@ fn save_conversation_at(
 /// always see populated display fields.
 pub(crate) fn load_history() -> Vec<AgentChatHistoryEntry> {
     let path = history_path();
-    let signature = history_file_signature(&path);
+    let mut signature = history_file_signature(&path);
     if let Ok(guard) = agent_chat_history_index_cache().lock() {
         if let Some(cache) = guard.as_ref() {
             if cache.signature == signature {
@@ -888,9 +914,12 @@ pub(crate) fn load_history() -> Vec<AgentChatHistoryEntry> {
         }
     }
 
-    let entries = read_private_history_file(&path)
-        .map(|content| parse_history_entries(&content))
-        .unwrap_or_default();
+    let parsed =
+        read_private_history_file(&path).and_then(|content| parse_history_entries(&content));
+    if parsed.is_err() {
+        signature = None;
+    }
+    let entries = parsed.unwrap_or_default();
 
     if let Ok(mut guard) = agent_chat_history_index_cache().lock() {
         *guard = Some(AgentChatHistoryIndexCache {
@@ -916,46 +945,50 @@ fn history_file_signature(path: &std::path::Path) -> HistoryFileSignature {
     ))
 }
 
-fn parse_history_entries(content: &str) -> Vec<AgentChatHistoryEntry> {
-    let mut entries: Vec<AgentChatHistoryEntry> = content
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .map(|mut entry: AgentChatHistoryEntry| {
-            // Back-fill missing fields from legacy entries.
-            if entry
-                .custom_title
-                .as_deref()
-                .is_some_and(|title| title.trim().is_empty())
-            {
-                entry.custom_title = None;
-            }
-            if entry.title.is_empty() {
-                entry.title = entry.first_message.clone();
-            }
-            if entry.preview.is_empty() {
-                entry.preview = entry.first_message.clone();
-            }
-            if entry.search_text.is_empty() {
-                entry.search_text = bounded_search_text(&format!(
-                    "{}\n{}\n{}\n{}",
-                    entry.title,
-                    entry.custom_title.as_deref().unwrap_or_default(),
-                    entry.preview,
-                    entry.timestamp
-                ));
-            } else {
-                entry.search_text = bounded_search_text(&entry.search_text);
-            }
-            entry
-        })
-        .collect();
+fn parse_history_entries(
+    content: &str,
+) -> Result<Vec<AgentChatHistoryEntry>, AgentChatConversationPersistenceError> {
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut entry: AgentChatHistoryEntry = serde_json::from_str(line)
+            .map_err(|_| AgentChatConversationPersistenceError::InvalidHistoryIndexPayload)?;
+        // Back-fill missing fields from legacy entries.
+        if entry
+            .custom_title
+            .as_deref()
+            .is_some_and(|title| title.trim().is_empty())
+        {
+            entry.custom_title = None;
+        }
+        if entry.title.is_empty() {
+            entry.title = entry.first_message.clone();
+        }
+        if entry.preview.is_empty() {
+            entry.preview = entry.first_message.clone();
+        }
+        if entry.search_text.is_empty() {
+            entry.search_text = bounded_search_text(&format!(
+                "{}\n{}\n{}\n{}",
+                entry.title,
+                entry.custom_title.as_deref().unwrap_or_default(),
+                entry.preview,
+                entry.timestamp
+            ));
+        } else {
+            entry.search_text = bounded_search_text(&entry.search_text);
+        }
+        entries.push(entry);
+    }
 
     // Most recent first, then deduplicate (keeps latest per session_id)
     entries.reverse();
     let mut seen = std::collections::HashSet::new();
     entries.retain(|e| seen.insert(e.session_id.clone()));
     entries.truncate(100);
-    entries
+    Ok(entries)
 }
 
 /// Whether a saved conversation exists for `session_id` (cheap stat, no
@@ -1012,6 +1045,16 @@ fn rename_conversation_at(
     session_id: &str,
     new_title: &str,
 ) -> anyhow::Result<()> {
+    with_agent_chat_history_write_lock(|| {
+        rename_conversation_at_locked(kit_root, session_id, new_title)
+    })
+}
+
+fn rename_conversation_at_locked(
+    kit_root: &std::path::Path,
+    session_id: &str,
+    new_title: &str,
+) -> anyhow::Result<()> {
     use anyhow::Context;
 
     validate_agent_chat_session_id(session_id)?;
@@ -1020,7 +1063,11 @@ fn rename_conversation_at(
     let sanitized = sanitize_conversation_title(new_title);
     conversation.custom_title = (!sanitized.is_empty()).then_some(sanitized);
     let entry = build_history_entry(&conversation).context("rebuild Agent Chat history entry")?;
-    let _ = inspect_regular_history_file(&kit_root.join("agent_chat-history.jsonl"))?;
+    let index = kit_root.join("agent_chat-history.jsonl");
+    if inspect_regular_history_file(&index)? {
+        let existing = read_private_history_file(&index)?;
+        parse_history_entries(&existing)?;
+    }
     save_conversation_at(kit_root, &conversation)?;
     save_history_entry_at(kit_root, &entry)?;
     Ok(())
@@ -1038,6 +1085,13 @@ pub(crate) fn delete_conversation(session_id: &str) -> anyhow::Result<()> {
 }
 
 fn delete_conversation_at(kit_root: &std::path::Path, session_id: &str) -> anyhow::Result<()> {
+    with_agent_chat_history_write_lock(|| delete_conversation_at_locked(kit_root, session_id))
+}
+
+fn delete_conversation_at_locked(
+    kit_root: &std::path::Path,
+    session_id: &str,
+) -> anyhow::Result<()> {
     let conversation_path = conversation_path_at(kit_root, session_id)?;
     let directory = kit_root.join("agent_chat-conversations");
     let conversation_exists = if inspect_conversation_directory(&directory)? {
@@ -1057,7 +1111,7 @@ fn delete_conversation_at(kit_root: &std::path::Path, session_id: &str) -> anyho
     let index_path = kit_root.join("agent_chat-history.jsonl");
     let rewritten_index = if inspect_regular_history_file(&index_path)? {
         let content = read_private_history_file(&index_path)?;
-        let entries = parse_history_entries(&content);
+        let entries = parse_history_entries(&content)?;
         let mut rewritten = String::new();
         for entry in entries
             .into_iter()
@@ -1091,8 +1145,8 @@ fn delete_conversation_at(kit_root: &std::path::Path, session_id: &str) -> anyho
 }
 
 /// Remove oldest conversation files beyond the keep limit.
-fn cleanup_old_conversations(keep: usize) {
-    let dir = conversations_dir();
+fn cleanup_old_conversations_at(kit_root: &std::path::Path, keep: usize) {
+    let dir = kit_root.join("agent_chat-conversations");
     if !matches!(inspect_conversation_directory(&dir), Ok(true)) {
         return;
     }
@@ -1159,6 +1213,233 @@ mod tests {
     // repoints SK_PATH (dictation history, config, scriptlets, ...).
     fn history_env_lock() -> &'static Mutex<()> {
         crate::test_utils::SK_PATH_TEST_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn agent_chat_history_integrity_repairs_legacy_private_jsonl_boundaries() {
+        let root = tempfile::tempdir().expect("isolated Agent Chat history root");
+        let first = make_conversation(
+            "legacy-private-session",
+            "2026-08-22T12:00:00Z",
+            vec![("user", "first private Agent Chat request")],
+        );
+        let second = make_conversation(
+            "next-private-session",
+            "2026-08-22T12:00:01Z",
+            vec![("user", "second private Agent Chat request")],
+        );
+        let first_entry = build_history_entry(&first).expect("legacy index entry");
+        let second_entry = build_history_entry(&second).expect("next index entry");
+        let path = root.path().join("agent_chat-history.jsonl");
+        let legacy = serde_json::to_string(&first_entry).expect("serialize legacy private entry");
+        crate::atomic_file::write_private_atomic(&path, legacy.as_bytes())
+            .expect("seed private JSONL without a terminal newline");
+
+        save_history_entry_at(root.path(), &second_entry)
+            .expect("repair legacy Agent Chat index record boundary");
+
+        let content = read_private_history_file(&path).expect("read private history index");
+        let entries = parse_history_entries(&content).expect("parse both complete conversations");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].session_id, second.session_id);
+        assert_eq!(entries[1].session_id, first.session_id);
+        assert!(content.ends_with('\n'));
+    }
+
+    #[test]
+    fn agent_chat_history_integrity_repairs_legacy_private_prompt_boundaries() {
+        let root = tempfile::tempdir().expect("isolated Agent Chat prompt root");
+        let path = root.path().join("agent_chat-prompt-history.jsonl");
+        let first = PromptHistoryLine {
+            timestamp: "2026-08-22T12:00:00Z".to_string(),
+            prompt: "first private composer prompt".to_string(),
+        };
+        let legacy = serde_json::to_string(&first).expect("serialize legacy prompt");
+        crate::atomic_file::write_private_atomic(&path, legacy.as_bytes())
+            .expect("seed legacy prompt without a terminal newline");
+
+        append_prompt_history_at(root.path(), "second private composer prompt")
+            .expect("repair private prompt JSONL boundary");
+
+        let prompts = load_prompt_history_at(root.path(), 10)
+            .expect("both private composer prompts remain recoverable");
+        assert_eq!(
+            prompts,
+            [
+                "first private composer prompt",
+                "second private composer prompt"
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_chat_history_integrity_never_overwrites_or_exposes_malformed_prompt_history() {
+        let root = tempfile::tempdir().expect("isolated Agent Chat prompt root");
+        let path = root.path().join("agent_chat-prompt-history.jsonl");
+        append_prompt_history_at(root.path(), "valid private composer prompt")
+            .expect("seed valid private composer history");
+        let valid = read_private_history_file(&path).expect("read valid private prompt history");
+        let canary = "never-expose-malformed-private-composer-prompt";
+        let corrupted = format!("{valid}{{\"prompt\":\"{canary}\"");
+        crate::atomic_file::write_private_atomic(&path, corrupted.as_bytes())
+            .expect("seed malformed private composer history");
+
+        let error = append_prompt_history_at(root.path(), "new private prompt")
+            .expect_err("malformed composer history refuses destructive append");
+
+        assert_eq!(
+            error,
+            AgentChatConversationPersistenceError::InvalidPromptHistoryPayload
+        );
+        assert!(!error.to_string().contains(canary));
+        assert_eq!(read_private_history_file(&path).unwrap(), corrupted);
+        assert!(load_prompt_history_at(root.path(), 10).is_err());
+    }
+
+    #[test]
+    fn agent_chat_history_integrity_never_deletes_a_conversation_for_a_malformed_index() {
+        let root = tempfile::tempdir().expect("isolated Agent Chat conversation root");
+        let conversation = make_conversation(
+            "preserve-private-conversation",
+            "2026-08-22T12:00:00Z",
+            vec![("user", "private conversation must remain recoverable")],
+        );
+        let entry = build_history_entry(&conversation).expect("private index entry");
+        save_completed_conversation_at(root.path(), &conversation, &entry)
+            .expect("persist valid private conversation");
+        let path = root.path().join("agent_chat-history.jsonl");
+        let valid = read_private_history_file(&path).expect("read valid private index");
+        let canary = "never-expose-malformed-private-agent-chat-content";
+        let corrupted = format!("{valid}{{\"private\":\"{canary}\"");
+        crate::atomic_file::write_private_atomic(&path, corrupted.as_bytes())
+            .expect("seed malformed private index");
+
+        let error = delete_conversation_at(root.path(), &conversation.session_id)
+            .expect_err("malformed private index must stop deletion before any mutation");
+
+        assert!(!error.to_string().contains(canary));
+        assert_eq!(read_private_history_file(&path).unwrap(), corrupted);
+        let retained = load_conversation_at(root.path(), &conversation.session_id)
+            .expect("original conversation remains readable")
+            .expect("original conversation remains on disk");
+        assert_eq!(retained.messages[0].body, conversation.messages[0].body);
+    }
+
+    #[test]
+    fn agent_chat_history_integrity_refuses_malformed_index_before_saving_or_renaming() {
+        let root = tempfile::tempdir().expect("isolated Agent Chat conversation root");
+        let original = make_conversation(
+            "original-private-session",
+            "2026-08-22T12:00:00Z",
+            vec![("user", "original private Agent Chat request")],
+        );
+        let original_entry = build_history_entry(&original).expect("original private index");
+        save_completed_conversation_at(root.path(), &original, &original_entry)
+            .expect("persist original private conversation");
+        let path = root.path().join("agent_chat-history.jsonl");
+        let valid = read_private_history_file(&path).expect("read valid index");
+        let corrupted = format!("{valid}{{malformed private index");
+        crate::atomic_file::write_private_atomic(&path, corrupted.as_bytes())
+            .expect("seed malformed index");
+        let incoming = make_conversation(
+            "incoming-private-session",
+            "2026-08-22T12:00:01Z",
+            vec![("user", "incoming private Agent Chat request")],
+        );
+        let incoming_entry = build_history_entry(&incoming).expect("incoming private index");
+
+        assert_eq!(
+            save_completed_conversation_at(root.path(), &incoming, &incoming_entry),
+            Err(AgentChatConversationPersistenceError::InvalidHistoryIndexPayload)
+        );
+        assert!(
+            rename_conversation_at(root.path(), &original.session_id, "Unexpected rename").is_err()
+        );
+        assert_eq!(read_private_history_file(&path).unwrap(), corrupted);
+        assert!(load_conversation_at(root.path(), &incoming.session_id)
+            .expect("incoming identity remains safe")
+            .is_none());
+        let unchanged = load_conversation_at(root.path(), &original.session_id)
+            .expect("original conversation remains readable")
+            .expect("original conversation remains on disk");
+        assert!(unchanged.custom_title.is_none());
+    }
+
+    #[test]
+    fn agent_chat_history_integrity_rejects_malformed_private_root_snapshots() {
+        let root = tempfile::tempdir().expect("isolated root Agent Chat history snapshot");
+        let path = root.path().join("agent_chat-history.jsonl");
+        crate::atomic_file::write_private_atomic(&path, b"private malformed conversation\n")
+            .expect("seed malformed private Agent Chat index");
+
+        let snapshot = read_root_agent_chat_history_snapshot_at(&path);
+
+        assert!(snapshot.cache.entries.is_empty());
+        assert!(snapshot.cache.signature.is_none());
+        assert!(!root_agent_chat_history_snapshot_is_current_at(
+            &snapshot, &path
+        ));
+    }
+
+    #[test]
+    fn agent_chat_history_integrity_serializes_completed_saves_and_deletion() {
+        use std::sync::{Arc, Barrier};
+
+        let directory = tempfile::tempdir().expect("isolated concurrent Agent Chat root");
+        let root = Arc::new(directory.path().to_path_buf());
+        let removed = make_conversation(
+            "remove-only-this-session",
+            "2026-08-22T12:00:00Z",
+            vec![("user", "only this private session should disappear")],
+        );
+        let removed_entry = build_history_entry(&removed).expect("removed private index");
+        save_completed_conversation_at(&root, &removed, &removed_entry)
+            .expect("persist initial private session");
+        let start = Arc::new(Barrier::new(6));
+        let workers = (0..5)
+            .map(|index| {
+                let root = Arc::clone(&root);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let session = format!("concurrent-private-session-{index}");
+                    let message = format!("private concurrent conversation {index}");
+                    let conversation = make_conversation(
+                        &session,
+                        "2026-08-22T12:00:01Z",
+                        vec![("user", &message)],
+                    );
+                    let entry = build_history_entry(&conversation).expect("concurrent index");
+                    start.wait();
+                    save_completed_conversation_at(&root, &conversation, &entry)
+                        .expect("persist complete concurrent private conversation");
+                    session
+                })
+            })
+            .collect::<Vec<_>>();
+
+        start.wait();
+        delete_conversation_at(&root, &removed.session_id)
+            .expect("delete only the requested private conversation");
+        let recorded = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("join isolated Agent Chat worker"))
+            .collect::<Vec<_>>();
+        let content = read_private_history_file(&root.join("agent_chat-history.jsonl"))
+            .expect("read complete private Agent Chat index");
+        let entries = parse_history_entries(&content).expect("parse complete private index");
+
+        assert_eq!(entries.len(), recorded.len());
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.session_id == removed.session_id));
+        assert!(recorded.iter().all(|session| {
+            entries.iter().any(|entry| &entry.session_id == session)
+                && conversation_exists_at(&root, session) == Ok(true)
+        }));
+        assert_eq!(
+            conversation_exists_at(&root, &removed.session_id),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -1873,8 +2154,8 @@ mod tests {
             "2026-04-01T18:00:00Z",
             vec![("user", "please debug auth"), ("assistant", "I found it")],
         );
-        save_conversation(&conv);
-        save_history_entry(&build_history_entry(&conv).expect("entry"));
+        save_completed_conversation(&conv, &build_history_entry(&conv).expect("entry"))
+            .expect("persist complete conversation and private index");
 
         rename_conversation("rename-1", r#"" Auth Debugging Plan! ""#).expect("rename");
         let saved = load_conversation("rename-1").expect("saved conversation");

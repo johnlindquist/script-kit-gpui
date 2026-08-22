@@ -1268,21 +1268,26 @@ impl AgentChatThread {
                 })();
 
                 if let Err(error) = result {
+                    let safe_error =
+                        crate::logging::log_private_user_value(&error.to_string());
                     tracing::debug!(
                         target: "script_kit::tab_ai",
                         event = "agent_chat_auto_title_failed",
                         session_id = %session_id,
-                        error = %error,
+                        error_bytes = safe_error.raw_bytes,
+                        error_sha256 = %safe_error.sha256,
                     );
                 }
             });
 
         if let Err(error) = spawn_result {
+            let safe_error = crate::logging::log_private_user_value(&error.to_string());
             tracing::debug!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_auto_title_spawn_failed",
                 session_id = %conversation.session_id,
-                error = %error,
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
             );
         }
     }
@@ -1495,10 +1500,12 @@ impl AgentChatThread {
         self.context_bootstrap_state = AgentChatContextBootstrapState::Ready;
         self.context_bootstrap_note = None;
         if let Err(error) = self.flush_bootstrap_queue(cx) {
+            let safe_error = crate::logging::log_private_user_value(&error);
             tracing::warn!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_bootstrap_flush_failed",
-                error = %error,
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
             );
         }
     }
@@ -1631,7 +1638,18 @@ impl AgentChatThread {
         // reads this store lazily). Queued submits count too — the user
         // typed and sent them. Zero-retention sessions contribute nothing.
         if self.session_policy.allows_automatic_transcript_retention() {
-            super::history::append_prompt_history(trimmed);
+            if let Err(error) = super::history::append_prompt_history(trimmed) {
+                tracing::warn!(
+                    target: "script_kit::tab_ai",
+                    reason = ?error,
+                    "agent_chat_prompt_history_not_saved"
+                );
+                self.push_notice(
+                    "Prompt history could not be saved",
+                    "Your message can still be sent, but prompt recall is unavailable.",
+                    cx,
+                );
+            }
         }
 
         self.resume_queue_for_manual_submit();
@@ -2810,10 +2828,12 @@ impl AgentChatThread {
         self.context_bootstrap_state = state;
         self.context_bootstrap_note = Some(note.into());
         if let Err(error) = self.flush_bootstrap_queue(cx) {
+            let safe_error = crate::logging::log_private_user_value(&error);
             tracing::warn!(
                 target: "script_kit::tab_ai",
                 event = "agent_chat_bootstrap_flush_failed",
-                error = %error,
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
             );
         }
     }
@@ -3467,48 +3487,66 @@ impl AgentChatThread {
                 // Build a rich index entry from the full conversation so
                 // search_history() can match on later transcript content.
                 // Zero-retention sessions (Quick AI) skip both writes.
-                let history_trace_label =
-                    if self.session_policy.allows_automatic_transcript_retention()
-                        && self
+                let history_trace_label = if self
+                    .session_policy
+                    .allows_automatic_transcript_retention()
+                    && self
+                        .messages
+                        .iter()
+                        .any(|m| matches!(m.role, AgentChatThreadMessageRole::User))
+                {
+                    let timestamp = chrono::Utc::now().to_rfc3339();
+                    let existing_custom_title =
+                        super::history::load_conversation(&self.ui_thread_id)
+                            .and_then(|conversation| conversation.custom_title);
+                    let conversation = super::history::SavedConversation {
+                        session_id: self.ui_thread_id.clone(),
+                        timestamp,
+                        custom_title: existing_custom_title.clone(),
+                        messages: self
                             .messages
                             .iter()
-                            .any(|m| matches!(m.role, AgentChatThreadMessageRole::User))
-                    {
-                        let timestamp = chrono::Utc::now().to_rfc3339();
-                        let existing_custom_title =
-                            super::history::load_conversation(&self.ui_thread_id)
-                                .and_then(|conversation| conversation.custom_title);
-                        let conversation = super::history::SavedConversation {
-                            session_id: self.ui_thread_id.clone(),
-                            timestamp,
-                            custom_title: existing_custom_title.clone(),
-                            messages: self
-                                .messages
-                                .iter()
-                                .map(|m| super::history::SavedMessage {
-                                    role: format!("{:?}", m.role),
-                                    body: m.body.to_string(),
-                                })
-                                .collect(),
-                        };
-                        super::history::save_conversation(&conversation);
-                        self.maybe_spawn_auto_title(&conversation);
-
-                        super::history::build_history_entry(&conversation).map(|entry| {
-                            tracing::info!(
-                                target: "script_kit::tab_ai",
-                                event = "agent_chat_history_index_entry_built",
-                                session_id = %entry.session_id,
-                                title = %entry.title_display(),
-                                preview_len = entry.preview.len(),
-                                message_count = entry.message_count,
-                            );
-                            super::history::save_history_entry(&entry);
-                            entry.title_display().to_string()
-                        })
-                    } else {
-                        None
+                            .map(|m| super::history::SavedMessage {
+                                role: format!("{:?}", m.role),
+                                body: m.body.to_string(),
+                            })
+                            .collect(),
                     };
+                    super::history::build_history_entry(&conversation).and_then(|entry| {
+                        match super::history::save_completed_conversation(&conversation, &entry) {
+                            Ok(()) => {
+                                self.maybe_spawn_auto_title(&conversation);
+                                let safe_title =
+                                    crate::logging::log_private_user_value(entry.title_display());
+                                tracing::info!(
+                                    target: "script_kit::tab_ai",
+                                    event = "agent_chat_history_index_entry_built",
+                                    session_id = %entry.session_id,
+                                    title_bytes = safe_title.raw_bytes,
+                                    title_sha256 = %safe_title.sha256,
+                                    preview_len = entry.preview.len(),
+                                    message_count = entry.message_count,
+                                );
+                                Some(entry.title_display().to_string())
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "script_kit::tab_ai",
+                                    reason = ?error,
+                                    "agent_chat_completed_conversation_not_saved"
+                                );
+                                self.push_notice(
+                                    "Conversation could not be saved",
+                                    "Copy important messages before closing this chat.",
+                                    cx,
+                                );
+                                None
+                            }
+                        }
+                    })
+                } else {
+                    None
+                };
 
                 // The finished turn appended a user message; refresh the
                 // rewind checkpoints so Cmd+K can offer it for editing.
@@ -3535,19 +3573,24 @@ impl AgentChatThread {
                                 &payload.user_text,
                                 &payload.assistant_text,
                             ) {
+                                let safe_error =
+                                    crate::logging::log_private_user_value(&error.to_string());
                                 tracing::debug!(
                                     target: "script_kit::brain",
-                                    error = %error,
+                                    error_bytes = safe_error.raw_bytes,
+                                    error_sha256 = %safe_error.sha256,
                                     "brain chat ingestion failed"
                                 );
                             }
                         });
                 }
                 if let Err(error) = self.submit_next_queued_if_ready(cx) {
+                    let safe_error = crate::logging::log_private_user_value(&error);
                     tracing::warn!(
                         target: "script_kit::tab_ai",
                         event = "agent_chat_queue_auto_submit_failed",
-                        error = %error,
+                        error_bytes = safe_error.raw_bytes,
+                        error_sha256 = %safe_error.sha256,
                     );
                 }
             }
@@ -3556,10 +3599,12 @@ impl AgentChatThread {
                 auth_methods,
             } => {
                 let current_requirements = self.current_setup_requirements();
+                let safe_reason = crate::logging::log_private_user_value(&reason);
                 tracing::info!(
                     target: "script_kit::tab_ai",
                     event = "agent_chat_runtime_setup_session_armed",
-                    reason = %reason,
+                    reason_bytes = safe_reason.raw_bytes,
+                    reason_sha256 = %safe_reason.sha256,
                     auth_method_count = auth_methods.len(),
                     selected_agent_id = self.selected_agent.as_ref().map(|a| a.id.as_ref()),
                     available_agent_count = self.available_agents.len(),
@@ -4280,10 +4325,12 @@ impl AgentChatThread {
         let rx = match self.connection.fork_points() {
             Ok(rx) => rx,
             Err(error) => {
+                let safe_error = crate::logging::log_private_user_value(&error.to_string());
                 tracing::debug!(
                     target: "script_kit::tab_ai",
                     event = "agent_chat_fork_points_unsupported",
-                    error = %error,
+                    error_bytes = safe_error.raw_bytes,
+                    error_sha256 = %safe_error.sha256,
                 );
                 return;
             }
@@ -4325,10 +4372,12 @@ impl AgentChatThread {
         let rx = match self.connection.fork_to_entry(entry_id.to_string()) {
             Ok(rx) => rx,
             Err(error) => {
+                let safe_error = crate::logging::log_private_user_value(&error.to_string());
                 tracing::warn!(
                     target: "script_kit::tab_ai",
                     event = "agent_chat_fork_request_failed",
-                    error = %error,
+                    error_bytes = safe_error.raw_bytes,
+                    error_sha256 = %safe_error.sha256,
                 );
                 return false;
             }
@@ -4472,11 +4521,13 @@ impl AgentChatThread {
         {
             Ok(rx) => rx,
             Err(error) => {
+                let safe_error = crate::logging::log_private_user_value(&error.to_string());
                 tracing::warn!(
                     target: "script_kit::tab_ai",
                     event = "agent_chat_refresh_models_channel_closed",
                     ui_thread = %self.ui_thread_id,
-                    error = %error,
+                    error_bytes = safe_error.raw_bytes,
+                    error_sha256 = %safe_error.sha256,
                 );
                 return;
             }
@@ -4528,8 +4579,13 @@ impl AgentChatThread {
                 .spawn(move || {
                     let mut prefs = crate::config::load_user_preferences();
                     prefs.ai.selected_model_id = Some(id.clone());
-                    if let Err(e) = crate::config::save_user_preferences(&prefs) {
-                        tracing::warn!(error = %e, "failed_to_persist_model_selection");
+                    if let Err(error) = crate::config::save_user_preferences(&prefs) {
+                        let safe_error = crate::logging::log_private_user_value(&error.to_string());
+                        tracing::warn!(
+                            error_bytes = safe_error.raw_bytes,
+                            error_sha256 = %safe_error.sha256,
+                            "failed_to_persist_model_selection"
+                        );
                     } else {
                         tracing::info!(model = %id, "model_selection_persisted");
                     }
