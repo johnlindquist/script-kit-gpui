@@ -71,6 +71,11 @@ pub use config::{
 pub use cache::{
     cache_image, get_cached_entries, get_cached_image, search_root_clipboard_history_meta_cached,
 };
+pub(crate) use cache::{
+    discard_root_clipboard_history_refresh, finish_root_clipboard_history_refresh,
+    read_root_clipboard_history_snapshot, root_clipboard_history_cache_is_fresh,
+    try_begin_root_clipboard_history_refresh, RootClipboardHistorySnapshot,
+};
 
 // Database operations
 #[allow(unused_imports)]

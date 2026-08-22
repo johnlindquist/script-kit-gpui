@@ -1,5 +1,9 @@
 /// Root-launcher Windows, file, and Brain search state owned as one coherent async cohort.
 pub(crate) struct RootSearchStore {
+    /// Query-scoped generation fences for every asynchronous passive provider.
+    /// Existing Windows/Brain/Files tokens remain authoritative for their
+    /// specialized stores; this extends the same guarantee to newer sources.
+    provider_generations: crate::scripts::root_search_contract::RootProviderCoordinator,
     /// Frozen cache-refreshable passive rows for the current root-search query frame.
     root_passive_frame: Option<crate::RootPassiveFrame>,
     /// App-layer enriched rows for root/unified `windows:` search.
@@ -67,6 +71,8 @@ pub(crate) struct RootSearchStore {
 impl Default for RootSearchStore {
     fn default() -> Self {
         Self {
+            provider_generations:
+                crate::scripts::root_search_contract::RootProviderCoordinator::default(),
             root_passive_frame: None,
             cached_root_windows: Vec::new(),
             root_windows_provider_status: crate::window_control::RootWindowsProviderStatus::Unknown,
@@ -103,6 +109,29 @@ impl Default for RootSearchStore {
 }
 
 impl RootSearchStore {
+    pub(crate) fn begin_provider_request(
+        &mut self,
+        source: sk_protocol::command_contract::CommandSource,
+        query: &str,
+    ) -> sk_protocol::search_contract::ProviderRequest {
+        self.provider_generations.begin(source, query)
+    }
+
+    pub(crate) fn accepts_provider_request(
+        &self,
+        request: &sk_protocol::search_contract::ProviderRequest,
+        current_query: &str,
+    ) -> bool {
+        self.provider_generations.accepts(request, current_query)
+    }
+
+    pub(crate) fn invalidate_provider_request(
+        &mut self,
+        source: sk_protocol::command_contract::CommandSource,
+    ) {
+        self.provider_generations.invalidate(source);
+    }
+
     pub(crate) fn root_brain_semantic_epoch(&self) -> u64 {
         self.root_brain_semantic_epoch
     }
@@ -189,13 +218,10 @@ impl RootSearchStore {
         &mut self,
         items: Vec<crate::brain::InboxItem>,
     ) -> bool {
-        let ids_match = self.root_brain_inbox_items.len() == items.len()
-            && self
-                .root_brain_inbox_items
-                .iter()
-                .zip(&items)
-                .all(|(current, fresh)| current.id == fresh.id);
-        if ids_match {
+        if crate::scripts::root_search_contract::brain_inbox_snapshot_matches(
+            &self.root_brain_inbox_items,
+            &items,
+        ) {
             return false;
         }
         self.root_brain_inbox_items = items;
@@ -601,17 +627,32 @@ mod root_search_store_tests {
         );
         assert_eq!(store.root_brain_inbox_epoch(), 1);
 
-        assert!(!store.install_root_brain_inbox_items(vec![
+        assert!(!store
+            .install_root_brain_inbox_items(vec![inbox_item(1, "one"), inbox_item(2, "two"),]));
+        assert_eq!(store.root_brain_inbox_epoch(), 1);
+
+        assert!(store.install_root_brain_inbox_items(vec![
             inbox_item(1, "updated title is the same identity"),
             inbox_item(2, "two"),
         ]));
-        assert_eq!(store.root_brain_inbox_items()[0].title, "one");
-        assert_eq!(store.root_brain_inbox_epoch(), 1);
+        assert_eq!(
+            store.root_brain_inbox_items()[0].title,
+            "updated title is the same identity"
+        );
+        assert_eq!(
+            store
+                .root_brain_inbox_items()
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(store.root_brain_inbox_epoch(), 2);
 
         assert!(
             store.install_root_brain_inbox_items(vec![inbox_item(2, "two"), inbox_item(1, "one"),])
         );
-        assert_eq!(store.root_brain_inbox_epoch(), 2);
+        assert_eq!(store.root_brain_inbox_epoch(), 3);
         assert!(store.remove_root_brain_inbox_item(1));
         assert_eq!(
             store
@@ -621,9 +662,54 @@ mod root_search_store_tests {
                 .collect::<Vec<_>>(),
             vec![2]
         );
-        assert_eq!(store.root_brain_inbox_epoch(), 3);
+        assert_eq!(store.root_brain_inbox_epoch(), 4);
         assert!(!store.remove_root_brain_inbox_item(99));
-        assert_eq!(store.root_brain_inbox_epoch(), 3);
+        assert_eq!(store.root_brain_inbox_epoch(), 4);
+    }
+
+    #[test]
+    fn brain_inbox_all_row_content_changes_refresh_once_without_moving_selection() {
+        let mut store = RootSearchStore::default();
+        assert!(
+            store.install_root_brain_inbox_items(vec![inbox_item(1, "one"), inbox_item(2, "two")])
+        );
+
+        let changes: [fn(&mut crate::brain::InboxItem); 7] = [
+            |item| item.title = "updated title".to_owned(),
+            |item| item.detail = "updated detail".to_owned(),
+            |item| item.kind = crate::brain::inbox::InboxKind::Commitment,
+            |item| item.source = "chat".to_owned(),
+            |item| item.source_id = "updated-source".to_owned(),
+            |item| item.created_at = 42,
+            |item| item.resolved_at = Some(84),
+        ];
+
+        for (index, change) in changes.into_iter().enumerate() {
+            let mut fresh = store.root_brain_inbox_items().to_vec();
+            change(&mut fresh[0]);
+            let unchanged = fresh.clone();
+            let previous_epoch = store.root_brain_inbox_epoch();
+
+            assert!(
+                store.install_root_brain_inbox_items(fresh),
+                "content update {index} must replace the existing row"
+            );
+            assert_eq!(store.root_brain_inbox_epoch(), previous_epoch + 1);
+            assert_eq!(
+                store
+                    .root_brain_inbox_items()
+                    .iter()
+                    .map(|item| item.id)
+                    .collect::<Vec<_>>(),
+                vec![1, 2],
+                "content update {index} must preserve selected row identity and order"
+            );
+            assert!(
+                !store.install_root_brain_inbox_items(unchanged),
+                "identical snapshot after update {index} must remain a no-op"
+            );
+            assert_eq!(store.root_brain_inbox_epoch(), previous_epoch + 1);
+        }
     }
 
     #[test]

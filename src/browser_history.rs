@@ -329,25 +329,10 @@ pub(crate) fn search_root_browser_history_meta_direct(
     query: &str,
     options: RootBrowserHistorySectionOptions,
 ) -> Vec<RootBrowserHistorySearchHit> {
-    // Verification-bearing: never block the caller on a fresh refresh.
-    // Return cached results and let the app layer handle the background refresh
-    // via ensure_root_browser_history_refresh (called by search_root_browser_history_meta_from_home).
-    if !root_browser_history_query_is_eligible(query, options.clone()) {
-        return Vec::new();
-    }
-
-    let candidates = cached_root_browser_history_snapshot(options.cache_ttl_ms);
-    if candidates.is_empty() {
-        // Trigger a refresh if we have nothing, but still don't block.
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            ensure_root_browser_history_refresh(home, options.clone(), "direct_query_empty_cache");
-        }
-    }
-
-    root_fuzzy_search_browser_history_hits(&candidates, query, options.search_urls)
-        .into_iter()
-        .take(options.max_results)
-        .collect()
+    // Direct means explicit matching, not ownership of a background provider.
+    // A cold composer honestly returns no rows until an app-owned, query-fenced
+    // refresh publishes a snapshot; detached refreshes cannot prove live intent.
+    search_root_browser_history_meta_cached(query, options)
 }
 
 #[allow(dead_code)] // Root unified search calls this through the binary app layer.
@@ -481,6 +466,27 @@ pub(crate) fn try_begin_root_browser_history_refresh(
     })
 }
 
+fn discard_root_browser_history_refresh_from_state(
+    cache: &mut RootBrowserHistorySnapshotState,
+    generation: u64,
+) -> bool {
+    if cache.generation != generation || !cache.refresh_in_flight {
+        return false;
+    }
+
+    cache.refresh_in_flight = false;
+    cache.generation = cache.generation.wrapping_add(1);
+    true
+}
+
+#[allow(dead_code)]
+pub(crate) fn discard_root_browser_history_refresh(refresh: RootBrowserHistoryRefresh) -> bool {
+    let Ok(mut cache) = ROOT_BROWSER_HISTORY_SNAPSHOT.lock() else {
+        return false;
+    };
+    discard_root_browser_history_refresh_from_state(&mut cache, refresh.generation)
+}
+
 #[allow(dead_code)]
 pub(crate) fn finish_root_browser_history_refresh(
     refresh: RootBrowserHistoryRefresh,
@@ -524,7 +530,7 @@ pub(crate) fn finish_root_browser_history_refresh(
                 source = "browser_history",
                 generation = refresh.generation,
                 elapsed_ms,
-                error = %error,
+                error_bytes = error.to_string().len(),
                 "root_passive_snapshot_refresh_failed"
             );
         }
@@ -607,9 +613,9 @@ pub(crate) fn refresh_root_browser_history_snapshot_from_home(
                 Err(error) => {
                     tracing::debug!(
                         provider = spec.provider_label,
-                        profile = %profile_label,
-                        path = %db_path.display(),
-                        error = %error,
+                        profile_bytes = profile_label.len(),
+                        path_bytes = db_path.as_os_str().to_string_lossy().len(),
+                        error_bytes = error.to_string().len(),
                         "root browser history source skipped"
                     );
                 }
@@ -1846,6 +1852,122 @@ mod tests {
         assert!(ensure_browser_history_url_is_http_or_https("file:///tmp/a").is_err());
         assert!(ensure_browser_history_url_is_http_or_https("javascript:alert(1)").is_err());
         assert!(ensure_browser_history_url_is_http_or_https("scriptkit://run/test").is_err());
+    }
+
+    #[test]
+    fn cold_direct_browser_history_lookup_cannot_start_an_unowned_refresh() {
+        {
+            let mut cache = ROOT_BROWSER_HISTORY_SNAPSHOT
+                .lock()
+                .expect("browser history cache");
+            *cache = RootBrowserHistorySnapshotState {
+                generation: 23,
+                ..RootBrowserHistorySnapshotState::default()
+            };
+        }
+        let before = root_browser_history_snapshot_status();
+        let options = RootBrowserHistorySectionOptions {
+            enabled: true,
+            min_query_chars: 0,
+            ..RootBrowserHistorySectionOptions::default()
+        };
+
+        assert!(
+            search_root_browser_history_meta_direct("private history query", options).is_empty()
+        );
+        assert_eq!(root_browser_history_snapshot_status(), before);
+        assert!(!root_browser_history_snapshot_status().refreshing);
+
+        if let Ok(mut cache) = ROOT_BROWSER_HISTORY_SNAPSHOT.lock() {
+            *cache = RootBrowserHistorySnapshotState::default();
+        }
+    }
+
+    #[test]
+    fn direct_browser_history_lookup_preserves_existing_snapshot_and_generation() {
+        let previous_rows = Arc::new(vec![root_history_hit(
+            "Private cached history",
+            "example.invalid",
+            "https://example.invalid/private-history-canary",
+        )]);
+        {
+            let mut cache = ROOT_BROWSER_HISTORY_SNAPSHOT
+                .lock()
+                .expect("browser history cache");
+            *cache = RootBrowserHistorySnapshotState {
+                snapshot: Some(RootBrowserHistorySnapshot {
+                    captured_at: Instant::now() - Duration::from_secs(40),
+                    hits: Arc::clone(&previous_rows),
+                }),
+                generation: 37,
+                ..RootBrowserHistorySnapshotState::default()
+            };
+        }
+        let before = root_browser_history_snapshot_status();
+        let options = RootBrowserHistorySectionOptions {
+            enabled: true,
+            min_query_chars: 0,
+            ..RootBrowserHistorySectionOptions::default()
+        };
+
+        let hits = search_root_browser_history_meta_direct("private cached history", options);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(root_browser_history_snapshot_status(), before);
+        {
+            let cache = ROOT_BROWSER_HISTORY_SNAPSHOT
+                .lock()
+                .expect("browser history cache");
+            assert!(Arc::ptr_eq(
+                &cache.snapshot.as_ref().expect("snapshot preserved").hits,
+                &previous_rows
+            ));
+        }
+        if let Ok(mut cache) = ROOT_BROWSER_HISTORY_SNAPSHOT.lock() {
+            *cache = RootBrowserHistorySnapshotState::default();
+        }
+    }
+
+    #[test]
+    fn canceled_browser_history_generation_preserves_snapshot_for_current_query() {
+        let previous_rows = Arc::new(Vec::new());
+        let mut cache = RootBrowserHistorySnapshotState {
+            snapshot: Some(RootBrowserHistorySnapshot {
+                captured_at: Instant::now(),
+                hits: Arc::clone(&previous_rows),
+            }),
+            refresh_in_flight: true,
+            generation: 7,
+            last_refresh_error: Some("previous failure".to_owned()),
+        };
+
+        assert!(discard_root_browser_history_refresh_from_state(
+            &mut cache, 7
+        ));
+        assert!(!cache.refresh_in_flight);
+        assert_eq!(cache.generation, 8);
+        assert_eq!(
+            cache.last_refresh_error.as_deref(),
+            Some("previous failure")
+        );
+        assert!(Arc::ptr_eq(
+            &cache.snapshot.as_ref().expect("preserved snapshot").hits,
+            &previous_rows
+        ));
+    }
+
+    #[test]
+    fn older_browser_history_completion_cannot_cancel_newer_in_flight_generation() {
+        let mut cache = RootBrowserHistorySnapshotState {
+            refresh_in_flight: true,
+            generation: 9,
+            ..RootBrowserHistorySnapshotState::default()
+        };
+
+        assert!(!discard_root_browser_history_refresh_from_state(
+            &mut cache, 7
+        ));
+        assert!(cache.refresh_in_flight);
+        assert_eq!(cache.generation, 9);
     }
 
     #[test]

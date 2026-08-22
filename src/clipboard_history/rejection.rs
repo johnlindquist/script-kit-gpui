@@ -117,7 +117,8 @@ pub fn rejection_count() -> u64 {
 
 /// Record a rejection and emit a log line without clipboard content.
 pub fn record_rejection(reason: RejectionReason) {
-    let total = REJECTION_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    REJECTION_COUNT.fetch_add(1, Ordering::Relaxed);
+    let total = rejection_count();
     info!(
         reason = ?reason,
         rejection_count = total,
@@ -220,10 +221,28 @@ unsafe fn nsstring_to_string(value: cocoa::base::id) -> Option<String> {
 }
 
 /// Rule 2 — blocked source app (prefix match on bundle ID).
+#[cfg(test)]
+mod legacy_password_manager_privacy_tests {
+    use super::matches_blocked_source_app;
+
+    #[test]
+    fn legacy_password_manager_sources_are_rejected_in_production_policy() {
+        assert!(matches_blocked_source_app("com.lastpass.LastPass"));
+        assert!(matches_blocked_source_app(
+            "com.lastpass.LastPass.extension"
+        ));
+        assert!(matches_blocked_source_app("com.dashlane.Dashlane"));
+        assert!(matches_blocked_source_app("com.dashlane.Dashlane.helper"));
+        assert!(matches_blocked_source_app("com.apple.Passwords"));
+        assert!(!matches_blocked_source_app("com.apple.TextEdit"));
+    }
+}
+
 pub fn matches_blocked_source_app(bundle_id: &str) -> bool {
-    if DEFAULT_BLOCKED_SOURCE_APPS
-        .iter()
-        .any(|blocked| bundle_id.starts_with(blocked))
+    if super::exclusions::should_exclude_clipboard(bundle_id)
+        || DEFAULT_BLOCKED_SOURCE_APPS
+            .iter()
+            .any(|blocked| bundle_id.starts_with(blocked))
     {
         return true;
     }

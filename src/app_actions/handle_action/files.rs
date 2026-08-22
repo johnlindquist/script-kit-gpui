@@ -249,7 +249,10 @@ impl FileSearchMoveHandlerAction {
     fn success_hud(self, destination_dir: &str) -> String {
         match self {
             Self::MovePath => {
-                format!("Moved to {}", crate::file_search::shorten_path(destination_dir))
+                format!(
+                    "Moved to {}",
+                    crate::file_search::shorten_path(destination_dir)
+                )
             }
         }
     }
@@ -429,6 +432,7 @@ impl ScriptListApp {
     fn deeplink_for_result(result: &scripts::SearchResult) -> String {
         result
             .launcher_command_id()
+            .and_then(|_| result.external_command_id())
             .and_then(|command_id| crate::config::command_id_to_deeplink(&command_id).ok())
             .unwrap_or_else(|| {
                 let deeplink_name = crate::actions::to_deeplink_name(result.name());
@@ -1178,10 +1182,7 @@ impl ScriptListApp {
                                     "failed to move to trash"
                                 );
                                 this.clear_file_search_action_target();
-                                this.show_error_toast(
-                                    trash_action.failure_message(e),
-                                    cx,
-                                );
+                                this.show_error_toast(trash_action.failure_message(e), cx);
                                 this.restore_file_search_input_focus(cx);
                             }
                         }
@@ -1210,11 +1211,7 @@ impl ScriptListApp {
                 match crate::file_search::duplicate_path(&path) {
                     Ok(new_path) => {
                         self.clear_file_search_action_target();
-                        self.show_hud(
-                            duplicate_action.success_hud(&name),
-                            Some(HUD_MEDIUM_MS),
-                            cx,
-                        );
+                        self.show_hud(duplicate_action.success_hud(&name), Some(HUD_MEDIUM_MS), cx);
                         self.refresh_file_search_after_insert(
                             &new_path,
                             previous_display_index,

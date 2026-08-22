@@ -628,7 +628,7 @@ fn resolve_agent_chat_read_target(
     op: &'static str,
     target: Option<&crate::protocol::AutomationWindowTarget>,
     embedded_agent_chat: Option<&gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>>,
-    cx: &gpui::App,
+    _cx: &gpui::App,
 ) -> Result<AgentChatReadTarget, crate::protocol::TransactionError> {
     // No explicit target → default to main window (preserves existing behavior).
     let Some(target) = target else {
@@ -993,6 +993,58 @@ fn next_inspect_generations(
     )
 }
 
+struct AutomationGenerationFacts<'a> {
+    window: &'a protocol::AutomationWindowInfo,
+    surface_kind: Option<&'a str>,
+    app_view_variant: Option<&'a str>,
+    native_footer_surface: Option<&'a str>,
+    total_count: usize,
+    focused_semantic_id: Option<&'a str>,
+    selected_semantic_id: Option<&'a str>,
+    semantic_quality: &'a protocol::SemanticQuality,
+}
+
+/// Advance the one real target/surface/data generation owner from semantic
+/// facts alone. Neither caller needs screenshot, pixel, focus, or input work.
+fn observe_automation_generations(facts: &AutomationGenerationFacts<'_>) -> (u64, u64, u64) {
+    let window = facts.window;
+    let target_fingerprint = format!(
+        "{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        window.kind,
+        window.focused,
+        window.visible,
+        window.bounds,
+        window.parent_window_id,
+        window.parent_kind,
+        window.semantic_surface,
+        window.pid,
+        window.generation,
+    );
+    let surface_fingerprint = format!(
+        "{:?}|{:?}|{:?}|{:?}",
+        facts.surface_kind,
+        facts.app_view_variant,
+        facts.native_footer_surface,
+        window.semantic_surface
+    );
+    let data_fingerprint = format!(
+        "{:?}|{:?}|{}|{:?}|{:?}|{:?}",
+        facts.surface_kind,
+        facts.app_view_variant,
+        facts.total_count,
+        facts.focused_semantic_id,
+        facts.selected_semantic_id,
+        facts.semantic_quality
+    );
+
+    next_inspect_generations(
+        &window.id,
+        target_fingerprint,
+        surface_fingerprint,
+        data_fingerprint,
+    )
+}
+
 // --- merged from part_001.rs ---
 impl ScriptListApp {
     pub(crate) fn build_automation_inspect_snapshot(
@@ -1171,37 +1223,17 @@ impl ScriptListApp {
                     .map(str::to_string)
             })
             .flatten();
-        let target_fingerprint = format!(
-            "{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
-            resolved.kind,
-            resolved.focused,
-            resolved.visible,
-            resolved.bounds,
-            resolved.parent_window_id,
-            resolved.parent_kind,
-            resolved.semantic_surface,
-            resolved.pid,
-            resolved.generation,
-        );
-        let surface_fingerprint = format!(
-            "{:?}|{:?}|{:?}|{:?}",
-            surface_kind, app_view_variant, native_footer_surface, resolved.semantic_surface
-        );
-        let data_fingerprint = format!(
-            "{:?}|{:?}|{}|{:?}|{:?}|{:?}",
-            surface_kind,
-            app_view_variant,
-            total_count,
-            focused_semantic_id,
-            selected_semantic_id,
-            semantic_quality
-        );
-        let (target_generation, surface_generation, data_generation) = next_inspect_generations(
-            &resolved.id,
-            target_fingerprint,
-            surface_fingerprint,
-            data_fingerprint,
-        );
+        let (target_generation, surface_generation, data_generation) =
+            observe_automation_generations(&AutomationGenerationFacts {
+                window: &resolved,
+                surface_kind: surface_kind.as_deref(),
+                app_view_variant: app_view_variant.as_deref(),
+                native_footer_surface: native_footer_surface.as_deref(),
+                total_count,
+                focused_semantic_id: focused_semantic_id.as_deref(),
+                selected_semantic_id: selected_semantic_id.as_deref(),
+                semantic_quality: &semantic_quality,
+            });
 
         let snapshot = protocol::AutomationInspectSnapshot {
             schema_version: protocol::AUTOMATION_INSPECT_SCHEMA_VERSION,
@@ -1866,7 +1898,7 @@ impl ScriptListApp {
     fn handle_prompt_message_with_window(
         &mut self,
         msg: PromptMessage,
-        mut current_window: Option<&mut gpui::Window>,
+        current_window: Option<&mut gpui::Window>,
         cx: &mut Context<Self>,
     ) {
         let route = classify_prompt_message_route(&msg);
@@ -2120,7 +2152,8 @@ impl ScriptListApp {
                 tracing::info!(
                     category = "UI",
                     id = %id,
-                    command = ?command,
+                    has_command = command.is_some(),
+                    command_bytes = command.as_ref().map_or(0, String::len),
                     "Showing term prompt"
                 );
 
@@ -2519,26 +2552,31 @@ impl ScriptListApp {
                 script_path,
                 suggestions,
             } => {
+                let error_diagnostic = crate::ai::reliability::redact_diagnostic(&error_message);
                 tracing::error!(
                     category = "ERROR",
-                    error_message = %error_message,
+                    diagnostic_fingerprint = %error_diagnostic.fingerprint.0,
                     exit_code = ?exit_code,
                     script_path = %script_path,
                     "Script error received"
                 );
                 if let Some(ref stderr) = stderr_output {
+                    let diagnostic = crate::ai::reliability::redact_diagnostic(stderr);
                     tracing::error!(
                         category = "ERROR",
                         script_path = %script_path,
-                        stderr = %stderr,
+                        diagnostic_fingerprint = %diagnostic.fingerprint.0,
+                        diagnostic_bytes = stderr.len(),
                         "Script stderr output"
                     );
                 }
                 if let Some(ref trace) = stack_trace {
+                    let diagnostic = crate::ai::reliability::redact_diagnostic(trace);
                     tracing::error!(
                         category = "ERROR",
                         script_path = %script_path,
-                        stack_trace = %trace,
+                        diagnostic_fingerprint = %diagnostic.fingerprint.0,
+                        diagnostic_bytes = trace.len(),
                         "Script stack trace"
                     );
                 }
@@ -3204,14 +3242,15 @@ impl ScriptListApp {
                         selected_index,
                         visible_limit,
                     } => {
-                        let (dataset_count, visible_count) =
-                            self.dictation_history_dataset_and_visible_counts(filter, *visible_limit);
-                        let selected_value = self.dictation_history_selected_visible_row(
-                            filter,
-                            *selected_index,
-                            *visible_limit,
-                        )
-                        .map(|entry| entry.preview);
+                        let (dataset_count, visible_count) = self
+                            .dictation_history_dataset_and_visible_counts(filter, *visible_limit);
+                        let selected_value = self
+                            .dictation_history_selected_visible_row(
+                                filter,
+                                *selected_index,
+                                *visible_limit,
+                            )
+                            .map(|entry| entry.preview);
                         (
                             "dictationHistory".to_string(),
                             None,
@@ -3226,8 +3265,8 @@ impl ScriptListApp {
                     AppView::NotesBrowseView { search } => {
                         let (dataset_count, visible_count) =
                             Self::notes_browse_dataset_and_visible_counts(search);
-                        let selected_value =
-                            Self::notes_browse_selected_visible_row(search).map(|entry| entry.title);
+                        let selected_value = Self::notes_browse_selected_visible_row(search)
+                            .map(|entry| entry.title);
                         (
                             "notesBrowse".to_string(),
                             None,
@@ -4129,7 +4168,7 @@ impl ScriptListApp {
                     request_id.clone(),
                     prompt_type,
                     prompt_id,
-                    Some(self.current_surface_contract_snapshot()),
+                    Some(self.current_surface_contract_snapshot(cx)),
                     self.active_popup_contract_snapshot(),
                     Some(self.active_footer_snapshot(cx)),
                     self.submit_diagnostics_snapshot(),
@@ -4469,7 +4508,7 @@ impl ScriptListApp {
                 fixture_id,
             } => {
                 use crate::ai::message_parts::{
-                    AiContextPart, ContextPreparationItem, prepare_user_message,
+                    prepare_user_message, AiContextPart, ContextPreparationItem,
                 };
 
                 if std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() != Some("1") {
@@ -4920,7 +4959,8 @@ impl ScriptListApp {
                             if let Some((entity, handle)) =
                                 crate::notes::get_notes_app_entity_and_handle()
                             {
-                                let mut layout_info = entity.read(cx).automation_layout_info(&resolved);
+                                let mut layout_info =
+                                    entity.read(cx).automation_layout_info(&resolved);
                                 if let Err(error) = handle.update(cx, |_root, window, _cx| {
                                     Self::append_paint_measurements(&mut layout_info, window);
                                 }) {
@@ -5608,6 +5648,10 @@ impl ScriptListApp {
                         let output = protocol::transaction_executor::BatchOutput::from_trace(
                             existing.clone(),
                         );
+                        let include_trace = protocol::transaction_trace::should_include_trace(
+                            trace_mode,
+                            output.success,
+                        );
                         if let Some(ref sender) = self.response_sender {
                             let _ = sender.try_send(Message::batch_result_with_trace(
                                 output.request_id,
@@ -5615,7 +5659,7 @@ impl ScriptListApp {
                                 output.results,
                                 output.failed_at,
                                 output.total_elapsed,
-                                Some(existing),
+                                include_trace.then_some(existing),
                             ));
                         }
                         return;
@@ -5856,7 +5900,7 @@ impl ScriptListApp {
                                             tracing::info!(
                                                 target: "script_kit::transaction",
                                                 event = "transaction_detached_agent_chat_select_by_value",
-                                                value = %v, submit,
+                                                value_bytes = v.len(), submit,
                                                 "detached Agent Chat select_by_value"
                                             );
                                             results.push(protocol::BatchResultEntry {
@@ -5916,7 +5960,7 @@ impl ScriptListApp {
                                             tracing::info!(
                                                 target: "script_kit::transaction",
                                                 event = "transaction_detached_agent_chat_select_by_value",
-                                                value = %v, submit,
+                                                value_bytes = v.len(), submit,
                                                 "detached Agent Chat select_by_semantic_id"
                                             );
                                             results.push(protocol::BatchResultEntry {
@@ -6525,7 +6569,7 @@ impl ScriptListApp {
                                             tracing::info!(
                                                 target: "script_kit::transaction",
                                                 event = "transaction_actions_dialog_select_by_value",
-                                                value = %v,
+                                                value_bytes = v.len(),
                                                 "ActionsDialog select_by_value"
                                             );
                                             results.push(protocol::BatchResultEntry {
@@ -6823,7 +6867,7 @@ impl ScriptListApp {
                                             tracing::info!(
                                                 target: "script_kit::transaction",
                                                 event = "transaction_prompt_popup_select_by_value",
-                                                value = %v,
+                                                value_bytes = v.len(),
                                                 "PromptPopup select_by_value"
                                             );
                                             results.push(protocol::BatchResultEntry {
@@ -6927,7 +6971,7 @@ impl ScriptListApp {
                                                 target: "script_kit::transaction",
                                                 event = "transaction_prompt_popup_set_theme_control",
                                                 control = %control,
-                                                value = %value,
+                                                value_bytes = value.len(),
                                                 "PromptPopup set_theme_control"
                                             );
                                             results.push(protocol::BatchResultEntry {
@@ -7172,7 +7216,7 @@ impl ScriptListApp {
                                     this.select_choice_by_value(&value, submit, cx)
                                 }) {
                                     Ok(Ok(v)) => {
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "selectByValue", value = %v, "batch.step.ok");
+                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "selectByValue", value_bytes = v.len(), "batch.step.ok");
                                         results.push(protocol::BatchResultEntry {
                                             index,
                                             success: true,
@@ -7220,7 +7264,7 @@ impl ScriptListApp {
                                     cx,
                                 ) {
                                     Ok(v) => {
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "selectBySemanticId", value = %v, "batch.step.ok");
+                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "selectBySemanticId", value_bytes = v.len(), "batch.step.ok");
                                         results.push(protocol::BatchResultEntry {
                                             index,
                                             success: true,
@@ -7264,7 +7308,7 @@ impl ScriptListApp {
                                     )
                                 }) {
                                     Ok(Ok(v)) => {
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "setThemeControl", control = %control, value = %value, "batch.step.ok");
+                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "setThemeControl", control = %control, value_bytes = value.len(), "batch.step.ok");
                                         results.push(protocol::BatchResultEntry {
                                             index,
                                             success: true,
@@ -7275,7 +7319,7 @@ impl ScriptListApp {
                                         });
                                     }
                                     Ok(Err(e)) | Err(e) => {
-                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "setThemeControl", control = %control, value = %value, error = %e, "batch.step.error");
+                                        tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "setThemeControl", control = %control, value_bytes = value.len(), error = %e, "batch.step.error");
                                         results.push(protocol::BatchResultEntry {
                                             index,
                                             success: false,
@@ -7874,7 +7918,6 @@ impl ScriptListApp {
             } => {
                 self.prepare_window_for_prompt("UI", "env", "");
 
-                tracing::info!(id, key, ?prompt, ?title, secret, "ShowEnv received");
                 tracing::info!(
                     category = "UI",
                     id = %id,
@@ -8072,7 +8115,7 @@ impl ScriptListApp {
                 tracing::info!(
                     category = "CONFIRM",
                     id = %id,
-                    message = ?message,
+                    message_bytes = message.len(),
                     "ShowConfirm prompt"
                 );
 
@@ -8516,7 +8559,7 @@ impl ScriptListApp {
                     state = "received",
                     status = %status,
                     has_message = message.is_some(),
-                    message = %message.as_deref().unwrap_or(""),
+                    message_bytes = message.as_ref().map_or(0, String::len),
                     "Received setStatus() protocol message"
                 );
             }
@@ -9203,13 +9246,122 @@ impl ScriptListApp {
     }
 
     /// Get the active launcher surface contract for `getState.surfaceContract`.
+    fn surface_presentation_snapshot(
+        view: &AppView,
+    ) -> crate::protocol::SurfacePresentationSnapshot {
+        use crate::protocol::SurfaceRowPrimitive;
+
+        let contract = view.surface_contract();
+        let header = view.main_view_header_input_policy();
+        let (shell_owner, intentional_divergence) = match header {
+            crate::MainViewHeaderInputPolicy::ViewOwnedCanonicalInput
+            | crate::MainViewHeaderInputPolicy::ViewOwnedCanonicalMultilineInput
+            | crate::MainViewHeaderInputPolicy::ViewOwnedContextOnly => {
+                ("components::main_view_chrome", None)
+            }
+            crate::MainViewHeaderInputPolicy::RootContextOnly => {
+                ("components::prompt_layout_shell", None)
+            }
+            crate::MainViewHeaderInputPolicy::ViewOwnedIntentionalCompact => (
+                "focused_text::compact_shell",
+                Some("Focused Text Mini intentionally owns a compact 44px input shell."),
+            ),
+        };
+        let input_owner = match contract.vocabulary.input_ownership {
+            crate::LauncherSurfaceInputOwnership::LauncherFilter => "components::text_input",
+            crate::LauncherSurfaceInputOwnership::PromptEntity => "prompt_entity::shared_input",
+            crate::LauncherSurfaceInputOwnership::ChildView => "child_view::owned_input",
+            crate::LauncherSurfaceInputOwnership::NoEditableInput => "none",
+        };
+        let row_primitive = match view {
+            AppView::SelectPrompt { .. } => SurfaceRowPrimitive::UnifiedListItem,
+            AppView::AgentChatView { .. }
+            | AppView::ChatPrompt { .. }
+            | AppView::FlowSessionView { .. } => SurfaceRowPrimitive::ConversationTurn,
+            AppView::ScriptList | AppView::ActionsDialog | AppView::ArgPrompt { .. } => {
+                SurfaceRowPrimitive::LegacyListItem
+            }
+            _ => match contract.vocabulary.family {
+                crate::LauncherSurfaceFamily::MainMenu
+                | crate::LauncherSurfaceFamily::FilterableLauncherList
+                | crate::LauncherSurfaceFamily::AttachmentPortal => {
+                    SurfaceRowPrimitive::LegacyListItem
+                }
+                crate::LauncherSurfaceFamily::AssistantWorkspace
+                | crate::LauncherSurfaceFamily::UtilityWorkspace => {
+                    SurfaceRowPrimitive::SpecializedContent
+                }
+                crate::LauncherSurfaceFamily::ScriptPrompt
+                | crate::LauncherSurfaceFamily::FeedbackSurface => SurfaceRowPrimitive::None,
+            },
+        };
+        let actions_owner = match contract.actions_policy {
+            crate::LauncherSurfaceActionsPolicy::MainMenuActions
+            | crate::LauncherSurfaceActionsPolicy::HostRowActions
+            | crate::LauncherSurfaceActionsPolicy::ActionsDialogActions => Some("actions::dialog"),
+            crate::LauncherSurfaceActionsPolicy::PromptEntityActions => {
+                Some("prompt_entity::actions")
+            }
+            crate::LauncherSurfaceActionsPolicy::ChildViewActions => Some("child_view::actions"),
+            crate::LauncherSurfaceActionsPolicy::NoSurfaceActions => None,
+        };
+
+        crate::protocol::SurfacePresentationSnapshot {
+            shell_owner: shell_owner.to_string(),
+            input_owner: input_owner.to_string(),
+            row_primitive,
+            footer_owner: view
+                .native_footer_surface()
+                .map(|_| "footer_popup::native_footer".to_string()),
+            actions_owner: actions_owner.map(str::to_string),
+            theme_owner: "theme::AppChromeColors + ui::chrome::tokens".to_string(),
+            intentional_divergence: intentional_divergence.map(str::to_string),
+        }
+    }
+
     fn current_surface_contract_snapshot(
         &self,
+        cx: &Context<Self>,
     ) -> crate::protocol::LauncherSurfaceContractSnapshot {
         let contract = self.current_view.surface_contract();
+        let surface_kind = format!("{:?}", self.current_view.surface_kind());
+        let app_view_variant = self.current_view.app_view_variant().to_string();
+        let native_footer_surface = self
+            .current_view
+            .native_footer_surface()
+            .map(str::to_string);
+        let target_identity = crate::windows::resolve_automation_window(Some(
+            &protocol::AutomationWindowTarget::Main,
+        ))
+        .ok()
+        .map(|window| {
+            let elements = self.collect_visible_elements(200, cx);
+            let focused_semantic_id = elements.focused_semantic_id();
+            let selected_semantic_id = elements.selected_semantic_id();
+            let (target_generation, surface_generation, data_generation) =
+                observe_automation_generations(&AutomationGenerationFacts {
+                    window: &window,
+                    surface_kind: Some(&surface_kind),
+                    app_view_variant: Some(&app_view_variant),
+                    native_footer_surface: native_footer_surface.as_deref(),
+                    total_count: elements.total_count,
+                    focused_semantic_id: focused_semantic_id.as_deref(),
+                    selected_semantic_id: selected_semantic_id.as_deref(),
+                    semantic_quality: &protocol::SemanticQuality::Full,
+                });
+
+            crate::protocol::AutomationTargetIdentitySnapshot {
+                window_id: window.id,
+                window_generation: window.generation,
+                app_view_variant: app_view_variant.clone(),
+                target_generation,
+                surface_generation,
+                data_generation,
+            }
+        });
         crate::protocol::LauncherSurfaceContractSnapshot {
             schema_version: crate::protocol::LAUNCHER_SURFACE_CONTRACT_SCHEMA_VERSION,
-            surface_kind: format!("{:?}", self.current_view.surface_kind()),
+            surface_kind,
             family: format!("{:?}", contract.vocabulary.family),
             input_ownership: format!("{:?}", contract.vocabulary.input_ownership),
             preview_role: format!("{:?}", contract.vocabulary.preview_role),
@@ -9219,10 +9371,9 @@ impl ScriptListApp {
             proof_policy: format!("{:?}", contract.proof_policy),
             visual_policy: format!("{:?}", contract.visual_policy),
             automation_semantic_surface: contract.automation_semantic_surface.to_string(),
-            native_footer_surface: self
-                .current_view
-                .native_footer_surface()
-                .map(str::to_string),
+            native_footer_surface,
+            target_identity,
+            presentation: Some(Self::surface_presentation_snapshot(&self.current_view)),
         }
     }
 
@@ -9249,6 +9400,8 @@ impl ScriptListApp {
             native_footer_surface: AppView::ActionsDialog
                 .native_footer_surface()
                 .map(str::to_string),
+            target_identity: None,
+            presentation: Some(Self::surface_presentation_snapshot(&AppView::ActionsDialog)),
         })
     }
 
@@ -9760,8 +9913,8 @@ impl ScriptListApp {
                 anyhow::bail!("Dictation History Load More is not visible");
             };
             if submit {
-                *visible_limit = visible_limit
-                    .saturating_add(crate::dictation::DICTATION_HISTORY_PAGE_SIZE);
+                *visible_limit =
+                    visible_limit.saturating_add(crate::dictation::DICTATION_HISTORY_PAGE_SIZE);
                 cx.notify();
             }
             return Ok(semantic_id.to_string());

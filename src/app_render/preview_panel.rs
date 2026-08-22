@@ -51,10 +51,7 @@ impl ScriptListApp {
     fn read_script_preview(path: &std::path::Path, max_lines: usize) -> String {
         match std::fs::read_to_string(path) {
             Ok(content) => {
-                let preview: String = content
-                    .lines()
-                    .take(max_lines)
-                    .join("\n");
+                let preview: String = content.lines().take(max_lines).join("\n");
                 logging::log(
                     "UI",
                     &format!(
@@ -78,10 +75,10 @@ impl ScriptListApp {
 
     /// Get the command ID for a search result, used for config lookups (shortcuts, etc.)
     ///
-    /// Delegates to `SearchResult::launcher_command_id()` so that the read path
-    /// is consistent with the write path in the shortcut/alias action handlers.
+    /// Source-owned identity agrees with newly written shortcut preferences;
+    /// the render path still falls back to historical display-name bindings.
     fn get_command_id_for_result(result: &scripts::SearchResult) -> Option<String> {
-        result.launcher_command_id()
+        result.external_command_id()
     }
 
     /// Render the preview panel showing details of the selected script/scriptlet.
@@ -129,6 +126,12 @@ impl ScriptListApp {
                 Self::get_command_id_for_result(result).and_then(|command_id| {
                     self.config
                         .get_command_shortcut(&command_id)
+                        .or_else(|| {
+                            result
+                                .launcher_command_id()
+                                .as_deref()
+                                .and_then(|legacy_id| self.config.get_command_shortcut(legacy_id))
+                        })
                         .map(|hotkey| hotkey.to_display_string())
                 })
             })
@@ -329,7 +332,9 @@ impl ScriptListApp {
                                 .code
                                 .lines()
                                 .take(15)
-                                .map(|line| truncate_preview_line_for_display(line, MAX_LINE_LENGTH))
+                                .map(|line| {
+                                    truncate_preview_line_for_display(line, MAX_LINE_LENGTH)
+                                })
                                 .join("\n");
 
                             let lang = match scriptlet.tool.as_str() {
@@ -436,7 +441,9 @@ impl ScriptListApp {
                                 Ok(content) => content
                                     .lines()
                                     .take(MAX_LINES)
-                                    .map(|line| truncate_preview_line_for_display(line, MAX_LINE_LENGTH))
+                                    .map(|line| {
+                                        truncate_preview_line_for_display(line, MAX_LINE_LENGTH)
+                                    })
                                     .join("\n"),
                                 Err(error) => {
                                     tracing::warn!(
@@ -474,9 +481,8 @@ impl ScriptListApp {
                                 line_div = line_div.child(" ");
                             } else {
                                 for span in line.spans {
-                                    line_div = line_div.child(
-                                        div().text_color(rgb(span.color)).child(span.text),
-                                    );
+                                    line_div = line_div
+                                        .child(div().text_color(rgb(span.color)).child(span.text));
                                 }
                             }
 

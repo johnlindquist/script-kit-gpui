@@ -140,6 +140,7 @@ pub fn load_scriptlets() -> Vec<Arc<Scriptlet>> {
         }
     };
 
+    let capability_generation = super::super::validation::begin_scriptlet_capability_generation();
     let mut scriptlets = Vec::new();
 
     for plugin in &index.plugins {
@@ -181,10 +182,15 @@ pub fn load_scriptlets() -> Vec<Arc<Scriptlet>> {
                             );
 
                             for parsed_scriptlet in parsed {
+                                let capability_metadata =
+                                    super::super::validation::merge_scriptlet_capability_metadata(
+                                        parsed_scriptlet.typed_metadata.as_ref(),
+                                        &parsed_scriptlet.metadata.extra,
+                                    );
                                 let file_path =
                                     build_scriptlet_file_path(&entry, &parsed_scriptlet.command);
 
-                                scriptlets.push(Arc::new(Scriptlet {
+                                let scriptlet = Scriptlet {
                                     name: parsed_scriptlet.name,
                                     description: parsed_scriptlet.metadata.description,
                                     code: parsed_scriptlet.scriptlet_content,
@@ -211,7 +217,13 @@ pub fn load_scriptlets() -> Vec<Arc<Scriptlet>> {
                                         .get("icon")
                                         .cloned()
                                         .or_else(|| bundle_icon.clone()),
-                                }));
+                                };
+                                super::super::validation::register_scriptlet_capabilities_for_generation(
+                                    &scriptlet,
+                                    capability_metadata.as_ref(),
+                                    capability_generation,
+                                );
+                                scriptlets.push(Arc::new(scriptlet));
                             }
                         }
                         Err(e) => {
@@ -244,6 +256,13 @@ pub fn load_scriptlets() -> Vec<Arc<Scriptlet>> {
         (None, Some(_)) => Ordering::Greater,
         (None, None) => a.name.cmp(&b.name),
     });
+
+    if !super::super::validation::complete_scriptlet_capability_generation(capability_generation) {
+        debug!(
+            generation = capability_generation,
+            "Discarded stale full-load scriptlet capability staging"
+        );
+    }
 
     debug!(
         count = scriptlets.len(),
@@ -306,6 +325,8 @@ pub fn read_scriptlets_from_file(path: &Path) -> Vec<Arc<Scriptlet>> {
         return vec![];
     }
 
+    super::super::validation::clear_scriptlet_capabilities_for_source(path);
+
     // Get kit path for plugin resolution
     let kit_path = get_kit_path();
 
@@ -335,9 +356,13 @@ pub fn read_scriptlets_from_file(path: &Path) -> Vec<Arc<Scriptlet>> {
     let scriptlets: Vec<Arc<Scriptlet>> = parsed
         .into_iter()
         .map(|parsed_scriptlet| {
+            let capability_metadata = super::super::validation::merge_scriptlet_capability_metadata(
+                parsed_scriptlet.typed_metadata.as_ref(),
+                &parsed_scriptlet.metadata.extra,
+            );
             let file_path = build_scriptlet_file_path(path, &parsed_scriptlet.command);
 
-            Arc::new(Scriptlet {
+            let scriptlet = Scriptlet {
                 name: parsed_scriptlet.name,
                 description: parsed_scriptlet.metadata.description,
                 code: parsed_scriptlet.scriptlet_content,
@@ -364,7 +389,12 @@ pub fn read_scriptlets_from_file(path: &Path) -> Vec<Arc<Scriptlet>> {
                     .get("icon")
                     .cloned()
                     .or_else(|| bundle_icon.clone()),
-            })
+            };
+            super::super::validation::register_scriptlet_capabilities(
+                &scriptlet,
+                capability_metadata.as_ref(),
+            );
+            Arc::new(scriptlet)
         })
         .collect();
 

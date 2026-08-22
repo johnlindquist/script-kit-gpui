@@ -245,17 +245,19 @@ pub fn get_scriptlet_context_actions_with_custom(
     let action_plan = ScriptletContextActionPlan::from_script(script);
     let ranking_plan = ScriptletRankingActionPlan::from_script(script);
 
-    actions.push(
-        Action::new(
-            "run_script",
-            format!("{} \"{}\"", script.action_verb, script.name),
-            Some(format!("{} this item", script.action_verb)),
-            ActionCategory::ScriptContext,
-        )
-        .with_shortcut("↵")
-        .with_icon(IconName::PlayFilled)
-        .with_section("Actions"),
-    );
+    let mut primary_action = Action::new(
+        "run_script",
+        format!("{} \"{}\"", script.action_verb, script.name),
+        Some(format!("{} this item", script.action_verb)),
+        ActionCategory::ScriptContext,
+    )
+    .with_shortcut("↵")
+    .with_icon(IconName::PlayFilled)
+    .with_section("Actions");
+    if let Some(descriptor) = &script.command_descriptor {
+        primary_action = primary_action.with_command_contract(descriptor);
+    }
+    actions.push(primary_action);
 
     if let Some(scriptlet) = scriptlet {
         actions.extend(get_scriptlet_defined_actions(scriptlet));
@@ -528,6 +530,39 @@ mod tests {
 
         let actions = get_scriptlet_context_actions_with_custom(&script, Some(&scriptlet));
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn test_scriptlet_context_primary_action_uses_canonical_availability() {
+        use sk_protocol::command_contract::{
+            CommandAvailability, CommandDescriptor, CommandIdentity, CommandSource,
+        };
+
+        let mut descriptor = CommandDescriptor::new(
+            CommandIdentity::new(CommandSource::Scriptlet, "main:demo").unwrap(),
+            "Demo",
+            "Run Verified Snippet",
+        )
+        .unwrap();
+        descriptor.availability = CommandAvailability::UnknownPermission {
+            permission: "unknown-device".to_owned(),
+        };
+        descriptor.actions[0].availability = descriptor.availability.clone();
+        let script = ScriptInfo::scriptlet("Demo", "/tmp/demo.md", None, None)
+            .with_command_descriptor(descriptor);
+
+        let actions = get_scriptlet_context_actions_with_custom(&script, None);
+        let primary = actions
+            .iter()
+            .find(|action| action.id == "run_script")
+            .unwrap();
+
+        assert_eq!(primary.title, "Run Verified Snippet");
+        assert!(!primary.is_enabled());
+        assert_eq!(
+            primary.disabled_reason(),
+            Some("This command requests a permission the host does not recognize.")
+        );
     }
 
     #[test]

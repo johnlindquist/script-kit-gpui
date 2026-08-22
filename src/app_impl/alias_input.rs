@@ -18,7 +18,14 @@ impl ScriptListApp {
         // Load existing alias if any
         let existing_alias = crate::aliases::load_alias_overrides()
             .ok()
-            .and_then(|overrides| overrides.get(&command_id).cloned())
+            .and_then(|overrides| {
+                overrides.get(&command_id).cloned().or_else(|| {
+                    self.get_selected_result()
+                        .and_then(|selected| selected.command_preference_identity())
+                        .filter(|identity| identity.exact_id == command_id)
+                        .and_then(|identity| overrides.get(&identity.legacy_id).cloned())
+                })
+            })
             .unwrap_or_default();
 
         // Store state
@@ -44,7 +51,7 @@ impl ScriptListApp {
             );
             self.alias_input_state = None;
             self.alias_input_entity = None; // Clear entity to reset for next open
-            // Return focus to the main filter input (like close_shortcut_recorder does)
+                                            // Return focus to the main filter input (like close_shortcut_recorder does)
             self.pending_focus = Some(FocusTarget::MainFilter);
             cx.notify();
         }

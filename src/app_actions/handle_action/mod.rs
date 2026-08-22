@@ -1186,7 +1186,7 @@ impl ScriptListApp {
             action_id = %receipt.action_id,
             dry_run = receipt.dry_run,
             prompt_chars = receipt.prompt_chars,
-            prompt_sha256 = %receipt.prompt_sha256,
+            prompt_sha256 = %receipt.diagnostic_prompt_fingerprint(),
             spawned = receipt.spawned,
             pid = ?receipt.pid,
         );
@@ -1216,9 +1216,9 @@ impl ScriptListApp {
             prompt_builder_segment_count = receipt.prompt_builder_segment_count,
             clipboard_written = receipt.clipboard_written,
             prompt_chars = receipt.prompt_chars,
-            prompt_sha256 = %receipt.prompt_sha256,
-            path = ?receipt.path,
-            url = ?receipt.url,
+            prompt_sha256 = %receipt.diagnostic_prompt_fingerprint(),
+            path_sha256 = ?receipt.diagnostic_path_fingerprint(),
+            url_sha256 = ?receipt.diagnostic_url_fingerprint(),
         );
         cx.notify();
         Ok(receipt)
@@ -1338,7 +1338,7 @@ impl ScriptListApp {
                         action_id = %receipt.action_id,
                         dry_run = receipt.dry_run,
                         prompt_chars = receipt.prompt_chars,
-                        prompt_sha256 = %receipt.prompt_sha256,
+                        prompt_sha256 = %receipt.diagnostic_prompt_fingerprint(),
                         spawned = receipt.spawned,
                         pid = ?receipt.pid,
                     );
@@ -1376,9 +1376,9 @@ impl ScriptListApp {
                         prompt_builder_segment_count = receipt.prompt_builder_segment_count,
                         clipboard_written = receipt.clipboard_written,
                         prompt_chars = receipt.prompt_chars,
-                        prompt_sha256 = %receipt.prompt_sha256,
-                        path = ?receipt.path,
-                        url = ?receipt.url,
+                        prompt_sha256 = %receipt.diagnostic_prompt_fingerprint(),
+                        path_sha256 = ?receipt.diagnostic_path_fingerprint(),
+                        url_sha256 = ?receipt.diagnostic_url_fingerprint(),
                     );
                     let mut outcome = DispatchOutcome::success();
                     outcome.user_message = Some(match receipt.export_kind.as_str() {
@@ -2513,7 +2513,7 @@ impl ScriptListApp {
                     if o.was_handled() {
                         ("file", o)
                     } else {
-                        let o = self.handle_app_action(&action_id_stripped, &dctx, cx);
+                        let o = self.handle_app_action(&action_id_stripped, &dctx, window, cx);
                         if o.was_handled() {
                             ("app", o)
                         } else {

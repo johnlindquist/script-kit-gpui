@@ -421,6 +421,9 @@ fn selection_warnings(
     let mut warnings = Vec::new();
 
     if let Some(result) = result {
+        if let Some(reason) = result.command_execution_block_reason() {
+            warnings.push(reason.to_string());
+        }
         if matches!(result, crate::scripts::SearchResult::Agent(_)) {
             warnings.push(
                 "Agent execution is not fully implemented in execute_selected yet.".to_string(),
@@ -444,14 +447,16 @@ fn build_enter_action(
     app: &crate::ScriptListApp,
     result: Option<&crate::scripts::SearchResult>,
 ) -> Option<MainWindowPreflightAction> {
-    result.map(|result| MainWindowPreflightAction {
-        kind: enter_action_kind(result),
-        label: app.main_window_primary_action_label(),
-        subject: result.name().to_string(),
-        type_label: result.type_label().to_string(),
-        source_name: result.source_name().map(ToString::to_string),
-        description: result.description().map(ToString::to_string),
-    })
+    result
+        .filter(|result| result.command_execution_block_reason().is_none())
+        .map(|result| MainWindowPreflightAction {
+            kind: enter_action_kind(result),
+            label: app.main_window_primary_action_label(),
+            subject: result.name().to_string(),
+            type_label: result.type_label().to_string(),
+            source_name: result.source_name().map(ToString::to_string),
+            description: result.description().map(ToString::to_string),
+        })
 }
 
 /// Refresh only the selection-dependent fields of a cached receipt.
@@ -468,6 +473,9 @@ pub(crate) fn refresh_main_window_preflight_selection(
     receipt.selected_index = app.selected_index;
     receipt.selected_result_key = result.as_ref().and_then(|r| r.stable_selection_key());
     receipt.selected_result_role = result.as_ref().map(result_role);
+    receipt.selected_command = result
+        .as_ref()
+        .and_then(|result| result.redacted_command_receipt().ok());
     receipt.enter_action = build_enter_action(app, result.as_ref());
     receipt.warnings = selection_warnings(app, result.as_ref());
 }
@@ -523,6 +531,9 @@ pub(crate) fn build_main_window_preflight_receipt(
         selected_index: app.selected_index,
         selected_result_key: result.as_ref().and_then(|r| r.stable_selection_key()),
         selected_result_role,
+        selected_command: result
+            .as_ref()
+            .and_then(|result| result.redacted_command_receipt().ok()),
         visible_results,
         visible_result_key_fingerprint: visible_result_keys(app).join("|"),
         visible_row_fingerprint: visible_row_fingerprint(app),

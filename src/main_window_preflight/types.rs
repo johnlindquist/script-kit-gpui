@@ -94,6 +94,8 @@ pub(crate) struct MainWindowPreflightReceipt {
     pub selected_index: usize,
     pub selected_result_key: Option<String>,
     pub selected_result_role: Option<MainWindowPreflightResultRole>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_command: Option<crate::scripts::LauncherCommandReceipt>,
     pub visible_results: Vec<MainWindowPreflightVisibleResult>,
     pub visible_result_key_fingerprint: String,
     pub visible_row_fingerprint: String,

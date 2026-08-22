@@ -1103,11 +1103,8 @@ fn render_focused_info_for_result(
             // row subtitle, which already carries surface · context · state.
             match flow_match.flow.as_ref() {
                 Some(flow) => {
-                    content = content.child(focused_info_labeled_section(
-                        "ENGINE",
-                        &flow.engine,
-                        style,
-                    ));
+                    content =
+                        content.child(focused_info_labeled_section("ENGINE", &flow.engine, style));
                     content = content.child(focused_info_labeled_section(
                         "ORIGIN",
                         flow.origin_label(),
@@ -1301,7 +1298,9 @@ impl ScriptListApp {
                         Some(format!("agent:{}", m.agent.path.to_string_lossy()))
                     }
                     scripts::SearchResult::Skill(_) => None, // Skills don't track frecency
-                    scripts::SearchResult::Flow(m) => m.flow.as_ref().map(|flow| format!("flow:{}", flow.id)),
+                    scripts::SearchResult::Flow(m) => {
+                        m.flow.as_ref().map(|flow| format!("flow:{}", flow.id))
+                    }
                     scripts::SearchResult::Fallback(_) => None, // Fallbacks don't track frecency
                     scripts::SearchResult::ScriptIssue(_) => None, // Diagnostic row doesn't track frecency
                     scripts::SearchResult::SpineProjection(_) => None, // Spine projections don't track frecency
@@ -1315,17 +1314,20 @@ impl ScriptListApp {
 
                 // Pre-compute launcher command ID and override lookups before the match
                 // to avoid partial-move borrow issues within match arms.
-                let launcher_cmd_id = result.launcher_command_id();
+                let preference_identity = result.command_preference_identity();
                 let alias_overrides = crate::aliases::get_cached_alias_overrides();
-                let override_shortcut = launcher_cmd_id
+                let override_shortcut = preference_identity
                     .as_ref()
-                    .and_then(|id| self.config.get_command_shortcut(id))
+                    .and_then(|identity| {
+                        identity.preferred_value(|id| self.config.get_command_shortcut(id))
+                    })
                     .map(|hotkey| hotkey.to_display_string());
-                let override_alias = launcher_cmd_id
-                    .as_ref()
-                    .and_then(|id| alias_overrides.get(id).cloned());
+                let override_alias = preference_identity.as_ref().and_then(|identity| {
+                    identity.preferred_value(|id| alias_overrides.get(id).cloned())
+                });
+                let command_descriptor = result.command_descriptor().ok();
 
-                match result {
+                let focused = match result {
                     scripts::SearchResult::Script(m) => {
                         // Launcher-managed overrides take precedence over inline metadata.
                         let shortcut = override_shortcut.or_else(|| m.script.shortcut.clone());
@@ -1547,7 +1549,12 @@ impl ScriptListApp {
                             scripts::ConversationRowTarget::FlowIdentity { .. } => "Converse",
                         },
                     )),
-                }
+                };
+
+                focused.map(|info| match command_descriptor {
+                    Some(descriptor) => info.with_command_descriptor(descriptor),
+                    None => info,
+                })
             } else {
                 None
             }

@@ -138,6 +138,79 @@ pub(crate) fn parse_context_subsearch<'a>(
     parse_root_subsearch_fragment(context_type)
 }
 
+/// Recognize the exact active browser-history mention using the same parser
+/// and source resolver as rich rows. Root refresh ownership must use this
+/// library-tested decision before a cold snapshot exists; partial mentions or
+/// the separate `@history` conversation source never qualify.
+pub(crate) fn active_browser_history_subsearch(query_text: &str) -> bool {
+    if !query_text.contains('@') {
+        return false;
+    }
+
+    let parse = super::parse_spine(query_text);
+    let projection = super::project_cursor(&parse, query_text.len());
+    let super::SpineSegmentKind::ContextMention {
+        context_type,
+        sub_query,
+    } = &projection.active_segment_kind
+    else {
+        return false;
+    };
+
+    matches!(
+        parse_context_subsearch(context_type, sub_query.as_deref()),
+        Some((ContextSubsearchSource::BrowserHistory, _))
+    )
+}
+
+/// Rank launcher-owned command catalogs with the exact same visibility,
+/// metadata matching, and deterministic ordering as ordinary root search.
+///
+/// Filtering and truncation happen only after canonical scoring, so a hidden
+/// script never leaks into an attachment portal and a late exact match cannot
+/// be pushed out by earlier low-relevance rows.
+pub(crate) fn rank_context_catalog_results(
+    source: ContextSubsearchSource,
+    query: &str,
+    scripts: &[std::sync::Arc<crate::scripts::Script>],
+    scriptlets: &[std::sync::Arc<crate::scripts::Scriptlet>],
+    skills: &[std::sync::Arc<crate::plugins::PluginSkill>],
+) -> Vec<crate::scripts::SearchResult> {
+    let (scripts, scriptlets, skills) = match source {
+        ContextSubsearchSource::Scripts => (scripts, &[][..], &[][..]),
+        ContextSubsearchSource::Scriptlets => (&[][..], scriptlets, &[][..]),
+        ContextSubsearchSource::Skills => (&[][..], &[][..], skills),
+        _ => return Vec::new(),
+    };
+
+    crate::scripts::fuzzy_search_unified_all_with_skills(
+        scripts,
+        scriptlets,
+        &[],
+        &[],
+        skills,
+        query,
+    )
+    .into_iter()
+    .filter(|result| {
+        matches!(
+            (source, result),
+            (
+                ContextSubsearchSource::Scripts,
+                crate::scripts::SearchResult::Script(_)
+            ) | (
+                ContextSubsearchSource::Scriptlets,
+                crate::scripts::SearchResult::Scriptlet(_)
+            ) | (
+                ContextSubsearchSource::Skills,
+                crate::scripts::SearchResult::Skill(_)
+            )
+        )
+    })
+    .take(SUBSEARCH_RENDER_LIMIT)
+    .collect()
+}
+
 /// Colon-less `@` fragments switch into search mode the moment the trigger is
 /// recognized — typing `@files` must already BE file search (recents,
 /// unarmed), with no "press Enter to refine" picker step. Continuations keep
@@ -251,6 +324,201 @@ pub(crate) fn escape_ref_component(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn catalog_script(name: &str) -> Arc<crate::scripts::Script> {
+        Arc::new(crate::scripts::Script {
+            name: name.to_owned(),
+            path: std::path::PathBuf::from(format!("/synthetic/{name}.ts")),
+            plugin_id: "main".to_owned(),
+            ..Default::default()
+        })
+    }
+
+    fn catalog_scriptlet(name: &str, alias: Option<&str>) -> Arc<crate::scripts::Scriptlet> {
+        Arc::new(crate::scripts::Scriptlet {
+            name: name.to_owned(),
+            description: Some(format!("Synthetic {name}")),
+            code: "// synthetic".to_owned(),
+            tool: "ts".to_owned(),
+            shortcut: None,
+            keyword: None,
+            group: None,
+            plugin_id: "main".to_owned(),
+            plugin_title: None,
+            file_path: Some(format!("/synthetic/scriptlets.md#{name}")),
+            command: Some(name.to_owned()),
+            alias: alias.map(str::to_owned),
+            icon: None,
+        })
+    }
+
+    fn catalog_skill(title: &str, skill_id: &str) -> Arc<crate::plugins::PluginSkill> {
+        Arc::new(crate::plugins::PluginSkill {
+            plugin_id: "synthetic".to_owned(),
+            plugin_title: "Synthetic".to_owned(),
+            skill_id: skill_id.to_owned(),
+            path: std::path::PathBuf::from(format!("/synthetic/skills/{skill_id}/SKILL.md")),
+            title: title.to_owned(),
+            description: "Synthetic skill".to_owned(),
+        })
+    }
+
+    #[test]
+    fn context_catalog_never_exposes_hidden_scripts() {
+        let visible = catalog_script("Visible deployment");
+        let hidden = Arc::new(crate::scripts::Script {
+            name: "Hidden deployment".to_owned(),
+            path: std::path::PathBuf::from("/synthetic/hidden-deployment.ts"),
+            typed_metadata: Some(crate::metadata_parser::TypedMetadata {
+                hidden: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        for query in ["", "deployment", "hidden"] {
+            let results = rank_context_catalog_results(
+                ContextSubsearchSource::Scripts,
+                query,
+                &[Arc::clone(&hidden), Arc::clone(&visible)],
+                &[],
+                &[],
+            );
+            assert!(
+                results.iter().all(|result| result.name() != hidden.name),
+                "hidden script leaked for query {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_catalog_ranks_before_truncating_and_preserves_evidence() {
+        let mut scripts: Vec<_> = (0..SUBSEARCH_RENDER_LIMIT + 4)
+            .map(|index| catalog_script(&format!("needle helper {index:02}")))
+            .collect();
+        scripts.push(catalog_script("needle"));
+
+        let results = rank_context_catalog_results(
+            ContextSubsearchSource::Scripts,
+            "needle",
+            &scripts,
+            &[],
+            &[],
+        );
+
+        assert_eq!(results.len(), SUBSEARCH_RENDER_LIMIT);
+        assert_eq!(results[0].name(), "needle");
+        match &results[0] {
+            crate::scripts::SearchResult::Script(script_match) => {
+                assert!(script_match.score > 0);
+                assert!(script_match.match_evidence.is_some());
+            }
+            _ => panic!("script catalog returned a different command family"),
+        }
+    }
+
+    #[test]
+    fn context_catalog_searches_aliases_and_skill_identifiers() {
+        let scriptlet = catalog_scriptlet("Open dashboard", Some("launch-control"));
+        let skill = catalog_skill("Incident response", "production-triage");
+
+        let scriptlet_results = rank_context_catalog_results(
+            ContextSubsearchSource::Scriptlets,
+            "launch-control",
+            &[],
+            std::slice::from_ref(&scriptlet),
+            std::slice::from_ref(&skill),
+        );
+        assert_eq!(scriptlet_results.len(), 1);
+        match &scriptlet_results[0] {
+            crate::scripts::SearchResult::Scriptlet(result) => {
+                assert_eq!(result.scriptlet.name, "Open dashboard");
+                assert!(result.match_evidence.is_some());
+            }
+            _ => panic!("scriptlet alias returned a different command family"),
+        }
+
+        let skill_results = rank_context_catalog_results(
+            ContextSubsearchSource::Skills,
+            "production-triage",
+            &[],
+            std::slice::from_ref(&scriptlet),
+            std::slice::from_ref(&skill),
+        );
+        assert_eq!(skill_results.len(), 1);
+        match &skill_results[0] {
+            crate::scripts::SearchResult::Skill(result) => {
+                assert_eq!(result.skill.title, "Incident response");
+                assert!(result.match_evidence.is_some());
+            }
+            _ => panic!("skill identifier returned a different command family"),
+        }
+    }
+
+    #[test]
+    fn context_catalog_equal_scores_use_canonical_deterministic_order() {
+        let alpha = catalog_script("alpha");
+        let zeta = catalog_script("zeta");
+        let forward = rank_context_catalog_results(
+            ContextSubsearchSource::Scripts,
+            "",
+            &[Arc::clone(&zeta), Arc::clone(&alpha)],
+            &[],
+            &[],
+        );
+        let reverse = rank_context_catalog_results(
+            ContextSubsearchSource::Scripts,
+            "",
+            &[alpha, zeta],
+            &[],
+            &[],
+        );
+
+        let forward_names: Vec<_> = forward.iter().map(|result| result.name()).collect();
+        let reverse_names: Vec<_> = reverse.iter().map(|result| result.name()).collect();
+        assert_eq!(forward_names, reverse_names);
+        assert_eq!(forward_names, ["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn active_browser_history_subsearch_recognizes_empty_colon_mode() {
+        assert!(active_browser_history_subsearch("@browser-history:"));
+    }
+
+    #[test]
+    fn active_browser_history_subsearch_recognizes_typed_subquery() {
+        assert!(active_browser_history_subsearch(
+            "@browser-history:private-query"
+        ));
+    }
+
+    #[test]
+    fn active_browser_history_subsearch_recognizes_colonless_alias() {
+        assert!(active_browser_history_subsearch("@browser-history"));
+    }
+
+    #[test]
+    fn active_browser_history_subsearch_rejects_ordinary_queries() {
+        assert!(!active_browser_history_subsearch("ordinary query"));
+        assert!(!active_browser_history_subsearch("person@example.invalid"));
+    }
+
+    #[test]
+    fn active_browser_history_subsearch_never_confuses_conversation_history() {
+        assert!(!active_browser_history_subsearch("@history:"));
+        assert!(!active_browser_history_subsearch("@history:private-query"));
+    }
+
+    #[test]
+    fn active_browser_history_subsearch_rejects_malformed_and_partial_mentions() {
+        for input in ["@", "@browser", "@browser-histor", "@browser_history:"] {
+            assert!(
+                !active_browser_history_subsearch(input),
+                "partial or malformed mention must not start browser-history refresh: {input}"
+            );
+        }
+    }
 
     #[test]
     fn parses_known_subsearch_prefixes() {

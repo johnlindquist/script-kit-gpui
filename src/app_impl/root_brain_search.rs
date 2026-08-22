@@ -96,12 +96,17 @@ impl ScriptListApp {
         if !eligible {
             tracing::debug!(
                 target: "script_kit::brain",
-                query = %trimmed,
+                query_sha256 = %crate::logging::log_private_user_value(trimmed),
+                query_bytes = trimmed.len(),
                 can_collect,
                 advanced_predicate_active,
                 allows = source_filters.allows(crate::menu_syntax::RootUnifiedSourceFilter::Brain),
                 max_results = brain_options.max_results,
-                plan = ?brain_plan,
+                plan = match &brain_plan {
+                    crate::brain::RootBrainQueryPlan::Skip => "skip",
+                    crate::brain::RootBrainQueryPlan::RecentsOnly => "recents_only",
+                    crate::brain::RootBrainQueryPlan::Search(_) => "search",
+                },
                 "brain semantic pass ineligible"
             );
             self.clear_root_brain_semantic_state(cx);
@@ -112,8 +117,10 @@ impl ScriptListApp {
         };
         tracing::debug!(
             target: "script_kit::brain",
-            query = %query_owned,
-            raw_query = %trimmed,
+            query_sha256 = %crate::logging::log_private_user_value(&query_owned),
+            query_bytes = query_owned.len(),
+            raw_query_sha256 = %crate::logging::log_private_user_value(trimmed),
+            raw_query_bytes = trimmed.len(),
             "brain semantic pass starting"
         );
 
@@ -178,14 +185,16 @@ impl ScriptListApp {
             let Some(hits) = outcome else {
                 tracing::debug!(
                     target: "script_kit::brain",
-                    query = %query_owned,
+                    query_sha256 = %crate::logging::log_private_user_value(&query_owned),
+                    query_bytes = query_owned.len(),
                     "brain semantic pass skipped (no warm embed model)"
                 );
                 return;
             };
             tracing::debug!(
                 target: "script_kit::brain",
-                query = %query_owned,
+                query_sha256 = %crate::logging::log_private_user_value(&query_owned),
+                query_bytes = query_owned.len(),
                 hits = hits.len(),
                 "brain semantic results ready"
             );

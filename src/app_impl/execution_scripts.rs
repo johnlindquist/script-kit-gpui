@@ -271,11 +271,41 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) {
         let plugin_source = scriptlet_plugin_source(scriptlet);
+        let capability_issues = crate::scripts::validate_scriptlet_capabilities(scriptlet);
+        if let Some(issue) = capability_issues
+            .iter()
+            .find(|issue| issue.severity == crate::scripts::ValidationSeverity::Fatal)
+            .or_else(|| capability_issues.first())
+        {
+            tracing::warn!(
+                target: "script_kit::execution",
+                scriptlet = %scriptlet.name,
+                plugin = %plugin_source,
+                issue = ?issue.kind,
+                "scriptlet_capability_preflight_refused_before_execution"
+            );
+            self.toast_manager.push(
+                components::toast::Toast::error(
+                    format!(
+                        "{} · {} unavailable: {}",
+                        plugin_source, scriptlet.name, issue.message
+                    ),
+                    &self.theme,
+                )
+                .duration_ms(Some(TOAST_ERROR_MS)),
+            );
+            cx.notify();
+            return;
+        }
+
         logging::log(
             "EXEC",
             &format!(
-                "Executing scriptlet: {} (tool: {}, plugin: {}, argv: {:?})",
-                scriptlet.name, scriptlet.tool, plugin_source, argv
+                "Executing scriptlet: {} (tool: {}, plugin: {}, argument_count: {})",
+                scriptlet.name,
+                scriptlet.tool,
+                plugin_source,
+                argv.len()
             ),
         );
 
@@ -626,18 +656,12 @@ impl ScriptListApp {
         if let Ok((category, identifier)) = crate::config::parse_command_id(command_id) {
             match category {
                 crate::config::CommandCategory::Script => {
-                    // Plugin-qualified: "script/{plugin_id}:{name}"
-                    // Legacy: "script/{name}" (no colon)
-                    let script = if let Some((plugin_id, name)) = identifier.split_once(':') {
-                        self.scripts.iter().find(|s| {
-                            s.name == name
-                                && (s.plugin_id == plugin_id
-                                    || (s.plugin_id.is_empty()
-                                        && s.kit_name.as_deref() == Some(plugin_id)))
-                        })
-                    } else {
-                        self.scripts.iter().find(|s| s.name == identifier)
-                    };
+                    // Exact source-digest links coexist with historical
+                    // plugin/name and bare-name config/deep-link aliases.
+                    let script = self
+                        .scripts
+                        .iter()
+                        .find(|script| script.matches_launcher_command_identifier(identifier));
                     if let Some(script) = script {
                         tracing::info!(
                             command_id = %command_id,
@@ -654,18 +678,9 @@ impl ScriptListApp {
                 }
                 crate::config::CommandCategory::Scriptlet => {
                     logging::bench_log("scriptlet_lookup_start");
-                    // Plugin-qualified: "scriptlet/{plugin_id}:{name}"
-                    // Legacy: "scriptlet/{name}" (no colon)
-                    let scriptlet = if let Some((plugin_id, name)) = identifier.split_once(':') {
-                        self.scriptlets.iter().find(|s| {
-                            s.name == name
-                                && (s.plugin_id == plugin_id
-                                    || (s.plugin_id.is_empty()
-                                        && s.group.as_deref() == Some(plugin_id)))
-                        })
-                    } else {
-                        self.scriptlets.iter().find(|s| s.name == identifier)
-                    };
+                    let scriptlet = self.scriptlets.iter().find(|scriptlet| {
+                        scriptlet.matches_launcher_command_identifier(identifier)
+                    });
                     if let Some(scriptlet) = scriptlet {
                         logging::bench_log("scriptlet_found");
                         let scriptlet_clone = scriptlet.clone();
@@ -719,7 +734,7 @@ impl ScriptListApp {
                                 target: "script_kit::agent_handoff",
                                 command_id = %command_id,
                                 adapter_id = %receipt.adapter_id,
-                                prompt_sha256 = %receipt.prompt_sha256,
+                                prompt_sha256 = %receipt.diagnostic_prompt_fingerprint(),
                                 "prompt_target_command_resolved"
                             );
                         }
@@ -746,7 +761,7 @@ impl ScriptListApp {
                                 target: "script_kit::agent_handoff",
                                 command_id = %command_id,
                                 export_kind = %receipt.export_kind,
-                                prompt_sha256 = %receipt.prompt_sha256,
+                                prompt_sha256 = %receipt.diagnostic_prompt_fingerprint(),
                                 "prompt_action_command_resolved"
                             );
                         }
@@ -845,7 +860,11 @@ mod builtin_command_window_visibility_tests {
             id: "builtin/reset-window-positions".to_string(),
             name: "Reset Window Positions".to_string(),
             description: "Restore all windows to default positions".to_string(),
-            keywords: vec!["reset".to_string(), "window".to_string(), "position".to_string()],
+            keywords: vec![
+                "reset".to_string(),
+                "window".to_string(),
+                "position".to_string(),
+            ],
             feature: crate::builtins::BuiltInFeature::SettingsCommand(
                 crate::builtins::SettingsCommandType::ResetWindowPositions,
             ),

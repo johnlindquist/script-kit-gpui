@@ -85,7 +85,7 @@ fn day_page_kit_resource_source_target_for_uri(
 }
 
 impl DayPageView {
-    pub fn new(
+    pub(crate) fn new(
         app: Entity<ScriptListApp>,
         substrate: BrainSubstrate,
         window: &mut Window,

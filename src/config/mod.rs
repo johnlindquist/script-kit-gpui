@@ -22,7 +22,7 @@ mod types;
 pub use command_ids::{
     build_command_id, canonical_builtin_command_id, command_id_from_deeplink,
     command_id_to_deeplink, is_valid_command_id, normalize_builtin_identifier, parse_command_id,
-    CommandCategory, SUPPORTED_COMMAND_CATEGORIES,
+    parse_command_identity, CommandCategory, SUPPORTED_COMMAND_CATEGORIES,
 };
 
 // Re-export defaults that are used externally

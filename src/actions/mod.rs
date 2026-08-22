@@ -78,9 +78,13 @@ pub use types::{
 };
 
 // Window functions for separate vibrancy window
+#[allow(
+    unused_imports,
+    reason = "the independently compiled application binary owns detached automation activation"
+)]
+pub(crate) use window::activate_detached_actions_window_action;
 pub(crate) use window::{
-    actions_popup_automation_snapshot, activate_detached_actions_window_action,
-    get_actions_dialog_entity, set_actions_dialog_search_text,
+    actions_popup_automation_snapshot, get_actions_dialog_entity, set_actions_dialog_search_text,
 };
 pub use window::{
     close_actions_window, is_actions_window, is_actions_window_open,

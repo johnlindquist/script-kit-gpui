@@ -3,8 +3,9 @@
 // Contains: configure_shortcut, add_shortcut, update_shortcut, remove_shortcut,
 // add_alias, update_alias, remove_alias.
 //
-// All branches resolve command IDs through `SearchResult::launcher_command_id()`
-// so that plugin-qualified IDs are consistent across read and write paths.
+// All branches retain the legacy `SearchResult::launcher_command_id()`
+// compatibility contract, then bind new preferences to the exact source
+// identity so same-name commands cannot overwrite one another.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShortcutRecorderAction {
@@ -202,6 +203,9 @@ impl ScriptListApp {
                             ),
                         );
                     };
+                    let command_id = result
+                        .command_preference_identity()
+                        .map_or(command_id, |identity| identity.exact_id);
                     let command_name = result.launcher_command_name();
 
                     tracing::info!(
@@ -228,7 +232,15 @@ impl ScriptListApp {
                 };
                 tracing::info!(category = "UI", "remove shortcut action");
                 if let Some(result) = self.get_selected_result() {
-                    let command_id_opt = result.launcher_command_id();
+                    let command_id_opt = result.launcher_command_id().map(|legacy_id| {
+                        result
+                            .command_preference_identity()
+                            .map_or(legacy_id, |identity| {
+                                identity.existing_id(|id| {
+                                    self.config.get_command_shortcut(id).is_some()
+                                })
+                            })
+                    });
 
                     if let Some(command_id) = command_id_opt {
                         tracing::info!(
@@ -335,6 +347,9 @@ impl ScriptListApp {
                             ),
                         );
                     };
+                    let command_id = result
+                        .command_preference_identity()
+                        .map_or(command_id, |identity| identity.exact_id);
                     let command_name = result.launcher_command_name();
 
                     tracing::info!(
@@ -361,7 +376,14 @@ impl ScriptListApp {
                 };
                 tracing::info!(category = "UI", "remove alias action");
                 if let Some(result) = self.get_selected_result() {
-                    let command_id_opt = result.launcher_command_id();
+                    let overrides = crate::aliases::get_cached_alias_overrides();
+                    let command_id_opt = result.launcher_command_id().map(|legacy_id| {
+                        result
+                            .command_preference_identity()
+                            .map_or(legacy_id, |identity| {
+                                identity.existing_id(|id| overrides.contains_key(id))
+                            })
+                    });
 
                     if let Some(command_id) = command_id_opt {
                         tracing::info!(

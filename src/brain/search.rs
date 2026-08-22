@@ -151,7 +151,7 @@ pub(crate) fn fuse_ranks(
         }
     }
     let mut ranked: Vec<(i64, f64)> = scores.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     ranked.truncate(limit);
     ranked
 }
@@ -179,7 +179,7 @@ pub(crate) fn cosine_top_ids(
         }
     }
     let mut scored: Vec<(i64, f32)> = best.into_iter().collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     scored.truncate(limit);
     scored.into_iter().map(|(id, _)| id).collect()
 }
@@ -194,7 +194,7 @@ pub(crate) fn aggregate_signals(signals: &[store::BrainSignal]) -> Vec<(String, 
         .into_iter()
         .filter(|(topic, _)| topic.len() > 2)
         .collect();
-    topics.sort_by(|a, b| b.1.cmp(&a.1));
+    topics.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     topics.truncate(16);
     topics
 }
@@ -359,4 +359,73 @@ pub fn recall_hits_json(query: &str, hits: &[BrainHit]) -> serde_json::Value {
             })
             .collect::<Vec<_>>()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signal(topic: &str, weight: i64) -> store::BrainSignal {
+        store::BrainSignal {
+            topic: topic.to_owned(),
+            weight,
+            source: "test".to_owned(),
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn rrf_tied_scores_have_stable_identity_order() {
+        for (lexical, semantic) in [([20, 10], [10, 20]), ([10, 20], [20, 10])] {
+            let ranked = fuse_ranks(&lexical, &semantic, &[], &[], 1);
+            assert_eq!(ranked.len(), 1);
+            assert_eq!(
+                ranked[0].0, 10,
+                "equal reciprocal-rank scores must prefer the stable lower document identity"
+            );
+        }
+    }
+
+    #[test]
+    fn cosine_tied_scores_have_stable_identity_order() {
+        for embeddings in [
+            vec![(20, vec![1.0, 0.0]), (10, vec![1.0, 0.0])],
+            vec![(10, vec![1.0, 0.0]), (20, vec![1.0, 0.0])],
+        ] {
+            assert_eq!(
+                cosine_top_ids(&[1.0, 0.0], &embeddings, 1),
+                vec![10],
+                "equal semantic scores must select the same document before truncation"
+            );
+        }
+    }
+
+    #[test]
+    fn signal_ties_have_stable_topic_order() {
+        let signals: Vec<_> = (0..17)
+            .rev()
+            .map(|index| signal(&format!("topic-{index:02}"), 1))
+            .collect();
+        let aggregated = aggregate_signals(&signals);
+        let expected: Vec<_> = (0..16)
+            .map(|index| (format!("topic-{index:02}"), 1))
+            .collect();
+
+        assert_eq!(
+            aggregated, expected,
+            "the 16-topic cap must preserve the same alphabetic identities for tied weights"
+        );
+    }
+
+    #[test]
+    fn ranking_tie_breakers_never_override_stronger_primary_scores() {
+        let ranked = fuse_ranks(&[20, 10], &[], &[], &[], 1);
+        assert_eq!(ranked[0].0, 20);
+
+        let embeddings = vec![(10, vec![0.8, 0.0]), (20, vec![1.0, 0.0])];
+        assert_eq!(cosine_top_ids(&[1.0, 0.0], &embeddings, 1), vec![20]);
+
+        let signals = [signal("alpha", 1), signal("zulu", 5)];
+        assert_eq!(aggregate_signals(&signals)[0], ("zulu".to_owned(), 5));
+    }
 }

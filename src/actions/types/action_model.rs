@@ -271,6 +271,35 @@ impl Action {
         self
     }
 
+    /// Apply the launcher-owned primary action without changing this host's
+    /// existing action-routing ID, shortcut formatting, or icon/chrome.
+    pub fn with_command_contract(
+        mut self,
+        descriptor: &sk_protocol::command_contract::CommandDescriptor,
+    ) -> Self {
+        let Some(primary) = descriptor.primary_action() else {
+            return self.disabled("This command does not expose a primary action.");
+        };
+
+        self.title = primary.title.clone();
+        self.title_lower = self.title.to_lowercase();
+
+        if !descriptor.can_execute() {
+            let availability = if descriptor.availability.is_executable() {
+                &primary.availability
+            } else {
+                &descriptor.availability
+            };
+            self = self.disabled(
+                availability
+                    .safe_message()
+                    .unwrap_or("This action is not currently available."),
+            );
+        }
+
+        self
+    }
+
     pub fn is_enabled(&self) -> bool {
         self.availability.is_enabled()
     }

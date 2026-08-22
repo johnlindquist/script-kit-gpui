@@ -229,7 +229,11 @@ pub(crate) fn parse_scriptlet_section(
         );
     }
 
-    Some(Scriptlet {
+    let capability_metadata = super::super::validation::merge_scriptlet_capability_metadata(
+        typed_metadata.as_ref(),
+        &html_metadata,
+    );
+    let scriptlet = Scriptlet {
         name,
         description: typed_metadata
             .as_ref()
@@ -252,5 +256,10 @@ pub(crate) fn parse_scriptlet_section(
             .and_then(|t| t.alias.clone())
             .or_else(|| html_metadata.get("alias").cloned()),
         icon: html_metadata.get("icon").cloned(),
-    })
+    };
+    super::super::validation::register_scriptlet_capabilities(
+        &scriptlet,
+        capability_metadata.as_ref(),
+    );
+    Some(scriptlet)
 }

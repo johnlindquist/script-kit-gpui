@@ -833,7 +833,7 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
         entries.push(BuiltInEntry::new_with_icon(
             "builtin/sdk-reference",
             "SDK Reference",
-            "Browse Script Kit SDK functions while writing scripts",
+            "Browse SDK functions, command readiness, permissions, and author diagnostics",
             vec![
                 "sdk",
                 "reference",
@@ -844,6 +844,11 @@ pub fn get_builtin_entries(config: &BuiltInConfig) -> Vec<BuiltInEntry> {
                 "scripting",
                 "functions",
                 "help",
+                "doctor",
+                "diagnostics",
+                "readiness",
+                "permissions",
+                "compatibility",
             ],
             BuiltInFeature::SdkReference,
             "book-open",

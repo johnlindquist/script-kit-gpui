@@ -21,6 +21,7 @@ pub const MAX_IMAGE_CACHE_ENTRIES: usize = 100;
 
 /// Maximum entries to cache in memory for fast access
 pub const MAX_CACHED_ENTRIES: usize = 500;
+const ROOT_CLIPBOARD_HISTORY_REFRESH_LABEL: &str = "root-clipboard-history-cache";
 
 /// Global image cache for decoded RenderImages (thread-safe)
 /// Key: entry ID, Value: decoded RenderImage
@@ -35,7 +36,17 @@ static ENTRY_CACHE: OnceLock<Mutex<Arc<Vec<ClipboardEntryMeta>>>> = OnceLock::ne
 
 /// Timestamp of last cache update
 static CACHE_UPDATED: OnceLock<Mutex<i64>> = OnceLock::new();
-static ENTRY_CACHE_REFRESH_IN_FLIGHT: OnceLock<Mutex<bool>> = OnceLock::new();
+static ENTRY_CACHE_READY: OnceLock<Mutex<bool>> = OnceLock::new();
+static ENTRY_CACHE_REFRESH_LIFECYCLE: OnceLock<
+    Mutex<crate::scripts::root_search_contract::RootOwnedProviderRefreshLifecycle>,
+> = OnceLock::new();
+
+pub(crate) type RootClipboardHistoryRefresh =
+    crate::scripts::root_search_contract::RootOwnedProviderRefresh;
+
+pub(crate) struct RootClipboardHistorySnapshot {
+    entries: Vec<ClipboardEntryMeta>,
+}
 
 /// Get the global image cache, initializing if needed
 pub fn get_image_cache() -> &'static Mutex<LruCache<String, Arc<RenderImage>>> {
@@ -50,8 +61,17 @@ pub fn get_entry_cache() -> &'static Mutex<Arc<Vec<ClipboardEntryMeta>>> {
     ENTRY_CACHE.get_or_init(|| Mutex::new(Arc::new(Vec::new())))
 }
 
-fn entry_cache_refresh_in_flight() -> &'static Mutex<bool> {
-    ENTRY_CACHE_REFRESH_IN_FLIGHT.get_or_init(|| Mutex::new(false))
+fn entry_cache_ready() -> &'static Mutex<bool> {
+    ENTRY_CACHE_READY.get_or_init(|| Mutex::new(false))
+}
+
+fn entry_cache_refresh_lifecycle(
+) -> &'static Mutex<crate::scripts::root_search_contract::RootOwnedProviderRefreshLifecycle> {
+    ENTRY_CACHE_REFRESH_LIFECYCLE.get_or_init(|| {
+        Mutex::new(
+            crate::scripts::root_search_contract::RootOwnedProviderRefreshLifecycle::default(),
+        )
+    })
 }
 
 /// Initialize the cache timestamp tracker
@@ -106,6 +126,8 @@ pub fn get_cached_entries(limit: usize) -> Vec<ClipboardEntryMeta> {
 pub fn invalidate_entry_cache() {
     let mut cache = get_entry_cache().lock();
     *cache = Arc::new(Vec::new());
+    drop(cache);
+    *entry_cache_ready().lock() = false;
 }
 
 /// Refresh the entry cache from database (metadata only, no content payload)
@@ -117,43 +139,61 @@ pub fn refresh_entry_cache() {
     *cache = Arc::new(entries);
     debug!(count = cache.len(), "Refreshed entry metadata cache");
     drop(cache);
+    *entry_cache_ready().lock() = true;
     if let Some(updated) = CACHE_UPDATED.get() {
         let mut ts = updated.lock();
         *ts = chrono::Utc::now().timestamp_millis();
     }
 }
 
-fn ensure_entry_cache_refresh() {
-    if let Some(mut refreshing) = entry_cache_refresh_in_flight().try_lock() {
-        if *refreshing {
-            return;
-        }
-        *refreshing = true;
-    } else {
-        return;
-    }
+pub(crate) fn root_clipboard_history_cache_is_fresh() -> bool {
+    !get_entry_cache().lock().is_empty() || *entry_cache_ready().lock()
+}
 
-    let spawn_result = std::thread::Builder::new()
-        .name("root-clipboard-history-cache".to_string())
-        .spawn(|| {
-            refresh_entry_cache();
-            if let Some(mut refreshing) = entry_cache_refresh_in_flight().try_lock() {
-                *refreshing = false;
-            }
-        });
+pub(crate) fn try_begin_root_clipboard_history_refresh() -> Option<RootClipboardHistoryRefresh> {
+    let cache_is_fresh = root_clipboard_history_cache_is_fresh();
+    entry_cache_refresh_lifecycle().lock().begin(
+        sk_protocol::command_contract::CommandSource::Clipboard,
+        cache_is_fresh,
+    )
+}
 
-    if spawn_result.is_err() {
-        if let Some(mut refreshing) = entry_cache_refresh_in_flight().try_lock() {
-            *refreshing = false;
-        }
+pub(crate) fn read_root_clipboard_history_snapshot() -> RootClipboardHistorySnapshot {
+    tracing::debug!(
+        target: "script_kit::search",
+        worker = ROOT_CLIPBOARD_HISTORY_REFRESH_LABEL,
+        "Reading owned private clipboard metadata snapshot"
+    );
+    RootClipboardHistorySnapshot {
+        entries: get_clipboard_history_meta(MAX_CACHED_ENTRIES, 0),
     }
+}
+
+pub(crate) fn finish_root_clipboard_history_refresh(
+    refresh: RootClipboardHistoryRefresh,
+    snapshot: RootClipboardHistorySnapshot,
+) -> bool {
+    if !entry_cache_refresh_lifecycle().lock().finish(refresh) {
+        return false;
+    }
+    let mut cache = get_entry_cache().lock();
+    *cache = Arc::new(snapshot.entries);
+    let count = cache.len();
+    drop(cache);
+    *entry_cache_ready().lock() = true;
+    update_cache_timestamp();
+    debug!(count, "Published owned clipboard metadata snapshot");
+    true
+}
+
+pub(crate) fn discard_root_clipboard_history_refresh(refresh: RootClipboardHistoryRefresh) -> bool {
+    entry_cache_refresh_lifecycle().lock().finish(refresh)
 }
 
 /// Cache-only root clipboard search used by foreground launcher grouping.
 ///
-/// When the metadata cache is cold, this starts a background refresh and returns
-/// no hits for the active frame so late SQLite work cannot repaint the current
-/// root-search rows.
+/// A cold metadata cache returns no hits and never starts SQLite work. The
+/// launcher input owner coordinates one generation-fenced background refresh.
 pub fn search_root_clipboard_history_meta_cached(
     query: &str,
     options: RootClipboardHistorySectionOptions,
@@ -178,7 +218,6 @@ pub fn search_root_clipboard_history_meta_cached(
     };
 
     let Some(entries) = entries else {
-        ensure_entry_cache_refresh();
         return Vec::new();
     };
 
@@ -301,6 +340,7 @@ pub(crate) fn update_ocr_text_in_cache(id: &str, text: String) {
 
 /// Update the cache timestamp (internal helper)
 fn update_cache_timestamp() {
+    *entry_cache_ready().lock() = true;
     if let Some(updated) = CACHE_UPDATED.get() {
         let mut ts = updated.lock();
         *ts = chrono::Utc::now().timestamp_millis();
@@ -339,6 +379,49 @@ mod tests {
             byte_size: 10,
             ocr_text: None,
         }
+    }
+
+    #[test]
+    fn root_clipboard_refresh_accepts_an_empty_owned_snapshot_without_restarting_forever() {
+        let _lock = TEST_LOCK.lock();
+        invalidate_entry_cache();
+        assert!(!root_clipboard_history_cache_is_fresh());
+
+        let refresh = try_begin_root_clipboard_history_refresh()
+            .expect("one owned worker for a cold clipboard cache");
+        assert!(try_begin_root_clipboard_history_refresh().is_none());
+        assert!(finish_root_clipboard_history_refresh(
+            refresh,
+            RootClipboardHistorySnapshot {
+                entries: Vec::new()
+            },
+        ));
+        assert!(root_clipboard_history_cache_is_fresh());
+        assert!(try_begin_root_clipboard_history_refresh().is_none());
+        invalidate_entry_cache();
+    }
+
+    #[test]
+    fn root_clipboard_refresh_refuses_another_providers_snapshot_before_publication() {
+        let _lock = TEST_LOCK.lock();
+        invalidate_entry_cache();
+        let refresh =
+            try_begin_root_clipboard_history_refresh().expect("clipboard owns its refresh worker");
+        let forged = crate::scripts::root_search_contract::RootOwnedProviderRefresh {
+            source: sk_protocol::command_contract::CommandSource::Dictation,
+            generation: refresh.generation,
+        };
+
+        assert!(!finish_root_clipboard_history_refresh(
+            forged,
+            RootClipboardHistorySnapshot {
+                entries: vec![make_meta("foreign-owner", 1, false)],
+            },
+        ));
+        assert!(get_entry_cache().lock().is_empty());
+        assert!(!root_clipboard_history_cache_is_fresh());
+        assert!(discard_root_clipboard_history_refresh(refresh));
+        invalidate_entry_cache();
     }
 
     #[test]

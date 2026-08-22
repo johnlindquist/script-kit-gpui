@@ -76,6 +76,69 @@ fn test_get_script_context_actions_preserves_builtin_action_text() {
 }
 
 #[test]
+fn script_context_primary_action_consumes_the_selected_command_descriptor() {
+    use sk_protocol::command_contract::{CommandDescriptor, CommandIdentity, CommandSource};
+
+    let descriptor = CommandDescriptor::new(
+        CommandIdentity::new(CommandSource::Script, "main:hello").unwrap(),
+        "Hello",
+        "Open Reviewed Result",
+    )
+    .unwrap();
+    let script =
+        ScriptInfo::new("Hello", "/tmp/hello.ts").with_command_descriptor(descriptor.clone());
+    let actions = get_script_context_actions(&script);
+    let primary = actions
+        .iter()
+        .find(|action| action.id == "run_script")
+        .unwrap();
+
+    assert_eq!(primary.title, descriptor.primary_action().unwrap().title);
+    assert!(primary.is_enabled());
+    assert_eq!(
+        script
+            .command_descriptor
+            .as_ref()
+            .unwrap()
+            .identity
+            .as_str(),
+        "script/main:hello"
+    );
+}
+
+#[test]
+fn script_context_primary_action_preserves_the_canonical_disabled_reason() {
+    use sk_protocol::command_contract::{
+        CommandAvailability, CommandCapability, CommandDescriptor, CommandIdentity, CommandSource,
+    };
+
+    let mut descriptor = CommandDescriptor::new(
+        CommandIdentity::new(CommandSource::Scriptlet, "main:camera").unwrap(),
+        "Camera",
+        "Inspect Camera",
+    )
+    .unwrap();
+    descriptor.availability = CommandAvailability::MissingPermission {
+        capability: CommandCapability::Microphone,
+    };
+    descriptor.actions[0].availability = descriptor.availability.clone();
+
+    let script = ScriptInfo::scriptlet("Camera", "/tmp/camera.md", None, None)
+        .with_command_descriptor(descriptor);
+    let actions = get_script_context_actions(&script);
+    let primary = actions
+        .iter()
+        .find(|action| action.id == "run_script")
+        .unwrap();
+
+    assert!(!primary.is_enabled());
+    assert_eq!(
+        primary.disabled_reason(),
+        Some("Grant the required permission to continue.")
+    );
+}
+
+#[test]
 fn test_primary_action_plan_classifies_context_kind_matrix() {
     let app = ScriptInfo::app("App", "/Applications/App.app", None, None, None);
     let agent = ScriptInfo::agent("Agent", "/tmp/agent.md", None, None);

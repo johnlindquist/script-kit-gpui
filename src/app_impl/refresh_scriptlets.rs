@@ -347,6 +347,11 @@ impl ScriptListApp {
     pub(crate) fn refresh_skills(&mut self, cx: &mut Context<Self>) {
         let before_count = self.skills.len();
         self.skills = load_plugin_skills();
+        crate::ai::context_selector::publish_launcher_catalog(
+            &self.scripts,
+            &self.scriptlets,
+            &self.skills,
+        );
 
         self.invalidate_filter_cache();
         self.invalidate_grouped_cache();
@@ -395,11 +400,21 @@ impl ScriptListApp {
         let catalog_report = crate::scripts::validate_script_catalog(loaded_scripts);
         let loaded_scripts: Vec<std::sync::Arc<scripts::Script>> =
             catalog_report.scripts.iter().cloned().collect();
-        self.script_validation_report = Some(catalog_report.validation.clone());
+        self.script_validation_report = Some(std::sync::Arc::new(
+            crate::scripts::merge_scriptlet_validation_issues(
+                &catalog_report.validation,
+                &loaded_scriptlets,
+            ),
+        ));
 
         self.scripts = loaded_scripts;
         // Use load_scriptlets() to load from all plugins (plugins/*/scriptlets/*.md)
         self.scriptlets = loaded_scriptlets;
+        crate::ai::context_selector::publish_launcher_catalog(
+            &self.scripts,
+            &self.scriptlets,
+            &self.skills,
+        );
         self.invalidate_filter_cache();
         self.invalidate_grouped_cache();
         self.invalidate_preview_cache();
@@ -679,6 +694,11 @@ impl ScriptListApp {
 
         // Sort by name to maintain consistent ordering
         self.scriptlets.sort_by(|a, b| a.name.cmp(&b.name));
+        crate::ai::context_selector::publish_launcher_catalog(
+            &self.scripts,
+            &self.scriptlets,
+            &self.skills,
+        );
 
         // Invalidate caches
         self.invalidate_filter_cache();

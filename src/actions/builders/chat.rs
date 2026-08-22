@@ -189,6 +189,10 @@ pub const CHAT_ROOT_ROUTE_ID: &str = "chat:root";
 pub const CHAT_MODEL_PICKER_ROUTE_ID: &str = "chat:model_picker";
 
 /// Build the root route for a chat prompt's actions dialog.
+#[allow(
+    dead_code,
+    reason = "the exported compatibility builder remains available to downstream callers and behavior tests"
+)]
 pub fn get_chat_root_route(info: &ChatPromptInfo) -> crate::actions::ActionsDialogRoute {
     get_chat_root_route_with_facts(
         info,
@@ -272,6 +276,10 @@ pub fn get_chat_model_picker_actions(info: &ChatPromptInfo) -> Vec<Action> {
 /// Returns root-level actions with a `chat:change_model` drill-down instead
 /// of flat model rows. Use [`get_chat_model_picker_actions`] for model-level
 /// actions.
+#[allow(
+    dead_code,
+    reason = "the exported compatibility builder remains available to downstream callers and behavior tests"
+)]
 pub fn get_chat_context_actions(info: &ChatPromptInfo) -> Vec<Action> {
     get_chat_context_actions_with_facts(
         info,

@@ -311,6 +311,17 @@ fn append_alias_preference_actions(
 }
 
 fn primary_action_copy(script: &ScriptInfo) -> PrimaryActionCopy {
+    if let Some(primary) = script
+        .command_descriptor
+        .as_ref()
+        .and_then(|descriptor| descriptor.primary_action())
+    {
+        return PrimaryActionCopy {
+            title: primary.title.clone(),
+            description: primary.title.clone(),
+        };
+    }
+
     match primary_action_plan(script_context_kind(script)) {
         PrimaryActionPlan::PreserveCatalogActionText => PrimaryActionCopy {
             title: script.action_verb.clone(),
@@ -354,17 +365,19 @@ pub fn get_script_context_actions(script: &ScriptInfo) -> Vec<Action> {
         "Building script context actions"
     );
 
-    actions.push(
-        Action::new(
-            "run_script",
-            primary_copy.title,
-            Some(primary_copy.description),
-            ActionCategory::ScriptContext,
-        )
-        .with_shortcut("↵")
-        .with_icon(IconName::PlayFilled)
-        .with_section("Actions"),
-    );
+    let mut primary_action = Action::new(
+        "run_script",
+        primary_copy.title,
+        Some(primary_copy.description),
+        ActionCategory::ScriptContext,
+    )
+    .with_shortcut("↵")
+    .with_icon(IconName::PlayFilled)
+    .with_section("Actions");
+    if let Some(descriptor) = &script.command_descriptor {
+        primary_action = primary_action.with_command_contract(descriptor);
+    }
+    actions.push(primary_action);
 
     actions.push(
         Action::new(
@@ -1153,8 +1166,8 @@ pub(crate) fn get_agent_chat_actions_with_facts(
         .with_section("Session"),
         Action::new(
             "agent_chat_clear_history",
-            "Clear History",
-            Some("Delete all saved conversations".to_string()),
+            "Delete All History",
+            Some("Delete all saved conversations and prompt history".to_string()),
             ActionCategory::ScriptContext,
         )
         .with_icon(IconName::Trash)
@@ -1671,9 +1684,12 @@ pub(crate) enum AgentChatActionsDialogHost {
     /// plus the Day-return action that writes the last assistant reply back to Today.
     #[allow(dead_code)] // WIP: constructed once the Day Page Agent Chat host lands.
     DayPage,
-    /// Notes-hosted Agent Chat surface — subset that works inside the Notes window.
-    /// `agent_chat_close` returns to the Notes editor rather than closing a window.
-    /// `agent_chat_save_as_note` saves the embedded transcript as a new canonical note.
+    /// Historical Notes-origin compatibility policy. Notes now stages explicit
+    /// context in the main Agent Chat host instead of hosting its own chat.
+    #[allow(
+        dead_code,
+        reason = "historical Notes-origin policy remains covered by backward-compatibility tests"
+    )]
     Notes,
     /// Detached Agent Chat chat window — only actions that work without the main panel.
     Detached,

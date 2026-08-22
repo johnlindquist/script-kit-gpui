@@ -53,6 +53,38 @@ pub(crate) fn compact_subsearch_token(prefix: &str, value: &str) -> String {
     format!("@{}:{}", prefix, escape_ref_component(&friendly))
 }
 
+/// Preserve every selected owner's identity when two context attachments
+/// have the same friendly label or file basename.
+///
+/// Re-selecting the exact source reuses its existing token; a distinct owner
+/// receives the next deterministic `-2` / `-3` suffix without an artificial
+/// collision ceiling that could fall back to overwriting an existing alias.
+pub(crate) fn unique_context_attachment_token(
+    base: &str,
+    part: &AiContextPart,
+    aliases: &std::collections::HashMap<String, AiContextPart>,
+) -> String {
+    let belongs_to_selected_owner =
+        |existing: &AiContextPart| existing.has_same_attachment_owner(part);
+
+    match aliases.get(base) {
+        None => return base.to_string(),
+        Some(existing) if belongs_to_selected_owner(existing) => return base.to_string(),
+        Some(_) => {}
+    }
+
+    for suffix in 2usize.. {
+        let candidate = format!("{base}-{suffix}");
+        match aliases.get(&candidate) {
+            None => return candidate,
+            Some(existing) if belongs_to_selected_owner(existing) => return candidate,
+            Some(_) => {}
+        }
+    }
+
+    unreachable!("an unbounded unique attachment suffix always resolves")
+}
+
 fn resolve_action(
     segment_index: usize,
     segment_byte_range: Range<usize>,
@@ -377,7 +409,6 @@ pub(crate) fn composer_subsearch_section(
     segment_byte_range: Range<usize>,
 ) -> Option<ComposerSubsearchSection> {
     let limit = crate::spine::catalog_subsearch::SUBSEARCH_RENDER_LIMIT;
-    let trimmed = query.trim();
     let (source_id, icon, empty_title, match_title): (&'static str, &'static str, &str, &str) =
         match source {
             ContextSubsearchSource::Notes => ("notes", "notebook-text", "Recent Notes", "Notes"),
@@ -411,6 +442,60 @@ pub(crate) fn composer_subsearch_section(
         };
 
     let results = composer_subsearch_results(source, query, limit);
+    Some(composer_subsearch_section_from_results(
+        source,
+        query,
+        segment_index,
+        segment_byte_range,
+        (source_id, icon, empty_title, match_title),
+        results,
+    ))
+}
+
+/// Resolve launcher-owned script, scriptlet, and skill catalogs without
+/// performing discovery or reading files on the composer's typing path.
+///
+/// The launcher publishes an immutable in-memory snapshot after startup and
+/// every refresh. The existing store-backed resolver deliberately continues
+/// rejecting these sources when no launcher catalogs were supplied.
+pub(crate) fn composer_catalog_subsearch_section(
+    source: ContextSubsearchSource,
+    query: &str,
+    segment_index: usize,
+    segment_byte_range: Range<usize>,
+    scripts: &[std::sync::Arc<crate::scripts::Script>],
+    scriptlets: &[std::sync::Arc<crate::scripts::Scriptlet>],
+    skills: &[std::sync::Arc<crate::plugins::PluginSkill>],
+) -> Option<ComposerSubsearchSection> {
+    let (source_id, icon, title) = match source {
+        ContextSubsearchSource::Scripts => ("scripts", "file-code", "Scripts"),
+        ContextSubsearchSource::Scriptlets => ("scriptlets", "scroll-text", "Scriptlets"),
+        ContextSubsearchSource::Skills => ("skills", "workflow", "Skills"),
+        _ => return None,
+    };
+    let results = crate::spine::catalog_subsearch::rank_context_catalog_results(
+        source, query, scripts, scriptlets, skills,
+    );
+    Some(composer_subsearch_section_from_results(
+        source,
+        query,
+        segment_index,
+        segment_byte_range,
+        (source_id, icon, title, title),
+        results,
+    ))
+}
+
+fn composer_subsearch_section_from_results(
+    source: ContextSubsearchSource,
+    query: &str,
+    segment_index: usize,
+    segment_byte_range: Range<usize>,
+    descriptor: (&'static str, &'static str, &str, &str),
+    results: Vec<SearchResult>,
+) -> ComposerSubsearchSection {
+    let (source_id, icon, empty_title, match_title) = descriptor;
+    let trimmed = query.trim();
     let rows = results
         .into_iter()
         .enumerate()
@@ -434,7 +519,7 @@ pub(crate) fn composer_subsearch_section(
                     meta: None,
                     icon: Some(icon.into()),
                     badges: Vec::new(),
-                    score: 0,
+                    score: result.score(),
                     is_selectable: true,
                     action_label: None,
                     action: outcome.action,
@@ -449,11 +534,37 @@ pub(crate) fn composer_subsearch_section(
     } else {
         format!("{match_title} matching \u{201c}{trimmed}\u{201d}")
     };
-    Some(ComposerSubsearchSection {
+    ComposerSubsearchSection {
         source_id,
         title,
         icon,
         rows,
+    }
+}
+
+/// Recover exactly the accepted row's attachment, even when two plugins use
+/// the same visible label and therefore produce the same friendly token.
+pub(crate) fn composer_subsearch_alias_for_resolution(
+    section: ComposerSubsearchSection,
+    token: &str,
+    resolution_id: &str,
+) -> Option<AiContextPart> {
+    section.rows.into_iter().find_map(|row| {
+        let SpineListAction::ResolveSegment {
+            replacement,
+            resolution_id: row_resolution_id,
+            ..
+        } = &row.row.action
+        else {
+            return None;
+        };
+        if replacement.as_ref() != token || row_resolution_id.as_ref() != resolution_id {
+            return None;
+        }
+        match row.alias {
+            Some((alias_token, part)) if alias_token == token => Some(part),
+            _ => None,
+        }
     })
 }
 
@@ -593,6 +704,28 @@ fn composer_subsearch_results(
 /// Display title/subtitle for a composer subsearch row.
 fn composer_result_display(result: &SearchResult) -> Option<(String, Option<String>)> {
     match result {
+        SearchResult::Script(script_match) => Some((
+            script_match.script.name.clone(),
+            script_match
+                .script
+                .description
+                .clone()
+                .or_else(|| Some(script_match.filename.clone())),
+        )),
+        SearchResult::Scriptlet(scriptlet_match) => Some((
+            scriptlet_match.scriptlet.name.clone(),
+            scriptlet_match
+                .scriptlet
+                .description
+                .clone()
+                .or_else(|| scriptlet_match.display_file_path.clone()),
+        )),
+        SearchResult::Skill(skill_match) => Some((
+            skill_match.skill.title.clone(),
+            (!skill_match.skill.description.is_empty())
+                .then(|| skill_match.skill.description.clone())
+                .or_else(|| Some(skill_match.skill.plugin_title.clone())),
+        )),
         SearchResult::Note(note_match) => Some((
             note_match.hit.title.clone(),
             Some(note_match.subtitle.clone()),
@@ -633,6 +766,86 @@ mod tests {
         let long = "x".repeat(120);
         let token = compact_subsearch_token("notes", &long);
         assert!(token.chars().count() <= "@notes:".len() + 40 + 1);
+    }
+
+    #[test]
+    fn duplicate_file_attachment_names_keep_distinct_owners_and_reuse_same_owner() {
+        let first = AiContextPart::FilePath {
+            path: "/first/plugin/SKILL.md".to_string(),
+            label: "Deploy".to_string(),
+        };
+        let second = AiContextPart::FilePath {
+            path: "/second/plugin/SKILL.md".to_string(),
+            label: "Deploy".to_string(),
+        };
+        let mut aliases = std::collections::HashMap::new();
+
+        let first_token = unique_context_attachment_token("@skills:Deploy", &first, &aliases);
+        assert_eq!(first_token, "@skills:Deploy");
+        aliases.insert(first_token.clone(), first.clone());
+
+        let second_token = unique_context_attachment_token("@skills:Deploy", &second, &aliases);
+        assert_eq!(second_token, "@skills:Deploy-2");
+        aliases.insert(second_token.clone(), second.clone());
+
+        assert_eq!(
+            unique_context_attachment_token("@skills:Deploy", &first, &aliases),
+            first_token
+        );
+        assert_eq!(
+            unique_context_attachment_token("@skills:Deploy", &second, &aliases),
+            second_token
+        );
+    }
+
+    #[test]
+    fn duplicate_scriptlet_attachment_names_preserve_distinct_source_identity() {
+        let first = AiContextPart::TextBlock {
+            label: "Deploy".to_string(),
+            source: "spine:scriptlets:/first/deploy.md".to_string(),
+            text: "first owner's command".to_string(),
+            mime_type: None,
+        };
+        let second = AiContextPart::TextBlock {
+            label: "Deploy".to_string(),
+            source: "spine:scriptlets:/second/deploy.md".to_string(),
+            text: "second owner's command".to_string(),
+            mime_type: None,
+        };
+        let aliases = std::collections::HashMap::from([("@scriptlets:Deploy".to_string(), first)]);
+
+        assert_eq!(
+            unique_context_attachment_token("@scriptlets:Deploy", &second, &aliases),
+            "@scriptlets:Deploy-2"
+        );
+    }
+
+    #[test]
+    fn attachment_token_collisions_never_fall_back_to_an_existing_owner() {
+        let mut aliases = std::collections::HashMap::new();
+        for index in 1..=128 {
+            let token = if index == 1 {
+                "@file:README.md".to_string()
+            } else {
+                format!("@file:README.md-{index}")
+            };
+            aliases.insert(
+                token,
+                AiContextPart::FilePath {
+                    path: format!("/plugin-{index}/README.md"),
+                    label: "README.md".to_string(),
+                },
+            );
+        }
+        let next = AiContextPart::FilePath {
+            path: "/plugin-129/README.md".to_string(),
+            label: "README.md".to_string(),
+        };
+
+        assert_eq!(
+            unique_context_attachment_token("@file:README.md", &next, &aliases),
+            "@file:README.md-129"
+        );
     }
 
     #[test]

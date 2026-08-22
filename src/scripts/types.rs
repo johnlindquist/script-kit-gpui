@@ -831,6 +831,11 @@ impl SearchResult {
     /// input history to promote those rows on future exact-query recall.
     pub fn stable_selection_key(&self) -> Option<String> {
         match self {
+            // Public, display-name-based IDs remain accepted for legacy
+            // config/query memory, but a painted selection must follow the
+            // actual source file even when another command has the same name.
+            SearchResult::Script(sm) => Some(sm.script.source_command_id()),
+            SearchResult::Scriptlet(sm) => Some(sm.scriptlet.source_command_id()),
             SearchResult::Fallback(fm) => fm
                 .stable_selection_key_override
                 .clone()
@@ -1034,27 +1039,131 @@ impl SearchResult {
     }
 }
 
+fn normalized_command_source_path(raw: &str) -> String {
+    use std::path::{Component, Path};
+
+    let (path, anchor) = raw
+        .split_once('#')
+        .map_or((raw, None), |(path, anchor)| (path, Some(anchor)));
+    let mut normalized = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    let mut source = normalized.to_string_lossy().into_owned();
+    if let Some(anchor) = anchor {
+        source.push('#');
+        source.push_str(anchor);
+    }
+    source
+}
+
+fn source_owned_command_id(category: &str, owner: &str, components: &[&str]) -> String {
+    use sha2::Digest;
+
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"script-kit-command-source-v1\0");
+    for component in components {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component.as_bytes());
+    }
+    format!("{category}/{owner}:source-sha256-{:x}", digest.finalize())
+}
+
 impl Script {
-    /// Returns the plugin-qualified command ID used by launcher config entries.
-    pub fn launcher_command_id(&self) -> String {
-        let owner = if self.plugin_id.is_empty() {
+    fn command_owner(&self) -> &str {
+        if self.plugin_id.is_empty() {
             self.kit_name.as_deref().unwrap_or("main")
         } else {
             self.plugin_id.as_str()
-        };
-        format!("script/{}:{}", owner, self.name)
+        }
+    }
+
+    /// Returns the plugin-qualified command ID used by launcher config entries.
+    pub fn launcher_command_id(&self) -> String {
+        format!("script/{}:{}", self.command_owner(), self.name)
+    }
+
+    /// Collision-resistant owner for selections, descriptors, and new
+    /// deep-links. Source-less legacy fixtures retain their original ID.
+    pub fn source_command_id(&self) -> String {
+        if self.path.as_os_str().is_empty() {
+            return self.launcher_command_id();
+        }
+        let source = normalized_command_source_path(&self.path.to_string_lossy());
+        source_owned_command_id("script", self.command_owner(), &[&source])
+    }
+
+    /// Resolve both existing name-based config/deep-links and exact source IDs.
+    pub fn matches_launcher_command_identifier(&self, identifier: &str) -> bool {
+        match identifier.split_once(':') {
+            Some((owner, selector)) if owner == self.command_owner() => {
+                if selector.starts_with("source-sha256-") {
+                    self.source_command_id() == format!("script/{identifier}")
+                } else {
+                    self.name == selector
+                }
+            }
+            Some(_) => false,
+            None => self.name == identifier,
+        }
     }
 }
 
 impl Scriptlet {
-    /// Returns the plugin-qualified command ID used by launcher config entries.
-    pub fn launcher_command_id(&self) -> String {
-        let owner = if self.plugin_id.is_empty() {
+    fn command_owner(&self) -> &str {
+        if self.plugin_id.is_empty() {
             self.group.as_deref().unwrap_or("main")
         } else {
             self.plugin_id.as_str()
+        }
+    }
+
+    /// Returns the plugin-qualified command ID used by launcher config entries.
+    pub fn launcher_command_id(&self) -> String {
+        format!("scriptlet/{}:{}", self.command_owner(), self.name)
+    }
+
+    /// Markdown source, anchor, and command together own the executable
+    /// snippet; mutable display names and list positions never do.
+    pub fn source_command_id(&self) -> String {
+        let Some(raw_source) = self.file_path.as_deref().filter(|path| !path.is_empty()) else {
+            return self.launcher_command_id();
         };
-        format!("scriptlet/{}:{}", owner, self.name)
+        let source = normalized_command_source_path(raw_source);
+        source_owned_command_id(
+            "scriptlet",
+            self.command_owner(),
+            &[&source, self.command.as_deref().unwrap_or_default()],
+        )
+    }
+
+    /// Keep historical name links working while new exact IDs select only
+    /// the snippet whose original source and anchor own that digest.
+    pub fn matches_launcher_command_identifier(&self, identifier: &str) -> bool {
+        match identifier.split_once(':') {
+            Some((owner, selector)) if owner == self.command_owner() => {
+                if selector.starts_with("source-sha256-") {
+                    self.source_command_id() == format!("scriptlet/{identifier}")
+                } else {
+                    self.name == selector
+                }
+            }
+            Some(_) => false,
+            None => self.name == identifier,
+        }
     }
 }
 

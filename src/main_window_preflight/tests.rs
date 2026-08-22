@@ -18,6 +18,7 @@ fn receipt_with_action(
         selected_index,
         selected_result_key: None,
         selected_result_role: Some(MainWindowPreflightResultRole::Primary),
+        selected_command: None,
         visible_results: Vec::new(),
         visible_result_key_fingerprint: String::new(),
         visible_row_fingerprint: String::new(),

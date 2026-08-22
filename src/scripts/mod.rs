@@ -19,16 +19,19 @@
 
 #![allow(dead_code)]
 
+mod command_contract;
 mod grouping;
 pub(crate) mod input_detection;
 mod loader;
 mod metadata;
+pub(crate) mod root_search_contract;
 mod scheduling;
 mod scriptlet_loader;
 pub(crate) mod search;
 mod types;
 mod validation;
 
+pub use self::command_contract::LauncherCommandReceipt;
 #[allow(unused_imports)]
 pub(crate) use self::grouping::build_capture_mode_results;
 #[allow(unused_imports)]
@@ -78,9 +81,16 @@ pub use self::types::{
 };
 #[allow(unused_imports)]
 pub use self::validation::{
-    detect_binding_collisions, validate_script_catalog, BindingKind, FailedScript, MetadataField,
-    RelatedScript, ScriptCatalogReport, ScriptValidationIssue, ScriptValidationKind,
-    ValidationReport, ValidationSeverity, VALIDATION_SCHEMA_VERSION,
+    detect_binding_collisions, format_script_validation_diagnostics,
+    format_script_validation_issue_detail, merge_registered_scriptlet_validation_issues,
+    merge_scriptlet_validation_issues, scriptlet_capability_registry_generation,
+    scriptlet_declared_sdk_capabilities, validate_declared_sdk_capabilities,
+    validate_declared_sdk_capabilities_with_host_availability,
+    validate_legacy_scriptlet_capabilities, validate_script_catalog,
+    validate_scriptlet_capabilities, validate_scriptlet_capabilities_with_host_availability,
+    BindingKind, FailedScript, MetadataField, RelatedScript, ScriptCatalogReport,
+    ScriptValidationIssue, ScriptValidationKind, ValidationReport, ValidationSeverity,
+    VALIDATION_SCHEMA_VERSION,
 };
 
 #[cfg(test)]

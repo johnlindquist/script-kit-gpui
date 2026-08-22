@@ -300,10 +300,8 @@ fn render_menu_syntax_form_field(
     input: Option<Entity<gpui_component::input::InputState>>,
 ) -> AnyElement {
     let colors = crate::components::FormFieldColors::from_theme(theme);
-    let metrics =
-        crate::components::FormFieldMetrics::from_theme_and_design(theme, design_variant);
-    let shell_spec =
-        crate::components::menu_syntax_form_field_shell_spec(target, field, metrics);
+    let metrics = crate::components::FormFieldMetrics::from_theme_and_design(theme, design_variant);
+    let shell_spec = crate::components::menu_syntax_form_field_shell_spec(target, field, metrics);
     let shell_style = crate::components::resolve_form_field_shell_style(&shell_spec, colors);
 
     let body = if let Some(input) = input {
@@ -390,13 +388,7 @@ fn render_menu_syntax_form(
                     let input = inputs
                         .iter()
                         .find_map(|(id, input)| (id == &field.id).then(|| input.clone()));
-                    render_menu_syntax_form_field(
-                        theme,
-                        design_variant,
-                        &form.target,
-                        field,
-                        input,
-                    )
+                    render_menu_syntax_form_field(theme, design_variant, &form.target, field, input)
                 })),
         )
         .into_any_element()
@@ -448,191 +440,193 @@ fn render_menu_syntax_main_hint(
         scroll_handle,
     )
     .child(
-        composition.content_stack(
-            "menu-syntax-main-hint-content",
-            metrics.max_width,
-            metrics.block_gap,
-        )
-        .min_h(px(0.0))
-        .child(
-            div()
-                .w_full()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(metrics.item_gap))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .text_size(px(list_tokens.main_hint_title_font_size))
-                        .line_height(px(list_tokens.main_hint_title_line_height))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(palette.title)
-                        .child(hint.title.clone()),
-                )
-                .child(
-                    div()
-                        .id("menu-syntax-main-hint-status-chip-row")
-                        .flex()
-                        .items_center()
-                        .gap(px(list_tokens.main_hint_status_chip_gap))
-                        .when_some(hint.mode_chip.as_ref(), |d, chip| {
-                            d.child(render_menu_syntax_hint_chip(theme, list_tokens, chip))
-                        })
-                        // Multi-chip capture-validation row (Pass 22 added the data,
-                        // Pass 23 wires the rendering): when `status_chips` is non-empty
-                        // the snapshot has already inserted the mode chip at index 0 plus
-                        // per-missing-field chips. Skip the mode_chip rendered above to
-                        // avoid duplication, and render the rest.
-                        .when(!hint.status_chips.is_empty(), |d| {
-                            let skip = if hint.mode_chip.is_some() { 1 } else { 0 };
-                            d.children(
-                                hint.status_chips.iter().skip(skip).map(|chip| {
-                                    render_menu_syntax_hint_chip(theme, list_tokens, chip)
-                                }),
-                            )
-                        })
-                        // Single-chip status (legacy non-capture path) — only render
-                        // when the multi-chip path didn't already populate. Prevents
-                        // double-chips on capture composer surfaces.
-                        .when_some(
-                            hint.status_chip
-                                .as_ref()
-                                .filter(|_| hint.status_chips.is_empty()),
-                            |d, chip| {
-                                d.child(render_menu_syntax_hint_chip(theme, list_tokens, chip))
-                            },
-                        ),
-                ),
-        )
-        .when_some(hint.subtitle.as_ref(), |d, subtitle| {
-            d.child(
-                div()
-                    .text_size(px(list_tokens.main_hint_body_font_size))
-                    .line_height(px(list_tokens.main_hint_body_line_height))
-                    .text_color(palette.body)
-                    .child(subtitle.clone()),
+        composition
+            .content_stack(
+                "menu-syntax-main-hint-content",
+                metrics.max_width,
+                metrics.block_gap,
             )
-        })
-        .when_some(hint.form.as_ref(), |d, form| {
-            d.child(render_menu_syntax_form(
-                theme,
-                design_variant,
-                form,
-                form_inputs,
-                form_field_bounds,
-                cx,
-            ))
-        })
-        .when(!hint.rows.is_empty(), |d| {
-            d.child(
+            .min_h(px(0.0))
+            .child(
                 div()
-                    .id("menu-syntax-main-hint-rows")
+                    .w_full()
                     .flex()
-                    .flex_col()
-                    .gap(px(list_tokens.main_hint_rows_gap))
-                    .children(
-                        hint.rows
-                            .iter()
-                            .map(|row| render_menu_syntax_hint_row(theme, list_tokens, row)),
-                    ),
-            )
-        })
-        .when_some(hint.fragment_preview.as_ref(), |d, preview| {
-            d.when(!preview.rows.is_empty(), |d| {
-                d.child(
-                    div()
-                        .id("menu-syntax-main-hint-fragment-rows")
-                        .flex()
-                        .flex_col()
-                        .gap(px(list_tokens.main_hint_fragment_rows_gap))
-                        .children(preview.rows.iter().map(|row| {
-                            render_menu_syntax_fragment_preview_row(theme, list_tokens, row)
-                        })),
-                )
-            })
-        })
-        .when_some(hint.warning.as_ref(), |d, warning| {
-            d.child(
-                composition.card("menu-syntax-main-hint-warning")
-                    .border_color(rgba(
-                        (theme.colors.ui.warning << 8) | list_tokens.main_hint_warning_border_alpha,
-                    ))
-                    .bg(rgba(
-                        (theme.colors.ui.warning << 8) | list_tokens.main_hint_warning_bg_alpha,
-                    ))
-                    .text_size(px(list_tokens.main_hint_body_font_size))
-                    .line_height(px(list_tokens.main_hint_body_line_height))
-                    .text_color(rgb(theme.colors.ui.warning))
-                    .child(warning.clone()),
-            )
-        })
-        .child(
-            div()
-                .id("menu-syntax-main-hint-divider")
-                .h(px(list_tokens.main_hint_divider_height))
-                .w_full()
-                .bg(palette.border),
-        )
-        .when_some(hint.primary_hint.as_ref(), |d, primary| {
-            d.child(
-                div()
-                    .text_size(px(list_tokens.main_hint_body_font_size))
-                    .line_height(px(list_tokens.main_hint_body_line_height))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(palette.accent)
-                    .child(primary.clone()),
-            )
-        })
-        .when_some(hint.secondary_hint.as_ref(), |d, secondary| {
-            d.child(
-                div()
-                    .text_size(px(list_tokens.main_hint_body_font_size))
-                    .line_height(px(list_tokens.main_hint_body_line_height))
-                    .text_color(palette.hint)
-                    .child(secondary.clone()),
-            )
-        })
-        .when(!examples.is_empty(), |d| {
-            d.child(
-                div()
-                    .id("menu-syntax-main-hint-examples-group")
-                    .flex()
-                    .flex_col()
-                    .gap(px(list_tokens.main_hint_examples_group_gap))
+                    .items_center()
+                    .justify_between()
+                    .gap(px(metrics.item_gap))
                     .child(
                         div()
-                            .text_size(px(list_tokens.main_hint_example_label_font_size))
-                            .line_height(px(list_tokens.main_hint_example_label_line_height))
-                            .text_color(palette.hint)
-                            .child(if examples.len() == 1 {
-                                "Example"
-                            } else {
-                                "Examples"
-                            }),
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_size(px(list_tokens.main_hint_title_font_size))
+                            .line_height(px(list_tokens.main_hint_title_line_height))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(palette.title)
+                            .child(hint.title.clone()),
                     )
                     .child(
-                        composition.card("menu-syntax-main-hint-examples")
-                        .flex()
-                        .flex_col()
-                        .gap(px(list_tokens.main_hint_example_row_gap))
-                        .text_size(px(list_tokens.main_hint_body_font_size))
-                        .line_height(px(list_tokens.main_hint_body_line_height))
-                        .font_family("JetBrains Mono")
-                        .text_color(palette.body)
-                        .children(examples.iter().map(|example| {
-                            div()
-                                .w_full()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(example.clone())
-                        })),
+                        div()
+                            .id("menu-syntax-main-hint-status-chip-row")
+                            .flex()
+                            .items_center()
+                            .gap(px(list_tokens.main_hint_status_chip_gap))
+                            .when_some(hint.mode_chip.as_ref(), |d, chip| {
+                                d.child(render_menu_syntax_hint_chip(theme, list_tokens, chip))
+                            })
+                            // Multi-chip capture-validation row (Pass 22 added the data,
+                            // Pass 23 wires the rendering): when `status_chips` is non-empty
+                            // the snapshot has already inserted the mode chip at index 0 plus
+                            // per-missing-field chips. Skip the mode_chip rendered above to
+                            // avoid duplication, and render the rest.
+                            .when(!hint.status_chips.is_empty(), |d| {
+                                let skip = if hint.mode_chip.is_some() { 1 } else { 0 };
+                                d.children(hint.status_chips.iter().skip(skip).map(|chip| {
+                                    render_menu_syntax_hint_chip(theme, list_tokens, chip)
+                                }))
+                            })
+                            // Single-chip status (legacy non-capture path) — only render
+                            // when the multi-chip path didn't already populate. Prevents
+                            // double-chips on capture composer surfaces.
+                            .when_some(
+                                hint.status_chip
+                                    .as_ref()
+                                    .filter(|_| hint.status_chips.is_empty()),
+                                |d, chip| {
+                                    d.child(render_menu_syntax_hint_chip(theme, list_tokens, chip))
+                                },
+                            ),
                     ),
             )
-        }),
+            .when_some(hint.subtitle.as_ref(), |d, subtitle| {
+                d.child(
+                    div()
+                        .text_size(px(list_tokens.main_hint_body_font_size))
+                        .line_height(px(list_tokens.main_hint_body_line_height))
+                        .text_color(palette.body)
+                        .child(subtitle.clone()),
+                )
+            })
+            .when_some(hint.form.as_ref(), |d, form| {
+                d.child(render_menu_syntax_form(
+                    theme,
+                    design_variant,
+                    form,
+                    form_inputs,
+                    form_field_bounds,
+                    cx,
+                ))
+            })
+            .when(!hint.rows.is_empty(), |d| {
+                d.child(
+                    div()
+                        .id("menu-syntax-main-hint-rows")
+                        .flex()
+                        .flex_col()
+                        .gap(px(list_tokens.main_hint_rows_gap))
+                        .children(
+                            hint.rows
+                                .iter()
+                                .map(|row| render_menu_syntax_hint_row(theme, list_tokens, row)),
+                        ),
+                )
+            })
+            .when_some(hint.fragment_preview.as_ref(), |d, preview| {
+                d.when(!preview.rows.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .id("menu-syntax-main-hint-fragment-rows")
+                            .flex()
+                            .flex_col()
+                            .gap(px(list_tokens.main_hint_fragment_rows_gap))
+                            .children(preview.rows.iter().map(|row| {
+                                render_menu_syntax_fragment_preview_row(theme, list_tokens, row)
+                            })),
+                    )
+                })
+            })
+            .when_some(hint.warning.as_ref(), |d, warning| {
+                d.child(
+                    composition
+                        .card("menu-syntax-main-hint-warning")
+                        .border_color(rgba(
+                            (theme.colors.ui.warning << 8)
+                                | list_tokens.main_hint_warning_border_alpha,
+                        ))
+                        .bg(rgba(
+                            (theme.colors.ui.warning << 8) | list_tokens.main_hint_warning_bg_alpha,
+                        ))
+                        .text_size(px(list_tokens.main_hint_body_font_size))
+                        .line_height(px(list_tokens.main_hint_body_line_height))
+                        .text_color(rgb(theme.colors.ui.warning))
+                        .child(warning.clone()),
+                )
+            })
+            .child(
+                div()
+                    .id("menu-syntax-main-hint-divider")
+                    .h(px(list_tokens.main_hint_divider_height))
+                    .w_full()
+                    .bg(palette.border),
+            )
+            .when_some(hint.primary_hint.as_ref(), |d, primary| {
+                d.child(
+                    div()
+                        .text_size(px(list_tokens.main_hint_body_font_size))
+                        .line_height(px(list_tokens.main_hint_body_line_height))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(palette.accent)
+                        .child(primary.clone()),
+                )
+            })
+            .when_some(hint.secondary_hint.as_ref(), |d, secondary| {
+                d.child(
+                    div()
+                        .text_size(px(list_tokens.main_hint_body_font_size))
+                        .line_height(px(list_tokens.main_hint_body_line_height))
+                        .text_color(palette.hint)
+                        .child(secondary.clone()),
+                )
+            })
+            .when(!examples.is_empty(), |d| {
+                d.child(
+                    div()
+                        .id("menu-syntax-main-hint-examples-group")
+                        .flex()
+                        .flex_col()
+                        .gap(px(list_tokens.main_hint_examples_group_gap))
+                        .child(
+                            div()
+                                .text_size(px(list_tokens.main_hint_example_label_font_size))
+                                .line_height(px(list_tokens.main_hint_example_label_line_height))
+                                .text_color(palette.hint)
+                                .child(if examples.len() == 1 {
+                                    "Example"
+                                } else {
+                                    "Examples"
+                                }),
+                        )
+                        .child(
+                            composition
+                                .card("menu-syntax-main-hint-examples")
+                                .flex()
+                                .flex_col()
+                                .gap(px(list_tokens.main_hint_example_row_gap))
+                                .text_size(px(list_tokens.main_hint_body_font_size))
+                                .line_height(px(list_tokens.main_hint_body_line_height))
+                                .font_family("JetBrains Mono")
+                                .text_color(palette.body)
+                                .children(examples.iter().map(|example| {
+                                    div()
+                                        .w_full()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(example.clone())
+                                })),
+                        ),
+                )
+            }),
     )
     .into_any_element()
 }
@@ -797,6 +791,68 @@ impl ScriptListApp {
         }
     }
 
+    pub(crate) fn launcher_escape_decision(
+        &self,
+        cx: &gpui::App,
+    ) -> crate::window_orchestrator::interaction::LauncherEscapeDecision {
+        crate::window_orchestrator::interaction::plan_launcher_escape(
+            crate::window_orchestrator::interaction::LauncherEscapeFacts {
+                actions_open: self.show_actions_popup || crate::actions::is_actions_window_open(),
+                attachment_portal_open: self.is_in_attachment_portal(),
+                object_selector_open: self.menu_syntax_object_selector_owns_main_keyboard(),
+                trigger_picker_open: self.menu_syntax_trigger_picker_owns_main_keyboard(),
+                trigger_picker_filter_only: self.menu_syntax_filter_only_escape_should_clear(),
+                visible_filter: self.script_list_escape_should_clear_visible_filter(cx),
+                return_to_origin: self.opened_from_main_menu,
+            },
+        )
+    }
+
+    /// Apply one shared Escape transition for physical and automation entry
+    /// paths. Final window dismissal stays with its existing path-specific
+    /// owner so calibrated native hide/reset behavior cannot drift.
+    pub(crate) fn apply_shared_launcher_escape(
+        &mut self,
+        routing_path: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> crate::window_orchestrator::interaction::LauncherEscapeDecision {
+        use crate::window_orchestrator::interaction::LauncherEscapeDecision;
+
+        let decision = self.launcher_escape_decision(cx);
+        match decision {
+            LauncherEscapeDecision::CloseActions => {
+                self.close_actions_popup_for_current_view(window, cx);
+            }
+            LauncherEscapeDecision::CancelAttachmentPortal => {
+                self.try_cancel_script_list_attachment_portal_escape(routing_path, cx);
+            }
+            LauncherEscapeDecision::CloseObjectSelector => {
+                self.apply_menu_syntax_object_selector_intent(
+                    crate::menu_syntax::InlinePickerKeyIntent::Close,
+                    window,
+                    cx,
+                );
+            }
+            LauncherEscapeDecision::CloseTriggerPicker => {
+                self.apply_menu_syntax_trigger_picker_intent(
+                    crate::menu_syntax::InlinePickerKeyIntent::Close,
+                    window,
+                    cx,
+                );
+            }
+            LauncherEscapeDecision::ClearVisibleFilter => self.clear_filter(window, cx),
+            LauncherEscapeDecision::ReturnToOrigin => {
+                self.clear_hidden_script_list_filter_before_escape_close(window, cx);
+                self.go_back_or_close(window, cx);
+            }
+            LauncherEscapeDecision::DismissMain => {
+                self.clear_hidden_script_list_filter_before_escape_close(window, cx);
+            }
+        }
+        decision
+    }
+
     fn should_preempt_empty_script_list_escape_close(
         &self,
         event: &gpui::KeyDownEvent,
@@ -811,14 +867,12 @@ impl ScriptListApp {
             return false;
         }
 
-        if !self.can_preserve_hide_script_list_on_passive_focus_loss()
-            || self.is_in_attachment_portal()
-            || self.opened_from_main_menu
-            || self.show_actions_popup
-            || crate::actions::is_actions_window_open()
-            || self.menu_syntax_object_selector_owns_main_keyboard()
-            || self.menu_syntax_trigger_picker_owns_main_keyboard()
-            || self.script_list_escape_should_clear_visible_filter(cx)
+        if !self.can_preserve_hide_script_list_on_passive_focus_loss() {
+            return false;
+        }
+
+        let decision = self.launcher_escape_decision(cx);
+        if decision != crate::window_orchestrator::interaction::LauncherEscapeDecision::DismissMain
         {
             return false;
         }
@@ -1527,29 +1581,28 @@ impl ScriptListApp {
                     self.current_design,
                     current_main_menu_theme,
                 );
-                let content_height =
-                    px(crate::list_item::metrics::resolved_list_content_height(
-                        &themed_metrics,
-                        grouped_items.iter().enumerate().map(|(ix, item)| {
-                            use crate::list_item::metrics::PredictiveListSlot;
-                            match item {
-                                GroupedListItem::SectionHeader(..) => {
-                                    if ix == 0 && hide_initial_section_header {
-                                        PredictiveListSlot::HiddenSection
-                                    } else if ix == 0 {
-                                        PredictiveListSlot::FirstSection
-                                    } else {
-                                        PredictiveListSlot::Section
-                                    }
+                let content_height = px(crate::list_item::metrics::resolved_list_content_height(
+                    &themed_metrics,
+                    grouped_items.iter().enumerate().map(|(ix, item)| {
+                        use crate::list_item::metrics::PredictiveListSlot;
+                        match item {
+                            GroupedListItem::SectionHeader(..) => {
+                                if ix == 0 && hide_initial_section_header {
+                                    PredictiveListSlot::HiddenSection
+                                } else if ix == 0 {
+                                    PredictiveListSlot::FirstSection
+                                } else {
+                                    PredictiveListSlot::Section
                                 }
-                                GroupedListItem::ReservedSectionSlot => {
-                                    PredictiveListSlot::ReservedFirstSection
-                                }
-                                GroupedListItem::Status(..) => PredictiveListSlot::SourceStatus,
-                                GroupedListItem::Item(..) => PredictiveListSlot::Row,
                             }
-                        }),
-                    ));
+                            GroupedListItem::ReservedSectionSlot => {
+                                PredictiveListSlot::ReservedFirstSection
+                            }
+                            GroupedListItem::Status(..) => PredictiveListSlot::SourceStatus,
+                            GroupedListItem::Item(..) => PredictiveListSlot::Row,
+                        }
+                    }),
+                ));
 
                 div()
                     .absolute()
@@ -1977,53 +2030,11 @@ impl ScriptListApp {
                         }
                     }
                     key if sk_is_key_escape(key) => {
-                        // Escape order on ScriptList:
-                        //   1. attachment portal active → cancel back to its host.
-                        //   2. menu-syntax trigger picker visible → close popup
-                        //      only, leave filter text untouched. Second Escape
-                        //      then falls through to the normal clear-filter
-                        //      branch below.
-                        //   3. visible filter non-empty → clear filter.
-                        //   4. launcher-origin surface → go back to the main launcher.
-                        //   5. filter empty → hide main window.
-                        if this.try_cancel_script_list_attachment_portal_escape(
-                            "physical_bubble",
-                            cx,
-                        ) {
-                            return;
-                        }
-                        if this.menu_syntax_object_selector_owns_main_keyboard()
-                            && this.apply_menu_syntax_object_selector_intent(
-                                crate::menu_syntax::InlinePickerKeyIntent::Close,
-                                window,
-                                cx,
-                            ) {
-                                return;
-                            }
-                        if this.menu_syntax_trigger_picker_owns_main_keyboard() {
-                            if this.menu_syntax_filter_only_escape_should_clear() {
-                                this.clear_filter(window, cx);
-                                return;
-                            }
-                            if this.apply_menu_syntax_trigger_picker_intent(
-                                crate::menu_syntax::InlinePickerKeyIntent::Close,
-                                window,
-                                cx,
-                            ) {
-                                return;
-                            }
-                        }
-                        // Clear visible text first. Hidden stale canonical
-                        // state is reconciled before close/go-back so an empty
-                        // input does not require a no-op extra Escape.
-                        if this.script_list_escape_should_clear_visible_filter(cx) {
-                            this.clear_filter(window, cx);
-                        } else if this.opened_from_main_menu {
-                            this.clear_hidden_script_list_filter_before_escape_close(window, cx);
-                            this.go_back_or_close(window, cx);
-                        } else {
-                            this.clear_hidden_script_list_filter_before_escape_close(window, cx);
-                            // Filter is empty - close window
+                        if this.apply_shared_launcher_escape("physical_bubble", window, cx)
+                            == crate::window_orchestrator::interaction::LauncherEscapeDecision::DismissMain
+                        {
+                            // Preserve the physical route's established
+                            // calibrated close/reset ownership.
                             this.close_and_reset_window(cx);
                         }
                     }

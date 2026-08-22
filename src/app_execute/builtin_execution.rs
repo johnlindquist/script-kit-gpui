@@ -1787,8 +1787,7 @@ static PENDING_DICTATION_RESTART: std::sync::OnceLock<
     parking_lot::Mutex<Option<PendingDictationRestart>>,
 > = std::sync::OnceLock::new();
 
-fn pending_dictation_restart(
-) -> &'static parking_lot::Mutex<Option<PendingDictationRestart>> {
+fn pending_dictation_restart() -> &'static parking_lot::Mutex<Option<PendingDictationRestart>> {
     PENDING_DICTATION_RESTART.get_or_init(|| parking_lot::Mutex::new(None))
 }
 
@@ -1857,8 +1856,6 @@ impl AiCommandWindowPlan {
             | builtins::AiCommandType::MiniAi
             | builtins::AiCommandType::NewConversation
             | builtins::AiCommandType::ClearConversation => Self::KeepMainWindowVisible,
-            // Preset commands (debug-only) retain their original behavior.
-            _ => Self::HideMainWindowDeferred,
         }
     }
 
@@ -6890,12 +6887,8 @@ impl ScriptListApp {
         if origin.captured_generation != origin.selection.selection_generation {
             return false;
         }
-        let restored = self.focus_dictation_selection(
-            &origin.selection,
-            &origin.semantic_focus_id,
-            true,
-            cx,
-        );
+        let restored =
+            self.focus_dictation_selection(&origin.selection, &origin.semantic_focus_id, true, cx);
         if restored {
             crate::dictation::clear_dictation_return_origin();
         }
@@ -6987,7 +6980,9 @@ impl ScriptListApp {
             }
             crate::dictation::DictationRecoveryAction::OpenDictationHistory => {
                 if work.request.history_entry_id.is_empty() {
-                    return Err("This transcript does not have a Dictation History entry".to_string());
+                    return Err(
+                        "This transcript does not have a Dictation History entry".to_string()
+                    );
                 }
                 let _ = crate::dictation::close_dictation_overlay(cx);
                 self.open_builtin_filterable_view(
@@ -7004,15 +6999,14 @@ impl ScriptListApp {
             }
             crate::dictation::DictationRecoveryAction::RetrySameDestination
             | crate::dictation::DictationRecoveryAction::ChooseDestination => {
-                let selection = if action
-                    == crate::dictation::DictationRecoveryAction::ChooseDestination
-                {
-                    crate::dictation::get_dictation_target_selection().ok_or_else(|| {
-                        "Choose a destination before retrying Dictation".to_string()
-                    })?
-                } else {
-                    work.request.selection.clone()
-                };
+                let selection =
+                    if action == crate::dictation::DictationRecoveryAction::ChooseDestination {
+                        crate::dictation::get_dictation_target_selection().ok_or_else(|| {
+                            "Choose a destination before retrying Dictation".to_string()
+                        })?
+                    } else {
+                        work.request.selection.clone()
+                    };
                 if action == crate::dictation::DictationRecoveryAction::RetrySameDestination
                     && matches!(
                         work.reason,
@@ -7129,10 +7123,7 @@ impl ScriptListApp {
             crate::platform::show_main_window_without_activation();
         }
         self.schedule_dictation_transcriber_cleanup(cx, std::time::Duration::from_secs(300));
-        self.dispatch_window_event(
-            crate::window_orchestrator::WindowEvent::FinishDictation,
-            cx,
-        );
+        self.dispatch_window_event(crate::window_orchestrator::WindowEvent::FinishDictation, cx);
     }
 
     /// Handle the result of background transcription: deliver the transcript
@@ -7203,10 +7194,11 @@ impl ScriptListApp {
                         );
                         let unavailable = crate::dictation::DictationTargetSelection {
                             target,
-                            destination: crate::dictation::FrozenDictationDestination::Unavailable {
-                                target_id: target.sticky_label().to_string(),
-                                generation: selection.selection_generation,
-                            },
+                            destination:
+                                crate::dictation::FrozenDictationDestination::Unavailable {
+                                    target_id: target.sticky_label().to_string(),
+                                    generation: selection.selection_generation,
+                                },
                             display_label: target.overlay_label().to_string(),
                             icon_identity: Some(target.descriptor().icon.to_string()),
                             selection_generation: selection.selection_generation,
@@ -7225,10 +7217,11 @@ impl ScriptListApp {
                         let generation = crate::dictation::dictation_target_generation();
                         let unavailable = crate::dictation::DictationTargetSelection {
                             target,
-                            destination: crate::dictation::FrozenDictationDestination::Unavailable {
-                                target_id: target.sticky_label().to_string(),
-                                generation,
-                            },
+                            destination:
+                                crate::dictation::FrozenDictationDestination::Unavailable {
+                                    target_id: target.sticky_label().to_string(),
+                                    generation,
+                                },
                             display_label: target.overlay_label().to_string(),
                             icon_identity: Some(target.descriptor().icon.to_string()),
                             selection_generation: generation,
@@ -7281,100 +7274,114 @@ impl ScriptListApp {
 
                 let mut pending_agent_chat_entry = None;
                 let internal_result: Result<Option<serde_json::Value>, String> =
-                    (|| -> Result<Option<serde_json::Value>, String> { match target {
-                    crate::dictation::DictationTarget::MainWindowFilter => {
-                        let current = self.capture_dictation_target_selection(target, cx)?;
-                        if current.destination != request.selection.destination {
-                            Err("The Script Kit filter changed while Dictation was active".to_string())
-                        } else if self.try_set_main_window_filter_from_dictation(
-                            request.transcript.text().to_string(),
-                            cx,
-                        ) {
-                            Ok(Some(serde_json::json!({
-                                "available": true,
-                                "unit": "utf8Bytes",
-                                "start": 0,
-                                "end": request.transcript.len(),
-                                "insertedLength": request.transcript.len(),
-                                "operation": "replaceFrozenInput",
-                                "source": "deliveryCoordinator",
-                                "redacted": true,
-                            })))
-                        } else {
-                            Err("The Script Kit filter is no longer available".to_string())
-                        }
-                    }
-                    crate::dictation::DictationTarget::MainWindowPrompt => {
-                        let current = self.capture_dictation_target_selection(target, cx)?;
-                        if current.destination != request.selection.destination {
-                            Err("The prompt changed while Dictation was active".to_string())
-                        } else if self.try_set_prompt_input(request.transcript.text().to_string(), cx) {
-                            Ok(Some(serde_json::json!({
-                                "available": true,
-                                "unit": "utf8Bytes",
-                                "start": 0,
-                                "end": request.transcript.len(),
-                                "insertedLength": request.transcript.len(),
-                                "operation": "replaceFrozenInput",
-                                "source": "deliveryCoordinator",
-                                "redacted": true,
-                            })))
-                        } else {
-                            Err("The prompt is no longer available".to_string())
-                        }
-                    }
-                    crate::dictation::DictationTarget::NotesEditor => {
-                        let crate::dictation::FrozenDictationDestination::NotesEditor {
-                            notes_instance_id,
-                            document_id,
-                            editor_generation,
-                            insertion_anchor,
-                        } = &request.selection.destination
-                        else {
-                            return Err("Frozen destination type does not match its target".to_string());
-                        };
-                        let expected = notes::NotesDictationDestinationSnapshot {
-                            notes_instance_id: *notes_instance_id,
-                            document_id: document_id.clone(),
-                            editor_generation: editor_generation.clone(),
-                            insertion_anchor: insertion_anchor.clone(),
-                        };
-                        notes::inject_text_into_frozen_notes(
-                            cx,
-                            &expected,
-                            request.transcript.text(),
-                        )
-                        .map(Some)
-                    }
-                    crate::dictation::DictationTarget::AiChatComposer => {
-                        Err("Legacy AI Chat destination was not canonicalized".to_string())
-                    }
-                    crate::dictation::DictationTarget::TabAiHarness => {
-                        use crate::dictation::{FrozenAgentChatPolicy, FrozenDictationDestination};
-                        let FrozenDictationDestination::AgentChat { policy } =
-                            &request.selection.destination
-                        else {
-                            return Err("Frozen destination type does not match its target".to_string());
-                        };
-                        if let FrozenAgentChatPolicy::ExistingThread {
-                            thread_id,
-                            generation,
-                        } = policy
-                        {
-                            let current_matches = match &self.current_view {
-                                AppView::AgentChatView { entity } => entity
-                                    .read(cx)
-                                    .thread()
-                                    .is_some_and(|thread| {
-                                        thread.read(cx).ui_thread_id() == thread_id
-                                            && self.tab_ai_harness_capture_generation == *generation
-                                    }),
-                                _ => false,
-                            };
-                            if !current_matches {
-                                Err("The selected Agent Chat thread changed".to_string())
-                            } else {
-                                match self.dispatch_dictation_to_frozen_agent_chat(
+                    (|| -> Result<Option<serde_json::Value>, String> {
+                        match target {
+                            crate::dictation::DictationTarget::MainWindowFilter => {
+                                let current =
+                                    self.capture_dictation_target_selection(target, cx)?;
+                                if current.destination != request.selection.destination {
+                                    Err("The Script Kit filter changed while Dictation was active"
+                                        .to_string())
+                                } else if self.try_set_main_window_filter_from_dictation(
+                                    request.transcript.text().to_string(),
+                                    cx,
+                                ) {
+                                    Ok(Some(serde_json::json!({
+                                        "available": true,
+                                        "unit": "utf8Bytes",
+                                        "start": 0,
+                                        "end": request.transcript.len(),
+                                        "insertedLength": request.transcript.len(),
+                                        "operation": "replaceFrozenInput",
+                                        "source": "deliveryCoordinator",
+                                        "redacted": true,
+                                    })))
+                                } else {
+                                    Err("The Script Kit filter is no longer available".to_string())
+                                }
+                            }
+                            crate::dictation::DictationTarget::MainWindowPrompt => {
+                                let current =
+                                    self.capture_dictation_target_selection(target, cx)?;
+                                if current.destination != request.selection.destination {
+                                    Err("The prompt changed while Dictation was active".to_string())
+                                } else if self
+                                    .try_set_prompt_input(request.transcript.text().to_string(), cx)
+                                {
+                                    Ok(Some(serde_json::json!({
+                                        "available": true,
+                                        "unit": "utf8Bytes",
+                                        "start": 0,
+                                        "end": request.transcript.len(),
+                                        "insertedLength": request.transcript.len(),
+                                        "operation": "replaceFrozenInput",
+                                        "source": "deliveryCoordinator",
+                                        "redacted": true,
+                                    })))
+                                } else {
+                                    Err("The prompt is no longer available".to_string())
+                                }
+                            }
+                            crate::dictation::DictationTarget::NotesEditor => {
+                                let crate::dictation::FrozenDictationDestination::NotesEditor {
+                                    notes_instance_id,
+                                    document_id,
+                                    editor_generation,
+                                    insertion_anchor,
+                                } = &request.selection.destination
+                                else {
+                                    return Err(
+                                        "Frozen destination type does not match its target"
+                                            .to_string(),
+                                    );
+                                };
+                                let expected = notes::NotesDictationDestinationSnapshot {
+                                    notes_instance_id: *notes_instance_id,
+                                    document_id: document_id.clone(),
+                                    editor_generation: editor_generation.clone(),
+                                    insertion_anchor: insertion_anchor.clone(),
+                                };
+                                notes::inject_text_into_frozen_notes(
+                                    cx,
+                                    &expected,
+                                    request.transcript.text(),
+                                )
+                                .map(Some)
+                            }
+                            crate::dictation::DictationTarget::AiChatComposer => {
+                                Err("Legacy AI Chat destination was not canonicalized".to_string())
+                            }
+                            crate::dictation::DictationTarget::TabAiHarness => {
+                                use crate::dictation::{
+                                    FrozenAgentChatPolicy, FrozenDictationDestination,
+                                };
+                                let FrozenDictationDestination::AgentChat { policy } =
+                                    &request.selection.destination
+                                else {
+                                    return Err(
+                                        "Frozen destination type does not match its target"
+                                            .to_string(),
+                                    );
+                                };
+                                if let FrozenAgentChatPolicy::ExistingThread {
+                                    thread_id,
+                                    generation,
+                                } = policy
+                                {
+                                    let current_matches = match &self.current_view {
+                                        AppView::AgentChatView { entity } => {
+                                            entity.read(cx).thread().is_some_and(|thread| {
+                                                thread.read(cx).ui_thread_id() == thread_id
+                                                    && self.tab_ai_harness_capture_generation
+                                                        == *generation
+                                            })
+                                        }
+                                        _ => false,
+                                    };
+                                    if !current_matches {
+                                        Err("The selected Agent Chat thread changed".to_string())
+                                    } else {
+                                        match self.dispatch_dictation_to_frozen_agent_chat(
                                     request.transcript.text().to_string(),
                                     false,
                                     crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
@@ -7392,10 +7399,10 @@ impl ScriptListApp {
                                         Ok(None)
                                     }
                                 }
-                            }
-                        } else {
-                            self.seed_agent_chat_dictation_return_origin(cx);
-                            match self.dispatch_dictation_to_frozen_agent_chat(
+                                    }
+                                } else {
+                                    self.seed_agent_chat_dictation_return_origin(cx);
+                                    match self.dispatch_dictation_to_frozen_agent_chat(
                                 request.transcript.text().to_string(),
                                 true,
                                 crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
@@ -7413,44 +7420,48 @@ impl ScriptListApp {
                                     Ok(None)
                                 }
                             }
-                        }
-                    }
-                    crate::dictation::DictationTarget::DayPageToday => {
-                        let crate::dictation::FrozenDictationDestination::DayPage {
-                            date,
-                            substrate_fingerprint,
-                            ..
-                        } = &request.selection.destination
-                        else {
-                            return Err("Frozen destination type does not match its target".to_string());
-                        };
-                        let substrate = crate::brain::substrate::BrainSubstrate::default_kit();
-                        let (_, current_fingerprint) =
-                            substrate.capture_day_destination(chrono::Utc::now());
-                        if current_fingerprint != *substrate_fingerprint {
-                            Err("The Day Page substrate changed".to_string())
-                        } else {
-                            let capture_text = request
-                                .transcript
-                                .text()
-                                .split_whitespace()
-                                .collect::<Vec<_>>()
-                                .join(" ");
-                            substrate
-                                .append_to_captured_day(
-                                    *date,
-                                    chrono::Utc::now(),
-                                    crate::brain::substrate::DayEntry::Capture {
-                                        text: capture_text,
-                                    },
-                                )
-                                .map(|_| None)
-                                .map_err(|error| error.to_string())
-                        }
-                    }
-                    crate::dictation::DictationTarget::QuickAiQuestion => {
-                        self.seed_agent_chat_dictation_return_origin(cx);
-                        match self.dispatch_dictation_to_frozen_agent_chat(
+                                }
+                            }
+                            crate::dictation::DictationTarget::DayPageToday => {
+                                let crate::dictation::FrozenDictationDestination::DayPage {
+                                    date,
+                                    substrate_fingerprint,
+                                    ..
+                                } = &request.selection.destination
+                                else {
+                                    return Err(
+                                        "Frozen destination type does not match its target"
+                                            .to_string(),
+                                    );
+                                };
+                                let substrate =
+                                    crate::brain::substrate::BrainSubstrate::default_kit();
+                                let (_, current_fingerprint) =
+                                    substrate.capture_day_destination(chrono::Utc::now());
+                                if current_fingerprint != *substrate_fingerprint {
+                                    Err("The Day Page substrate changed".to_string())
+                                } else {
+                                    let capture_text = request
+                                        .transcript
+                                        .text()
+                                        .split_whitespace()
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    substrate
+                                        .append_to_captured_day(
+                                            *date,
+                                            chrono::Utc::now(),
+                                            crate::brain::substrate::DayEntry::Capture {
+                                                text: capture_text,
+                                            },
+                                        )
+                                        .map(|_| None)
+                                        .map_err(|error| error.to_string())
+                                }
+                            }
+                            crate::dictation::DictationTarget::QuickAiQuestion => {
+                                self.seed_agent_chat_dictation_return_origin(cx);
+                                match self.dispatch_dictation_to_frozen_agent_chat(
                             request.transcript.text().to_string(),
                             true,
                             crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi,
@@ -7468,11 +7479,13 @@ impl ScriptListApp {
                                 Ok(None)
                             }
                         }
-                    }
-                    crate::dictation::DictationTarget::ExternalApp => {
-                        Err("external delivery is handled by the frozen external actor".to_string())
-                    }
-                } })();
+                            }
+                            crate::dictation::DictationTarget::ExternalApp => {
+                                Err("external delivery is handled by the frozen external actor"
+                                    .to_string())
+                            }
+                        }
+                    })();
 
                 if !matches!(target, crate::dictation::DictationTarget::ExternalApp) {
                     let delivery_insertion_range = match internal_result {
@@ -7485,7 +7498,8 @@ impl ScriptListApp {
                             };
                             let _ = crate::dictation::record_wrong_target_refusal(
                                 crate::dictation::DictationWrongTargetRefusalDraft {
-                                    reason: crate::dictation::DictationWrongTargetReason::TargetStale,
+                                    reason:
+                                        crate::dictation::DictationWrongTargetReason::TargetStale,
                                     requested_target_label: None,
                                     requested_target: Some(target),
                                     delivery_generation_before:
@@ -7639,8 +7653,7 @@ impl ScriptListApp {
                     let target_pid = *target_pid;
                     let target_bundle_id = target_app.bundle_id;
                     let target_app_name = target_app_name.clone();
-                    let Some(target_window_id) =
-                        request.selection.destination.external_window_id()
+                    let Some(target_window_id) = request.selection.destination.external_window_id()
                     else {
                         return;
                     };

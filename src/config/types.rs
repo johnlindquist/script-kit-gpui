@@ -196,8 +196,8 @@ impl Default for UnifiedSearchFilesConfig {
 
 /// Todos participate passively once the query reaches `min_query_chars`
 /// (byte length), served from an in-memory day-page snapshot refreshed
-/// off-thread. An explicit `todo:` filter forces min 0 and browses all
-/// recent todos directly. The default is 3 (not 0) so the empty-query
+/// off-thread. An explicit `todo:` filter forces min 0 and browses the same
+/// owned nonblocking snapshot. The default is 3 (not 0) so the empty-query
 /// launcher never floods with every open todo.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]

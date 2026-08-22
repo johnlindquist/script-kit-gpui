@@ -201,6 +201,8 @@ fn filtering_cache_freezes_passive_snapshot_hits_per_query_frame() {
     );
 }
 
+/// Root grouping runs synchronously on every launcher keystroke, so blocking
+/// SQLite/day-page readers must remain outside this exact structural owner.
 #[test]
 fn foreground_grouping_uses_cache_only_passive_sources() {
     let filtering_cache = include_str!("../../src/app_impl/filtering_cache.rs");
@@ -212,6 +214,7 @@ fn foreground_grouping_uses_cache_only_passive_sources() {
 
     for required in [
         "search_root_notes_meta_cached(",
+        "search_root_todos_cached(",
         "search_root_clipboard_history_meta_cached(",
         "search_root_dictation_history_cached(",
         "search_history_cached(",
@@ -224,6 +227,8 @@ fn foreground_grouping_uses_cache_only_passive_sources() {
 
     for forbidden in [
         "search_root_notes_meta(",
+        "search_root_notes_meta_direct(",
+        "search_root_todos_direct(",
         "search_root_clipboard_history_meta(",
         "search_root_dictation_history(",
         "crate::ai::agent_chat::ui::history::search_history(",
@@ -387,6 +392,8 @@ fn root_file_test_provider_supports_multi_query_cancellation_fixture() {
     }
 }
 
+/// JSONL history must reuse a signature-keyed index and open private files
+/// through their no-follow owner; Result-returning loaders are valid owners.
 #[test]
 fn jsonl_history_sources_use_mtime_backed_foreground_indexes() {
     for (source_name, source) in [
@@ -404,8 +411,10 @@ fn jsonl_history_sources_use_mtime_backed_foreground_indexes() {
                 && source.contains("IndexCache")
                 && source.contains("history_file_signature(&path)")
                 && source.contains("parse_history_entries(&content)")
-                && source.contains("return cache.entries.clone()"),
-            "{source_name} root-search history reads should reuse an mtime-backed index cache"
+                && source.contains("cache.entries.clone()")
+                && (source.contains("read_private_history_file(&path)")
+                    || source.contains("crate::atomic_file::read_private_file(path)")),
+            "{source_name} root-search history reads should reuse a private mtime-backed index cache"
         );
         assert!(
             source.contains("invalidate_history_cache();"),
@@ -414,6 +423,8 @@ fn jsonl_history_sources_use_mtime_backed_foreground_indexes() {
     }
 }
 
+/// History search must borrow its already-bounded transcript and use the
+/// shared field/evidence matcher instead of renormalizing it in the row owner.
 #[test]
 fn agent_chat_history_root_cache_bounds_search_text_before_foreground_ranking() {
     let source = include_str!("../../src/ai/agent_chat/ui/history.rs");
@@ -430,9 +441,10 @@ fn agent_chat_history_root_cache_bounds_search_text_before_foreground_ranking() 
         "Agent Chat history cache should clamp legacy multi-megabyte search_text fields before root ranking"
     );
     assert!(
-        rank_fn.contains("let full = entry.search_text.as_str();")
+        rank_fn.contains("text: entry.search_text.as_str(),")
+            && rank_fn.contains("match_long_text_query(&compiled, &fields)")
             && !rank_fn.contains("normalize_search_text(&entry.search_text)"),
-        "foreground Agent Chat history ranking should reuse normalized cached search_text without reallocating it per keystroke"
+        "foreground Agent Chat history ranking should borrow bounded cached search_text for the shared evidence matcher"
     );
 }
 

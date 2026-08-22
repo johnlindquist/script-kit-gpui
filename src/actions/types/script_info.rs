@@ -91,6 +91,9 @@ pub struct ScriptInfo {
     /// Bundle identifier for macOS apps (e.g., "com.apple.Safari")
     /// Used by app-specific actions like Copy Bundle Identifier
     pub bundle_id: Option<String>,
+    /// Canonical launcher contract when this context originated from an actual
+    /// selected result. Legacy/test-only contexts remain supported without it.
+    pub command_descriptor: Option<sk_protocol::command_contract::CommandDescriptor>,
 }
 
 impl Default for ScriptInfo {
@@ -108,6 +111,7 @@ impl Default for ScriptInfo {
             is_agent: false,
             is_app: false,
             bundle_id: None,
+            command_descriptor: None,
         }
     }
 }
@@ -317,16 +321,7 @@ impl ScriptInfo {
         alias: Option<String>,
     ) -> Self {
         Self::build(
-            name,
-            path,
-            false,
-            false,
-            false,
-            true,
-            "Launch",
-            shortcut,
-            alias,
-            bundle_id,
+            name, path, false, false, false, true, "Launch", shortcut, alias, bundle_id,
         )
     }
 
@@ -337,7 +332,18 @@ impl ScriptInfo {
         is_script: bool,
         action_verb: impl Into<String>,
     ) -> Self {
-        Self::build(name, path, is_script, false, false, false, action_verb, None, None, None)
+        Self::build(
+            name,
+            path,
+            is_script,
+            false,
+            false,
+            false,
+            action_verb,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Create a ScriptInfo with all options including custom action verb and shortcut
@@ -392,6 +398,16 @@ impl ScriptInfo {
         let normalized_path = Self::normalized_optional_text(frecency_path);
         self.is_suggested = is_suggested && normalized_path.is_some();
         self.frecency_path = normalized_path;
+        self
+    }
+
+    /// Carry the already-projected launcher identity, primary action, and
+    /// availability into Actions without re-deriving a competing contract.
+    pub fn with_command_descriptor(
+        mut self,
+        descriptor: sk_protocol::command_contract::CommandDescriptor,
+    ) -> Self {
+        self.command_descriptor = Some(descriptor);
         self
     }
 }
@@ -470,13 +486,7 @@ mod script_info_completeness_tests {
 
     #[test]
     fn test_script_info_app_handles_none_bundle_id() {
-        let info = ScriptInfo::app(
-            "MyApp",
-            "/Applications/MyApp.app",
-            None,
-            None,
-            None,
-        );
+        let info = ScriptInfo::app("MyApp", "/Applications/MyApp.app", None, None, None);
 
         assert!(info.is_app);
         assert!(info.bundle_id.is_none());

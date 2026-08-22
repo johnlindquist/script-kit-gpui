@@ -127,9 +127,39 @@ impl ScriptListApp {
         // These provide aliases for built-ins, apps, and other commands
         // that don't have their own alias metadata
         if let Ok(alias_overrides) = crate::aliases::load_alias_overrides() {
+            let mut alias_overrides: Vec<_> = alias_overrides.into_iter().collect();
+            alias_overrides.sort_by(|(left_id, _), (right_id, _)| {
+                let left_is_exact = left_id.contains(":source-sha256-");
+                let right_is_exact = right_id.contains(":source-sha256-");
+                right_is_exact
+                    .cmp(&left_is_exact)
+                    .then_with(|| left_id.cmp(right_id))
+            });
             for (command_id, alias) in alias_overrides {
                 let alias_lower = alias.to_lowercase();
                 if let Some(existing_path) = self.alias_registry.get(&alias_lower) {
+                    let compatibility_shadow = if let (Some(exact), Some(legacy)) = (
+                        existing_path.strip_prefix("script/"),
+                        command_id.strip_prefix("script/"),
+                    ) {
+                        self.scripts.iter().any(|script| {
+                            script.matches_launcher_command_identifier(exact)
+                                && script.matches_launcher_command_identifier(legacy)
+                        })
+                    } else if let (Some(exact), Some(legacy)) = (
+                        existing_path.strip_prefix("scriptlet/"),
+                        command_id.strip_prefix("scriptlet/"),
+                    ) {
+                        self.scriptlets.iter().any(|scriptlet| {
+                            scriptlet.matches_launcher_command_identifier(exact)
+                                && scriptlet.matches_launcher_command_identifier(legacy)
+                        })
+                    } else {
+                        false
+                    };
+                    if compatibility_shadow {
+                        continue;
+                    }
                     conflicts.push(format!(
                         "Alias conflict: '{}' already used by {}",
                         alias,

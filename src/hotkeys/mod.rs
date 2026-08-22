@@ -1811,7 +1811,9 @@ pub(crate) fn start_hotkey_listener(config: config::Config) {
         for script in &all_scripts {
             if let Some(ref shortcut) = script.shortcut {
                 let command_id = script.launcher_command_id();
-                if registered_commands.contains(&command_id) {
+                if registered_commands.contains(&command_id)
+                    || registered_commands.contains(&script.source_command_id())
+                {
                     continue;
                 }
                 let path = script.path.to_string_lossy().to_string();
@@ -1827,7 +1829,9 @@ pub(crate) fn start_hotkey_listener(config: config::Config) {
         for scriptlet in &all_scriptlets {
             if let Some(ref shortcut) = scriptlet.shortcut {
                 let command_id = scriptlet.launcher_command_id();
-                if registered_commands.contains(&command_id) {
+                if registered_commands.contains(&command_id)
+                    || registered_commands.contains(&scriptlet.source_command_id())
+                {
                     continue;
                 }
                 let path = scriptlet

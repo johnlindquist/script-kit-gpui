@@ -136,14 +136,15 @@ fn has_invalid_note_switcher_note_info(note: &NoteSwitcherNoteInfo) -> bool {
 
 /// Get actions for the Notes window command bar (Cmd+K menu).
 pub fn get_notes_command_bar_actions(info: &NotesInfo) -> Vec<Action> {
+    let plan = NotesCommandBarActionPlan::from_info(info);
     let context = crate::notes::NotesActionContext {
-        surface: if info.is_trash_view {
+        surface: if plan.is_trash_view() {
             crate::notes::NotesActionSurface::Trash
         } else {
             crate::notes::NotesActionSurface::Editor
         },
-        has_current_note: info.has_selection,
-        auto_sizing_enabled: info.auto_sizing_enabled,
+        has_current_note: plan.has_active_note_actions() || plan.has_trash_note_actions(),
+        auto_sizing_enabled: !plan.needs_auto_sizing_action(),
     };
     get_notes_command_bar_actions_for_context(context)
 }

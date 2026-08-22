@@ -215,11 +215,83 @@ impl AppLifecycleAppleScriptAction {
 }
 
 impl ScriptListApp {
+    fn execute_app_lifecycle_action(
+        &mut self,
+        lifecycle_action: AppLifecycleHandlerAction,
+        target: AppLifecycleTarget,
+        trace_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let app_name = target.app_name.clone();
+        self.show_hud(
+            lifecycle_action.hud_message(&app_name),
+            Some(HUD_SHORT_MS),
+            cx,
+        );
+        self.hide_main_and_reset(cx);
+        cx.spawn(async move |_this, cx| match lifecycle_action {
+            AppLifecycleHandlerAction::Quit => {
+                let name = target.app_name.clone();
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { quit_app_by_name(&name) })
+                    .await;
+                if let Err(e) = result {
+                    tracing::error!(trace_id = %trace_id, error = %e, "{}", lifecycle_action.async_failure_log());
+                }
+            }
+            AppLifecycleHandlerAction::ForceQuit => {
+                let app_name = target.app_name;
+                let bundle_id = target.bundle_id;
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { force_quit_app(&app_name, bundle_id.as_deref()) })
+                    .await;
+                if let Err(e) = result {
+                    tracing::error!(trace_id = %trace_id, error = %e, "{}", lifecycle_action.async_failure_log());
+                }
+            }
+            AppLifecycleHandlerAction::Restart => {
+                let name = target.app_name.clone();
+                let quit_result = cx
+                    .background_executor()
+                    .spawn(async move { quit_app_by_name(&name) })
+                    .await;
+
+                if let Err(e) = &quit_result {
+                    tracing::warn!(trace_id = %trace_id, error = %e, "{}", lifecycle_action.restart_quit_failure_log());
+                }
+
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+
+                let path = target.app_path;
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        std::process::Command::new("open")
+                            .arg(&path)
+                            .spawn()
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+
+                if let Err(e) = result {
+                    tracing::error!(trace_id = %trace_id, error = %e, "{}", lifecycle_action.async_failure_log());
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Handle app-specific actions. Returns `DispatchOutcome` indicating if handled.
     fn handle_app_action(
         &mut self,
         action_id: &str,
         dctx: &DispatchContext,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> DispatchOutcome {
         let trace_id = &dctx.trace_id;
@@ -273,12 +345,10 @@ impl ScriptListApp {
                         .detach();
                         DispatchOutcome::success()
                     }
-                    Err(msg) => {
-                        DispatchOutcome::error(
-                            crate::action_helpers::ERROR_ACTION_FAILED,
-                            open_action.target_error_message(msg),
-                        )
-                    }
+                    Err(msg) => DispatchOutcome::error(
+                        crate::action_helpers::ERROR_ACTION_FAILED,
+                        open_action.target_error_message(msg),
+                    ),
                 }
             }
             "copy_command_id" => {
@@ -343,73 +413,81 @@ impl ScriptListApp {
                     }
                 };
 
-                let app_name = target.app_name.clone();
-                let trace_id = trace_id.to_string();
-                self.show_hud(
-                    lifecycle_action.hud_message(&app_name),
-                    Some(HUD_SHORT_MS),
+                if lifecycle_action == AppLifecycleHandlerAction::ForceQuit {
+                    let weak_entity = cx.entity().downgrade();
+                    let owner = weak_entity.clone();
+                    let confirmed_target = target.clone();
+                    let confirmation_trace_id = trace_id.to_string();
+                    let cancellation_trace_id = confirmation_trace_id.clone();
+
+                    crate::confirm::open_parent_confirm_dialog_for_entity(
+                        window,
+                        cx,
+                        owner,
+                        crate::confirm::ParentConfirmOptions::destructive(
+                            "Force Quit Application",
+                            format!(
+                                "Force quit \"{}\"? Unsaved changes may be lost.",
+                                target.app_name
+                            ),
+                            "Force Quit",
+                        ),
+                        move |_window, cx| {
+                            let Some(entity) = weak_entity.upgrade() else {
+                                return;
+                            };
+
+                            let captured_target = confirmed_target.clone();
+                            let trace_id = confirmation_trace_id.clone();
+                            entity.update(cx, move |this, cx| {
+                                let current_target = lifecycle_action
+                                    .target_from_result(this.get_selected_result())
+                                    .ok();
+                                let decision = crate::window_orchestrator::interaction::
+                                    plan_confirmed_destructive_action(
+                                        true,
+                                        &captured_target,
+                                        current_target.as_ref(),
+                                    );
+
+                                if decision
+                                    != crate::window_orchestrator::interaction::
+                                        ConfirmedDestructiveActionDecision::ExecuteCapturedTarget
+                                {
+                                    tracing::warn!(
+                                        trace_id = %trace_id,
+                                        decision = ?decision,
+                                        event = "force_quit_target_rejected",
+                                        "Force quit refused because the confirmed application changed"
+                                    );
+                                    return;
+                                }
+
+                                this.execute_app_lifecycle_action(
+                                    lifecycle_action,
+                                    captured_target,
+                                    trace_id,
+                                    cx,
+                                );
+                            });
+                        },
+                        move |_window, _cx| {
+                            tracing::info!(
+                                trace_id = %cancellation_trace_id,
+                                event = "force_quit_cancelled",
+                                "Force quit cancelled"
+                            );
+                        },
+                    );
+                    return DispatchOutcome::success();
+                }
+
+                self.execute_app_lifecycle_action(
+                    lifecycle_action,
+                    target,
+                    trace_id.to_string(),
                     cx,
                 );
-                self.hide_main_and_reset(cx);
-                cx.spawn(async move |_this, cx| {
-                    match lifecycle_action {
-                        AppLifecycleHandlerAction::Quit => {
-                            let name = target.app_name.clone();
-                            let result = cx
-                                .background_executor()
-                                .spawn(async move { quit_app_by_name(&name) })
-                                .await;
-                            if let Err(e) = result {
-                                tracing::error!(trace_id = %trace_id, error = %e, "{}", lifecycle_action.async_failure_log());
-                            }
-                        }
-                        AppLifecycleHandlerAction::ForceQuit => {
-                            let app_name = target.app_name;
-                            let bundle_id = target.bundle_id;
-                            let result = cx
-                                .background_executor()
-                                .spawn(async move { force_quit_app(&app_name, bundle_id.as_deref()) })
-                                .await;
-                            if let Err(e) = result {
-                                tracing::error!(trace_id = %trace_id, error = %e, "{}", lifecycle_action.async_failure_log());
-                            }
-                        }
-                        AppLifecycleHandlerAction::Restart => {
-                            let name = target.app_name.clone();
-                            let quit_result = cx
-                                .background_executor()
-                                .spawn(async move { quit_app_by_name(&name) })
-                                .await;
-
-                            if let Err(e) = &quit_result {
-                                tracing::warn!(trace_id = %trace_id, error = %e, "{}", lifecycle_action.restart_quit_failure_log());
-                            }
-
-                            // Brief delay to let the app finish quitting
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(500))
-                                .await;
-
-                            // Relaunch
-                            let path = target.app_path;
-                            let result = cx
-                                .background_executor()
-                                .spawn(async move {
-                                    std::process::Command::new("open")
-                                        .arg(&path)
-                                        .spawn()
-                                        .map(|_| ())
-                                        .map_err(|e| e.to_string())
-                                })
-                                .await;
-
-                            if let Err(e) = result {
-                                tracing::error!(trace_id = %trace_id, error = %e, "{}", lifecycle_action.async_failure_log());
-                            }
-                        }
-                    }
-                })
-                .detach();
                 DispatchOutcome::success()
             }
             _ => DispatchOutcome::not_handled(),
@@ -422,7 +500,10 @@ fn quit_app_by_name(name: &str) -> Result<(), String> {
     let lifecycle_script = AppLifecycleAppleScriptAction::Quit;
     let escaped_name = crate::utils::escape_applescript_string(name);
     std::process::Command::new("osascript")
-        .args(["-e", &format!(r#"tell application "{}" to quit"#, escaped_name)])
+        .args([
+            "-e",
+            &format!(r#"tell application "{}" to quit"#, escaped_name),
+        ])
         .output()
         .map_err(|e| lifecycle_script.osascript_failure_message(e))
         .and_then(|output| {

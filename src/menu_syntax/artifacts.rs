@@ -27,6 +27,10 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 
+use crate::scripts::root_search_contract::{
+    RootOwnedProviderRefresh, RootOwnedProviderRefreshLifecycle,
+};
+
 /// How many recent day pages to scan for unchecked todo task lines (v1).
 pub const RECENT_DAY_PAGE_SCAN_LIMIT: usize = 30;
 
@@ -355,14 +359,12 @@ pub fn search_root_todos_in_sk_path(
     hits
 }
 
-/// Day-page todo snapshot for the implicit (passive) typing path. The direct
-/// search re-reads up to 30 day-page files per call, which is fine for an
-/// explicit `todo:` filter but not per keystroke; the passive path filters
-/// this in-memory snapshot instead (mirroring the browser-history model:
-/// stale snapshots are still served, refresh happens on a detached thread).
+/// Day-page todo snapshot for every root-launcher typing path. Reading up to
+/// 30 markdown files never belongs in foreground grouping, even for an explicit
+/// `todo:` filter. The launcher owns one generation-fenced background scan.
 struct RootTodoSnapshotCache {
     snapshot: Option<RootTodoSnapshot>,
-    refresh_in_flight: bool,
+    refresh_lifecycle: RootOwnedProviderRefreshLifecycle,
 }
 
 struct RootTodoSnapshot {
@@ -370,18 +372,24 @@ struct RootTodoSnapshot {
     hits: std::sync::Arc<Vec<RootTodoSearchHit>>,
 }
 
+pub(crate) struct RootTodoRefreshSnapshot {
+    owner: RootOwnedProviderRefresh,
+    hits: Vec<RootTodoSearchHit>,
+}
+
 static ROOT_TODO_SNAPSHOT: std::sync::Mutex<RootTodoSnapshotCache> =
     std::sync::Mutex::new(RootTodoSnapshotCache {
         snapshot: None,
-        refresh_in_flight: false,
+        refresh_lifecycle: RootOwnedProviderRefreshLifecycle {
+            next_generation: 0,
+            in_flight: None,
+        },
     });
 
 const ROOT_TODO_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Nonblocking snapshot-only lookup for the implicit (passive) typing path:
-/// one mutex lock plus an in-memory filter. No file I/O ever happens here —
-/// call `ensure_root_todos_snapshot_refresh` (cheap, self-guarded) to keep
-/// the snapshot warm.
+/// Nonblocking snapshot-only lookup: one mutex lock plus an in-memory filter.
+/// No file I/O or detached worker ever starts from foreground grouping.
 pub fn search_root_todos_cached(
     query: &str,
     options: RootTodoSectionOptions,
@@ -407,34 +415,81 @@ pub fn search_root_todos_cached(
         .collect()
 }
 
-/// Kick a background day-page scan when the todo snapshot is missing or past
-/// its TTL. Self-guarded: costs one mutex lock + `Instant` check when fresh,
-/// and spawns at most one detached scan thread per TTL window.
-pub fn ensure_root_todos_snapshot_refresh() {
-    {
-        let Ok(mut cache) = ROOT_TODO_SNAPSHOT.lock() else {
-            return;
-        };
-        let is_fresh = cache
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.captured_at.elapsed() <= ROOT_TODO_SNAPSHOT_TTL);
-        if is_fresh || cache.refresh_in_flight {
-            return;
-        }
-        cache.refresh_in_flight = true;
+fn root_todos_snapshot_cache_is_fresh(cache: &RootTodoSnapshotCache) -> bool {
+    cache
+        .snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.captured_at.elapsed() <= ROOT_TODO_SNAPSHOT_TTL)
+}
+
+pub(crate) fn root_todos_snapshot_is_fresh() -> bool {
+    ROOT_TODO_SNAPSHOT
+        .lock()
+        .is_ok_and(|cache| root_todos_snapshot_cache_is_fresh(&cache))
+}
+
+fn try_begin_root_todos_snapshot_refresh_in_cache(
+    cache: &mut RootTodoSnapshotCache,
+) -> Option<RootOwnedProviderRefresh> {
+    let cache_is_fresh = root_todos_snapshot_cache_is_fresh(cache);
+    let refresh = cache.refresh_lifecycle.begin(
+        sk_protocol::command_contract::CommandSource::Todo,
+        cache_is_fresh,
+    )?;
+    tracing::debug!(
+        target: "script_kit::search",
+        source = "root-todos-snapshot-cache",
+        generation = refresh.generation,
+        "Started owned Todos snapshot refresh"
+    );
+    Some(refresh)
+}
+
+pub(crate) fn try_begin_root_todos_snapshot_refresh() -> Option<RootOwnedProviderRefresh> {
+    let mut cache = ROOT_TODO_SNAPSHOT.lock().ok()?;
+    try_begin_root_todos_snapshot_refresh_in_cache(&mut cache)
+}
+
+pub(crate) fn read_root_todos_snapshot(
+    refresh: RootOwnedProviderRefresh,
+) -> RootTodoRefreshSnapshot {
+    RootTodoRefreshSnapshot {
+        owner: refresh,
+        hits: collect_day_page_todo_hits(&default_sk_path(), RECENT_DAY_PAGE_SCAN_LIMIT),
     }
-    let sk_path = default_sk_path();
-    std::thread::spawn(move || {
-        let hits = collect_day_page_todo_hits(&sk_path, RECENT_DAY_PAGE_SCAN_LIMIT);
-        if let Ok(mut cache) = ROOT_TODO_SNAPSHOT.lock() {
-            cache.snapshot = Some(RootTodoSnapshot {
-                captured_at: std::time::Instant::now(),
-                hits: std::sync::Arc::new(hits),
-            });
-            cache.refresh_in_flight = false;
-        }
+}
+
+fn finish_root_todos_snapshot_refresh_in_cache(
+    cache: &mut RootTodoSnapshotCache,
+    refresh: RootOwnedProviderRefresh,
+    snapshot: RootTodoRefreshSnapshot,
+) -> bool {
+    if refresh.source != sk_protocol::command_contract::CommandSource::Todo
+        || snapshot.owner != refresh
+        || !cache.refresh_lifecycle.finish(refresh)
+    {
+        return false;
+    }
+    cache.snapshot = Some(RootTodoSnapshot {
+        captured_at: std::time::Instant::now(),
+        hits: std::sync::Arc::new(snapshot.hits),
     });
+    true
+}
+
+pub(crate) fn finish_root_todos_snapshot_refresh(
+    refresh: RootOwnedProviderRefresh,
+    snapshot: RootTodoRefreshSnapshot,
+) -> bool {
+    ROOT_TODO_SNAPSHOT.lock().is_ok_and(|mut cache| {
+        finish_root_todos_snapshot_refresh_in_cache(&mut cache, refresh, snapshot)
+    })
+}
+
+pub(crate) fn discard_root_todos_snapshot_refresh(refresh: RootOwnedProviderRefresh) -> bool {
+    ROOT_TODO_SNAPSHOT
+        .lock()
+        .is_ok_and(|mut cache| cache.refresh_lifecycle.finish(refresh))
 }
 
 #[cfg(test)]
@@ -444,7 +499,7 @@ pub(crate) fn set_root_todo_snapshot_for_tests(hits: Vec<RootTodoSearchHit>) {
             captured_at: std::time::Instant::now(),
             hits: std::sync::Arc::new(hits),
         });
-        cache.refresh_in_flight = false;
+        cache.refresh_lifecycle.in_flight = None;
     }
 }
 
@@ -917,6 +972,107 @@ mod tests {
             line_number: Some(1),
             raw_line: format!("- [ ] {body}"),
         }
+    }
+
+    fn root_owned_todo_cache() -> RootTodoSnapshotCache {
+        RootTodoSnapshotCache {
+            snapshot: None,
+            refresh_lifecycle: RootOwnedProviderRefreshLifecycle::default(),
+        }
+    }
+
+    #[test]
+    fn root_todos_owned_refresh_accepts_empty_snapshot_without_restarting_forever() {
+        let mut cache = root_owned_todo_cache();
+        let refresh = try_begin_root_todos_snapshot_refresh_in_cache(&mut cache)
+            .expect("cold Todos cache owns one worker");
+        assert!(try_begin_root_todos_snapshot_refresh_in_cache(&mut cache).is_none());
+        assert!(finish_root_todos_snapshot_refresh_in_cache(
+            &mut cache,
+            refresh,
+            RootTodoRefreshSnapshot {
+                owner: refresh,
+                hits: Vec::new(),
+            },
+        ));
+        assert!(root_todos_snapshot_cache_is_fresh(&cache));
+        assert!(cache
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.hits.is_empty()));
+        assert!(try_begin_root_todos_snapshot_refresh_in_cache(&mut cache).is_none());
+    }
+
+    #[test]
+    fn root_todos_owned_refresh_rejects_foreign_owner_and_snapshot_before_publication() {
+        let mut cache = root_owned_todo_cache();
+        let refresh = try_begin_root_todos_snapshot_refresh_in_cache(&mut cache)
+            .expect("Todos owns its private day-page snapshot");
+        let forged = RootOwnedProviderRefresh {
+            source: sk_protocol::command_contract::CommandSource::Note,
+            generation: refresh.generation,
+        };
+
+        assert!(!finish_root_todos_snapshot_refresh_in_cache(
+            &mut cache,
+            forged,
+            RootTodoRefreshSnapshot {
+                owner: forged,
+                hits: vec![snapshot_hit("foreign private todo")],
+            },
+        ));
+        assert!(!finish_root_todos_snapshot_refresh_in_cache(
+            &mut cache,
+            refresh,
+            RootTodoRefreshSnapshot {
+                owner: forged,
+                hits: vec![snapshot_hit("wrong private snapshot")],
+            },
+        ));
+        assert!(cache.snapshot.is_none());
+        assert_eq!(cache.refresh_lifecycle.in_flight, Some(refresh));
+        assert!(finish_root_todos_snapshot_refresh_in_cache(
+            &mut cache,
+            refresh,
+            RootTodoRefreshSnapshot {
+                owner: refresh,
+                hits: vec![snapshot_hit("the real private todo")],
+            },
+        ));
+        assert_eq!(
+            cache.snapshot.unwrap().hits[0].body,
+            "the real private todo"
+        );
+    }
+
+    #[test]
+    fn root_todos_owned_refresh_rejects_stale_completion_after_worker_replacement() {
+        let mut cache = root_owned_todo_cache();
+        let stale = try_begin_root_todos_snapshot_refresh_in_cache(&mut cache)
+            .expect("initial Todos worker");
+        assert!(cache.refresh_lifecycle.finish(stale));
+        let current = try_begin_root_todos_snapshot_refresh_in_cache(&mut cache)
+            .expect("replacement Todos worker");
+        assert!(current.generation > stale.generation);
+
+        assert!(!finish_root_todos_snapshot_refresh_in_cache(
+            &mut cache,
+            stale,
+            RootTodoRefreshSnapshot {
+                owner: stale,
+                hits: vec![snapshot_hit("stale private todo")],
+            },
+        ));
+        assert!(cache.snapshot.is_none());
+        assert_eq!(cache.refresh_lifecycle.in_flight, Some(current));
+        assert!(finish_root_todos_snapshot_refresh_in_cache(
+            &mut cache,
+            current,
+            RootTodoRefreshSnapshot {
+                owner: current,
+                hits: vec![snapshot_hit("fresh private todo")],
+            },
+        ));
     }
 
     #[test]

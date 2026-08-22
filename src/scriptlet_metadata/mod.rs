@@ -281,6 +281,18 @@ fn parse_simple_metadata(content: &str) -> Option<TypedMetadata> {
             "system" => metadata.system = value.to_lowercase() == "true" || value == "1",
             "fallback" => metadata.fallback = value.to_lowercase() == "true" || value == "1",
             "fallback_label" => metadata.fallback_label = Some(value),
+            "sdkcapabilities" => {
+                let parsed = serde_json::from_str(&value)
+                    .unwrap_or_else(|_| serde_json::Value::String(value));
+                metadata.extra.insert("sdkCapabilities".to_string(), parsed);
+            }
+            "executiontopology" => {
+                let parsed = serde_json::from_str(&value)
+                    .unwrap_or_else(|_| serde_json::Value::String(value));
+                metadata
+                    .extra
+                    .insert("executionTopology".to_string(), parsed);
+            }
             // Unknown fields go to extra
             _ => {
                 metadata.extra.insert(key, serde_json::Value::String(value));
@@ -902,5 +914,87 @@ echo "Hello World"
         assert_eq!(result.errors.len(), 2);
         assert!(result.errors[0].contains("metadata"));
         assert!(result.errors[1].contains("schema"));
+    }
+
+    #[test]
+    fn json_metadata_preserves_typed_capability_and_interactive_topology_fields() {
+        let content = r#"
+```metadata
+{
+  "sdkCapabilities": ["arg", "readFile"],
+  "executionTopology": "typescript-scriptlet-interactive"
+}
+```
+
+```ts
+await arg("Choose a file");
+```
+"#;
+
+        let metadata = parse_codefence_metadata(content)
+            .metadata
+            .expect("typed scriptlet metadata");
+        assert_eq!(
+            metadata.extra.get("sdkCapabilities"),
+            Some(&serde_json::json!(["arg", "readFile"]))
+        );
+        assert_eq!(
+            metadata.extra.get("executionTopology"),
+            Some(&serde_json::json!("typescript-scriptlet-interactive"))
+        );
+    }
+
+    #[test]
+    fn simple_metadata_keeps_canonical_names_and_json_array_shape() {
+        let content = r#"
+```metadata
+sdkCapabilities: ["arg", "readFile"]
+executionTopology: typescript-scriptlet-interactive
+```
+
+```ts
+await arg("Prompt");
+```
+"#;
+
+        let metadata = parse_codefence_metadata(content)
+            .metadata
+            .expect("simple scriptlet metadata");
+        assert_eq!(
+            metadata.extra.get("sdkCapabilities"),
+            Some(&serde_json::json!(["arg", "readFile"]))
+        );
+        assert_eq!(
+            metadata.extra.get("executionTopology"),
+            Some(&serde_json::json!("typescript-scriptlet-interactive"))
+        );
+        assert!(!metadata.extra.contains_key("sdkcapabilities"));
+        assert!(!metadata.extra.contains_key("executiontopology"));
+    }
+
+    #[test]
+    fn malformed_simple_capability_declaration_is_preserved_for_validation() {
+        let content = r#"
+```metadata
+sdkCapabilities: arg
+executionTopology: invalid-topology
+```
+
+```ts
+console.log("safe fixture");
+```
+"#;
+
+        let metadata = parse_codefence_metadata(content)
+            .metadata
+            .expect("malformed values remain observable");
+        assert_eq!(
+            metadata.extra.get("sdkCapabilities"),
+            Some(&serde_json::json!("arg"))
+        );
+        assert_eq!(
+            metadata.extra.get("executionTopology"),
+            Some(&serde_json::json!("invalid-topology"))
+        );
     }
 }

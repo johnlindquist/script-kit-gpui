@@ -9,7 +9,7 @@
 //! This module depends on app subsystems like `protocol`, `hotkeys`, `watcher`, and `window_manager`.
 
 use gpui::{
-    div, hsla, list, point, prelude::*, px, rgb, rgba, size, svg, uniform_list, AnyElement, App,
+    div, hsla, list, point, prelude::*, px, rgb, rgba, size, uniform_list, AnyElement, App,
     BoxShadow, Context, CursorStyle, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight,
     KeyDownEvent, ListAlignment, ListOffset, ListSizingBehavior, ListState, MouseMoveEvent, Render,
     ScrollHandle, ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, Window,
@@ -64,6 +64,7 @@ mod effects;
 #[allow(dead_code)] // Public API in lib.rs; binary only uses ErrorSeverity currently
 mod error;
 mod executor;
+mod extension_types;
 mod fidelity_capture;
 mod filter_coalescer;
 mod flows;

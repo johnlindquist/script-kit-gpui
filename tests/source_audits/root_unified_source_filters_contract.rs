@@ -28,10 +28,10 @@ fn source_filters_are_frame_keyed_and_gate_async_sources() {
     assert!(filtering.contains("browser_tabs_options.enabled = true;"));
     assert!(filtering.contains("browser_history_options.enabled = true;"));
     assert!(filtering.contains("agent_chat_history_options.enabled = true;"));
-    assert!(filtering
-        .contains("crate::notes::search_root_notes_meta_direct(search_text, notes_options)"));
-    assert!(filtering
-        .contains("crate::menu_syntax::search_root_todos_direct(search_text, todo_options)"));
+    assert!(filtering.contains("maybe_start_root_notes_refresh_for_query("));
+    assert!(filtering.contains("maybe_start_root_todos_refresh_for_query("));
+    assert!(filtering.contains("crate::notes::search_root_notes_meta_cached("));
+    assert!(filtering.contains("crate::menu_syntax::search_root_todos_cached("));
     assert!(
         filtering.contains("crate::clipboard_history::search_root_clipboard_history_meta_direct(")
     );

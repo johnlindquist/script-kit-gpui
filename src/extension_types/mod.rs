@@ -388,6 +388,159 @@ impl Command {
     pub fn is_valid_tool(&self) -> bool {
         VALID_TOOLS.contains(&self.tool.as_str())
     }
+
+    /// Project the existing Raycast-compatible manifest and command metadata
+    /// into the single host-facing command contract.
+    pub fn command_descriptor(
+        &self,
+        manifest: Option<&ExtensionManifest>,
+        current_version: &str,
+    ) -> Result<sk_protocol::command_contract::CommandDescriptor, String> {
+        use sk_protocol::command_contract::{
+            CommandArgument, CommandArgumentKind, CommandAvailability, CommandCapability,
+            CommandContextPolicy, CommandDescriptor, CommandExecutionMode, CommandExecutionPolicy,
+            CommandIdentity, CommandSource,
+        };
+
+        let owner = self
+            .extension
+            .as_deref()
+            .or_else(|| manifest.map(|entry| entry.name.as_str()))
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("main");
+        let identity = CommandIdentity::new(
+            CommandSource::Scriptlet,
+            format!("{owner}:{}", self.command),
+        )
+        .map_err(|error| error.to_string())?;
+        let primary_label = match self.metadata.mode {
+            CommandMode::NoView => "Run Command",
+            CommandMode::MenuBar => "Open Menu Bar Command",
+            CommandMode::View => "Run Command",
+        };
+        let mut descriptor = CommandDescriptor::new(identity, &self.name, primary_label)
+            .map_err(|error| error.to_string())?;
+        descriptor.subtitle = self
+            .metadata
+            .subtitle
+            .clone()
+            .or_else(|| self.metadata.description.clone());
+        descriptor.source_name = manifest
+            .map(|entry| entry.title.as_str())
+            .filter(|title| !title.trim().is_empty())
+            .map(ToOwned::to_owned);
+        descriptor.shortcut = self.metadata.shortcut.clone();
+        descriptor
+            .keywords
+            .extend(self.metadata.keywords.iter().cloned());
+        if let Some(alias) = &self.metadata.alias {
+            descriptor.aliases.push(alias.clone());
+        }
+        if let Some(keyword) = &self.metadata.keyword {
+            descriptor.keywords.push(keyword.clone());
+        }
+        descriptor
+            .arguments
+            .extend(
+                self.metadata
+                    .arguments
+                    .iter()
+                    .map(|argument| CommandArgument {
+                        name: argument.name.clone(),
+                        kind: match argument.arg_type {
+                            ArgumentType::Text => CommandArgumentKind::Text,
+                            ArgumentType::Password => CommandArgumentKind::Password,
+                            ArgumentType::Dropdown => CommandArgumentKind::Selection,
+                        },
+                        required: argument.required,
+                    }),
+            );
+        descriptor.execution = CommandExecutionPolicy {
+            mode: if self.metadata.background || self.metadata.mode == CommandMode::NoView {
+                CommandExecutionMode::BackgroundProcess
+            } else {
+                CommandExecutionMode::ForegroundProcess
+            },
+            cancellable: true,
+            backgroundable: self.metadata.background || self.metadata.mode == CommandMode::NoView,
+            streams_output: self.is_shell(),
+        };
+        descriptor
+            .capabilities
+            .push(CommandCapability::Cancellation);
+        if descriptor.execution.backgroundable {
+            descriptor
+                .capabilities
+                .push(CommandCapability::BackgroundExecution);
+        }
+        if descriptor.execution.streams_output {
+            descriptor.capabilities.push(CommandCapability::Streaming);
+        }
+        descriptor.context = CommandContextPolicy::ExplicitOnly;
+
+        if let Some(manifest) = manifest {
+            let version_requirement = manifest
+                .min_version
+                .as_deref()
+                .map(|required| {
+                    let minimum = parse_extension_version(required, "minVersion")?;
+                    let current = parse_extension_version(current_version, "current")?;
+                    Ok::<_, String>((required, minimum, current))
+                })
+                .transpose()?;
+            let mut unknown_permission = None;
+
+            for permission in &manifest.permissions {
+                let capability = match permission.to_ascii_lowercase().as_str() {
+                    "accessibility" => Some(CommandCapability::Accessibility),
+                    "screen-recording" | "screenrecording" => {
+                        Some(CommandCapability::ScreenRecording)
+                    }
+                    "microphone" => Some(CommandCapability::Microphone),
+                    "clipboard" => Some(CommandCapability::Clipboard),
+                    "network" => Some(CommandCapability::Network),
+                    "filesystem" | "file-system" => Some(CommandCapability::FileSystem),
+                    _ => {
+                        if unknown_permission.is_none() {
+                            unknown_permission = Some(permission.clone());
+                        }
+                        None
+                    }
+                };
+                if let Some(capability) = capability {
+                    if !descriptor.capabilities.contains(&capability) {
+                        descriptor.capabilities.push(capability);
+                    }
+                }
+            }
+
+            descriptor.availability = if let Some(permission) = unknown_permission {
+                CommandAvailability::UnknownPermission { permission }
+            } else if !manifest.supports_macos() {
+                CommandAvailability::UnsupportedPlatform {
+                    platform: std::env::consts::OS.to_owned(),
+                }
+            } else if let Some((required, minimum, current)) = version_requirement {
+                if current < minimum {
+                    CommandAvailability::HostVersionTooOld {
+                        minimum_version: required.to_owned(),
+                        current_version: current_version.to_owned(),
+                    }
+                } else {
+                    CommandAvailability::Ready
+                }
+            } else {
+                CommandAvailability::Ready
+            };
+        }
+        if !descriptor.availability.is_executable() {
+            if let Some(primary) = descriptor.actions.first_mut() {
+                primary.availability = descriptor.availability.clone();
+            }
+        }
+        descriptor.validate().map_err(|error| error.to_string())?;
+        Ok(descriptor)
+    }
 }
 /// Convert a name to a command slug (lowercase, spaces to hyphens)
 fn slugify(name: &str) -> String {
@@ -572,26 +725,23 @@ pub fn resolve_icon(value: &str) -> IconSource {
 // Version Checking
 // ============================================================================
 
-/// Check if a version requirement is satisfied
-/// Uses semver-style comparison
-pub fn check_min_version(required: &str, current: &str) -> Result<(), String> {
-    // Parse versions as semver
-    let parse_version = |v: &str| -> Option<(u32, u32, u32)> {
-        let parts: Vec<&str> = v.trim_start_matches('v').split('.').collect();
-        if parts.len() >= 2 {
-            let major = parts[0].parse().ok()?;
-            let minor = parts[1].parse().ok()?;
-            let patch = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
-            Some((major, minor, patch))
-        } else {
-            None
-        }
+fn parse_extension_version(value: &str, label: &str) -> Result<semver::Version, String> {
+    let unprefixed = value.strip_prefix('v').unwrap_or(value);
+    let normalized = if unprefixed.split('.').count() == 2 {
+        format!("{unprefixed}.0")
+    } else {
+        unprefixed.to_owned()
     };
 
-    let required_v = parse_version(required)
-        .ok_or_else(|| format!("Invalid minVersion format: {}", required))?;
-    let current_v =
-        parse_version(current).ok_or_else(|| format!("Invalid current version: {}", current))?;
+    semver::Version::parse(&normalized)
+        .map_err(|_| format!("Invalid {label} version format: {value}"))
+}
+
+/// Check if a version requirement is satisfied using strict semantic version
+/// parsing while retaining the documented `v1.2.3` and `1.2` legacy forms.
+pub fn check_min_version(required: &str, current: &str) -> Result<(), String> {
+    let required_v = parse_extension_version(required, "minVersion")?;
+    let current_v = parse_extension_version(current, "current")?;
 
     if current_v >= required_v {
         Ok(())
@@ -988,6 +1138,23 @@ anotherField: 123
     fn test_check_min_version_invalid() {
         assert!(check_min_version("invalid", "1.0.0").is_err());
         assert!(check_min_version("1.0.0", "invalid").is_err());
+
+        for invalid in ["1.2.broken", "1.2.3.4", "1..2", "vv1.2.3"] {
+            assert!(
+                check_min_version(invalid, "2.0.0").is_err(),
+                "accepted malformed required version {invalid:?}"
+            );
+            assert!(
+                check_min_version("1.0.0", invalid).is_err(),
+                "accepted malformed current version {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_min_version_preserves_semver_prerelease_ordering() {
+        assert!(check_min_version("1.2.3", "1.2.3-beta.1").is_err());
+        assert!(check_min_version("1.2.3-beta.1", "1.2.3").is_ok());
     }
     // ========================================
     // Valid Categories Tests
@@ -1101,6 +1268,79 @@ anotherField: 123
         assert!(cmd.name.is_empty());
         assert!(cmd.content.is_empty());
     }
+
+    #[test]
+    fn test_command_descriptor_truthfully_classifies_extension_compatibility() {
+        use sk_protocol::command_contract::CommandAvailability;
+
+        let command = Command::new("Hello".to_owned(), "ts".to_owned(), String::new());
+        let unsupported_platform = ExtensionManifest {
+            platforms: vec!["Windows".to_owned()],
+            ..ExtensionManifest::default()
+        };
+        let descriptor = command
+            .command_descriptor(Some(&unsupported_platform), "1.0.0")
+            .expect("valid manifest");
+        assert_eq!(
+            descriptor.availability,
+            CommandAvailability::UnsupportedPlatform {
+                platform: std::env::consts::OS.to_owned(),
+            }
+        );
+        assert_eq!(
+            descriptor.primary_action().unwrap().availability,
+            descriptor.availability
+        );
+        assert!(!descriptor.can_execute());
+
+        let newer_host_required = ExtensionManifest {
+            min_version: Some("2.0.0".to_owned()),
+            ..ExtensionManifest::default()
+        };
+        let descriptor = command
+            .command_descriptor(Some(&newer_host_required), "1.0.0")
+            .expect("valid manifest");
+        assert_eq!(
+            descriptor.availability,
+            CommandAvailability::HostVersionTooOld {
+                minimum_version: "2.0.0".to_owned(),
+                current_version: "1.0.0".to_owned(),
+            }
+        );
+        assert!(!descriptor.can_execute());
+    }
+
+    #[test]
+    fn test_command_descriptor_rejects_unknown_permissions_and_malformed_versions() {
+        use sk_protocol::command_contract::{CommandAvailability, CommandCapability};
+
+        let command = Command::new("Hello".to_owned(), "ts".to_owned(), String::new());
+        let unknown_permission = ExtensionManifest {
+            permissions: vec!["accessibility".to_owned(), "screen-scrape-all".to_owned()],
+            ..ExtensionManifest::default()
+        };
+        let descriptor = command
+            .command_descriptor(Some(&unknown_permission), "1.0.0")
+            .expect("unknown permissions must remain visible and blocked");
+        assert_eq!(
+            descriptor.availability,
+            CommandAvailability::UnknownPermission {
+                permission: "screen-scrape-all".to_owned(),
+            }
+        );
+        assert!(descriptor
+            .capabilities
+            .contains(&CommandCapability::Accessibility));
+        assert!(!descriptor.can_execute());
+
+        let malformed = ExtensionManifest {
+            min_version: Some("1.2.broken".to_owned()),
+            ..ExtensionManifest::default()
+        };
+        assert!(command
+            .command_descriptor(Some(&malformed), "2.0.0")
+            .is_err());
+    }
     // ========================================
     // CommandValidationError Tests
     // ========================================
@@ -1136,5 +1376,4 @@ anotherField: 123
         assert!(result.errors.is_empty());
         assert!(result.manifest.is_none());
     }
-
 }

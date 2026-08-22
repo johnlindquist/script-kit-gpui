@@ -15,15 +15,15 @@ impl ScriptListApp {
             ScriptListSpecialEntry::ActionsHelp => "actions_help",
             ScriptListSpecialEntry::DayPage => "day_page",
         };
-        let raw_filter_text_safe = logging::log_user_value(raw_filter_text);
+        let raw_filter_text_safe = logging::log_private_user_value(raw_filter_text);
 
         tracing::info!(
             target: "script_kit::do_in_trace",
             event = "DO_IN_TRACE script_list_special_entry_routed",
             filter_text_preview = %raw_filter_text_safe,
             filter_text_bytes = raw_filter_text_safe.raw_bytes,
-            filter_text_safe_bytes = raw_filter_text_safe.safe_bytes,
-            filter_text_truncated = raw_filter_text_safe.truncated,
+            filter_text_safe_bytes = raw_filter_text_safe.safe_bytes(),
+            filter_text_truncated = false,
             entry_kind,
             current_view = ?self.current_view,
             "DO_IN_TRACE script_list_special_entry_routed"
@@ -31,7 +31,8 @@ impl ScriptListApp {
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "script_list_special_entry_routed",
-            filter_text = %raw_filter_text,
+            filter_bytes = raw_filter_text_safe.raw_bytes,
+            filter_sha256 = %raw_filter_text_safe.sha256,
             entry_kind,
             current_view = ?self.current_view,
         );
@@ -68,11 +69,13 @@ impl ScriptListApp {
         let handler_start = std::time::Instant::now();
 
         if self.suppress_filter_events {
+            let safe_filter = logging::log_private_user_value(&self.filter_text);
             tracing::info!(
                 target: "script_kit::do_in_trace",
                 event = "DO_IN_TRACE filter_change.suppressed",
                 current_view = ?self.current_view,
-                canonical_filter = %self.filter_text,
+                canonical_filter_bytes = safe_filter.raw_bytes,
+                canonical_filter_sha256 = %safe_filter.sha256,
                 "DO_IN_TRACE filter_change.suppressed"
             );
             return;
@@ -104,8 +107,8 @@ impl ScriptListApp {
         self.menu_syntax_form_draft_field_id = None;
         self.menu_syntax_form_draft_value.clear();
         self.cancel_history_filter_render_pending_if_obsolete(&new_text);
-        let new_text_safe = logging::log_user_value(&new_text);
-        let canonical_filter_safe = logging::log_user_value(&self.filter_text);
+        let new_text_safe = logging::log_private_user_value(&new_text);
+        let canonical_filter_safe = logging::log_private_user_value(&self.filter_text);
 
         if logging::filter_perf_trace_enabled() {
             tracing::info!(
@@ -114,12 +117,12 @@ impl ScriptListApp {
                 current_view = ?self.current_view,
                 new_text_preview = %new_text_safe,
                 new_text_bytes = new_text_safe.raw_bytes,
-                new_text_safe_bytes = new_text_safe.safe_bytes,
-                new_text_truncated = new_text_safe.truncated,
+                new_text_safe_bytes = new_text_safe.safe_bytes(),
+                new_text_truncated = false,
                 canonical_filter_preview = %canonical_filter_safe,
                 canonical_filter_bytes = canonical_filter_safe.raw_bytes,
-                canonical_filter_safe_bytes = canonical_filter_safe.safe_bytes,
-                canonical_filter_truncated = canonical_filter_safe.truncated,
+                canonical_filter_safe_bytes = canonical_filter_safe.safe_bytes(),
+                canonical_filter_truncated = false,
                 shared_filter_view,
                 show_actions_popup = self.show_actions_popup,
                 pending_filter_sync = self.pending_filter_sync,
@@ -140,8 +143,8 @@ impl ScriptListApp {
                 current_view = ?self.current_view,
                 new_text_preview = %new_text_safe,
                 new_text_bytes = new_text_safe.raw_bytes,
-                new_text_safe_bytes = new_text_safe.safe_bytes,
-                new_text_truncated = new_text_safe.truncated,
+                new_text_safe_bytes = new_text_safe.safe_bytes(),
+                new_text_truncated = false,
                 canonical_filter_preview = %canonical_filter_safe,
                 shared_filter_view,
                 pending_filter_sync = self.pending_filter_sync,
@@ -157,8 +160,8 @@ impl ScriptListApp {
                 current_view = ?self.current_view,
                 new_text_preview = %new_text_safe,
                 new_text_bytes = new_text_safe.raw_bytes,
-                new_text_safe_bytes = new_text_safe.safe_bytes,
-                new_text_truncated = new_text_safe.truncated,
+                new_text_safe_bytes = new_text_safe.safe_bytes(),
+                new_text_truncated = false,
                 canonical_filter_preview = %canonical_filter_safe,
                 "DO_IN_TRACE filter_change.not_shared_return"
             );
@@ -174,8 +177,8 @@ impl ScriptListApp {
                 raw_len = new_text.len(),
                 new_text_preview = %new_text_safe,
                 new_text_bytes = new_text_safe.raw_bytes,
-                new_text_safe_bytes = new_text_safe.safe_bytes,
-                new_text_truncated = new_text_safe.truncated,
+                new_text_safe_bytes = new_text_safe.safe_bytes(),
+                new_text_truncated = false,
                 "DO_IN_TRACE filter_change.newline_ignored"
             );
             self.pending_filter_sync = true;
@@ -190,9 +193,12 @@ impl ScriptListApp {
             let previous_filter = self.filter_text.clone();
             self.filter_text = new_text.clone();
             if let Err(error) = self.refresh_current_app_commands_session_if_needed(&new_text, cx) {
+                let safe_error = logging::log_private_user_value(&error.to_string());
                 tracing::warn!(
-                    error = %error,
-                    query = %new_text,
+                    error_bytes = safe_error.raw_bytes,
+                    error_sha256 = %safe_error.sha256,
+                    query_bytes = new_text_safe.raw_bytes,
+                    query_sha256 = %new_text_safe.sha256,
                     "current_app_commands.refresh_failed_on_filter_change"
                 );
             }
@@ -214,10 +220,17 @@ impl ScriptListApp {
                         &self.cached_current_app_entries,
                         &new_text,
                     );
+                    let safe_receipt_query = logging::log_private_user_value(&receipt.query);
+                    let safe_normalized_query =
+                        logging::log_private_user_value(&receipt.normalized_query);
+                    let safe_previous_filter = logging::log_private_user_value(&previous_filter);
+                    let safe_view_filter = logging::log_private_user_value(&filter_before);
 
                     tracing::debug!(
-                        query = %receipt.query,
-                        normalized_query = %receipt.normalized_query,
+                        query_bytes = safe_receipt_query.raw_bytes,
+                        query_sha256 = %safe_receipt_query.sha256,
+                        normalized_query_bytes = safe_normalized_query.raw_bytes,
+                        normalized_query_sha256 = %safe_normalized_query.sha256,
                         total_entries = receipt.total_entries,
                         matched_entries = receipt.matched_entries,
                         input_mode = %input_mode,
@@ -226,17 +239,20 @@ impl ScriptListApp {
                     tracing::info!(
                         target: "script_kit::do_in_trace",
                         event = "DO_IN_TRACE current_app_filter.synced",
-                        previous_canonical_filter = %previous_filter,
-                        previous_view_filter = %filter_before,
+                        previous_canonical_filter_bytes = safe_previous_filter.raw_bytes,
+                        previous_canonical_filter_sha256 = %safe_previous_filter.sha256,
+                        previous_view_filter_bytes = safe_view_filter.raw_bytes,
+                        previous_view_filter_sha256 = %safe_view_filter.sha256,
                         new_text_preview = %new_text_safe,
                         new_text_bytes = new_text_safe.raw_bytes,
-                        new_text_safe_bytes = new_text_safe.safe_bytes,
-                        new_text_truncated = new_text_safe.truncated,
+                        new_text_safe_bytes = new_text_safe.safe_bytes(),
+                        new_text_truncated = false,
                         selected_before,
                         selected_after = *selected_index,
                         total_entries = receipt.total_entries,
                         matched_entries = receipt.matched_entries,
-                        normalized_query = %receipt.normalized_query,
+                        normalized_query_bytes = safe_normalized_query.raw_bytes,
+                        normalized_query_sha256 = %safe_normalized_query.sha256,
                         input_mode,
                         "DO_IN_TRACE current_app_filter.synced"
                     );
@@ -250,15 +266,19 @@ impl ScriptListApp {
                     );
                     cx.notify();
                 } else {
+                    let safe_previous_filter = logging::log_private_user_value(&previous_filter);
+                    let safe_view_filter = logging::log_private_user_value(&filter_before);
                     tracing::info!(
                         target: "script_kit::do_in_trace",
                         event = "DO_IN_TRACE current_app_filter.unchanged",
-                        previous_canonical_filter = %previous_filter,
-                        view_filter = %filter_before,
+                        previous_canonical_filter_bytes = safe_previous_filter.raw_bytes,
+                        previous_canonical_filter_sha256 = %safe_previous_filter.sha256,
+                        view_filter_bytes = safe_view_filter.raw_bytes,
+                        view_filter_sha256 = %safe_view_filter.sha256,
                         new_text_preview = %new_text_safe,
                         new_text_bytes = new_text_safe.raw_bytes,
-                        new_text_safe_bytes = new_text_safe.safe_bytes,
-                        new_text_truncated = new_text_safe.truncated,
+                        new_text_safe_bytes = new_text_safe.safe_bytes(),
+                        new_text_truncated = false,
                         selected_index = *selected_index,
                         "DO_IN_TRACE current_app_filter.unchanged"
                     );
@@ -797,7 +817,8 @@ impl ScriptListApp {
                         tracing::info!(
                             target: "script_kit::menu_syntax_popup",
                             event = "menu_syntax_trigger_picker_close",
-                            filter = %new_text,
+                            filter_bytes = new_text_safe.raw_bytes,
+                            filter_sha256 = %new_text_safe.sha256,
                         );
                     }
                     self.menu_syntax_trigger_picker_state = Default::default();
@@ -809,7 +830,8 @@ impl ScriptListApp {
                     tracing::info!(
                         target: "script_kit::menu_syntax_popup",
                         event = "menu_syntax_trigger_picker_open",
-                        filter = %new_text,
+                        filter_bytes = new_text_safe.raw_bytes,
+                        filter_sha256 = %new_text_safe.sha256,
                         row_count = snapshot.rows.len(),
                         selected_row_id = ?selected_row_id,
                     );
@@ -838,7 +860,8 @@ impl ScriptListApp {
                     tracing::info!(
                         target: "script_kit::menu_syntax_popup",
                         event = "menu_syntax_trigger_picker_update",
-                        filter = %new_text,
+                        filter_bytes = new_text_safe.raw_bytes,
+                        filter_sha256 = %new_text_safe.sha256,
                         row_count = snapshot.rows.len(),
                         selected_row_id = ?selected_row_id,
                     );
@@ -932,9 +955,10 @@ impl ScriptListApp {
             logging::log(
                 "FILTER_PERF",
                 &format!(
-                    "[HANDLER_SLOW] handle_filter_input_change took {:.2}ms for '{}'",
+                    "[HANDLER_SLOW] handle_filter_input_change took {:.2}ms for {} ({} bytes)",
                     handler_elapsed.as_secs_f64() * 1000.0,
-                    new_text
+                    new_text_safe,
+                    new_text_safe.raw_bytes,
                 ),
             );
         }

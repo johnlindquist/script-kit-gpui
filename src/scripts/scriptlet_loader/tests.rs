@@ -189,3 +189,196 @@ fn window_management_scriptlets_all_declare_launcher_icons() {
         );
     }
 }
+
+#[test]
+fn section_parser_preserves_json_and_legacy_html_capability_diagnostics() {
+    let _registry = crate::test_utils::SK_PATH_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let interactive = r#"## Prompt Scriptlet
+```metadata
+{"sdkCapabilities":["arg"],"executionTopology":"typescript-scriptlet-interactive"}
+```
+```ts
+await arg("Prompt");
+```
+"#;
+    let source = std::path::Path::new("/tmp/sdk-section-interactive.md");
+    let scriptlet = parse_scriptlet_section(interactive, Some(source)).expect("parse interactive");
+    assert!(crate::scripts::validate_scriptlet_capabilities(&scriptlet).is_empty());
+
+    let legacy = r#"## Invalid Shell
+<!--
+sdkCapabilities: ["readFile"]
+-->
+```bash
+echo safe-fixture
+```
+"#;
+    let source = std::path::Path::new("/tmp/sdk-section-legacy.md");
+    let scriptlet = parse_scriptlet_section(legacy, Some(source)).expect("parse shell");
+    let issues = crate::scripts::validate_scriptlet_capabilities(&scriptlet);
+    assert_eq!(issues.len(), 1);
+    assert!(matches!(
+        issues[0].kind,
+        crate::scripts::ScriptValidationKind::CapabilityUnavailable {
+            code: crate::mcp_resources::SdkCapabilityDiagnosticCode::MissingSdkTransport,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn incremental_markdown_loader_replaces_stale_diagnostics_without_hiding_rows() {
+    let _registry = crate::test_utils::SK_PATH_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::TempDir::new().expect("create isolated markdown fixture");
+    let source = temp.path().join("sdk-incremental.md");
+    std::fs::write(
+        &source,
+        r#"## Retained Command
+```metadata
+{"sdkCapabilities":["readFile"]}
+```
+```bash
+echo no-sdk
+```
+"#,
+    )
+    .expect("write noninteractive fixture");
+
+    let first = super::loading::read_scriptlets_from_file(&source);
+    assert_eq!(first.len(), 1, "invalid commands must stay visible");
+    assert_eq!(
+        crate::scripts::validate_scriptlet_capabilities(&first[0]).len(),
+        1
+    );
+
+    std::fs::write(
+        &source,
+        r#"## Retained Command
+```metadata
+{"sdkCapabilities":["arg"]}
+```
+```ts
+await arg("Interactive");
+```
+"#,
+    )
+    .expect("write repaired interactive fixture");
+    let repaired = super::loading::read_scriptlets_from_file(&source);
+    assert_eq!(repaired.len(), 1);
+    assert!(crate::scripts::validate_scriptlet_capabilities(&repaired[0]).is_empty());
+
+    std::fs::write(
+        &source,
+        "## Retained Command\n```ts\nitems.find(item => item.ready);\n```\n",
+    )
+    .expect("write safe legacy fixture");
+    let legacy = super::loading::read_scriptlets_from_file(&source);
+    assert_eq!(legacy.len(), 1);
+    assert!(crate::scripts::validate_scriptlet_capabilities(&legacy[0]).is_empty());
+}
+
+#[test]
+fn full_markdown_loader_preserves_interactive_and_blocked_scriptlet_rows() {
+    let _lock = crate::test_utils::SK_PATH_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    struct SkPathGuard(Option<String>);
+    impl Drop for SkPathGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.0 {
+                std::env::set_var(crate::setup::SK_PATH_ENV, previous);
+            } else {
+                std::env::remove_var(crate::setup::SK_PATH_ENV);
+            }
+        }
+    }
+
+    let temp = tempfile::TempDir::new().expect("create isolated plugin tree");
+    let directory = temp.path().join("plugins/main/scriptlets");
+    std::fs::create_dir_all(&directory).expect("create plugin scriptlet directory");
+    std::fs::write(
+        directory.join("capabilities.md"),
+        r#"## Interactive Prompt
+```metadata
+{"sdkCapabilities":["arg"]}
+```
+```ts
+await arg("Safe launcher prompt");
+```
+
+## Impossible Legacy Prompt
+```metadata
+{"sdkCapabilities":["arg"],"executionTopology":"typescript-scriptlet"}
+```
+```ts
+await arg("No response pipe");
+```
+
+## Missing Shell Transport
+```metadata
+{"sdkCapabilities":["readFile"]}
+```
+```bash
+echo no-sdk
+```
+
+## Existing Legacy Command
+```bash
+echo untouched
+```
+"#,
+    )
+    .expect("write realistic markdown bundle");
+
+    let guard = SkPathGuard(std::env::var(crate::setup::SK_PATH_ENV).ok());
+    std::env::set_var(crate::setup::SK_PATH_ENV, temp.path());
+    let generation_before = crate::scripts::scriptlet_capability_registry_generation();
+    let loaded = super::loading::load_scriptlets();
+    assert_eq!(loaded.len(), 4, "invalid scriptlets remain visible");
+    assert!(crate::scripts::scriptlet_capability_registry_generation() > generation_before);
+
+    let interactive = loaded
+        .iter()
+        .find(|entry| entry.name == "Interactive Prompt")
+        .expect("launcher-interactive scriptlet");
+    assert!(crate::scripts::validate_scriptlet_capabilities(interactive).is_empty());
+
+    let legacy = loaded
+        .iter()
+        .find(|entry| entry.name == "Impossible Legacy Prompt")
+        .expect("explicit noninteractive scriptlet remains indexed");
+    assert!(matches!(
+        crate::scripts::validate_scriptlet_capabilities(legacy)[0].kind,
+        crate::scripts::ScriptValidationKind::CapabilityUnavailable {
+            code: crate::mcp_resources::SdkCapabilityDiagnosticCode::InteractivePromptUnavailable,
+            ..
+        }
+    ));
+
+    let shell = loaded
+        .iter()
+        .find(|entry| entry.name == "Missing Shell Transport")
+        .expect("shell scriptlet remains indexed");
+    assert!(matches!(
+        crate::scripts::validate_scriptlet_capabilities(shell)[0].kind,
+        crate::scripts::ScriptValidationKind::CapabilityUnavailable {
+            code: crate::mcp_resources::SdkCapabilityDiagnosticCode::MissingSdkTransport,
+            ..
+        }
+    ));
+
+    let old = loaded
+        .iter()
+        .find(|entry| entry.name == "Existing Legacy Command")
+        .expect("old scriptlet remains indexed");
+    assert!(crate::scripts::validate_scriptlet_capabilities(old).is_empty());
+    drop(guard);
+}

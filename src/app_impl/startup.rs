@@ -180,7 +180,9 @@ impl ScriptListApp {
 
         let scripts: Vec<std::sync::Arc<scripts::Script>> =
             script_report.scripts.iter().cloned().collect();
-        let script_validation_report = Some(script_report.validation.clone());
+        let script_validation_report = Some(std::sync::Arc::new(
+            scripts::merge_scriptlet_validation_issues(&script_report.validation, &scriptlets),
+        ));
 
         // Theme cache was initialized earlier in app startup before window creation.
         // Reuse it here so ScriptListApp construction does not re-read theme files
@@ -648,6 +650,11 @@ impl ScriptListApp {
                 .unwrap_or_default();
             skills.into_iter().map(std::sync::Arc::new).collect()
         };
+        crate::ai::context_selector::publish_launcher_catalog(
+            &scripts,
+            &scriptlets,
+            &plugin_skills,
+        );
         crate::dictation::hydrate_dictation_resource_from_history();
         let window_search_test_provider =
             std::env::var_os("SCRIPT_KIT_WINDOW_SEARCH_TEST_PROVIDER").is_some();
@@ -2570,15 +2577,15 @@ impl ScriptListApp {
 
                                         if !source_filter_mode && (in_history || at_top_of_list) {
                                             if let Some(text) = this.input_history.navigate_up() {
-                                                let safe = logging::log_user_value(&text);
+                                                let safe = logging::log_private_user_value(&text);
                                                 tracing::info!(
                                                     target: "script_kit::input_history",
                                                     event = "history_recalled",
                                                     direction = "up",
                                                     filter_preview = %safe,
                                                     filter_bytes = safe.raw_bytes,
-                                                    filter_safe_bytes = safe.safe_bytes,
-                                                    filter_truncated = safe.truncated,
+                                                    filter_safe_bytes = safe.safe_bytes(),
+                                                    filter_truncated = false,
                                                     history_index = ?this.input_history.current_index(),
                                                 );
                                                 logging::log(

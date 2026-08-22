@@ -210,22 +210,65 @@ pub(crate) fn get_grouped_results_with_input_history_and_query(
 /// the list continues to point at the original results.
 ///
 /// Called from [`get_grouped_results_with_validation`] when validation has
-/// recorded one or more failed scripts and the surface should show the
-/// launcher "Script Issues" repair row.
+/// recorded excluded scripts, retained blocked scriptlets, or actionable
+/// warnings and the surface should show the launcher "Script Issues" row.
 pub(crate) fn prepend_script_issues_row(
     grouped: &mut Vec<GroupedListItem>,
     flat_results: &mut Vec<SearchResult>,
     validation: &ValidationReport,
 ) {
     let failed_count = validation.failed_scripts.len();
-    if failed_count == 0 {
+    if failed_count == 0 && validation.retained_issues.is_empty() && validation.warnings.is_empty()
+    {
         return;
     }
 
+    let affected_count = validation
+        .failed_scripts
+        .iter()
+        .map(|script| (&script.path, script.name.as_str()))
+        .chain(
+            validation
+                .retained_issues
+                .iter()
+                .map(|issue| (&issue.path, issue.script_name.as_str())),
+        )
+        .chain(
+            validation
+                .warnings
+                .iter()
+                .map(|issue| (&issue.path, issue.script_name.as_str())),
+        )
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let retained_count = validation
+        .retained_issues
+        .iter()
+        .map(|issue| (&issue.path, issue.script_name.as_str()))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     let fatal_count = validation.fatal_count;
     let warning_count = validation.warning_count;
 
-    let description = if fatal_count > 0 && warning_count > 0 {
+    let description = if retained_count > 0 {
+        Some(format!(
+            "{} excluded · {} retained · {} blocking issue{} · {} warning{}",
+            failed_count,
+            retained_count,
+            fatal_count,
+            if fatal_count == 1 { "" } else { "s" },
+            warning_count,
+            if warning_count == 1 { "" } else { "s" }
+        ))
+    } else if failed_count == 0 {
+        Some(format!(
+            "{} script{} flagged · {} warning{}",
+            affected_count,
+            if affected_count == 1 { "" } else { "s" },
+            warning_count,
+            if warning_count == 1 { "" } else { "s" }
+        ))
+    } else if fatal_count > 0 && warning_count > 0 {
         Some(format!(
             "{} failed · {} fatal · {} warning{}",
             failed_count,
@@ -250,7 +293,7 @@ pub(crate) fn prepend_script_issues_row(
     };
 
     let issue = ScriptIssueMatch {
-        title: format!("Script Issues ({failed_count})"),
+        title: format!("Script Issues ({affected_count})"),
         description,
         failed_count,
         fatal_count,
@@ -609,7 +652,11 @@ pub(crate) fn get_grouped_results_with_validation_and_query(
 
     if should_show {
         if let Some(report) = validation {
-            if !report.failed_scripts.is_empty() && !advanced_query_rejects_issue(advanced_query) {
+            if (!report.failed_scripts.is_empty()
+                || !report.retained_issues.is_empty()
+                || !report.warnings.is_empty())
+                && !advanced_query_rejects_issue(advanced_query)
+            {
                 prepend_script_issues_row(&mut grouped, &mut flat_results, report);
             }
         }
@@ -2558,6 +2605,87 @@ fn advanced_query_rejects_issue(
         .predicates
         .iter()
         .all(|p| crate::menu_syntax::matches_predicate(&synthetic, p))
+}
+
+#[cfg(test)]
+mod script_issue_catalog_tests {
+    use super::*;
+    use crate::mcp_resources::SdkCapabilityDiagnosticCode;
+    use crate::scripts::{
+        MetadataField, ScriptValidationIssue, ScriptValidationKind, ValidationSeverity,
+    };
+
+    fn capability_issue(severity: ValidationSeverity) -> ScriptValidationIssue {
+        ScriptValidationIssue {
+            severity,
+            path: "/tmp/scriptlet-authoring.md".into(),
+            script_name: "Repair Windows".to_string(),
+            field: Some(MetadataField::Capability),
+            message: "This capability is unavailable.".to_string(),
+            kind: ScriptValidationKind::CapabilityUnavailable {
+                capability: "moveWindow".to_string(),
+                code: if severity == ValidationSeverity::Fatal {
+                    SdkCapabilityDiagnosticCode::UnsupportedCapability
+                } else {
+                    SdkCapabilityDiagnosticCode::PermissionInventoryUnavailable
+                },
+                alternatives: Vec::new(),
+            },
+            related: Vec::new(),
+        }
+    }
+
+    fn report_for_retained(severity: ValidationSeverity) -> ValidationReport {
+        ValidationReport {
+            schema_version: crate::scripts::validation::VALIDATION_SCHEMA_VERSION,
+            total_candidates: 1,
+            valid_count: usize::from(severity == ValidationSeverity::Warning),
+            fatal_count: usize::from(severity == ValidationSeverity::Fatal),
+            warning_count: usize::from(severity == ValidationSeverity::Warning),
+            failed_scripts: Arc::from(Vec::new()),
+            warnings: Arc::from(Vec::new()),
+            retained_issues: Arc::from(vec![capability_issue(severity)]),
+        }
+    }
+
+    #[test]
+    fn retained_fatal_scriptlets_receive_repair_row_without_fake_exclusion() {
+        let mut grouped = Vec::new();
+        let mut results = Vec::new();
+        prepend_script_issues_row(
+            &mut grouped,
+            &mut results,
+            &report_for_retained(ValidationSeverity::Fatal),
+        );
+
+        let SearchResult::ScriptIssue(issue) = &results[0] else {
+            panic!("retained fatal command must expose the repair row");
+        };
+        assert_eq!(issue.title, "Script Issues (1)");
+        assert_eq!(issue.failed_count, 0);
+        assert_eq!(issue.fatal_count, 1);
+        assert!(issue.description.as_ref().unwrap().contains("1 retained"));
+        assert!(matches!(grouped[0], GroupedListItem::Item(0)));
+    }
+
+    #[test]
+    fn pending_permission_warning_alone_still_exposes_repair_row() {
+        let mut grouped = Vec::new();
+        let mut results = Vec::new();
+        prepend_script_issues_row(
+            &mut grouped,
+            &mut results,
+            &report_for_retained(ValidationSeverity::Warning),
+        );
+
+        let SearchResult::ScriptIssue(issue) = &results[0] else {
+            panic!("permission-pending command must expose the repair row");
+        };
+        assert_eq!(issue.failed_count, 0);
+        assert_eq!(issue.fatal_count, 0);
+        assert_eq!(issue.warning_count, 1);
+        assert!(issue.description.as_ref().unwrap().contains("1 warning"));
+    }
 }
 
 #[cfg(test)]

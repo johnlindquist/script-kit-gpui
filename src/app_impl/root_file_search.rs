@@ -193,7 +193,10 @@ impl ScriptListApp {
                 event = "root_file_provider_stale_drop",
                 generation,
                 active_generation = self.root_search.root_file_search_generation,
-                query = %self.root_search.root_file_search_query,
+                query_sha256 = %crate::logging::log_private_user_value(
+                    &self.root_search.root_file_search_query
+                ),
+                query_bytes = self.root_search.root_file_search_query.len(),
             );
             return;
         }
@@ -263,7 +266,10 @@ impl ScriptListApp {
                 event = "root_file_provider_stale_drop",
                 generation,
                 active_generation = self.root_search.root_file_search_generation,
-                query = %self.root_search.root_file_search_query,
+                query_sha256 = %crate::logging::log_private_user_value(
+                    &self.root_search.root_file_search_query
+                ),
+                query_bytes = self.root_search.root_file_search_query.len(),
             );
             return;
         }
@@ -573,12 +579,18 @@ impl ScriptListApp {
                         app.root_file_request_should_publish_now(generation, &request);
                     tracing::debug!(
                         event = "root_file_provider_done",
-                        query = %app.root_search.root_file_search_query,
+                        query_sha256 = %crate::logging::log_private_user_value(
+                            &app.root_search.root_file_search_query
+                        ),
+                        query_bytes = app.root_search.root_file_search_query.len(),
                         generation,
                         publish_active_results = publish_now,
                         requested_publish_at_start = publish_active_results,
                         result_count = batch.len(),
-                        cache_key = %request_cache_key,
+                        cache_key_sha256 = %crate::logging::log_private_user_value(
+                            &request_cache_key
+                        ),
+                        cache_key_bytes = request_cache_key.len(),
                         visible_frame_touched = publish_now,
                     );
                     if publish_now {

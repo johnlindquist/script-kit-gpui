@@ -15,6 +15,19 @@ const ROOT_BROWSER_TABS_FAILURE_BACKOFF_BASE: Duration = Duration::from_secs(15)
 const ROOT_BROWSER_TABS_FAILURE_BACKOFF_MAX: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BrowserQueryDiagnostic {
+    bytes: usize,
+    chars: usize,
+}
+
+fn browser_query_diagnostic(query: &str) -> BrowserQueryDiagnostic {
+    BrowserQueryDiagnostic {
+        bytes: query.len(),
+        chars: query.chars().count(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserFamily {
     Safari,
     Chromium,
@@ -139,8 +152,9 @@ pub(crate) fn query_is_bare_domain(query: &str) -> bool {
         return false;
     }
 
-    let tld = labels.last().expect("two or more labels");
-    tld.len() >= 2 && tld.bytes().all(|byte| byte.is_ascii_alphabetic())
+    labels
+        .last()
+        .is_some_and(|tld| tld.len() >= 2 && tld.bytes().all(|byte| byte.is_ascii_alphabetic()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,7 +312,7 @@ fn list_open_tabs_for_root_providers(
                 Err(error) => {
                     tracing::warn!(
                         browser = browser.app_name,
-                        error = %error,
+                        error_bytes = error.to_string().len(),
                         "check_browser_running_failed"
                     );
                     Err(anyhow!("{}: {error}", browser.app_name))
@@ -372,8 +386,14 @@ fn activate_tab_by_url(browser: &SupportedBrowser, url: &str) -> Result<()> {
 }
 
 pub fn fuzzy_search_browser_tabs(tabs: &[BrowserTabInfo], query: &str) -> Vec<BrowserTabMatch> {
-    let _span =
-        tracing::info_span!("fuzzy_search_browser_tabs", tab_count = tabs.len(), query).entered();
+    let query_diagnostic = browser_query_diagnostic(query);
+    let _span = tracing::info_span!(
+        "fuzzy_search_browser_tabs",
+        tab_count = tabs.len(),
+        query_bytes = query_diagnostic.bytes,
+        query_chars = query_diagnostic.chars,
+    )
+    .entered();
 
     if query.trim().is_empty() {
         return tabs
@@ -511,9 +531,8 @@ pub(crate) fn search_root_browser_tabs_meta_direct(
     query: &str,
     options: RootBrowserTabsSectionOptions,
 ) -> Vec<RootBrowserTabSearchHit> {
-    // When explicitly typing "tabs:", we want it to be fresh, but not blocking.
-    // We use a short TTL (5s) for direct mode to avoid re-fetching on every keystroke
-    // while still ensuring it's relatively recent.
+    // Preserve explicit-mode permissive matching, but never begin a detached
+    // refresh here: only the app owner can bind completion to its live query.
     search_root_browser_tabs_internal(query, options, RootBrowserTabsLookupMode::RefreshThenCached)
 }
 
@@ -539,9 +558,11 @@ fn search_root_browser_tabs_internal(
     options: RootBrowserTabsSectionOptions,
     mode: RootBrowserTabsLookupMode,
 ) -> Vec<RootBrowserTabSearchHit> {
+    let query_diagnostic = browser_query_diagnostic(query);
     let _span = tracing::info_span!(
         "search_root_browser_tabs_internal",
-        query,
+        query_bytes = query_diagnostic.bytes,
+        query_chars = query_diagnostic.chars,
         mode = ?mode,
         cache_ttl_ms = options.cache_ttl_ms
     )
@@ -549,16 +570,6 @@ fn search_root_browser_tabs_internal(
 
     if !root_browser_tabs_query_is_eligible(query, options.clone()) {
         return Vec::new();
-    }
-
-    if matches!(mode, RootBrowserTabsLookupMode::RefreshThenCached) {
-        // Keep explicit `tabs:` refreshes relatively fresh without putting the
-        // implicit root typing path on any provider or refresh setup work.
-        ensure_root_browser_tabs_refresh(
-            5000,
-            "root_search_query_direct",
-            options.providers.clone(),
-        );
     }
 
     let tabs = cached_root_browser_tabs_snapshot(options.cache_ttl_ms);
@@ -702,6 +713,30 @@ pub(crate) fn refresh_root_browser_tabs_snapshot(
     list_open_tabs_for_root_providers(&providers)
 }
 
+fn discard_root_browser_tabs_refresh_from_state(
+    cache: &mut RootBrowserTabSnapshotState,
+    generation: u64,
+) -> bool {
+    if cache.generation != generation || !cache.refresh_in_flight {
+        return false;
+    }
+
+    cache.refresh_in_flight = false;
+    cache.generation = cache.generation.wrapping_add(1);
+    // This attempt belonged to the canceled query, not the next one. Keep a
+    // genuine failure backoff, but do not impose its five-second start throttle.
+    cache.last_attempt_at = None;
+    true
+}
+
+#[allow(dead_code)]
+pub(crate) fn discard_root_browser_tabs_refresh(refresh: RootBrowserTabsRefresh) -> bool {
+    let Ok(mut cache) = ROOT_BROWSER_TAB_SNAPSHOT.lock() else {
+        return false;
+    };
+    discard_root_browser_tabs_refresh_from_state(&mut cache, refresh.generation)
+}
+
 #[allow(dead_code)]
 pub(crate) fn finish_root_browser_tabs_refresh(
     refresh: RootBrowserTabsRefresh,
@@ -753,7 +788,7 @@ pub(crate) fn finish_root_browser_tabs_refresh(
                 elapsed_ms,
                 failure_count = cache.failure_count,
                 backoff_ms = backoff.as_millis() as u64,
-                error = %error,
+                error_bytes = error.to_string().len(),
                 "root_passive_snapshot_refresh_failed"
             );
         }
@@ -796,10 +831,12 @@ fn root_fuzzy_search_browser_tabs(
     search_urls: bool,
     mode: RootBrowserTabsFuzzyMode,
 ) -> Vec<BrowserTabMatch> {
+    let query_diagnostic = browser_query_diagnostic(query);
     let _span = tracing::info_span!(
         "root_fuzzy_search_browser_tabs",
         tab_count = tabs.len(),
-        query,
+        query_bytes = query_diagnostic.bytes,
+        query_chars = query_diagnostic.chars,
         search_urls,
         mode = ?mode
     )
@@ -1247,6 +1284,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn browser_query_diagnostics_retain_only_sizes_not_private_query_text() {
+        let private_query = "private-browser-query-canary-🔒";
+        let diagnostic = browser_query_diagnostic(private_query);
+
+        assert_eq!(diagnostic.bytes, private_query.len());
+        assert_eq!(diagnostic.chars, private_query.chars().count());
+        assert_ne!(diagnostic.bytes, diagnostic.chars);
+        assert!(!format!("{diagnostic:?}").contains("private-browser-query-canary"));
+    }
+
+    #[test]
     fn bare_domain_query_recognizes_hostname_intent() {
         for query in [
             "x.com",
@@ -1395,6 +1443,128 @@ mod tests {
     fn missing_root_browser_tab_snapshot_returns_empty_rows() {
         reset_root_browser_tabs_snapshot_for_test();
         assert!(cached_root_browser_tabs_snapshot(1).is_empty());
+    }
+
+    #[test]
+    fn direct_browser_tabs_lookup_is_snapshot_only_and_keeps_permissive_matching() {
+        reset_root_browser_tabs_snapshot_for_test();
+        let previous_rows = Arc::new(vec![BrowserTabInfo {
+            browser_name: "Google Chrome".into(),
+            browser_bundle_id: "com.google.Chrome".into(),
+            window_index: 1,
+            tab_index: 1,
+            title: "Delta".into(),
+            url: "https://delta.example.com/wxxxxhxxxxaxxxxtxxxxixxxsxxxxtxxxhxxxixxxsxxxxaxxxxnxxxxyxxxxwxxxxaxxxxy".into(),
+        }]);
+        {
+            let mut cache = ROOT_BROWSER_TAB_SNAPSHOT
+                .lock()
+                .expect("browser tabs cache");
+            *cache = RootBrowserTabSnapshotState {
+                snapshot: Some(RootBrowserTabSnapshot {
+                    captured_at: Instant::now() - Duration::from_secs(7),
+                    tabs: Arc::clone(&previous_rows),
+                }),
+                generation: 41,
+                ..RootBrowserTabSnapshotState::default()
+            };
+        }
+
+        let before = root_browser_tabs_snapshot_status();
+        let options = RootBrowserTabsSectionOptions {
+            enabled: true,
+            min_query_chars: 0,
+            cache_ttl_ms: 10_000,
+            ..RootBrowserTabsSectionOptions::default()
+        };
+        let hits = search_root_browser_tabs_meta_direct("What is this anyway", options);
+        let after = root_browser_tabs_snapshot_status();
+
+        assert_eq!(
+            hits.len(),
+            1,
+            "explicit lookup must retain permissive matching"
+        );
+        assert_eq!(
+            before, after,
+            "direct lookup cannot own a refresh generation"
+        );
+        assert!(!after.refreshing);
+        {
+            let cache = ROOT_BROWSER_TAB_SNAPSHOT
+                .lock()
+                .expect("browser tabs cache");
+            assert!(Arc::ptr_eq(
+                &cache.snapshot.as_ref().expect("snapshot preserved").tabs,
+                &previous_rows
+            ));
+        }
+        reset_root_browser_tabs_snapshot_for_test();
+    }
+
+    #[test]
+    fn cold_direct_browser_tabs_lookup_cannot_start_an_unowned_refresh() {
+        reset_root_browser_tabs_snapshot_for_test();
+        let before = root_browser_tabs_snapshot_status();
+        let options = RootBrowserTabsSectionOptions {
+            enabled: true,
+            min_query_chars: 0,
+            ..RootBrowserTabsSectionOptions::default()
+        };
+
+        assert!(search_root_browser_tabs_meta_direct("private query", options).is_empty());
+        assert_eq!(root_browser_tabs_snapshot_status(), before);
+        assert!(!root_browser_tabs_snapshot_status().refreshing);
+    }
+
+    #[test]
+    fn canceled_browser_tabs_generation_preserves_snapshot_and_rearms_current_query() {
+        let previous_rows = Arc::new(Vec::new());
+        let backoff_until = Instant::now() + Duration::from_secs(10);
+        let mut cache = RootBrowserTabSnapshotState {
+            snapshot: Some(RootBrowserTabSnapshot {
+                captured_at: Instant::now(),
+                tabs: Arc::clone(&previous_rows),
+            }),
+            refresh_in_flight: true,
+            generation: 7,
+            last_refresh_error: Some("previous failure".to_owned()),
+            last_attempt_at: Some(Instant::now()),
+            next_refresh_after: Some(backoff_until),
+            failure_count: 2,
+            ..RootBrowserTabSnapshotState::default()
+        };
+
+        assert!(discard_root_browser_tabs_refresh_from_state(&mut cache, 7));
+        assert!(!cache.refresh_in_flight);
+        assert_eq!(cache.generation, 8);
+        assert!(cache.last_attempt_at.is_none());
+        assert_eq!(cache.next_refresh_after, Some(backoff_until));
+        assert_eq!(
+            cache.last_refresh_error.as_deref(),
+            Some("previous failure")
+        );
+        assert_eq!(cache.failure_count, 2);
+        assert!(Arc::ptr_eq(
+            &cache.snapshot.as_ref().expect("preserved snapshot").tabs,
+            &previous_rows
+        ));
+    }
+
+    #[test]
+    fn older_browser_tabs_completion_cannot_cancel_newer_in_flight_generation() {
+        let attempted_at = Instant::now();
+        let mut cache = RootBrowserTabSnapshotState {
+            refresh_in_flight: true,
+            generation: 9,
+            last_attempt_at: Some(attempted_at),
+            ..RootBrowserTabSnapshotState::default()
+        };
+
+        assert!(!discard_root_browser_tabs_refresh_from_state(&mut cache, 7));
+        assert!(cache.refresh_in_flight);
+        assert_eq!(cache.generation, 9);
+        assert_eq!(cache.last_attempt_at, Some(attempted_at));
     }
 
     #[test]

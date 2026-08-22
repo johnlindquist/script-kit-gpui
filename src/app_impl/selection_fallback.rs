@@ -56,8 +56,9 @@ impl ScriptListApp {
                     .find(|e| e.id == *command_id)
                 {
                     tracing::info!(
-                        alias = %alias,
-                        command_id = %command_id,
+                        alias_sha256 = %crate::logging::log_private_user_value(alias),
+                        alias_bytes = alias.len(),
+                        command_id_sha256 = %crate::logging::log_private_user_value(command_id),
                         "alias_builtin_match_resolved"
                     );
                     return Some(AliasMatch::BuiltIn(std::sync::Arc::new(entry)));
@@ -73,50 +74,44 @@ impl ScriptListApp {
                 {
                     logging::log(
                         "ALIAS",
-                        &format!("Found app match: '{}' -> '{}'", alias, app.name),
+                        &format!(
+                            "Found app match: alias={} app={}",
+                            crate::logging::log_private_user_value(alias),
+                            crate::logging::log_private_user_value(&app.name),
+                        ),
                     );
                     return Some(AliasMatch::App(std::sync::Arc::new(app.clone())));
                 }
             }
 
-            // Handle plugin-qualified script command IDs: "script/{plugin_id}:{name}"
+            // Resolve exact source-owned aliases and historical plugin/name IDs.
             if let Some(identifier) = command_id.strip_prefix("script/") {
-                let found = if let Some((plugin_id, name)) = identifier.split_once(':') {
-                    self.scripts.iter().find(|s| {
-                        s.name == name
-                            && (s.plugin_id == plugin_id
-                                || (s.plugin_id.is_empty()
-                                    && s.kit_name.as_deref() == Some(plugin_id)))
-                    })
-                } else {
-                    self.scripts.iter().find(|s| s.name == identifier)
-                };
+                let found = self
+                    .scripts
+                    .iter()
+                    .find(|script| script.matches_launcher_command_identifier(identifier));
                 if let Some(script) = found {
                     tracing::info!(
-                        alias = %alias,
-                        command_id = %command_id,
+                        alias_sha256 = %crate::logging::log_private_user_value(alias),
+                        alias_bytes = alias.len(),
+                        command_id_sha256 = %crate::logging::log_private_user_value(command_id),
                         "alias_script_match_resolved"
                     );
                     return Some(AliasMatch::Script(script.clone()));
                 }
             }
 
-            // Handle plugin-qualified scriptlet command IDs: "scriptlet/{plugin_id}:{name}"
+            // Scriptlet source/anchor digests coexist with their legacy aliases.
             if let Some(identifier) = command_id.strip_prefix("scriptlet/") {
-                let found = if let Some((plugin_id, name)) = identifier.split_once(':') {
-                    self.scriptlets.iter().find(|s| {
-                        s.name == name
-                            && (s.plugin_id == plugin_id
-                                || (s.plugin_id.is_empty()
-                                    && s.group.as_deref() == Some(plugin_id)))
-                    })
-                } else {
-                    self.scriptlets.iter().find(|s| s.name == identifier)
-                };
+                let found = self
+                    .scriptlets
+                    .iter()
+                    .find(|scriptlet| scriptlet.matches_launcher_command_identifier(identifier));
                 if let Some(scriptlet) = found {
                     tracing::info!(
-                        alias = %alias,
-                        command_id = %command_id,
+                        alias_sha256 = %crate::logging::log_private_user_value(alias),
+                        alias_bytes = alias.len(),
+                        command_id_sha256 = %crate::logging::log_private_user_value(command_id),
                         "alias_scriptlet_match_resolved"
                     );
                     return Some(AliasMatch::Scriptlet(scriptlet.clone()));
@@ -128,7 +123,11 @@ impl ScriptListApp {
                 if script.path.to_string_lossy() == *command_id {
                     logging::log(
                         "ALIAS",
-                        &format!("Found script match: '{}' -> '{}'", alias, script.name),
+                        &format!(
+                            "Found script match: alias={} script={}",
+                            crate::logging::log_private_user_value(alias),
+                            crate::logging::log_private_user_value(&script.name),
+                        ),
                     );
                     return Some(AliasMatch::Script(script.clone()));
                 }
@@ -140,7 +139,11 @@ impl ScriptListApp {
                 if scriptlet_path == command_id {
                     logging::log(
                         "ALIAS",
-                        &format!("Found scriptlet match: '{}' -> '{}'", alias, scriptlet.name),
+                        &format!(
+                            "Found scriptlet match: alias={} scriptlet={}",
+                            crate::logging::log_private_user_value(alias),
+                            crate::logging::log_private_user_value(&scriptlet.name),
+                        ),
                     );
                     return Some(AliasMatch::Scriptlet(scriptlet.clone()));
                 }
@@ -150,8 +153,9 @@ impl ScriptListApp {
             logging::log(
                 "ALIAS",
                 &format!(
-                    "Stale registry entry: '{}' -> '{}' (not found)",
-                    alias, command_id
+                    "Stale registry entry: alias={} command_id={} (not found)",
+                    crate::logging::log_private_user_value(alias),
+                    crate::logging::log_private_user_value(command_id),
                 ),
             );
         }
@@ -164,9 +168,15 @@ impl ScriptListApp {
         tracing::info!(
             event = "script_list_submit_blocked",
             route,
-            filter_text = %value,
-            computed_filter_text = %self.computed_filter_text,
-            grouped_cache_key = %self.main_menu_result_caches.grouped_cache_key(),
+            filter_sha256 = %crate::logging::log_private_user_value(&value),
+            filter_bytes = value.len(),
+            computed_filter_sha256 = %crate::logging::log_private_user_value(
+                &self.computed_filter_text
+            ),
+            computed_filter_bytes = self.computed_filter_text.len(),
+            grouped_cache_key_sha256 = %crate::logging::log_private_user_value(
+                self.main_menu_result_caches.grouped_cache_key()
+            ),
             selected_index = self.selected_index,
         );
         self.record_submit_diagnostic("launcher", route, None, Some(value.as_str()), true);
@@ -322,6 +332,19 @@ impl ScriptListApp {
             let selected_result = self
                 .main_menu_result_caches
                 .cloned_search_result_for_flat_index(idx);
+            if let Some(result) = selected_result.as_ref() {
+                if let Err(reason) = result.authorize_launcher_submit() {
+                    tracing::warn!(
+                        target: "script_kit::execution",
+                        source = ?result.command_source(),
+                        reason,
+                        "launcher_command_refused_before_frecency_or_execution"
+                    );
+                    self.show_hud(reason.to_string(), Some(HUD_MEDIUM_MS), cx);
+                    return;
+                }
+            }
+
             if let Some(query) = history_query.as_deref() {
                 self.input_history.add_entry_with_selection(
                     query,
@@ -330,7 +353,10 @@ impl ScriptListApp {
                         .and_then(|result| result.history_result_key()),
                 );
                 if let Err(e) = self.input_history.save() {
-                    tracing::warn!("Failed to save input history: {}", e);
+                    tracing::warn!(
+                        error_sha256 = %crate::logging::log_private_user_value(&e.to_string()),
+                        "Failed to save input history"
+                    );
                 }
                 self.invalidate_grouped_cache();
             }
@@ -363,12 +389,18 @@ impl ScriptListApp {
                 tracing::info!(
                     target: "script_kit::submit",
                     event = "launcher_execute_selected_resolved",
-                    filter_text = %self.filter_text,
-                    computed_filter_text = %self.computed_filter_text,
+                    filter_sha256 = %crate::logging::log_private_user_value(&self.filter_text),
+                    filter_bytes = self.filter_text.len(),
+                    computed_filter_sha256 = %crate::logging::log_private_user_value(
+                        &self.computed_filter_text
+                    ),
+                    computed_filter_bytes = self.computed_filter_text.len(),
                     selected_index = self.selected_index,
                     flat_result_index = idx,
-                    submitted_value = %submitted_value,
-                    result_name = %result.name(),
+                    submitted_value_sha256 = %crate::logging::log_private_user_value(
+                        &submitted_value
+                    ),
+                    result_name_sha256 = %crate::logging::log_private_user_value(result.name()),
                     result_type = %result.type_label(),
                     "launcher execute_selected resolved visible row"
                 );
@@ -407,7 +439,9 @@ impl ScriptListApp {
                     )),
                     // Same frecency key as history_result_key so ranking and
                     // input-history preference agree on the flow identity.
-                    scripts::SearchResult::Flow(fm) => fm.flow.as_ref().map(|flow| format!("flow:{}", flow.id)),
+                    scripts::SearchResult::Flow(fm) => {
+                        fm.flow.as_ref().map(|flow| format!("flow:{}", flow.id))
+                    }
                     scripts::SearchResult::Window(wm) => {
                         Some(format!("window:{}:{}", wm.window.app, wm.window.title))
                     }
@@ -444,9 +478,9 @@ impl ScriptListApp {
                 logging::log(
                     "EXEC",
                     &format!(
-                        "Action: '{}' on '{}' (type: {})",
+                        "Action: '{}' on {} (type: {})",
                         action_text,
-                        result.name(),
+                        crate::logging::log_private_user_value(result.name()),
                         result.type_label()
                     ),
                 );
@@ -503,8 +537,13 @@ impl ScriptListApp {
                             tracing::info!(
                                 target: "script_kit::menu_syntax",
                                 event = "script_list_pivot_to_power_syntax_composer",
-                                script = %script_match.script.name,
-                                pivot_filter = %new_filter,
+                                script_sha256 = %crate::logging::log_private_user_value(
+                                    &script_match.script.name
+                                ),
+                                pivot_filter_sha256 = %crate::logging::log_private_user_value(
+                                    &new_filter
+                                ),
+                                pivot_filter_bytes = new_filter.len(),
                                 "Pivoting main-list capture-handler launch into ;target composer"
                             );
                             self.filter_text = new_filter.clone();
@@ -525,8 +564,13 @@ impl ScriptListApp {
                             tracing::info!(
                                 target: "script_kit::menu_syntax",
                                 event = "script_list_pivot_to_command_composer",
-                                script = %script_match.script.name,
-                                pivot_filter = %new_filter,
+                                script_sha256 = %crate::logging::log_private_user_value(
+                                    &script_match.script.name
+                                ),
+                                pivot_filter_sha256 = %crate::logging::log_private_user_value(
+                                    &new_filter
+                                ),
+                                pivot_filter_bytes = new_filter.len(),
                                 "Pivoting main-list command-handler launch into !head composer"
                             );
                             self.filter_text = new_filter.clone();
@@ -634,7 +678,9 @@ impl ScriptListApp {
                             event = "agent_chat_skill_launch_requested",
                             plugin_id = %skill_match.skill.plugin_id,
                             skill_id = %skill_match.skill.skill_id,
-                            path = %skill_match.skill.path.display(),
+                            path_sha256 = %crate::logging::log_private_user_value(
+                                &skill_match.skill.path.to_string_lossy()
+                            ),
                             owner,
                             "Skill selected from main menu"
                         );
@@ -658,8 +704,12 @@ impl ScriptListApp {
                         // Agent Chat agent catalog/provider selection remains in src/ai/agent_chat/ui/.
                         tracing::info!(
                             event = "legacy_agent_result_suppressed",
-                            agent_name = %agent_match.agent.name,
-                            agent_path = %agent_match.agent.path.display(),
+                            agent_name_sha256 = %crate::logging::log_private_user_value(
+                                &agent_match.agent.name
+                            ),
+                            agent_path_sha256 = %crate::logging::log_private_user_value(
+                                &agent_match.agent.path.to_string_lossy()
+                            ),
                             "Agent execution suppressed in main menu - use skills or Agent Chat"
                         );
                     }
@@ -974,8 +1024,9 @@ impl ScriptListApp {
         }
         if let Err(error) = self.frecency_store.save() {
             tracing::warn!(
-                path = %file.path,
-                error = %error,
+                path_sha256 = %crate::logging::log_private_user_value(&file.path),
+                path_bytes = file.path.len(),
+                error_sha256 = %crate::logging::log_private_user_value(&error.to_string()),
                 "Failed to save root file frecency after open"
             );
         }
@@ -999,7 +1050,11 @@ impl ScriptListApp {
         if let Err(error) = crate::file_search::open_file(&file.path) {
             logging::log(
                 "ROOT_FILE_SEARCH",
-                &format!("failed_to_open path={} error={}", file.path, error),
+                &format!(
+                    "failed_to_open path={} error={}",
+                    crate::logging::log_private_user_value(&file.path),
+                    crate::logging::log_private_user_value(&error.to_string()),
+                ),
             );
             self.show_hud(
                 format!("Failed to open {}", file.name),
@@ -1099,7 +1154,13 @@ impl ScriptListApp {
     pub(crate) fn execute_root_browser_history_open(&mut self, url: &str, cx: &mut Context<Self>) {
         match crate::browser_history::open_browser_history_url(url) {
             Ok(()) => {
-                logging::log("EXEC", &format!("Opened root browser history URL: {url}"));
+                logging::log(
+                    "EXEC",
+                    &format!(
+                        "Opened root browser history URL: {}",
+                        crate::logging::log_private_user_value(url)
+                    ),
+                );
                 self.hide_main_and_reset(cx);
             }
             Err(error) => {
@@ -1123,7 +1184,13 @@ impl ScriptListApp {
     ) {
         match crate::browser_tabs::focus_root_browser_tab(hit) {
             Ok(()) => {
-                logging::log("EXEC", &format!("Focused root browser tab: {}", hit.title));
+                logging::log(
+                    "EXEC",
+                    &format!(
+                        "Focused root browser tab: {}",
+                        crate::logging::log_private_user_value(&hit.title)
+                    ),
+                );
                 self.hide_main_and_reset(cx);
             }
             Err(error) => {
@@ -1217,7 +1284,11 @@ impl ScriptListApp {
                 if let Err(error) = crate::file_search::reveal_in_finder(&file.path) {
                     logging::log(
                         "ROOT_FILE_SEARCH",
-                        &format!("failed_to_reveal path={} error={}", file.path, error),
+                        &format!(
+                            "failed_to_reveal path={} error={}",
+                            crate::logging::log_private_user_value(&file.path),
+                            crate::logging::log_private_user_value(&error.to_string()),
+                        ),
                     );
                     self.show_hud(
                         format!("Failed to reveal {}", file.name),
@@ -1256,7 +1327,11 @@ impl ScriptListApp {
                     Err(error) => {
                         logging::log(
                             "ROOT_FILE_SEARCH",
-                            &format!("failed_to_quick_look path={} error={}", file.path, error),
+                            &format!(
+                                "failed_to_quick_look path={} error={}",
+                                crate::logging::log_private_user_value(&file.path),
+                                crate::logging::log_private_user_value(&error.to_string()),
+                            ),
                         );
                         self.show_hud(
                             format!("Failed to preview {}: {}", file.name, error),
@@ -1343,9 +1418,10 @@ impl ScriptListApp {
         logging::log(
             "EXEC",
             &format!(
-                "Executing fallback item: {} with input: '{}'",
+                "Executing fallback item: {} with input: {} bytes={}",
                 fallback.display_name(),
-                input
+                crate::logging::log_private_user_value(&input),
+                input.len(),
             ),
         );
 
@@ -1417,7 +1493,12 @@ impl ScriptListApp {
 
         logging::log(
             "FALLBACK",
-            &format!("Executing fallback '{}' with input: {}", fallback_id, input),
+            &format!(
+                "Executing fallback '{}' with input: {} bytes={}",
+                fallback_id,
+                crate::logging::log_private_user_value(input),
+                input.len(),
+            ),
         );
 
         // Find the fallback by ID
@@ -1433,12 +1514,26 @@ impl ScriptListApp {
         match fallback.execute(input) {
             Ok(result) => match result {
                 FallbackResult::RunTerminal { command } => {
-                    logging::log("FALLBACK", &format!("RunTerminal: {}", command));
+                    logging::log(
+                        "FALLBACK",
+                        &format!(
+                            "RunTerminal: {} bytes={}",
+                            crate::logging::log_private_user_value(&command),
+                            command.len(),
+                        ),
+                    );
                     // Open the built-in terminal with the command
                     self.open_terminal_with_command(command, cx);
                 }
                 FallbackResult::AddNote { content } => {
-                    logging::log("FALLBACK", &format!("AddNote: {}", content));
+                    logging::log(
+                        "FALLBACK",
+                        &format!(
+                            "AddNote: {} bytes={}",
+                            crate::logging::log_private_user_value(&content),
+                            content.len(),
+                        ),
+                    );
                     let item = gpui::ClipboardItem::new_string(content);
                     cx.write_to_clipboard(item);
                     if let Err(e) = crate::notes::open_notes_window(cx) {
@@ -1456,12 +1551,22 @@ impl ScriptListApp {
                     );
                 }
                 FallbackResult::OpenUrl { url } => {
-                    logging::log("FALLBACK", &format!("OpenUrl: {}", url));
+                    logging::log(
+                        "FALLBACK",
+                        &format!("OpenUrl: {}", crate::logging::log_private_user_value(&url)),
+                    );
                     let _ = open::that(&url);
                 }
                 FallbackResult::Calculate { expression } => {
                     // Evaluate the expression using meval
-                    logging::log("FALLBACK", &format!("Calculate: {}", expression));
+                    logging::log(
+                        "FALLBACK",
+                        &format!(
+                            "Calculate: {} bytes={}",
+                            crate::logging::log_private_user_value(&expression),
+                            expression.len(),
+                        ),
+                    );
                     match meval::eval_str(&expression) {
                         Ok(result) => {
                             let item = gpui::ClipboardItem::new_string(result.to_string());
@@ -1480,7 +1585,13 @@ impl ScriptListApp {
                     }
                 }
                 FallbackResult::OpenFile { path } => {
-                    logging::log("FALLBACK", &format!("OpenFile: {}", path));
+                    logging::log(
+                        "FALLBACK",
+                        &format!(
+                            "OpenFile: {}",
+                            crate::logging::log_private_user_value(&path)
+                        ),
+                    );
                     let expanded = if path.starts_with("~") {
                         if let Some(home) = dirs::home_dir() {
                             path.replacen("~", &home.to_string_lossy(), 1)
@@ -1493,7 +1604,14 @@ impl ScriptListApp {
                     let _ = open::that(&expanded);
                 }
                 FallbackResult::SearchFiles { query } => {
-                    logging::log("FALLBACK", &format!("SearchFiles: {}", query));
+                    logging::log(
+                        "FALLBACK",
+                        &format!(
+                            "SearchFiles: {} bytes={}",
+                            crate::logging::log_private_user_value(&query),
+                            query.len(),
+                        ),
+                    );
                     self.open_file_search(query, cx);
                 }
                 FallbackResult::ExecuteBuiltin { builtin_id } => {
@@ -1526,7 +1644,14 @@ impl ScriptListApp {
                     self.execute_builtin_with_query(&entry, Some(input), cx);
                 }
                 FallbackResult::SendToAiHarness { query } => {
-                    logging::log("FALLBACK", &format!("SendToAiHarness: {}", query));
+                    logging::log(
+                        "FALLBACK",
+                        &format!(
+                            "SendToAiHarness: {} bytes={}",
+                            crate::logging::log_private_user_value(&query),
+                            query.len(),
+                        ),
+                    );
                     let normalized = query.trim().to_string();
                     let intent = if normalized.is_empty() {
                         None

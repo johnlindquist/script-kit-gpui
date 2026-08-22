@@ -1,4 +1,7 @@
 use super::*;
+use crate::scripts::root_search_contract::{
+    RootLocalContentOptions, RootLocalContentProvider, RootPrivateHistoryProvider,
+};
 
 const INLINE_CALCULATOR_SECTION_LABEL: &str = "Calculator";
 const INLINE_CALCULATOR_RESULT_INDEX: usize = usize::MAX;
@@ -311,6 +314,9 @@ impl ScriptListApp {
         let Some((options, explicit_tabs)) =
             self.root_browser_tabs_refresh_options_for_query(query_text)
         else {
+            self.root_search.invalidate_provider_request(
+                sk_protocol::command_contract::CommandSource::BrowserTab,
+            );
             return;
         };
 
@@ -337,6 +343,11 @@ impl ScriptListApp {
             return;
         };
 
+        let provider_request = self.root_search.begin_provider_request(
+            sk_protocol::command_contract::CommandSource::BrowserTab,
+            query_text,
+        );
+
         self.invalidate_root_passive_and_grouped_cache();
         cx.notify();
 
@@ -349,6 +360,23 @@ impl ScriptListApp {
                     .await;
 
             let _ = this.update(cx, |app, cx| {
+                if !app
+                    .root_search
+                    .accepts_provider_request(&provider_request, &app.computed_filter_text)
+                {
+                    let canceled = crate::browser_tabs::discard_root_browser_tabs_refresh(refresh);
+                    tracing::debug!(
+                        target: "script_kit::search",
+                        source = "browser-tabs",
+                        generation = provider_request.generation,
+                        "Dropped stale provider completion before snapshot or favicon publication"
+                    );
+                    if canceled {
+                        let query_text = app.computed_filter_text.clone();
+                        app.maybe_start_root_browser_tabs_refresh_for_query(&query_text, cx);
+                    }
+                    return;
+                }
                 let changed =
                     crate::browser_tabs::finish_root_browser_tabs_refresh(refresh, result);
                 if !changed {
@@ -390,8 +418,10 @@ impl ScriptListApp {
             .map(|query| query.source_filters.clone())
             .unwrap_or_default();
         let explicit_history = source_filters.includes(source) && source_filters.allows(source);
+        let rich_history =
+            source_filters.allows(source) && active_rich_browser_history_subsearch(query_text);
 
-        if explicit_history {
+        if explicit_history || rich_history {
             options.enabled = true;
             options.min_query_chars = 0;
             options.max_age_days = 365;
@@ -439,6 +469,9 @@ impl ScriptListApp {
         let Some((options, explicit_history)) =
             self.root_browser_history_refresh_options_for_query(query_text)
         else {
+            self.root_search.invalidate_provider_request(
+                sk_protocol::command_contract::CommandSource::BrowserHistory,
+            );
             return;
         };
 
@@ -461,6 +494,11 @@ impl ScriptListApp {
         let Some(refresh) = refresh else {
             return;
         };
+
+        let provider_request = self.root_search.begin_provider_request(
+            sk_protocol::command_contract::CommandSource::BrowserHistory,
+            query_text,
+        );
 
         self.invalidate_root_passive_and_grouped_cache();
         cx.notify();
@@ -491,6 +529,24 @@ impl ScriptListApp {
             };
 
             let _ = this.update(cx, |app, cx| {
+                if !app
+                    .root_search
+                    .accepts_provider_request(&provider_request, &app.computed_filter_text)
+                {
+                    let canceled =
+                        crate::browser_history::discard_root_browser_history_refresh(refresh);
+                    tracing::debug!(
+                        target: "script_kit::search",
+                        source = "browser-history",
+                        generation = provider_request.generation,
+                        "Dropped stale provider completion before snapshot or favicon publication"
+                    );
+                    if canceled {
+                        let query_text = app.computed_filter_text.clone();
+                        app.maybe_start_root_browser_history_refresh_for_query(&query_text, cx);
+                    }
+                    return;
+                }
                 let changed =
                     crate::browser_history::finish_root_browser_history_refresh(refresh, result);
                 if !changed {
@@ -513,6 +569,465 @@ impl ScriptListApp {
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    fn root_local_content_refresh_options_for_query(
+        &self,
+        provider: RootLocalContentProvider,
+        query_text: &str,
+    ) -> Option<(String, RootLocalContentOptions)> {
+        let unified_search = self.config.get_unified_search();
+        let advanced_query = self.menu_syntax_mode.advanced_query_for(query_text);
+        let source_filters = advanced_query
+            .map(|query| query.source_filters.clone())
+            .unwrap_or_default();
+        let source = provider.source_filter();
+        if !source_filters.allows(source) {
+            return None;
+        }
+        let explicit = source_filters.includes(source);
+        if advanced_query.is_some_and(|query| query.has_predicates())
+            && (!explicit || matches!(provider, RootLocalContentProvider::Notes))
+        {
+            return None;
+        }
+        if !explicit
+            && (self.menu_syntax_object_selector_state.owns_main_list()
+                || self.menu_syntax_trigger_picker_state.owns_main_list()
+                || self
+                    .menu_syntax_mode
+                    .capture_composer_owns_input_for(query_text)
+                || self.menu_syntax_mode.command_owns_input_for(query_text))
+        {
+            return None;
+        }
+
+        let search_text =
+            crate::menu_syntax::free_text_for_search(&self.menu_syntax_mode, query_text);
+        let needle = root_passive_search_needle(search_text).to_owned();
+        match provider {
+            RootLocalContentProvider::Notes => {
+                let mut options = unified_search.notes_section_options();
+                if explicit {
+                    options.enabled = true;
+                    options.min_query_chars = 0;
+                    options.max_results = options
+                        .max_results
+                        .max(unified_search.passive_result_limits().max_total_results);
+                }
+                crate::notes::root_notes_query_is_eligible(&needle, options)
+                    .then_some((needle, RootLocalContentOptions::Notes(options)))
+            }
+            RootLocalContentProvider::Todos => {
+                let mut options = unified_search.todo_section_options();
+                if explicit {
+                    options.enabled = true;
+                    options.min_query_chars = 0;
+                    options.max_results = options
+                        .max_results
+                        .max(unified_search.passive_result_limits().max_total_results);
+                }
+                crate::menu_syntax::root_todo_query_is_eligible(&needle, options)
+                    .then_some((needle, RootLocalContentOptions::Todos(options)))
+            }
+        }
+    }
+
+    fn maybe_start_root_local_content_refresh_for_query(
+        &mut self,
+        provider: RootLocalContentProvider,
+        query_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((needle, options)) =
+            self.root_local_content_refresh_options_for_query(provider, query_text)
+        else {
+            self.root_search
+                .invalidate_provider_request(provider.source());
+            return;
+        };
+        if provider.cache_is_fresh(&needle, options) {
+            return;
+        }
+
+        let provider_request = self
+            .root_search
+            .begin_provider_request(provider.source(), query_text);
+        let Some(refresh) = provider.begin(&needle, options) else {
+            return;
+        };
+
+        self.invalidate_root_passive_and_grouped_cache();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let worker_refresh = refresh.clone();
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { provider.read_snapshot(&worker_refresh) })
+                .await;
+
+            let updated = this.update(cx, |app, cx| {
+                if !app
+                    .root_search
+                    .accepts_provider_request(&provider_request, &app.computed_filter_text)
+                {
+                    let released = provider.discard(&refresh);
+                    tracing::debug!(
+                        target: "script_kit::search",
+                        source = provider.source().prefix(),
+                        generation = provider_request.generation,
+                        "Dropped stale local content completion before snapshot publication"
+                    );
+                    if released {
+                        let query_text = app.computed_filter_text.clone();
+                        app.maybe_start_root_local_content_refresh_for_query(
+                            provider,
+                            &query_text,
+                            cx,
+                        );
+                    }
+                    return;
+                }
+
+                let Some(snapshot) = snapshot else {
+                    provider.discard(&refresh);
+                    return;
+                };
+                if !provider.finish(refresh.clone(), snapshot) {
+                    provider.discard(&refresh);
+                    let query_text = app.computed_filter_text.clone();
+                    app.maybe_start_root_local_content_refresh_for_query(provider, &query_text, cx);
+                    return;
+                }
+
+                let interaction_before = app.main_menu_interaction_snapshot();
+                app.invalidate_root_passive_and_grouped_cache();
+                app.reconcile_script_list_after_results_refresh(
+                    provider.completion_reason(),
+                    interaction_before,
+                    cx,
+                );
+                cx.notify();
+            });
+            if updated.is_err() {
+                provider.discard(&refresh);
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn maybe_start_root_notes_refresh_for_query(
+        &mut self,
+        query_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.maybe_start_root_local_content_refresh_for_query(
+            RootLocalContentProvider::Notes,
+            query_text,
+            cx,
+        );
+    }
+
+    pub(crate) fn maybe_start_root_todos_refresh_for_query(
+        &mut self,
+        query_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.maybe_start_root_local_content_refresh_for_query(
+            RootLocalContentProvider::Todos,
+            query_text,
+            cx,
+        );
+    }
+
+    fn root_private_history_provider_is_eligible(
+        &self,
+        provider: RootPrivateHistoryProvider,
+        query_text: &str,
+    ) -> bool {
+        let unified_search = self.config.get_unified_search();
+        let advanced_query = self.menu_syntax_mode.advanced_query_for(query_text);
+        let source_filters = advanced_query
+            .map(|query| query.source_filters.clone())
+            .unwrap_or_default();
+        let source = provider.source_filter();
+        if !source_filters.allows(source) {
+            return false;
+        }
+        let explicit = source_filters.includes(source);
+        if !explicit
+            && (advanced_query.is_some_and(|query| query.has_predicates())
+                || self.menu_syntax_object_selector_state.owns_main_list()
+                || self.menu_syntax_trigger_picker_state.owns_main_list()
+                || self
+                    .menu_syntax_mode
+                    .capture_composer_owns_input_for(query_text)
+                || self.menu_syntax_mode.command_owns_input_for(query_text))
+        {
+            return false;
+        }
+        let search_text =
+            crate::menu_syntax::free_text_for_search(&self.menu_syntax_mode, query_text);
+        let needle = root_passive_search_needle(search_text);
+
+        match provider {
+            RootPrivateHistoryProvider::Clipboard => {
+                let mut options = self.config.root_clipboard_history_section_options();
+                if explicit {
+                    options.enabled = true;
+                    options.min_query_chars = 0;
+                    options.max_results = options
+                        .max_results
+                        .max(unified_search.passive_result_limits().max_total_results);
+                }
+                crate::clipboard_history::root_clipboard_history_query_is_eligible(needle, options)
+            }
+            RootPrivateHistoryProvider::Dictation => {
+                let mut options = unified_search.dictation_history_section_options();
+                if explicit {
+                    options.enabled = true;
+                    options.min_query_chars = 0;
+                    options.max_results = options
+                        .max_results
+                        .max(unified_search.passive_result_limits().max_total_results);
+                }
+                crate::dictation::root_dictation_history_query_is_eligible(needle, options)
+            }
+        }
+    }
+
+    fn maybe_start_root_private_history_refresh_for_query(
+        &mut self,
+        provider: RootPrivateHistoryProvider,
+        query_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.root_private_history_provider_is_eligible(provider, query_text) {
+            self.root_search
+                .invalidate_provider_request(provider.source());
+            return;
+        }
+        if provider.cache_is_fresh() {
+            return;
+        }
+
+        let provider_request = self
+            .root_search
+            .begin_provider_request(provider.source(), query_text);
+        let Some(refresh) = provider.begin() else {
+            return;
+        };
+
+        self.invalidate_root_passive_and_grouped_cache();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { provider.read_snapshot() })
+                .await;
+
+            let updated = this.update(cx, |app, cx| {
+                if !app
+                    .root_search
+                    .accepts_provider_request(&provider_request, &app.computed_filter_text)
+                {
+                    let released = provider.discard(refresh);
+                    tracing::debug!(
+                        target: "script_kit::search",
+                        source = provider.source().prefix(),
+                        generation = provider_request.generation,
+                        "Dropped stale private history completion before snapshot publication"
+                    );
+                    if released {
+                        let query_text = app.computed_filter_text.clone();
+                        app.maybe_start_root_private_history_refresh_for_query(
+                            provider,
+                            &query_text,
+                            cx,
+                        );
+                    }
+                    return;
+                }
+
+                if !provider.finish(refresh, snapshot) {
+                    let query_text = app.computed_filter_text.clone();
+                    app.maybe_start_root_private_history_refresh_for_query(
+                        provider,
+                        &query_text,
+                        cx,
+                    );
+                    return;
+                }
+
+                let interaction_before = app.main_menu_interaction_snapshot();
+                app.invalidate_root_passive_and_grouped_cache();
+                app.reconcile_script_list_after_results_refresh(
+                    provider.completion_reason(),
+                    interaction_before,
+                    cx,
+                );
+                cx.notify();
+            });
+            if updated.is_err() {
+                provider.discard(refresh);
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn maybe_start_root_clipboard_history_refresh_for_query(
+        &mut self,
+        query_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.maybe_start_root_private_history_refresh_for_query(
+            RootPrivateHistoryProvider::Clipboard,
+            query_text,
+            cx,
+        );
+    }
+
+    pub(crate) fn maybe_start_root_dictation_history_refresh_for_query(
+        &mut self,
+        query_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.maybe_start_root_private_history_refresh_for_query(
+            RootPrivateHistoryProvider::Dictation,
+            query_text,
+            cx,
+        );
+    }
+
+    fn root_agent_chat_history_refresh_options_for_query(
+        &self,
+        query_text: &str,
+    ) -> Option<crate::ai::agent_chat::ui::history::RootAgentChatHistorySectionOptions> {
+        let source = crate::menu_syntax::RootUnifiedSourceFilter::Conversations;
+        let unified_search = self.config.get_unified_search();
+        let mut options = unified_search.agent_chat_history_section_options();
+        let advanced_query = self.menu_syntax_mode.advanced_query_for(query_text);
+        let source_filters = advanced_query
+            .map(|query| query.source_filters.clone())
+            .unwrap_or_default();
+
+        if !source_filters.allows(source) {
+            return None;
+        }
+        if source_filters.includes(source) {
+            options.enabled = true;
+            options.min_query_chars = 0;
+            options.max_results = options
+                .max_results
+                .max(unified_search.passive_result_limits().max_total_results);
+            return Some(options);
+        }
+        if advanced_query.is_some_and(|query| query.has_predicates())
+            || self.menu_syntax_object_selector_state.owns_main_list()
+            || self.menu_syntax_trigger_picker_state.owns_main_list()
+            || self
+                .menu_syntax_mode
+                .capture_composer_owns_input_for(query_text)
+            || self.menu_syntax_mode.command_owns_input_for(query_text)
+        {
+            return None;
+        }
+
+        let search_text =
+            crate::menu_syntax::free_text_for_search(&self.menu_syntax_mode, query_text);
+        crate::ai::agent_chat::ui::history::root_agent_chat_history_query_is_eligible(
+            root_passive_search_needle(search_text),
+            options,
+        )
+        .then_some(options)
+    }
+
+    pub(crate) fn maybe_start_root_agent_chat_history_refresh_for_query(
+        &mut self,
+        query_text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let source = sk_protocol::command_contract::CommandSource::Conversation;
+        if self
+            .root_agent_chat_history_refresh_options_for_query(query_text)
+            .is_none()
+        {
+            self.root_search.invalidate_provider_request(source);
+            return;
+        }
+        if crate::ai::agent_chat::ui::history::root_agent_chat_history_cache_is_fresh() {
+            return;
+        }
+
+        // Record a newer query even if its predecessor still owns the only
+        // worker. The stale completion will release that worker and retry
+        // against the actual live query before any snapshot can be published.
+        let provider_request = self.root_search.begin_provider_request(source, query_text);
+        let Some(refresh) =
+            crate::ai::agent_chat::ui::history::try_begin_root_agent_chat_history_refresh()
+        else {
+            return;
+        };
+
+        self.invalidate_root_passive_and_grouped_cache();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::ai::agent_chat::ui::history::read_root_agent_chat_history_snapshot()
+                })
+                .await;
+
+            let updated = this.update(cx, |app, cx| {
+                if !app
+                    .root_search
+                    .accepts_provider_request(&provider_request, &app.computed_filter_text)
+                {
+                    let released =
+                        crate::ai::agent_chat::ui::history::discard_root_agent_chat_history_refresh(
+                            refresh,
+                        );
+                    tracing::debug!(
+                        target: "script_kit::search",
+                        source = "agent-chat-history",
+                        generation = provider_request.generation,
+                        "Dropped stale conversation completion before snapshot publication"
+                    );
+                    if released {
+                        let query_text = app.computed_filter_text.clone();
+                        app.maybe_start_root_agent_chat_history_refresh_for_query(&query_text, cx);
+                    }
+                    return;
+                }
+
+                if !crate::ai::agent_chat::ui::history::finish_root_agent_chat_history_refresh(
+                    refresh, snapshot,
+                ) {
+                    let query_text = app.computed_filter_text.clone();
+                    app.maybe_start_root_agent_chat_history_refresh_for_query(&query_text, cx);
+                    return;
+                }
+
+                let interaction_before = app.main_menu_interaction_snapshot();
+                app.invalidate_root_passive_and_grouped_cache();
+                app.reconcile_script_list_after_results_refresh(
+                    "agent_chat_history_refresh_complete",
+                    interaction_before,
+                    cx,
+                );
+                cx.notify();
+            });
+            if updated.is_err() {
+                crate::ai::agent_chat::ui::history::discard_root_agent_chat_history_refresh(
+                    refresh,
+                );
+            }
         })
         .detach();
     }
@@ -641,11 +1156,7 @@ impl ScriptListApp {
                 && allow_notes
                 && crate::notes::root_notes_query_is_eligible(search_needle, notes_options)
             {
-                if explicit_notes {
-                    crate::notes::search_root_notes_meta_direct(search_needle, notes_options)
-                } else {
-                    crate::notes::search_root_notes_meta_cached(search_needle, notes_options)
-                }
+                crate::notes::search_root_notes_meta_cached(search_needle, notes_options)
             } else {
                 Vec::new()
             }
@@ -656,16 +1167,7 @@ impl ScriptListApp {
                 && allow_todos
                 && crate::menu_syntax::root_todo_query_is_eligible(search_needle, todo_options)
             {
-                if explicit_todos {
-                    crate::menu_syntax::search_root_todos_direct(search_needle, todo_options)
-                } else {
-                    // Implicit typing path: nonblocking snapshot filter. The
-                    // day-page file scan happens on a detached refresh
-                    // thread (self-guarded, at most once per TTL), never on
-                    // the keystroke path.
-                    crate::menu_syntax::ensure_root_todos_snapshot_refresh();
-                    crate::menu_syntax::search_root_todos_cached(search_needle, todo_options)
-                }
+                crate::menu_syntax::search_root_todos_cached(search_needle, todo_options)
             } else {
                 Vec::new()
             }
@@ -683,17 +1185,10 @@ impl ScriptListApp {
                         clipboard_history_options,
                     )
                 {
-                    if explicit_clipboard {
-                        crate::clipboard_history::search_root_clipboard_history_meta_direct(
-                            search_needle,
-                            clipboard_history_options,
-                        )
-                    } else {
-                        crate::clipboard_history::search_root_clipboard_history_meta_cached(
-                            search_needle,
-                            clipboard_history_options,
-                        )
-                    }
+                    crate::clipboard_history::search_root_clipboard_history_meta_cached(
+                        search_needle,
+                        clipboard_history_options,
+                    )
                 } else {
                     Vec::new()
                 }
@@ -712,17 +1207,10 @@ impl ScriptListApp {
                         dictation_history_options,
                     )
                 {
-                    if explicit_dictation {
-                        crate::dictation::search_root_dictation_history_direct(
-                            search_needle,
-                            dictation_history_options,
-                        )
-                    } else {
-                        crate::dictation::search_root_dictation_history_cached(
-                            search_needle,
-                            dictation_history_options,
-                        )
-                    }
+                    crate::dictation::search_root_dictation_history_cached(
+                        search_needle,
+                        dictation_history_options,
+                    )
                 } else {
                     Vec::new()
                 }
@@ -741,17 +1229,10 @@ impl ScriptListApp {
                         agent_chat_history_options,
                     )
                 {
-                    if explicit_conversations {
-                        crate::ai::agent_chat::ui::history::search_history_direct(
-                            search_needle,
-                            agent_chat_history_options.max_results,
-                        )
-                    } else {
-                        crate::ai::agent_chat::ui::history::search_history_cached(
-                            search_needle,
-                            agent_chat_history_options.max_results,
-                        )
-                    }
+                    crate::ai::agent_chat::ui::history::search_history_cached(
+                        search_needle,
+                        agent_chat_history_options.max_results,
+                    )
                 } else {
                     Vec::new()
                 }
@@ -914,14 +1395,18 @@ impl ScriptListApp {
             None => results,
         };
         let search_elapsed = search_start.elapsed();
+        let safe_filter = logging::log_private_user_value(filter_text);
+        let safe_search = logging::log_private_user_value(search_text);
 
         if !filter_text.is_empty() {
             logging::log(
                 "PERF",
                 &format!(
-                    "Search '{}' (computed '{}') took {:.2}ms ({} results from {} total, including {} skills)",
-                    filter_text,
-                    search_text,
+                    "Search {} ({} bytes; computed {} / {} bytes) took {:.2}ms ({} results from {} total, including {} skills)",
+                    safe_filter,
+                    safe_filter.raw_bytes,
+                    safe_search,
+                    safe_search.raw_bytes,
                     search_elapsed.as_secs_f64() * 1000.0,
                     results.len(),
                     self.scripts.len()
@@ -935,8 +1420,10 @@ impl ScriptListApp {
         }
 
         tracing::info!(
-            filter_text = %filter_text,
-            search_text = %search_text,
+            filter_bytes = safe_filter.raw_bytes,
+            filter_sha256 = %safe_filter.sha256,
+            search_bytes = safe_search.raw_bytes,
+            search_sha256 = %safe_search.sha256,
             result_count = results.len(),
             script_count = self.scripts.len(),
             scriptlet_count = self.scriptlets.len(),
@@ -975,17 +1462,27 @@ impl ScriptListApp {
             .main_menu_result_caches
             .has_filtered_results_for(filter_text)
         {
-            logging::log_debug("CACHE", &format!("Filter cache HIT for '{}'", filter_text));
+            logging::log_debug(
+                "CACHE",
+                &format!(
+                    "Filter cache HIT for {} ({} bytes)",
+                    logging::log_private_user_value(filter_text),
+                    filter_text.len(),
+                ),
+            );
             return self.main_menu_result_caches.clone_filtered_results();
         }
 
         // P1: Cache miss - need to recompute (will be done by get_filtered_results_mut)
+        let cached_key = self.main_menu_result_caches.filtered_cache_key();
         logging::log_debug(
             "CACHE",
             &format!(
-                "Filter cache MISS - need recompute for '{}' (cached key: '{}')",
-                filter_text,
-                self.main_menu_result_caches.filtered_cache_key()
+                "Filter cache MISS - need recompute for {} / {} bytes (cached key: {} / {} bytes)",
+                logging::log_private_user_value(filter_text),
+                filter_text.len(),
+                logging::log_private_user_value(cached_key.as_ref()),
+                cached_key.len(),
             ),
         );
 
@@ -1038,8 +1535,9 @@ impl ScriptListApp {
                 logging::log(
                     "FILTER_PERF",
                     &format!(
-                        "[4a/5] SEARCH_START for '{}' (scripts={}, scriptlets={}, builtins={}, apps={}, skills={})",
-                        filter_text,
+                        "[4a/5] SEARCH_START for {} ({} bytes; scripts={}, scriptlets={}, builtins={}, apps={}, skills={})",
+                        logging::log_private_user_value(&filter_text),
+                        filter_text.len(),
                         self.scripts.len(),
                         self.scriptlets.len(),
                         self.builtin_entries.len(),
@@ -1061,8 +1559,9 @@ impl ScriptListApp {
                 logging::log(
                     "FILTER_PERF",
                     &format!(
-                        "[4a/5] SEARCH_DONE '{}' in {:.2}ms -> {} results (skills={})",
-                        filter_text,
+                        "[4a/5] SEARCH_DONE {} ({} bytes) in {:.2}ms -> {} results (skills={})",
+                        logging::log_private_user_value(&filter_text),
+                        filter_text.len(),
                         search_elapsed.as_secs_f64() * 1000.0,
                         filtered_result_count,
                         self.skills.len(),
@@ -1650,7 +2149,11 @@ impl ScriptListApp {
         if logging::filter_perf_trace_enabled() {
             logging::log(
                 "FILTER_PERF",
-                &format!("[4b/5] GROUP_START for '{}'", self.computed_filter_text),
+                &format!(
+                    "[4b/5] GROUP_START for {} ({} bytes)",
+                    logging::log_private_user_value(&self.computed_filter_text),
+                    self.computed_filter_text.len(),
+                ),
             );
         }
 
@@ -1681,8 +2184,9 @@ impl ScriptListApp {
             logging::log(
                 "APP",
                 &format!(
-                    "get_grouped_results: filter='{}', menu_bar_items={}, bundle_id={:?}",
-                    self.computed_filter_text,
+                    "get_grouped_results: filter={} ({} bytes), menu_bar_items={}, bundle_id={:?}",
+                    logging::log_private_user_value(&self.computed_filter_text),
+                    self.computed_filter_text.len(),
                     menu_bar_items.len(),
                     menu_bar_bundle_id
                 ),
@@ -2070,8 +2574,9 @@ impl ScriptListApp {
             logging::log(
                 "FILTER_PERF",
                 &format!(
-                    "[4b/5] GROUP_DONE '{}' in {:.2}ms -> {} items (from {} results)",
-                    self.computed_filter_text,
+                    "[4b/5] GROUP_DONE {} ({} bytes) in {:.2}ms -> {} items (from {} results)",
+                    logging::log_private_user_value(&self.computed_filter_text),
+                    self.computed_filter_text.len(),
                     elapsed.as_secs_f64() * 1000.0,
                     self.main_menu_result_caches.grouped_items().len(),
                     self.main_menu_result_caches.grouped_flat_result_count()
@@ -2088,8 +2593,9 @@ impl ScriptListApp {
                 logging::log(
                     "FILTER_PERF",
                     &format!(
-                        "[5/5] TOTAL_TIME '{}': {:.2}ms (input->grouped)",
-                        self.computed_filter_text,
+                        "[5/5] TOTAL_TIME {} ({} bytes): {:.2}ms (input->grouped)",
+                        logging::log_private_user_value(&self.computed_filter_text),
+                        self.computed_filter_text.len(),
                         total_elapsed.as_secs_f64() * 1000.0
                     ),
                 );
@@ -2218,13 +2724,19 @@ impl ScriptListApp {
 
         // Cache miss - need to re-read and re-highlight
         let cache_miss_start = std::time::Instant::now();
+        let safe_script_path = logging::log_private_user_value(script_path);
+        let safe_cached_path = self
+            .preview_cache_path
+            .as_deref()
+            .map(logging::log_private_user_value);
         logging::log(
             "FILTER_PERF",
             &format!(
-                "[PREVIEW_CACHE_MISS_REASON] path='{}' reason={} cached_path={:?} cached_match_signature={:?} requested_match_signature={:?}",
-                script_path,
+                "[PREVIEW_CACHE_MISS_REASON] path={} path_bytes={} reason={} cached_path={:?} cached_match_signature={:?} requested_match_signature={:?}",
+                safe_script_path,
+                safe_script_path.raw_bytes,
                 miss_reason,
-                self.preview_cache_path,
+                safe_cached_path,
                 self.preview_cache_match_signature,
                 match_signature
             ),
@@ -2232,15 +2744,15 @@ impl ScriptListApp {
         logging::log(
             "FILTER_PERF",
             &format!(
-                "[PREVIEW_CACHE_KEY] path='{}' match_signature={:?}",
-                script_path, match_signature
+                "[PREVIEW_CACHE_KEY] path={} path_bytes={} match_signature={:?}",
+                safe_script_path, safe_script_path.raw_bytes, match_signature
             ),
         );
         logging::log(
             "FILTER_PERF",
             &format!(
-                "[PREVIEW_CACHE_MISS] Loading '{}' matched_line={:?}",
-                script_path, matched_line
+                "[PREVIEW_CACHE_MISS] Loading {} ({} bytes) matched_line={:?}",
+                safe_script_path, safe_script_path.raw_bytes, matched_line
             ),
         );
 
@@ -2312,7 +2824,14 @@ impl ScriptListApp {
                 lines
             }
             Err(e) => {
-                logging::log("ERROR", &format!("Failed to read preview: {}", e));
+                let safe_error = logging::log_private_user_value(&e.to_string());
+                logging::log(
+                    "ERROR",
+                    &format!(
+                        "Failed to read preview: {} ({} bytes)",
+                        safe_error, safe_error.raw_bytes
+                    ),
+                );
                 Vec::new()
             }
         };
@@ -2321,9 +2840,10 @@ impl ScriptListApp {
         logging::log(
             "FILTER_PERF",
             &format!(
-                "[PREVIEW_CACHE_MISS] Total={:.2}ms for '{}'",
+                "[PREVIEW_CACHE_MISS] Total={:.2}ms for {} ({} bytes)",
                 cache_miss_elapsed.as_secs_f64() * 1000.0,
-                script_path
+                safe_script_path,
+                safe_script_path.raw_bytes,
             ),
         );
 
@@ -2629,11 +3149,17 @@ impl ScriptListApp {
             .ghost_prediction
             .as_ref()
             .is_none_or(|current| current.ghost_suffix != suffix || current.kind != pred.kind);
+        let safe_query = logging::log_private_user_value(&pred.query);
+        let safe_suffix = logging::log_private_user_value(&pred.ghost_suffix);
+        let safe_label = logging::log_private_user_value(&pred.full_label);
         tracing::info!(
             target: "script_kit::ghost_text",
-            query = %pred.query,
-            ghost_suffix = %pred.ghost_suffix,
-            full_label = %pred.full_label,
+            query_bytes = safe_query.raw_bytes,
+            query_sha256 = %safe_query.sha256,
+            ghost_suffix_bytes = safe_suffix.raw_bytes,
+            ghost_suffix_sha256 = %safe_suffix.sha256,
+            full_label_bytes = safe_label.raw_bytes,
+            full_label_sha256 = %safe_label.sha256,
             confidence = %pred.confidence,
             ghost_id = pred.ghost_id,
             kind = pred.kind_label(),
@@ -2813,10 +3339,14 @@ impl ScriptListApp {
                         Ok(pair) => pair,
                         Err(err) => {
                             // Silent fallback: the starter remains visible.
+                            let safe_error = logging::log_private_user_value(&format!("{err:#}"));
+                            let safe_query = logging::log_private_user_value(&query);
                             tracing::warn!(
                                 target: "script_kit::ghost_text",
-                                error = %format!("{err:#}"),
-                                query = %query,
+                                error_bytes = safe_error.raw_bytes,
+                                error_sha256 = %safe_error.sha256,
+                                query_bytes = safe_query.raw_bytes,
+                                query_sha256 = %safe_query.sha256,
                                 "ghost local llm generation failed; keeping starter"
                             );
                             return;
@@ -3098,6 +3628,10 @@ mod tests {
                 "@history:",
                 crate::spine::catalog_subsearch::ContextSubsearchSource::History,
             ),
+            (
+                "@browser-history:",
+                crate::spine::catalog_subsearch::ContextSubsearchSource::BrowserHistory,
+            ),
         ] {
             let parse = crate::spine::parse_spine(input);
             let projection = crate::spine::project_cursor(&parse, input.len());
@@ -3108,6 +3642,17 @@ mod tests {
                 "{input} must route to rich rows so unarmed recents render with the choose hint"
             );
         }
+    }
+
+    #[test]
+    fn rich_browser_history_is_recognized_before_cold_snapshot_refresh() {
+        assert!(active_rich_browser_history_subsearch("@browser-history:"));
+        assert!(active_rich_browser_history_subsearch(
+            "@browser-history:secret"
+        ));
+        assert!(active_rich_browser_history_subsearch("@browser-history"));
+        assert!(!active_rich_browser_history_subsearch("@history:"));
+        assert!(!active_rich_browser_history_subsearch("ordinary query"));
     }
 
     /// Colon-less root fragments must auto-enter the same guarded rich rows —
@@ -3134,6 +3679,11 @@ mod tests {
             (
                 "@history",
                 crate::spine::catalog_subsearch::ContextSubsearchSource::History,
+                "",
+            ),
+            (
+                "@browser-history",
+                crate::spine::catalog_subsearch::ContextSubsearchSource::BrowserHistory,
                 "",
             ),
         ] {
@@ -3216,6 +3766,10 @@ mod tests {
             );
         }
     }
+}
+
+fn active_rich_browser_history_subsearch(query_text: &str) -> bool {
+    crate::spine::catalog_subsearch::active_browser_history_subsearch(query_text)
 }
 
 pub(crate) fn active_rich_spine_subsearch(
@@ -3633,7 +4187,6 @@ pub(crate) fn build_rich_script_rows(
     query: &str,
     all_scripts: &[std::sync::Arc<scripts::Script>],
 ) -> (Vec<GroupedListItem>, Vec<scripts::SearchResult>) {
-    let limit = crate::spine::catalog_subsearch::SUBSEARCH_RENDER_LIMIT;
     let mut grouped = Vec::new();
     let mut flat: Vec<scripts::SearchResult> = Vec::new();
     let header = if query.trim().is_empty() {
@@ -3645,41 +4198,22 @@ pub(crate) fn build_rich_script_rows(
         header,
         Some("code".to_string()),
     ));
-    let query_lower = query.trim().to_lowercase();
-    let matches: Vec<_> = all_scripts
-        .iter()
-        .filter(|s| {
-            query_lower.is_empty()
-                || s.name.to_lowercase().contains(&query_lower)
-                || s.path
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .is_some_and(|f| f.to_lowercase().contains(&query_lower))
-        })
-        .take(limit)
-        .collect();
+    let matches = crate::spine::catalog_subsearch::rank_context_catalog_results(
+        crate::spine::catalog_subsearch::ContextSubsearchSource::Scripts,
+        query.trim(),
+        all_scripts,
+        &[],
+        &[],
+    );
     if matches.is_empty() {
         grouped.push(GroupedListItem::SectionHeader(
             format!("No scripts matching \u{201c}{}\u{201d}", query.trim()),
             None,
         ));
     } else {
-        for script in matches {
+        for result in matches {
             let idx = flat.len();
-            flat.push(scripts::SearchResult::Script(scripts::ScriptMatch {
-                script: std::sync::Arc::clone(script),
-                score: 0,
-                filename: script
-                    .path
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or(&script.name)
-                    .to_string(),
-                match_indices: scripts::MatchIndices::default(),
-                match_kind: scripts::ScriptMatchKind::Name,
-                content_match: None,
-                match_evidence: None,
-            }));
+            flat.push(result);
             grouped.push(GroupedListItem::Item(idx));
         }
     }
@@ -3690,7 +4224,6 @@ pub(crate) fn build_rich_scriptlet_rows(
     query: &str,
     all_scriptlets: &[std::sync::Arc<scripts::Scriptlet>],
 ) -> (Vec<GroupedListItem>, Vec<scripts::SearchResult>) {
-    let limit = crate::spine::catalog_subsearch::SUBSEARCH_RENDER_LIMIT;
     let mut grouped = Vec::new();
     let mut flat: Vec<scripts::SearchResult> = Vec::new();
     let header = if query.trim().is_empty() {
@@ -3702,27 +4235,22 @@ pub(crate) fn build_rich_scriptlet_rows(
         header,
         Some("workflow".to_string()),
     ));
-    let query_lower = query.trim().to_lowercase();
-    let matches: Vec<_> = all_scriptlets
-        .iter()
-        .filter(|s| query_lower.is_empty() || s.name.to_lowercase().contains(&query_lower))
-        .take(limit)
-        .collect();
+    let matches = crate::spine::catalog_subsearch::rank_context_catalog_results(
+        crate::spine::catalog_subsearch::ContextSubsearchSource::Scriptlets,
+        query.trim(),
+        &[],
+        all_scriptlets,
+        &[],
+    );
     if matches.is_empty() {
         grouped.push(GroupedListItem::SectionHeader(
             format!("No scriptlets matching \u{201c}{}\u{201d}", query.trim()),
             None,
         ));
     } else {
-        for scriptlet in matches {
+        for result in matches {
             let idx = flat.len();
-            flat.push(scripts::SearchResult::Scriptlet(scripts::ScriptletMatch {
-                scriptlet: std::sync::Arc::clone(scriptlet),
-                score: 0,
-                display_file_path: None,
-                match_indices: scripts::MatchIndices::default(),
-                match_evidence: None,
-            }));
+            flat.push(result);
             grouped.push(GroupedListItem::Item(idx));
         }
     }
@@ -3733,7 +4261,6 @@ pub(crate) fn build_rich_skill_rows(
     query: &str,
     all_skills: &[std::sync::Arc<crate::plugins::PluginSkill>],
 ) -> (Vec<GroupedListItem>, Vec<scripts::SearchResult>) {
-    let limit = crate::spine::catalog_subsearch::SUBSEARCH_RENDER_LIMIT;
     let mut grouped = Vec::new();
     let mut flat: Vec<scripts::SearchResult> = Vec::new();
     let header = if query.trim().is_empty() {
@@ -3745,26 +4272,22 @@ pub(crate) fn build_rich_skill_rows(
         header,
         Some("zap".to_string()),
     ));
-    let query_lower = query.trim().to_lowercase();
-    let matches: Vec<_> = all_skills
-        .iter()
-        .filter(|s| query_lower.is_empty() || s.title.to_lowercase().contains(&query_lower))
-        .take(limit)
-        .collect();
+    let matches = crate::spine::catalog_subsearch::rank_context_catalog_results(
+        crate::spine::catalog_subsearch::ContextSubsearchSource::Skills,
+        query.trim(),
+        &[],
+        &[],
+        all_skills,
+    );
     if matches.is_empty() {
         grouped.push(GroupedListItem::SectionHeader(
             format!("No skills matching \u{201c}{}\u{201d}", query.trim()),
             None,
         ));
     } else {
-        for skill in matches {
+        for result in matches {
             let idx = flat.len();
-            flat.push(scripts::SearchResult::Skill(scripts::SkillMatch {
-                skill: std::sync::Arc::clone(skill),
-                score: 0,
-                match_indices: scripts::MatchIndices::default(),
-                match_evidence: None,
-            }));
+            flat.push(result);
             grouped.push(GroupedListItem::Item(idx));
         }
     }

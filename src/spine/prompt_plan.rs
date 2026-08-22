@@ -458,6 +458,48 @@ mod tests {
     }
 
     #[test]
+    fn prompt_plan_preserves_duplicate_named_catalog_attachments_by_owner() {
+        let first_skill = AiContextPart::FilePath {
+            path: "/plugins/first/deploy/SKILL.md".to_string(),
+            label: "Deploy".to_string(),
+        };
+        let second_skill = AiContextPart::FilePath {
+            path: "/plugins/second/deploy/SKILL.md".to_string(),
+            label: "Deploy".to_string(),
+        };
+        let first_scriptlet = AiContextPart::TextBlock {
+            label: "Deploy".to_string(),
+            source: "spine:scriptlets:/plugins/first/deploy.md".to_string(),
+            text: "first owner's command".to_string(),
+            mime_type: None,
+        };
+        let second_scriptlet = AiContextPart::TextBlock {
+            label: "Deploy".to_string(),
+            source: "spine:scriptlets:/plugins/second/deploy.md".to_string(),
+            text: "second owner's command".to_string(),
+            mime_type: None,
+        };
+        let aliases = std::collections::HashMap::from([
+            ("@skills:Deploy".to_string(), first_skill.clone()),
+            ("@skills:Deploy-2".to_string(), second_skill.clone()),
+            ("@scriptlets:Deploy".to_string(), first_scriptlet.clone()),
+            ("@scriptlets:Deploy-2".to_string(), second_scriptlet.clone()),
+        ]);
+        let parse = parse_spine(
+            "@skills:Deploy @skills:Deploy-2 @scriptlets:Deploy @scriptlets:Deploy-2 compare",
+        );
+
+        let plan = build_spine_prompt_plan_with_aliases(&parse, &aliases);
+
+        assert!(plan.should_submit_to_chat());
+        assert_eq!(
+            plan.context_parts,
+            [first_skill, second_skill, first_scriptlet, second_scriptlet]
+        );
+        assert_eq!(plan.free_text_tail, "compare");
+    }
+
+    #[test]
     fn prompt_plan_without_alias_falls_back_to_literal_file_path() {
         let parse = parse_spine("@file:/tmp/demo.rs summarize");
         let plan = build_spine_prompt_plan(&parse);

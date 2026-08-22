@@ -218,7 +218,11 @@ impl ScriptListApp {
         if logging::filter_perf_trace_enabled() {
             logging::log(
                 "FILTER_PERF",
-                &format!("[2/5] APPLY_FILTER value='{}' len={}", value, value.len()),
+                &format!(
+                    "[2/5] APPLY_FILTER value={} len={}",
+                    logging::log_private_user_value(&value),
+                    value.len(),
+                ),
             );
         }
         if self.computed_filter_text != value {
@@ -232,9 +236,14 @@ impl ScriptListApp {
             self.maybe_start_root_file_search(&value, cx);
             self.maybe_start_root_brain_semantic_search(&value, cx);
             self.refresh_root_brain_inbox_if_stale(false, cx);
+            self.maybe_start_root_notes_refresh_for_query(&value, cx);
+            self.maybe_start_root_todos_refresh_for_query(&value, cx);
             self.maybe_start_root_windows_refresh_for_query(&value, cx);
             self.maybe_start_root_browser_tabs_refresh_for_query(&value, cx);
             self.maybe_start_root_browser_history_refresh_for_query(&value, cx);
+            self.maybe_start_root_clipboard_history_refresh_for_query(&value, cx);
+            self.maybe_start_root_dictation_history_refresh_for_query(&value, cx);
+            self.maybe_start_root_agent_chat_history_refresh_for_query(&value, cx);
             self.reconcile_script_list_after_filter_change("filter_immediate", cx);
             self.rebuild_main_window_preflight_if_needed();
             if self.filter_change_can_affect_window_size() {
@@ -247,9 +256,10 @@ impl ScriptListApp {
                 logging::log(
                     "FILTER_PERF",
                     &format!(
-                        "[3/5] APPLY_FILTER_DONE in {:.2}ms for '{}'",
+                        "[3/5] APPLY_FILTER_DONE in {:.2}ms for {} ({} bytes)",
                         update_elapsed.as_secs_f64() * 1000.0,
-                        value
+                        logging::log_private_user_value(&value),
+                        value.len(),
                     ),
                 );
             }
@@ -527,9 +537,14 @@ impl ScriptListApp {
         self.maybe_start_root_file_search(&text, cx);
         self.maybe_start_root_brain_semantic_search(&text, cx);
         self.refresh_root_brain_inbox_if_stale(false, cx);
+        self.maybe_start_root_notes_refresh_for_query(&text, cx);
+        self.maybe_start_root_todos_refresh_for_query(&text, cx);
         self.maybe_start_root_windows_refresh_for_query(&text, cx);
         self.maybe_start_root_browser_tabs_refresh_for_query(&text, cx);
         self.maybe_start_root_browser_history_refresh_for_query(&text, cx);
+        self.maybe_start_root_clipboard_history_refresh_for_query(&text, cx);
+        self.maybe_start_root_dictation_history_refresh_for_query(&text, cx);
+        self.maybe_start_root_agent_chat_history_refresh_for_query(&text, cx);
         self.reconcile_script_list_after_filter_change("set_filter_text_immediate", cx);
 
         // Update fallback state immediately based on filter results
@@ -931,10 +946,12 @@ impl ScriptListApp {
         // note-open) while the user is mid-prompt.
         if let Some(outcome) = self.selected_spine_rich_subsearch_outcome() {
             if let Some((token, part)) = outcome.alias {
+                let safe_token = logging::log_private_user_value(&token);
                 tracing::info!(
                     target: "script_kit::spine",
                     event = "spine_subsearch_alias_registered",
-                    token = %token,
+                    token_bytes = safe_token.raw_bytes,
+                    token_sha256 = %safe_token.sha256,
                 );
                 self.spine_mention_aliases.insert(token, part);
             }
@@ -949,11 +966,15 @@ impl ScriptListApp {
             return false;
         };
         let action = row.action.clone();
+        let safe_row_id = logging::log_private_user_value(row.id.as_ref());
+        let safe_row_title = logging::log_private_user_value(row.title.as_ref());
         tracing::info!(
             target: "script_kit::spine",
             event = "accept_spine_projection_row",
-            row_id = %row.id,
-            row_title = %row.title,
+            row_id_bytes = safe_row_id.raw_bytes,
+            row_id_sha256 = %safe_row_id.sha256,
+            row_title_bytes = safe_row_title.raw_bytes,
+            row_title_sha256 = %safe_row_title.sha256,
             selected_index = self.selected_index,
         );
         self.apply_spine_list_action(action, window, cx)
@@ -994,9 +1015,9 @@ impl ScriptListApp {
             segment_index,
             segment_byte_range,
         )?;
-        // File tokens are deduplicated against the live alias registry so a
-        // second README.md gets `@file:README.md-2` instead of silently
-        // overwriting the first alias.
+        // Every alias-bearing source is deduplicated against the live
+        // registry so same-named files, scripts, scriptlets, skills, notes,
+        // or history entries cannot overwrite another selected owner.
         if let crate::spine::SpineListAction::ResolveSegment {
             replacement,
             resolution_id,
@@ -1008,6 +1029,14 @@ impl ScriptListApp {
                 if let Some(path) = resolution_id.as_ref().strip_prefix("file/") {
                     *replacement = self.unique_spine_file_mention_token(path).into();
                 }
+            } else if let Some((token, part)) = outcome.alias.as_mut() {
+                let unique = crate::spine::attach::unique_context_attachment_token(
+                    token,
+                    part,
+                    &self.spine_mention_aliases,
+                );
+                *token = unique.clone();
+                *replacement = unique.into();
             }
         }
         Some(outcome)
@@ -1027,25 +1056,19 @@ impl ScriptListApp {
     /// not silently overwrite the first alias.
     pub(crate) fn unique_spine_file_mention_token(&self, path: &str) -> String {
         let base = Self::spine_file_mention_token(path);
-        let collides = |token: &str| {
-            matches!(
-                self.spine_mention_aliases.get(token),
-                Some(crate::ai::message_parts::AiContextPart::FilePath {
-                    path: existing,
-                    ..
-                }) if existing != path
-            )
+        let part = crate::ai::message_parts::AiContextPart::FilePath {
+            path: path.to_string(),
+            label: std::path::Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path)
+                .to_string(),
         };
-        if !collides(&base) {
-            return base;
-        }
-        for n in 2..100 {
-            let candidate = format!("{base}-{n}");
-            if !collides(&candidate) {
-                return candidate;
-            }
-        }
-        base
+        crate::spine::attach::unique_context_attachment_token(
+            &base,
+            &part,
+            &self.spine_mention_aliases,
+        )
     }
 
     /// Register the alias that maps a compact spine `@file:` token back to its
@@ -1056,10 +1079,12 @@ impl ScriptListApp {
             .and_then(|name| name.to_str())
             .unwrap_or(&path)
             .to_string();
+        let safe_token = logging::log_private_user_value(&token);
         tracing::info!(
             target: "script_kit::spine",
             event = "spine_file_mention_alias_registered",
-            token = %token,
+            token_bytes = safe_token.raw_bytes,
+            token_sha256 = %safe_token.sha256,
         );
         self.spine_mention_aliases.insert(
             token,
@@ -1079,10 +1104,12 @@ impl ScriptListApp {
         label: String,
     ) {
         let text = crate::clipboard_history::get_entry_content(&id).unwrap_or_default();
+        let safe_token = logging::log_private_user_value(&token);
         tracing::info!(
             target: "script_kit::spine",
             event = "spine_clipboard_mention_alias_registered",
-            token = %token,
+            token_bytes = safe_token.raw_bytes,
+            token_sha256 = %safe_token.sha256,
             bytes = text.len(),
         );
         self.spine_mention_aliases.insert(
@@ -1123,10 +1150,12 @@ impl ScriptListApp {
         if chars.get(end) == Some(&' ') {
             end += 1;
         }
+        let safe_token = logging::log_private_user_value(&span.token);
         tracing::info!(
             target: "script_kit::spine",
             event = "spine_mention_deleted_atomically",
-            token = %span.token,
+            token_bytes = safe_token.raw_bytes,
+            token_sha256 = %safe_token.sha256,
         );
         let mut out = String::with_capacity(previous.len());
         out.extend(chars[..span.range.start].iter());
@@ -1171,11 +1200,13 @@ impl ScriptListApp {
                 text,
                 trailing_space,
             } => {
+                let safe_text = logging::log_private_user_value(text.as_ref());
                 tracing::info!(
                     target: "script_kit::spine",
                     event = "apply_spine_action_insert_segment",
                     segment_index,
-                    text = %text,
+                    text_bytes = safe_text.raw_bytes,
+                    text_sha256 = %safe_text.sha256,
                     trailing_space,
                 );
                 self.replace_active_segment_text(
@@ -1196,13 +1227,20 @@ impl ScriptListApp {
                 resolution_source,
                 trailing_space,
             } => {
+                let safe_replacement = logging::log_private_user_value(replacement.as_ref());
+                let safe_resolution_id = logging::log_private_user_value(resolution_id.as_ref());
+                let safe_resolution_label =
+                    logging::log_private_user_value(resolution_label.as_ref());
                 tracing::info!(
                     target: "script_kit::spine",
                     event = "apply_spine_action_resolve_segment",
                     segment_index,
-                    replacement = %replacement,
-                    resolution_id = %resolution_id,
-                    resolution_label = %resolution_label,
+                    replacement_bytes = safe_replacement.raw_bytes,
+                    replacement_sha256 = %safe_replacement.sha256,
+                    resolution_id_bytes = safe_resolution_id.raw_bytes,
+                    resolution_id_sha256 = %safe_resolution_id.sha256,
+                    resolution_label_bytes = safe_resolution_label.raw_bytes,
+                    resolution_label_sha256 = %safe_resolution_label.sha256,
                     resolution_source = %resolution_source,
                     trailing_space,
                 );
@@ -1270,7 +1308,8 @@ impl ScriptListApp {
                         tracing::info!(
                             target: "script_kit::spine",
                             event = "spine_style_only_auto_submit",
-                            replacement = %replacement,
+                            replacement_bytes = safe_replacement.raw_bytes,
+                            replacement_sha256 = %safe_replacement.sha256,
                         );
                         self.try_submit_spine_prompt_plan_from_enter(cx);
                     }
@@ -1278,11 +1317,13 @@ impl ScriptListApp {
                 }
             }
             SpineListAction::OpenModeExit { sigil, rest } => {
+                let safe_rest = logging::log_private_user_value(&rest);
                 tracing::info!(
                     target: "script_kit::spine",
                     event = "apply_spine_action_open_mode_exit",
                     sigil = %sigil,
-                    rest = %rest,
+                    rest_bytes = safe_rest.raw_bytes,
+                    rest_sha256 = %safe_rest.sha256,
                 );
                 match sigil {
                     '~' => {
@@ -1313,11 +1354,13 @@ impl ScriptListApp {
                 segment_byte_range,
                 query,
             } => {
+                let safe_query = logging::log_private_user_value(&query);
                 tracing::info!(
                     target: "script_kit::spine",
                     event = "apply_spine_action_open_file_search_portal",
                     segment_index,
-                    query = %query,
+                    query_bytes = safe_query.raw_bytes,
+                    query_sha256 = %safe_query.sha256,
                 );
                 self.open_spine_file_search_attachment_portal(
                     segment_byte_range,
@@ -1384,13 +1427,15 @@ impl ScriptListApp {
         let space = if add_space { " " } else { "" };
         let new_text = format!("{prefix}{replacement}{space}{suffix}");
         let cursor = prefix.len() + replacement.len() + space.len();
+        let safe_replacement = logging::log_private_user_value(replacement);
 
         tracing::info!(
             target: "script_kit::spine",
             event = "replace_active_segment_text",
             segment_index,
             old_range = ?segment_byte_range,
-            replacement,
+            replacement_bytes = safe_replacement.raw_bytes,
+            replacement_sha256 = %safe_replacement.sha256,
             trailing_space,
             new_text_len = new_text.len(),
             cursor,

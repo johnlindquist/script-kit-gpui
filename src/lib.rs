@@ -42,6 +42,7 @@ pub mod emoji;
 pub mod emoji_usage;
 pub mod error;
 pub mod executor;
+pub mod extension_types;
 pub(crate) mod fidelity_capture;
 pub mod focus_coordinator;
 pub mod form_prompt;
