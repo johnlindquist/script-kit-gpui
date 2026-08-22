@@ -236,28 +236,36 @@ Evidence in this checkpoint is intentionally time- and source-qualified:
   other. User-requested webcam photos now use the same shared exclusive
   no-follow `0600` owner as conversation exports, suffix every same-second
   collision instead of destroying an earlier image, reject hostile Desktop
-  destinations, and expose only keyed diagnostic identities. Twenty-nine
-  isolated
-  regressions
+  destinations, and expose only keyed diagnostic identities. The first real
+  Dictation regression run then exposed an additional production mismatch:
+  saved entries publish `preview`/`text` and `target`, while the shared
+  provider-item reader previously accepted only `title`, silently hiding
+  valid spoken history from generic provider consumers. The actual reader now
+  resolves Dictation previews/text and destination labels while preserving
+  strict Calendar/Notifications title rules. Thirty-one isolated regressions
   cover hostile links, corrupt records, durable-provider preservation,
   boundary repair, preflight ordering, and concurrent saves/deletes. The
   owner's machine load rose to **68.53 / 30.73 / 18.39** immediately after
   starting the bounded compile, so that compile was stopped; the requested
   approximately 20-minute recheck at 12:27 worsened to **281.47 / 149.11 /
-  83.88**; a second recheck at 12:46 improved to **43.49 / 19.09 / 31.07**
-  but remained too expensive for a fresh application compile. These newest
-  Rust changes remain **uncompiled and behavior-unverified** until a safe
-  capacity window
-  returns; the requested implementation was checkpointed in four grouped
-  source commits after `rustfmt --check` and `git diff --check` passed, but
-  those static checks are not executable Rust behavior evidence. Lightweight,
+  83.88**; a second recheck at 12:46 improved to **43.49 / 19.09 / 31.07**.
+  Once load recovered, the genuine application harness completed and all
+  **31/31 isolated Rust regressions passed**: six Dictation-history, two real
+  provider-projection, seven Agent Chat persistence, four conversation-export,
+  four synthetic Selfie artifact, two screenshot-directory, and six private
+  exclusive/unique-file cases. The first six reran directly in **0.08s**;
+  every group ran single-threaded without an app, capture, provider, camera,
+  microphone, native input, or real clipboard. The provider correction is
+  committed as `31e3940ff`. Lightweight,
   genuinely rerun facade-governance suites did execute **50 passing Bun tests
   with 115 assertions**, and the existing non-GUI design exporter produced
   byte-identical generated outputs; refreshed source-bound facade and export
   receipts restored the exact current clean commit to **15/75 accepted,
   60 missing, zero stale/invalid/failed receipts, and zero auditor errors**.
-  This verifies the safe DevTools/code-generation obligations, not the 29
-  newest Rust regressions or any interactive runtime task.
+  This verifies the safe DevTools/code-generation obligations and the named
+  isolated Rust behavior, not any interactive runtime task. Subsequent
+  build-system/domain extraction changes require their own fresh application
+  compile and source-bound receipt regeneration before being called complete.
 - A lightweight owner audit then promoted eight heavily used launcher
   surfaces whose actual production renderer, semantic collector, and layout
   owner were already present but hidden behind host-wide Derived coverage:
@@ -895,6 +903,195 @@ The follow-up static surface inventory contains **16 Direct, 38 Derived, and
 **0 of 54 surface mappings and 0 of 17 supported prompt families have a fresh
 direct runtime receipt**. Source-generation changes invalidate all 15 existing
 offline receipts until their real producers are run again.
+
+## 2026-08-22: predictable Rust builds and verification throughput
+
+### Observed failure chain, not a generic Rust checklist
+
+1. One reviewed Dictation filter linked an application harness containing
+   **15,207 tests** even though only six were requested.
+2. `.cargo/config.toml` globally injected `CARGO_INCREMENTAL=1`; after the
+   official prebuilt sccache package was installed, sccache immediately
+   refused `rustc -vV` instead of caching any compilation.
+3. Cargo's `test` profile inherited `[profile.dev.package."*"] opt-level=2`,
+   so correctness-only checks optimized hundreds of third-party packages as
+   if they were part of a frame-sensitive interactive binary.
+4. `transcribe-rs` unconditionally enabled both Whisper C++ and ONNX; the
+   application-wide harness therefore rebuilt native speech/model dependencies
+   even for private JSONL, symlink, file-permission, and provider tests.
+5. `gpui_macos/build.rs` let Metal pick `$HOME/.cache/clang/ModuleCache`.
+   A cold sandboxed build failed because that path was not writable.
+6. The emergency cleaner deliberately terminated live agent Cargo owners;
+   its pruning helper could delete whole `target-agent/pools` parents rather
+   than individually locked caches. During the observed run that destroyed a
+   warm cache, produced hundreds of impossible dependency errors, and forced
+   an entirely new cold compile.
+7. Disk policy only warned below its 25-GiB reserve and still began a build,
+   guaranteeing a race against the 25-GiB emergency watcher.
+8. The local machine had no `sccache`, while CI already used both rust-cache
+   and sccache; adding another CI cache layer would not fix the actual local
+   absence or CI's incremental-compilation incompatibility.
+9. The first real bounded timing report measured **1,233 total build units,
+   1,228 rebuilt units, 2-way concurrency, and 257.2 seconds total**. Its
+   longest actual owners were the monolithic app test harness (**67.0s**),
+   Whisper's native build script (**17.2s**), `objc2-app-kit` (**13.2s**),
+   and two separate compilations of the identical GPUI crate (**7.25s +
+   6.28s**). The duplicate existed because GPUI's Metal build script pulled
+   the complete GPUI application crate into its build dependencies just to
+   read a sibling directory constant.
+10. The app build script watched `.git/HEAD`, packed refs, and the active
+    branch ref even in local debug/test profiles. Every grouped commit,
+    including documentation-only checkpoints, therefore invalidated the
+    entire **67-second** application test harness without a compiled-source
+    or bundled-asset change.
+11. The release verifier, CI performance lane, and offline-proof producer
+    invoked `bun test scripts/...` without an explicit `./` prefix. On the
+    installed Bun **1.3.14**, that form enters repository-wide filter mode,
+    traverses unrelated build trees, and can exceed Darwin's **10,240-file
+    descriptor** ceiling. The resulting missing child-process stdout/stderr
+    produced **128 false failures** and a measured **156.13** machine-load
+    spike even though the same bounded tests and their child processes were
+    healthy. This exact Bun/macOS failure is independently documented by
+    the upstream project; it was not an application regression.
+
+### Ten implemented improvements and their verification contracts
+
+1. **Extract GPUI-free persistence ownership.** `crates/sk-storage` now owns
+   atomic writes, private directories/files, safe JSONL, symlink refusal, and
+   collision-proof exports; `src/atomic_file.rs` preserves all app-facing
+   paths. `cargo tree -p sk-storage` contains only `libc`, `tempfile`, `uuid`,
+   and their small transitive dependencies: no GPUI, Metal, Whisper, or ONNX.
+   Four initial storage regressions compiled in **1.69s**; the subsequent
+   **14 isolated private-storage tests** ran against a **15-test harness** in
+   **0.20s warm**, rather than linking the 15,207-test app harness. The full
+   **15/15 domain suite**, including a real concurrent no-tearing regression,
+   now finishes its behavior in **0.64s**; the former 12,000-write stress
+   workload requires explicit `SCRIPT_KIT_STORAGE_FULL_STRESS=1`. The normal
+   release domain lane now executes **75/75 passing app-independent cases**:
+   nine Clipboard, 51 Protocol, and all 15 Storage behaviors.
+2. **Separate test optimization from interactive rendering.** Keep every
+   existing frame-sensitive dev dependency at `-O2`; explicitly compile
+   correctness-test dependencies and vendored GPUI crates at `-O0`. Release
+   settings and calibrated user-facing animation/render performance stay
+   unchanged. Local debug/test builds no longer track changing Git refs;
+   release, CI `GITHUB_SHA`, and explicit `SCRIPT_KIT_TRACK_GIT_HEAD=1`
+   preserve exact provenance. Executable checks cover both profiles and
+   every Git-invalidation policy.
+3. **Use a real compiler cache.** Install the official prebuilt sccache
+   package, configure a persistent repo-owned local cache and Unix socket,
+   and normalize the repository base directory. Preserve explicit existing
+   wrappers. Auto mode clearly explains sandbox fallback; required mode fails
+   closed before Cargo starts if the cache cannot execute `rustc`. The
+   observed cold rebuild populated **more than 1,100 real cache files**.
+4. **Remove the incremental/sccache contradiction.** Delete the global
+   `CARGO_INCREMENTAL=1` injection while preserving local dev/test profile
+   incrementality. CI/release explicitly use `CARGO_INCREMENTAL=0`, allowing
+   disposable runners to cache eligible Rust units instead of bypassing
+   sccache. Keep in mind that linked binaries, proc macros, and incremental
+   path crates remain non-cacheable by design.
+5. **Persist shader modules inside the writable workspace.** The wrapper and
+   vendored GPUI Metal build agree on `target-agent/shared/clang-modules` and
+   pass Clang's documented `-fmodules-cache-path` flag. The identical
+   production Metal compile succeeded in the restricted sandbox in **0.16s**,
+   produced real `.pcm` modules under that directory, and linked a valid
+   `.metallib` without touching `$HOME/.cache`. The shader build now resolves
+   the adjacent vendored GPUI path directly, eliminating the full duplicate
+   GPUI build-dependency graph exposed by the timing report.
+6. **Protect live and warm build caches.** A shared lock-owner contract makes
+   incomplete leases fail closed, acquires the exact pool lock before
+   deletion, preserves `agent-debug`, and never deletes pool parents,
+   `.locks`, shared compiler/shader caches, exports, or artifacts. Both
+   ordinary and emergency pruning now remove only individually unlocked
+   stale pools. No automatic cleaner kills Cargo, rustc, a dev watcher, or a
+   user-owned process.
+7. **Fail before predictable disk contention.** Preserve the 25-GiB floor,
+   inspect free space after safe eviction, and refuse to start below that
+   reserve unless an explicit low-disk override was provided. Executable
+   negative tests prove the compiler is never invoked when the floor cannot
+   be met.
+8. **Bound CPU and capture actual timing receipts.** Agent Cargo defaults to
+   two workers while preserving an intentional caller override. Every run
+   records cache state, pool, worker count, exit status, elapsed seconds, and
+   before/after free space. `SCRIPT_KIT_AGENT_TIMINGS=1` emits Cargo's real
+   critical-path HTML plus a fail-closed machine-readable summary of actual
+   hot units, duplicate compilations, bounded concurrency, and specific next
+   actions instead of relying on impressions about slow crates.
+9. **Reuse only current reviewed test binaries.** The dedicated harness
+   runner refuses missing executables and binaries older than source,
+   workspace crates, vendored code, Cargo configuration, or lockfiles. It
+   accepts explicit reviewed filters only and disables app launch, visible
+   probes, screen takeover/capture, native input, and live AI before running
+   each group single-threaded. It cannot claim a stale build is current.
+10. **Lock the contract into real behavior and release gates.** Dedicated
+    low-cost Bun cases operate disposable fake pools, live/incomplete leases,
+    missing/unusable sccache, disk starvation, stale/current harnesses,
+    optimized-vs-test profiles, and CI safety flags. The release verifier now
+    also refuses native-input/screen-capture overrides and includes the
+    storage domain plus build-policy tests in its normal verification lanes.
+    Every real explicit Bun test invocation now roots its paths with `./`,
+    including both shared offline-proof launchers and the actual recorded
+    receipt command; the receipt validator rejects any unrooted command
+    while preserving canonical source paths and fingerprints. A live
+    child-output regression proves subprocess evidence is observable, and
+    both extra native-input/screen-capture opt-ins are forcibly disabled.
+    The source-current full nonintrusive release lane then executed
+    **690 passing tests, zero failures, and 2,704 assertions across 37 files
+    in 9.69s**, without the previous repository scan or load spike. The
+    focused build/proof-contract lane separately passed **61 tests and 317
+    assertions in 0.74s**. None touches the operator's computer.
+
+The measured post-deduplication build contained **985 total units instead of
+1,233**, rebuilt only **119 units instead of 1,228**, retained exactly two
+workers, and completed in **103.5s instead of 257.2s**. Its timing report
+contains one GPUI compilation instead of two. Its remaining critical path is
+the application test harness (**66.63s**) and Whisper's native build
+(**16.68s**), which is why app-independent domain extraction remains the
+highest-return next architectural move. After Git-reference invalidation was
+removed, a real app-harness incremental rebuild completed in **17.38s**;
+all **25 current app-only privacy regressions** then passed from that fresh
+binary in **0.45s**, and all **15 Storage regressions** passed separately.
+After the storage extraction and four grouped source commits, a genuinely
+source-current application harness rebuilt in **22.04s** with exactly two
+workers; all 25 app regressions passed again, and the complete **75-case
+domain lane** rebuilt in **0.41s** and passed every case without a GUI.
+The required strict application-library release gate also passed on this
+source with **zero warnings** via the bounded two-worker agent wrapper;
+its first populated Clippy metadata cache completed in **74s**.
+
+### Remaining architecture, without overstating completion
+
+- Additional pure command/search/provider/AI-policy owners should follow the
+  proven `sk-storage` pattern; each extraction must preserve app paths and
+  prove its dependency tree excludes GPUI and native media backends.
+- The application-wide root harness still legitimately includes Whisper and
+  ONNX. Making speech backends optional requires a separate typed runtime
+  boundary, unchanged default packaged capabilities, and explicit no-feature,
+  default-feature, and packaged-Dictation verification; simply disabling a
+  dependency would silently break a shipped command.
+- The lockfile contains duplicate `nix`, `dirs`, `png`, `hashbrown`, and
+  Windows-platform dependency generations. Any consolidation must be driven
+  by the generated timing critical path and verified compatibility, not a
+  blanket lockfile upgrade.
+- nextest and CI rust-cache already exist. Use nextest archive/reuse only for
+  an actually measured build-once/multiple-runner workflow; do not duplicate
+  caches or misrepresent execution as fresh behavior proof.
+- A changed source still invalidates previous top-ten receipts; final
+  acceptance requires the fresh app/library build, reviewed offline behavior,
+  direct safe-producer reruns, and exact-current-source audit. Interactive,
+  painted, provider-backed, signed, packaged, and 54-surface runtime
+  requirements remain separately unproven without explicit authorization.
+
+Primary technical references:
+
+- [Cargo build-cache layout and compiler wrappers](https://doc.rust-lang.org/cargo/reference/build-cache.html)
+- [Cargo profiles, inheritance, package overrides, and incremental compilation](https://doc.rust-lang.org/stable/cargo/reference/profiles.html)
+- [Cargo critical-path build timing reports](https://doc.rust-lang.org/stable/cargo/reference/timings.html)
+- [Cargo build-script change detection](https://doc.rust-lang.org/cargo/reference/build-scripts.html)
+- [Mozilla sccache: supported storage, Unix sockets, and non-cacheable Rust units](https://github.com/mozilla/sccache)
+- [Clang modules and explicit module-cache locations](https://clang.llvm.org/docs/Modules.html)
+- [Cargo optional dependencies and feature contracts](https://doc.rust-lang.org/stable/cargo/reference/features.html)
+- [Nextest build archiving and reuse](https://nexte.st/docs/ci-features/archiving/)
+- [Bun macOS test-filter descriptor exhaustion and silent child-process output loss](https://github.com/oven-sh/bun/issues/32067)
 
 ## Historical 2026-08-21 re-audit: superseded worktree snapshot
 
@@ -1941,6 +2138,8 @@ modes of the same reliable assistant.
   webcam verification uses synthetic bytes and never accesses a camera
 - `src/flows/session.rs`, `codex_client.rs`, and `runner.rs`
 - `src/dictation/history.rs` for complete private spoken-transcript history
+- `src/mcp_resources/mod.rs` for Dictation-native `preview`/`text` and
+  `target` projection into the shared provider-item/search contract
 - `src/notes/storage.rs` for private, collision-safe Notes conflict recovery
 - `src/notes/window/ai_handoff.rs`
 - `src/components/conversation_style.rs`, `conversation_text.rs`,
@@ -2500,7 +2699,7 @@ and ratified performance gates all pass against the release candidate.
 ```bash
 ./scripts/agentic/agent-cargo.sh clippy --locked --lib --no-deps -- -D warnings
 ./scripts/agentic/agent-cargo.sh test --lib
-./scripts/agentic/agent-cargo.sh test -p sk-clipboard -p sk-protocol
+./scripts/agentic/agent-cargo.sh test -p sk-clipboard -p sk-protocol -p sk-storage
 bun run scripts/check-sdk-types.ts
 SCRIPT_KIT_NONINTERACTIVE=1 bun run scripts/test-runner.ts --parallel --json
 bash scripts/verify-macos-bundle.sh '<packaged-app-path>'
