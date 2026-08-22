@@ -93,6 +93,15 @@ requested_args=("$@")
 if [[ "$noninteractive_mode" == "1" ]]; then
   cargo_subcommand="${requested_args[0]:-}"
   case "$cargo_subcommand" in
+    build|check|clippy|fmt|metadata|tree|bundle|rustc|rustdoc)
+      ;;
+    doc)
+      for argument in "${requested_args[@]}"; do
+        if [[ "$argument" == "--open" || "$argument" == --open=* ]]; then
+          worker_failure "noninteractive agent Cargo refuses application launch or live benchmarks"
+        fi
+      done
+      ;;
     run)
       reviewed_exporter=0
       for (( command_index=1; command_index<${#requested_args[@]}; command_index++ )); do
@@ -181,6 +190,9 @@ if [[ "$noninteractive_mode" == "1" ]]; then
       if (( reviewed_app_target == 0 && (reviewed_domain_target == 0 || unreviewed_package == 1) )); then
         worker_failure "noninteractive agent Cargo requires an explicit reviewed --lib, --test, or safe domain package"
       fi
+      ;;
+    *)
+      worker_failure "noninteractive agent Cargo refuses unreviewed subcommand or alias: ${cargo_subcommand:-<missing>}"
       ;;
   esac
 fi

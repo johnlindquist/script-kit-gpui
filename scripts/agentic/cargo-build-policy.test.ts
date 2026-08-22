@@ -467,12 +467,27 @@ describe("bounded Cargo builds", () => {
     ["run", "--bin", "script-kit-gpui"],
     ["run", "--bin=liquid-glass-demo"],
     ["bench"],
+    ["doc", "--open"],
   ])("refuses application launch or live benchmark %j before Cargo runs", (...launchArgs) => {
     const workspace = fixture();
     const result = run("agent-cargo.sh", launchArgs, workspace.env);
 
     expect(result.status).toBe(64);
     expect(result.stderr).toContain("noninteractive agent Cargo refuses application launch or live benchmarks");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test.each([
+    ["t", "--lib", "--", "--ignored"],
+    ["r", "--bin", "script-kit-gpui"],
+    ["test-serial", "--ignored"],
+    ["unreviewed-cargo-plugin", "--", "--ignored"],
+  ])("refuses unreviewed Cargo alias or external subcommand %j before startup", (...aliasArgs) => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", aliasArgs, workspace.env);
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("noninteractive agent Cargo refuses unreviewed subcommand or alias");
     expect(existsSync(workspace.capture)).toBe(false);
   });
 
