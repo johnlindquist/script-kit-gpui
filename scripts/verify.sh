@@ -59,6 +59,17 @@ export SCRIPT_KIT_ALLOW_SCREEN_CAPTURE=0
 export SCRIPT_KIT_ALLOW_VISIBLE_PROBES=0
 export SCRIPT_KIT_ALLOW_LIVE_AI=0
 export SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=0
+export SCRIPT_KIT_SEARCH_FULL_STRESS=0
+export SCRIPT_KIT_STORAGE_FULL_STRESS=0
+
+for worker_setting in CARGO_BUILD_JOBS RUST_TEST_THREADS; do
+  worker_count="${!worker_setting:-2}"
+  if [[ ! "$worker_count" =~ ^[12]$ ]]; then
+    echo "[verify] REFUSED ${worker_setting}=${worker_count}; noninteractive verification permits only one or two workers" >&2
+    exit 78
+  fi
+  export "${worker_setting}=${worker_count}"
+done
 
 require_clean_source_identity() {
   if [[ "${SCRIPT_KIT_REQUIRE_CLEAN_SOURCE:-0}" != "1" ]]; then
@@ -178,7 +189,15 @@ require_clean_source_identity() {
 
 require_clean_source_identity
 
-CARGO_CMD="${SCRIPT_KIT_CARGO:-cargo}"
+if [[ -n "${SCRIPT_KIT_CARGO:-}" ]]; then
+  CARGO_CMD="$SCRIPT_KIT_CARGO"
+elif [[ "${CI:-}" == "true" && "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  # Hosted runners already own isolated targets and do not satisfy the local
+  # workstation's 25-GiB pool floor; their inherited worker counts stay bounded.
+  CARGO_CMD="cargo"
+else
+  CARGO_CMD="${REPO_ROOT}/scripts/agentic/agent-cargo.sh"
+fi
 
 sanitize_id() {
   printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '-'

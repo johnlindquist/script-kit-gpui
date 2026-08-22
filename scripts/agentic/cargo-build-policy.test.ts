@@ -99,6 +99,121 @@ function installFakeSccache(workspace: ReturnType<typeof fixture>, usable = true
 }
 
 describe("bounded Cargo builds", () => {
+  test("local release verification defaults to the bounded agent Cargo wrapper", () => {
+    const workspace = fixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(scripts, "..", "verify.sh"), "--skip-bundle", "--only", "check"],
+      {
+        env: {
+          ...workspace.env,
+          SCRIPT_KIT_CARGO: "",
+          CI: "",
+          GITHUB_ACTIONS: "",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("agent-cargo.sh check --locked");
+    expect(result.stderr.toString()).toContain("AGENT_CARGO mode=pool");
+    expect(readFileSync(workspace.capture, "utf8")).toContain("jobs=2\n");
+    expect(readFileSync(workspace.capture, "utf8")).toContain("test_threads=2\n");
+  });
+
+  test("hosted GitHub verification keeps its isolated Cargo target and bounded workers", () => {
+    const workspace = fixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(scripts, "..", "verify.sh"), "--skip-bundle", "--only", "check"],
+      {
+        env: {
+          ...workspace.env,
+          SCRIPT_KIT_CARGO: "",
+          CI: "true",
+          GITHUB_ACTIONS: "true",
+          RUST_TEST_THREADS: "1",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("check :: cargo check --locked");
+    expect(result.stderr.toString()).not.toContain("AGENT_CARGO mode=pool");
+    expect(readFileSync(workspace.capture, "utf8")).toContain("jobs=2\n");
+    expect(readFileSync(workspace.capture, "utf8")).toContain("test_threads=1\n");
+  });
+
+  test.each([
+    ["true", ""],
+    ["", "true"],
+  ])("partial CI identity cannot bypass the local Cargo wrapper (%s, %s)", (ci, githubActions) => {
+    const workspace = fixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(scripts, "..", "verify.sh"), "--skip-bundle", "--only", "check"],
+      {
+        env: {
+          ...workspace.env,
+          SCRIPT_KIT_CARGO: "",
+          CI: ci,
+          GITHUB_ACTIONS: githubActions,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("agent-cargo.sh check --locked");
+    expect(result.stderr.toString()).toContain("AGENT_CARGO mode=pool");
+  });
+
+  test("release verifier refuses hostile compiler or harness concurrency before any Cargo starts", () => {
+    for (const [variable, value] of [
+      ["CARGO_BUILD_JOBS", "48"],
+      ["RUST_TEST_THREADS", "24"],
+      ["CARGO_BUILD_JOBS", "0"],
+      ["RUST_TEST_THREADS", "invalid"],
+    ]) {
+      const workspace = fixture();
+      const result = Bun.spawnSync(
+        ["/bin/bash", join(scripts, "..", "verify.sh"), "--skip-bundle", "--only", "check"],
+        {
+          env: { ...workspace.env, SCRIPT_KIT_CARGO: "", [variable!]: value },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+
+      expect(result.exitCode).toBe(78);
+      expect(result.stderr.toString()).toContain("permits only one or two workers");
+      expect(existsSync(workspace.capture)).toBe(false);
+    }
+  });
+
+  test("release verifier disables heavyweight inherited search and storage stress", () => {
+    const workspace = fixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(scripts, "..", "verify.sh"), "--skip-bundle", "--only", "check"],
+      {
+        env: {
+          ...workspace.env,
+          SCRIPT_KIT_CARGO: join(workspace.bin, "cargo"),
+          SCRIPT_KIT_SEARCH_FULL_STRESS: "1",
+          SCRIPT_KIT_STORAGE_FULL_STRESS: "1",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(workspace.capture, "utf8")).toContain("search_stress=0\n");
+    expect(readFileSync(workspace.capture, "utf8")).toContain("storage_stress=0\n");
+  });
+
   test("uses two workers, a persistent sandbox-safe shader cache, timings, and a truthful receipt", () => {
     const workspace = fixture();
     const result = run(
