@@ -22,6 +22,7 @@ async function runFixture(
   mode: string,
   extraArgs: string[] = [],
   selectedFixture = fixturePath,
+  environmentOverrides: Record<string, string> = {},
 ): Promise<RunnerResult> {
   const child = Bun.spawn({
     cmd: ["bun", "run", runnerPath, "--json", ...extraArgs, selectedFixture],
@@ -33,11 +34,16 @@ async function runFixture(
       SCRIPT_KIT_NONINTERACTIVE: "1",
       SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "1",
       SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "1",
+      SCRIPT_KIT_ALLOW_NATIVE_INPUT: "1",
+      SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: "1",
       SCRIPT_KIT_ALLOW_LIVE_AI: "1",
+      SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "1",
+      SCRIPT_KIT_TEST_STATUS: "1",
       INCLUDE_SYSTEM_INPUT: "1",
       SDK_TEST_TIMEOUT: "1",
       SDK_RUNNER_FAILURE_FIXTURE: mode,
       SDK_TEST_VERBOSE: "false",
+      ...environmentOverrides,
     },
   });
 
@@ -126,4 +132,48 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
     expect(result.summary?.total_passed).toBe(1);
     expect(result.summary?.total_failed).toBe(0);
   });
+
+  test("noninteractive SDK workers default to two while preserving an explicit override", async () => {
+    const bounded = await runFixture("safety-env", [], fixturePath, {
+      SDK_TEST_CONCURRENCY: "",
+      SDK_RUNNER_EXPECTED_CONCURRENCY: "2",
+    });
+    expect(bounded.exitCode).toBe(0);
+    expect(bounded.summary?.total_passed).toBe(1);
+
+    const explicit = await runFixture("safety-env", [], fixturePath, {
+      SDK_TEST_CONCURRENCY: "3",
+      SDK_RUNNER_EXPECTED_CONCURRENCY: "3",
+    });
+    expect(explicit.exitCode).toBe(0);
+    expect(explicit.summary?.total_passed).toBe(1);
+  });
+
+  test.each(["0", "-1", "1.5", "invalid", "2workers"])(
+    "invalid SDK worker count %s refuses before any child can spin or launch",
+    async (concurrency) => {
+      const result = await runFixture("safety-env", [], fixturePath, {
+        SDK_TEST_CONCURRENCY: concurrency,
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain(
+        "SDK_TEST_CONCURRENCY must be a positive safe integer",
+      );
+    },
+  );
+
+  test.each(["0", "-1", "1.5", "invalid", "2seconds"])(
+    "invalid SDK timeout %s refuses before any test child starts",
+    async (timeout) => {
+      const result = await runFixture("safety-env", [], fixturePath, {
+        SDK_TEST_TIMEOUT: timeout,
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain(
+        "SDK_TEST_TIMEOUT must be a positive safe integer",
+      );
+    },
+  );
 });

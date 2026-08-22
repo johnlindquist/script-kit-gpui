@@ -2229,6 +2229,7 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/agentic/session.sh",
     "scripts/agentic/root-search-frame-stability.test.ts",
     "tests/sdk/capability-types.fixture.ts",
+    "tests/sdk/fixtures/runner-negative-case.ts",
     "tests/sdk/runner-safety.test.ts",
     "tests/protocol_batch.rs",
   ])("standalone authoritative gates reject an untracked mandatory fixture: %s", (owner) => {

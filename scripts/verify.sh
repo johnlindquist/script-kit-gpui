@@ -152,6 +152,7 @@ require_clean_source_identity() {
     tests/script_content_model.rs
     tests/window_resize_logic.rs
     tests/sdk/capability-types.fixture.ts
+    tests/sdk/fixtures/runner-negative-case.ts
     tests/sdk/runner-safety.test.ts
     kit-init/sdk/menu-syntax.test.ts
     kit-init/types/menu-syntax.test.ts

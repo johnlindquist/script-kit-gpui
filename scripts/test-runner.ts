@@ -14,9 +14,9 @@
  *   bun run scripts/test-runner.ts --include-system  # Include tests that send real keystrokes
  * 
  * Environment:
- *   SDK_TEST_TIMEOUT=10    # Max seconds per test (default: 30)
+ *   SDK_TEST_TIMEOUT=10    # Max seconds per test (default: 5)
  *   SDK_TEST_VERBOSE=true  # Extra debug output
- *   SDK_TEST_CONCURRENCY=4 # Max concurrent tests in parallel mode (default: 4)
+ *   SDK_TEST_CONCURRENCY=4 # Max workers (default: 2 noninteractive, 4 otherwise)
  *   SCRIPT_KIT_NONINTERACTIVE=1 # Refuse system-input tests before starting children
  * 
  * =============================================================================
@@ -113,13 +113,28 @@ interface RunnerSummary {
 const PROJECT_ROOT = resolve(import.meta.dir, '..');
 const SDK_PATH = join(PROJECT_ROOT, 'scripts', 'kit-sdk.ts');
 const TESTS_DIR = join(PROJECT_ROOT, 'tests', 'sdk');
-const TIMEOUT_MS = parseInt(process.env.SDK_TEST_TIMEOUT || '5', 10) * 1000;
+
+function positiveSafeInteger(name: string, fallback: number): number {
+  const configured = process.env[name];
+  if (configured === undefined || configured === '') return fallback;
+  const parsed = Number(configured);
+  if (!/^[1-9][0-9]*$/.test(configured) || !Number.isSafeInteger(parsed)) {
+    console.error(`[sdk-tests] REFUSED ${name} must be a positive safe integer`);
+    process.exit(78);
+  }
+  return parsed;
+}
+
+const NONINTERACTIVE = process.env.SCRIPT_KIT_NONINTERACTIVE === '1';
+const TIMEOUT_MS = positiveSafeInteger('SDK_TEST_TIMEOUT', 5) * 1000;
 const VERBOSE = process.env.SDK_TEST_VERBOSE === 'true';
 const JSON_ONLY = process.argv.includes('--json');
 const PARALLEL = process.argv.includes('--parallel');
 const INCLUDE_SYSTEM = process.argv.includes('--include-system');
-const NONINTERACTIVE = process.env.SCRIPT_KIT_NONINTERACTIVE === '1';
-const CONCURRENCY = parseInt(process.env.SDK_TEST_CONCURRENCY || '4', 10);
+const CONCURRENCY = positiveSafeInteger(
+  'SDK_TEST_CONCURRENCY',
+  NONINTERACTIVE ? 2 : 4,
+);
 
 if (NONINTERACTIVE && INCLUDE_SYSTEM) {
   console.error(
@@ -260,9 +275,14 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
         SDK_TEST_CLIPBOARD_FIXTURES: fileName === 'test-clipboard-history.ts' ? '1' : '0',
         SDK_TEST_FILE_FIXTURES: fileName === 'test-file-search.ts' ? '1' : '0',
         SDK_TEST_MENU_FIXTURES: fileName === 'test-menu-bar-api.ts' ? '1' : '0',
+        SDK_TEST_CONCURRENCY: String(CONCURRENCY),
         SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: '0',
         SCRIPT_KIT_ALLOW_VISIBLE_PROBES: '0',
+        SCRIPT_KIT_ALLOW_NATIVE_INPUT: '0',
+        SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: '0',
         SCRIPT_KIT_ALLOW_LIVE_AI: '0',
+        SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: '0',
+        SCRIPT_KIT_TEST_STATUS: '0',
         ...(NONINTERACTIVE ? { INCLUDE_SYSTEM_INPUT: '0' } : {}),
       },
     });

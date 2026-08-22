@@ -29,7 +29,15 @@ switch (mode) {
       process.env.SDK_TEST_AUTOSUBMIT === "1" &&
       process.env.SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER === "0" &&
       process.env.SCRIPT_KIT_ALLOW_VISIBLE_PROBES === "0" &&
+      process.env.SCRIPT_KIT_ALLOW_NATIVE_INPUT === "0" &&
+      process.env.SCRIPT_KIT_ALLOW_SCREEN_CAPTURE === "0" &&
       process.env.SCRIPT_KIT_ALLOW_LIVE_AI === "0" &&
+      process.env.SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH === "0" &&
+      process.env.SCRIPT_KIT_TEST_STATUS === "0" &&
+      (
+        !process.env.SDK_RUNNER_EXPECTED_CONCURRENCY ||
+        process.env.SDK_TEST_CONCURRENCY === process.env.SDK_RUNNER_EXPECTED_CONCURRENCY
+      ) &&
       process.env.INCLUDE_SYSTEM_INPUT === "0";
     result("noninteractive-child-environment", safe ? "pass" : "fail");
     break;
