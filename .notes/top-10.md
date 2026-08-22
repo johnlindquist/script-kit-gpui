@@ -984,12 +984,21 @@ offline receipts until their real producers are run again.
    stale-query/reset regressions. `src/filter_coalescer.rs` preserves the
    exact binary-facing import; bounded governance fingerprints the domain
    owner, compatibility adapter, and actual queue/take/reset consumer.
-   The expanded protocol domain executes **83 passing cases** without GPUI,
-   Metal, Whisper, or ONNX. The complete domain inventory is now **107
-   cases**: nine Clipboard, 83 Protocol, and 15 Storage behaviors. The actual
-   shipping binary compiled against the moved scheduler in **41.95s**, and
-   the strict zero-warning application-library release lint passed in
-   **24.31s**, each using exactly two workers and preserving the disk floor.
+   The common ASCII/fuzzy matcher then moved to
+   `crates/sk-protocol/src/ascii_search.rs`, with the original
+   `src/scripts/search/ascii.rs` path preserved as a compatibility facade.
+   All **27 existing** case-folding, ordered-match, original-index,
+   word-boundary, and exact-name regressions left the monolithic application
+   harness; four new Unicode-boundary, out-of-range, highlight-position, and
+   short-query edge cases now run beside the pure owner. Five representative
+   real app search, ranking, script, and scriptlet highlight cases also pass
+   from the fresh application harness. The expanded protocol domain executes
+   **114 passing cases** without GPUI, Metal, Whisper, or ONNX. The complete
+   domain inventory is now **138 cases**: nine Clipboard, 114 Protocol, and
+   15 Storage behaviors. The actual shipping binary compiled against the
+   moved search owner in **26.10s**, and the strict zero-warning
+   application-library release lint passed in **26.07s**, each using exactly
+   two workers and preserving the disk floor.
 2. **Separate test optimization from interactive rendering.** Keep every
    existing frame-sensitive dev dependency at `-O2`; explicitly compile
    correctness-test dependencies and vendored GPUI crates at `-O0`. Release
@@ -1093,8 +1102,8 @@ offline receipts until their real producers are run again.
     passes **19 cases and 57 assertions**; the actual two-worker SDK runner
     separately passes **215 cases, zero failures, and zero skips**.
     The source-current full nonintrusive release lane then executed
-    **729 passing tests, zero failures, and 2,823 assertions across 37 files
-    in 10.96s**, without the previous repository scan or load spike. The
+    **731 passing tests, zero failures, and 2,832 assertions across 37 files
+    in 11.51s**, without the previous repository scan or load spike. The
     focused build/proof-contract lane separately passed **62 tests and 320
     assertions in 0.77s**. None touches the operator's computer.
 
