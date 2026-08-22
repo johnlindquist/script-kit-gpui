@@ -200,6 +200,59 @@ Evidence in this checkpoint is intentionally time- and source-qualified:
   regressions, the real repeated Day Page save, its existing non-append
   compatibility case, and all 13 private Brain behaviors pass** without
   starting an application or touching live user data.
+- A follow-up review found the same integrity failures in both private
+  conversation indexes: Dictation History returned successful-looking IDs
+  after failed writes, hydrated an empty provider over valid data after a
+  failed read, and could discard malformed records during deletion; Agent
+  Chat silently ignored completed-conversation persistence errors, parsed
+  malformed index lines as if they never existed, and could delete a saved
+  conversation before discovering its index was unsafe; private composer
+  prompt recall had the same malformed-line and JSONL-boundary failures.
+  Both owners now
+  reject malformed JSONL without exposing private lines, repair legacy
+  missing-newline boundaries through the opened owner-only descriptor,
+  serialize save/delete/compaction ownership, reject invalid root snapshots,
+  and preserve existing files before any unsafe rewrite. Dictation returns a
+  real typed persistence result and leaves unavailable History actions
+  disabled; Agent Chat saves the complete conversation and index together,
+  protects submitted composer prompts with the same serialized private owner,
+  shows safe recovery notices on either persistence failure, and replaces raw
+  conversation-title, current-app automation query, generated-command name,
+  launcher filter, grouped-cache-key, captured-window-title, and screenshot-
+  artifact-path diagnostics with process-keyed fingerprints; provider/setup,
+  background-title, model-selection, queued-submit, rewind, and Brain-ingest
+  failures receive the same private diagnostic treatment. The separate
+  Script Kit Selfie owner now encodes image bytes in memory and persists both
+  screenshot/receipt through preflighted no-follow `0600` atomic files in a
+  repaired `0700` directory; the grandfathered source audit no longer requires
+  the previously unsafe `std::fs::write` implementation. The real Agent Chat
+  Downloads export now creates owner-only exclusive files, suffixes repeated
+  exports instead of overwriting earlier conversations, refuses hostile
+  directories/destination links, and sanitizes session-derived filenames.
+  Both focused-window and full-screen AI screenshot paths now also repair
+  their shared temporary directory to `0700` and refuse hostile directory
+  links before accepting any private image bytes; process/sequence-qualified
+  Selfie identities prevent same-millisecond captures from overwriting each
+  other. User-requested webcam photos now use the same shared exclusive
+  no-follow `0600` owner as conversation exports, suffix every same-second
+  collision instead of destroying an earlier image, reject hostile Desktop
+  destinations, and expose only keyed diagnostic identities. Twenty-nine
+  isolated
+  regressions
+  cover hostile links, corrupt records, durable-provider preservation,
+  boundary repair, preflight ordering, and concurrent saves/deletes. The
+  owner's machine load rose to **68.53 / 30.73 / 18.39** immediately after
+  starting the bounded compile, so that compile was stopped; the requested
+  approximately 20-minute recheck at 12:27 worsened to **281.47 / 149.11 /
+  83.88**; a second recheck at 12:46 improved to **43.49 / 19.09 / 31.07**
+  but remained too expensive for a fresh application compile. These newest
+  changes remain **source-only and unverified** until a safe capacity window
+  returns; the requested implementation was checkpointed in four grouped
+  source commits after `rustfmt --check` and `git diff --check` passed, but
+  those static checks are not executable behavior evidence. The previous
+  **15/75** proof checkpoint belongs to its older source commit and must be
+  regenerated after build/test verification; no interactive runtime work is
+  authorized.
 - The actual full library and application check completed successfully through
   the prescribed two-job Cargo wrapper. The main binary still reports eight
   preexisting binary-only unused-import warnings; the release-required
@@ -1822,8 +1875,11 @@ modes of the same reliable assistant.
 - `src/ai/presets.rs` and `src/render_builtins/ai_presets.rs` for private
   user-authored system prompts, safe preset import/export and mutation,
   and keyed launcher-side preset diagnostics
-- `src/ai/agent_chat/ui/history.rs`, `history_attachment.rs`, and
-  `chat_window.rs` for all four owner-bound private-history stores
+- `src/ai/agent_chat/ui/history.rs`, `history_attachment.rs`, `thread.rs`, and
+  `chat_window.rs` for all four owner-bound private-history stores, truthful
+  completed-turn persistence, and visible private-storage failure recovery
+- `src/ai/agent_chat/ui/{export.rs,view.rs}` for owner-only, collision-safe,
+  no-follow user-requested conversation exports and truthful export failure
 - `src/ai/session.rs` and `src/ai/providers.rs` for typed provider-error
   facts, exact user cancellation, fail-closed retry ownership, complete
   nonempty response validation, and final-only output delivery
@@ -1857,6 +1913,12 @@ modes of the same reliable assistant.
   execution receipts
 - `src/ai/harness/screenshot_files.rs` for owner-only image files and
   fingerprint-only screenshot/window/error diagnostics
+- `src/platform/selfie_capture.rs` for owner-only, no-follow screenshot
+  images/receipts, private capture directories, and synthetic-byte-only
+  artifact verification without screen capture
+- `src/app_impl/webcam_actions.rs` and `src/atomic_file.rs` for shared
+  collision-safe, exclusive, no-follow `0600` user exports and webcam photos;
+  webcam verification uses synthetic bytes and never accesses a camera
 - `src/flows/session.rs`, `codex_client.rs`, and `runner.rs`
 - `src/dictation/history.rs` for complete private spoken-transcript history
 - `src/notes/storage.rs` for private, collision-safe Notes conflict recovery
@@ -1893,13 +1955,40 @@ modes of the same reliable assistant.
    turns. Route every Flow and Dictation primary/legacy transcript through the
    shared opened-descriptor `0600`/`O_NOFOLLOW` private-file contract; repair
    older permissive files before exposing private data, reject symlinks at all
-   names, and atomically replace complete compacted history. Preserve v0-v3
+   names, repair missing JSONL boundaries before appending, reject malformed
+   records instead of silently dropping them, and atomically replace complete
+   compacted history. Serialize Dictation/Agent Chat save, deletion, and
+   compaction ownership so concurrent writers cannot erase adjacent private
+   work. Publish Dictation provider data and saved IDs only after actual
+   durable persistence; retain the previous valid resource on load failure.
+   Save a completed Agent Chat conversation and its private index together,
+   refuse malformed existing indexes before mutating any conversation, and
+   show a safe recovery notice whenever durable storage fails. Apply the same
+   strict private JSONL boundary, malformed-record rejection, serialized
+   mutation, and truthful visible failure policy to submitted composer prompt
+   recall without blocking delivery of the active message. Preserve v0-v3
    migration and fail closed on failed/foreign claims.
    Apply that same contract to preflight audits, both current-app/Tab AI
    automation memories, Tab AI execution receipts, and focused/full-screen
    screenshot PNGs; repair JSONL append boundaries through the already-open
    descriptor, never expose path/window-title/provider-error text, and verify
    image persistence with synthetic PNG bytes instead of capturing the screen.
+   Prepare the shared focused/full-screen screenshot temporary directory as
+   `0700` through the no-follow owner before either capture writes its image;
+   repair permissive legacy directories and reject symlinked roots.
+   Keep Script Kit Selfie screenshots and their provenance receipts in a
+   repaired `0700` directory, preflight both no-follow artifact targets
+   before writing either, replace both through private `0600` atomic files,
+   and refuse foreign destinations or planted links. Remove any historical
+   source-audit expectation that unsafe `std::fs::write` remain present;
+   executable synthetic-byte permission/link tests are the behavior contract.
+   Persist user-requested Agent Chat Downloads exports in exclusive `0600`
+   no-follow files; suffix repeated exports, reject symlinked directories and
+   destinations, sanitize session-derived names, and keep raw OS errors out
+   of the user-visible export recovery message. Reuse that same shared
+   exclusive owner for user-requested webcam photos: preserve every same-second
+   capture, reject symlinked Desktop destinations, fingerprint private paths,
+   and verify the actual production writer with synthetic bytes only.
    Create prompt-export/handoff directories at `0700` from first appearance;
    repair legacy permissions through an opened no-follow directory handle;
    reject hostile export-directory, prompt-file, wrapper, and receipt
@@ -2233,7 +2322,10 @@ mistaking source-text assertions or inherited host coverage for proof.
    focus-ring bounds; report absence as an explicit typed blocker.
 8. Add Dictation History fixture store identity, row generation, preview
    generation, redacted transcript fingerprint, audio-path privacy proof, and
-   selection/scroll anchor measurements.
+   selection/scroll anchor measurements. Ensure fixture generation itself
+   receives a real durable saved-entry result; a rejected write, malformed
+   private index, missing provider payload, or stale invalid root snapshot is
+   an explicit unavailable/failure state, never an invented passing identity.
 9. Extend the existing layout joins, clipping checks, overlap analyses,
    semantic projection grading, receipt privacy, and AX primitives where a
    concrete runtime owner is missing. Add text truncation, clipping, overlap,
