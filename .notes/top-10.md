@@ -166,6 +166,28 @@ Evidence in this checkpoint is intentionally time- and source-qualified:
   filename no-follow. **All ten new isolated regressions pass**, along with
   five existing SQLite/recovery compatibility cases. The strict release
   Clippy gate was refreshed successfully against the final database owner.
+- A subsequent private-document and semantic-owner audit found that canonical
+  Brain/Notes/Day Page markdown, actual Brain indexing and day switching,
+  fragment provenance, trash restore, transaction/element fingerprints, AI
+  diagnostics, Dictation receipts, and legacy DevTools outputs still crossed
+  weaker ownership boundaries. The real production owners now create/repair
+  `0700` directories and `0600` no-follow documents before reads; reject
+  hostile links, foreign roots, fragment traversal, and unsafe restore
+  destinations; preserve repeated same-name trash entries; and replace
+  publicly guessable private SHA-256/FNV hashes with the existing
+  process-private keyed fingerprint owner. Dictation History's painted rows,
+  semantic projection, and tracked scroll now share one actual entry ID.
+  Launcher and Dictation History have truthful direct static owners, raising
+  the complete 54-mapping inventory to **7 Direct / 47 Derived / 0
+  Unsupported** while retaining **0/54 direct runtime proofs**. **Ten Brain
+  substrate/indexer cases, 19 additional screened Rust behaviors, and 50
+  DevTools tests with 212 assertions pass** without launching the app or
+  touching the operator's computer. The 11:19 source-freshness audit correctly
+  reduced acceptance from the earlier committed **15/75** to **0/75** while
+  the follow-up was uncommitted: all 15 earlier offline receipts were
+  `BLOCKED_STALE_GENERATION`, and all 60 runtime receipts remained absent.
+  Regenerate actual safe producer receipts after the final grouped commits;
+  do not reuse, timestamp-edit, or relabel stale evidence.
 - The actual full library and application check completed successfully through
   the prescribed two-job Cargo wrapper. The main binary still reports eight
   preexisting binary-only unused-import warnings; the release-required
@@ -782,6 +804,12 @@ owners visible as required clean-source release inputs. Every visible,
 native-input, provider-backed, packaged, or genuinely painted requirement
 remains blocked until its separate explicit authorization and exact-artifact
 evidence exist; no synthetic fixture can discharge those obligations.
+
+The follow-up static surface inventory contains **7 Direct, 47 Derived, and
+0 Unsupported bindings**. Direct is a production-owner relation only:
+**0 of 54 surface mappings and 0 of 17 supported prompt families have a fresh
+direct runtime receipt**. Source-generation changes invalidate all 15 existing
+offline receipts until their real producers are run again.
 
 ## Historical 2026-08-21 re-audit: superseded worktree snapshot
 
@@ -1800,6 +1828,16 @@ modes of the same reliable assistant.
 - `src/utils/db_permissions.rs`, `src/ai/storage.rs`, `src/notes/storage.rs`,
   `src/brain/store.rs`, and both `src/clipboard_history/{database.rs,
   db_worker/mod.rs}` owners for private SQLite primary/WAL/SHM lifecycle
+- `src/brain/substrate/{io.rs,paths.rs,day.rs,trash.rs}`,
+  `src/brain/{indexer.rs,day_trace.rs}`, `src/day_page/{document.rs,
+  sediment.rs}`, `src/notes/{storage.rs,day_switcher.rs}`, and
+  `src/notes/window/{init.rs,notes.rs}` for canonical private Brain/Notes/day
+  markdown, owner-only readers, indexing, fragment provenance, and safe trash
+- `src/protocol/transaction_trace.rs`, `src/protocol/types/`,
+  `src/ai/reliability/{diagnostics.rs,devtools.rs}`, `src/dictation/runtime.rs`,
+  `src/main_sections/day_page_{actions.rs,context_round_trip.rs}`, and
+  `scripts/devtools/lib/privacy.ts` for non-guessable process-keyed private
+  receipt, semantic, AI, transcript, and automation fingerprints
 - `src/ai/preflight_audit.rs` for private AI preparation receipts and atomic
   bounded log compaction
 - `src/ai/current_app_automation_memory/` and `src/ai/tab_context.rs` for
@@ -1891,6 +1929,24 @@ modes of the same reliable assistant.
    corruption recovery rename a planted foreign link. All ten focused isolated
    regressions pass, along with five existing owner/recovery compatibility
    cases, without opening the app or touching the real clipboard.
+   Extend that same owner-only opened-descriptor contract to every canonical
+   Brain/Notes/day markdown root and document, not only SQLite/transcript
+   sidecars. Repair older directory/file permissions before indexing, parsing,
+   switching, AI context assembly, or fragment traversal; reject hostile
+   directory/document links, foreign roots, and path escapes without reading
+   or mutating another owner's bytes; preserve same-name trash collisions;
+   and allow restore only inside the verified private Brain tree. Keep the
+   actual Notes window, Day Page editor, Brain indexer, day switcher, AI day
+   traces, and fragment provenance on that production owner rather than
+   adding a synthetic test-only file path.
+   Route semantic element fingerprints, private Choice IDs, transaction
+   payload markers, AI diagnostic vault/DevTools identities, Dictation
+   transcript/microphone/device summaries, Day Page handoff receipts, and
+   legacy DevTools main/focus/text/dictation receipts through the existing
+   process-private cryptographic owner. Preserve protocol wire shape where
+   required, but reject publicly computable SHA-256/FNV private markers; the
+   only retained public SHA is the existing nonprivate AppKit footer label
+   required for cross-runtime accessibility parity.
    Classify actual persistent-Claude `result` records from provider-stated
    `is_error` and error-subtype facts; preserve structured failure detail for
    safe diagnostic handling; refuse missing/empty final responses in both
@@ -2140,12 +2196,15 @@ mistaking source-text assertions or inherited host coverage for proof.
    mappings, variants, coverage profiles, and `Direct`/`Derived`/`Unsupported`
    classifications. A static `Direct` relation is not a runtime pass; record
    its profile status and the exact current runtime receipt separately.
-3. Preserve the current worktree repair of stale launcher and Dictation History
-   `sourceFiles` entries, and retain behavior-oriented registry validation
-   that refuses nonexistent, duplicate, absolute, or escaping owner paths.
-4. Enumerate the 49 mappings that currently lack even a direct profile binding
-   and separately enumerate all 54 mappings without fresh direct runtime proof;
-   rank both by
+3. Preserve the real launcher and Dictation History direct selectors and
+   production `sourceFiles` entries; keep painted Dictation rows, semantic
+   projection, and tracked scrolling on the same actual row ID; and retain
+   behavior-oriented registry validation that refuses nonexistent, duplicate,
+   absolute, or escaping owner paths.
+4. Enumerate the **47 Derived mappings** that currently lack a direct profile
+   binding after promoting the genuine ScriptList and Dictation History
+   owners; separately enumerate all **54 mappings without fresh direct
+   runtime proof**, including the seven static Direct bindings. Rank both by
    user frequency, failure severity, state mutation, privacy exposure, and
    likelihood of interaction drift.
 5. Define the minimum direct receipt for every surface: exact target identity,
