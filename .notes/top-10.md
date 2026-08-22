@@ -992,13 +992,25 @@ offline receipts until their real producers are run again.
    harness; four new Unicode-boundary, out-of-range, highlight-position, and
    short-query edge cases now run beside the pure owner. Five representative
    real app search, ranking, script, and scriptlet highlight cases also pass
-   from the fresh application harness. The expanded protocol domain executes
-   **114 passing cases** without GPUI, Metal, Whisper, or ONNX. The complete
-   domain inventory is now **138 cases**: nine Clipboard, 114 Protocol, and
-   15 Storage behaviors. The actual shipping binary compiled against the
-   moved search owner in **26.10s**, and the strict zero-warning
-   application-library release lint passed in **26.07s**, each using exactly
-   two workers and preserving the disk floor.
+   from the fresh application harness. Structured `tag:`, `author:`, `kit:`,
+   `is:`, `type:`, `group:`, and `tool:` parsing and app-independent
+   built-in/app/window/flow/skill/script/scriptlet routing now also belong to
+   `crates/sk-protocol/src/query_prefix.rs`.
+   `src/scripts/search/prefix_filters.rs` preserves every application import
+   and retains only real app-owned script/scriptlet metadata matching. Eight
+   existing parser/built-in cases left the GUI harness; 13 new edge cases
+   cover Unicode normalization, empty/unknown prefixes, every category, and
+   impossible-source short-circuiting. All **21 structured-query behaviors**
+   pass without GPUI. Six actual app tag/author/cron/tool/category/ranking
+   regressions pass from the newly rebuilt application harness, now down to
+   **15,131 cases**. Bounded governance fingerprints the canonical parser,
+   compatibility adapter, and real unified-search category consumer. The
+   expanded protocol domain executes **135 passing cases** without GPUI,
+   Metal, Whisper, or ONNX. The complete domain inventory is now **159
+   cases**: nine Clipboard, 135 Protocol, and 15 Storage behaviors. The
+   shipping binary compiled against the moved search owner in **35.58s**,
+   and the strict zero-warning application-library release lint passed in
+   **28.79s**, each using exactly two workers and preserving the disk floor.
 2. **Separate test optimization from interactive rendering.** Keep every
    existing frame-sensitive dev dependency at `-O2`; explicitly compile
    correctness-test dependencies and vendored GPUI crates at `-O0`. Release
@@ -1102,8 +1114,8 @@ offline receipts until their real producers are run again.
     passes **19 cases and 57 assertions**; the actual two-worker SDK runner
     separately passes **215 cases, zero failures, and zero skips**.
     The source-current full nonintrusive release lane then executed
-    **731 passing tests, zero failures, and 2,832 assertions across 37 files
-    in 11.51s**, without the previous repository scan or load spike. The
+    **737 passing tests, zero failures, and 2,849 assertions across 37 files
+    in 11.65s**, without the previous repository scan or load spike. The
     focused build/proof-contract lane separately passed **62 tests and 320
     assertions in 0.77s**. None touches the operator's computer.
 
