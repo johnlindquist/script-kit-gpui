@@ -400,6 +400,49 @@ try {
 	});
 }
 
+// Every legacy mutator must preserve the same stale-ID boundary; auto-submit
+// fixtures are purely in-memory and never address an operating-system window.
+const staleActionsTest = "stale-id-rejects-every-window-action";
+logTest(staleActionsTest, "running");
+const staleActionsStarted = Date.now();
+
+try {
+	const staleId = 0x7fff_fffe;
+	const operations = [
+		{ name: "focus", call: () => focusWindow(staleId) },
+		{ name: "close", call: () => closeWindow(staleId) },
+		{ name: "minimize", call: () => minimizeWindow(staleId) },
+		{ name: "maximize", call: () => maximizeWindow(staleId) },
+		{ name: "move", call: () => moveWindow(staleId, 10, 10) },
+		{ name: "resize", call: () => resizeWindow(staleId, 100, 100) },
+		{ name: "tile", call: () => tileWindow(staleId, "center") },
+		{ name: "next-display", call: () => moveToNextDisplay(staleId) },
+		{ name: "previous-display", call: () => moveToPreviousDisplay(staleId) },
+	];
+
+	for (const operation of operations) {
+		let rejected = false;
+		try {
+			await operation.call();
+		} catch (error) {
+			rejected = String(error).includes("stale or unknown");
+		}
+		if (!rejected) {
+			throw new Error(`${operation.name} accepted a stale or unknown window ID`);
+		}
+	}
+
+	logTest(staleActionsTest, "pass", {
+		result: { rejectedActions: operations.map((operation) => operation.name) },
+		duration_ms: Date.now() - staleActionsStarted,
+	});
+} catch (error) {
+	logTest(staleActionsTest, "fail", {
+		error: String(error),
+		duration_ms: Date.now() - staleActionsStarted,
+	});
+}
+
 // -----------------------------------------------------------------------------
 // Restore the fixture's original bounds before the close test.
 // -----------------------------------------------------------------------------

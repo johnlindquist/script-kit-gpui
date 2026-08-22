@@ -26,13 +26,14 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use super::types::Script;
+use super::types::{Script, Scriptlet};
+use crate::metadata_parser::TypedMetadata;
 
 /// Current schema version of the `ValidationReport` payload.
 pub const VALIDATION_SCHEMA_VERSION: u32 = 1;
@@ -77,6 +78,8 @@ pub enum MetadataField {
     Cron,
     Schedule,
     Watch,
+    Capability,
+    ExecutionTopology,
     Unknown,
 }
 
@@ -94,6 +97,14 @@ pub enum ScriptValidationKind {
     InvalidValue { value: String, reason: String },
     /// Two or more scripts declared the same binding (shortcut/alias/keyword/trigger).
     DuplicateBinding { binding: BindingKind, value: String },
+    /// A capability is unknown, unsupported, unavailable in this execution
+    /// topology, or blocked by already-known host compatibility facts.
+    CapabilityUnavailable {
+        capability: String,
+        code: crate::mcp_resources::SdkCapabilityDiagnosticCode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        alternatives: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -135,6 +146,115 @@ pub struct ValidationReport {
     pub warning_count: usize,
     pub failed_scripts: Arc<[FailedScript]>,
     pub warnings: Arc<[ScriptValidationIssue]>,
+    /// Diagnostics for commands deliberately retained as visible, disabled
+    /// launcher rows. Fatal entries here are not excluded `failed_scripts`,
+    /// and warnings here never contaminate the script-only warning channel.
+    #[serde(default)]
+    pub retained_issues: Arc<[ScriptValidationIssue]>,
+}
+
+/// Stable, user-safe issue detail shared by the binary renderer and library
+/// behavior tests. Raw script bodies, environment variables, and credentials
+/// never enter the existing typed issue contract.
+pub fn format_script_validation_issue_detail(issue: &ScriptValidationIssue) -> String {
+    let field = issue
+        .field
+        .map(|field| format!("[{field:?}] "))
+        .unwrap_or_default();
+    let detail = match &issue.kind {
+        ScriptValidationKind::MetadataParse { detail }
+        | ScriptValidationKind::SchemaParse { detail } => detail.clone(),
+        ScriptValidationKind::InvalidValue { value, reason } => {
+            format!("value={value:?} — {reason}")
+        }
+        ScriptValidationKind::DuplicateBinding { binding, value } => {
+            format!("{binding:?} duplicate: {value:?}")
+        }
+        ScriptValidationKind::CapabilityUnavailable {
+            capability,
+            code,
+            alternatives,
+        } => {
+            let repair = if alternatives.is_empty() {
+                String::new()
+            } else {
+                format!(" — try {}", alternatives.join(", "))
+            };
+            format!("{capability} ({code:?}){repair}")
+        }
+    };
+    format!("{field}{detail}").trim().to_string()
+}
+
+/// Pure author-facing repair document. Excluded scripts, retained blocked
+/// scriptlets, and pending warnings remain explicitly distinct.
+pub fn format_script_validation_diagnostics(report: &ValidationReport) -> String {
+    let mut output = format!(
+        "Script Issues — {} excluded · {} retained issue(s) · {} fatal · {} warning(s)\n",
+        report.failed_scripts.len(),
+        report.retained_issues.len(),
+        report.fatal_count,
+        report.warning_count,
+    );
+    if report.failed_scripts.is_empty()
+        && report.retained_issues.is_empty()
+        && report.warnings.is_empty()
+    {
+        output.push_str("No failing scripts in this report.\n");
+        return output;
+    }
+
+    for failed in report.failed_scripts.iter() {
+        output.push_str(&format!(
+            "\n## {}\n  path: {}\n",
+            failed.name,
+            failed.path.display(),
+        ));
+        for issue in failed.fatal.iter() {
+            let field = issue
+                .field
+                .map(|field| format!("[{field:?}] "))
+                .unwrap_or_default();
+            output.push_str(&format!("  - {field}{}\n", issue.message));
+            output.push_str(&format!(
+                "      kind: {}\n",
+                format_script_validation_issue_detail(issue)
+            ));
+            for related in &issue.related {
+                output.push_str(&format!(
+                    "      ↔ {} — {}\n",
+                    related.name,
+                    related.path.display()
+                ));
+            }
+        }
+    }
+
+    for issue in report.retained_issues.iter().chain(report.warnings.iter()) {
+        let status = match issue.severity {
+            ValidationSeverity::Fatal => "blocked, retained in launcher",
+            ValidationSeverity::Warning => "warning, retained in launcher",
+        };
+        output.push_str(&format!(
+            "\n## {}\n  path: {}\n  status: {status}\n  - {}\n",
+            issue.script_name,
+            issue.path.display(),
+            issue.message,
+        ));
+        output.push_str(&format!(
+            "      kind: {}\n",
+            format_script_validation_issue_detail(issue)
+        ));
+        for related in &issue.related {
+            output.push_str(&format!(
+                "      ↔ {} — {}\n",
+                related.name,
+                related.path.display()
+            ));
+        }
+    }
+
+    output
 }
 
 /// Bundles the kept scripts + the validation report into one immutable
@@ -254,6 +374,653 @@ pub fn detect_binding_collisions(scripts: &[Arc<Script>]) -> Vec<ScriptValidatio
     out
 }
 
+struct CapabilityValidationSubject<'a> {
+    path: PathBuf,
+    name: &'a str,
+    runtime_topology: crate::mcp_resources::SdkExecutionTopology,
+    enforce_scriptlet_topology: bool,
+}
+
+fn capability_validation_issue(
+    subject: &CapabilityValidationSubject<'_>,
+    field: MetadataField,
+    message: String,
+    kind: ScriptValidationKind,
+) -> ScriptValidationIssue {
+    let severity = if matches!(
+        &kind,
+        ScriptValidationKind::CapabilityUnavailable {
+            code: crate::mcp_resources::SdkCapabilityDiagnosticCode::PermissionInventoryUnavailable,
+            ..
+        }
+    ) {
+        // Unknown permission state must stay visible as pending. Removing the
+        // row would falsely imply denial; execution still consults its issue.
+        ValidationSeverity::Warning
+    } else {
+        ValidationSeverity::Fatal
+    };
+    ScriptValidationIssue {
+        severity,
+        path: subject.path.clone(),
+        script_name: subject.name.to_owned(),
+        field: Some(field),
+        message,
+        kind,
+        related: Vec::new(),
+    }
+}
+
+fn declared_execution_topology(
+    subject: &CapabilityValidationSubject<'_>,
+    value: Option<&serde_json::Value>,
+) -> Result<crate::mcp_resources::SdkExecutionTopology, Box<ScriptValidationIssue>> {
+    use crate::mcp_resources::SdkExecutionTopology;
+
+    let Some(value) = value else {
+        return Ok(subject.runtime_topology);
+    };
+
+    let topology = serde_json::from_value::<SdkExecutionTopology>(value.clone()).map_err(|_| {
+        let rendered = value.to_string();
+        Box::new(capability_validation_issue(
+            subject,
+            MetadataField::ExecutionTopology,
+            "`executionTopology` must be typescript-script, typescript-scriptlet, typescript-scriptlet-interactive, shell-scriptlet, or python-scriptlet.".to_string(),
+            ScriptValidationKind::InvalidValue {
+                value: rendered,
+                reason: "unknown_sdk_execution_topology".to_string(),
+            },
+        ))
+    })?;
+
+    let incompatible = match subject.runtime_topology {
+        SdkExecutionTopology::ShellScriptlet | SdkExecutionTopology::PythonScriptlet => {
+            topology != subject.runtime_topology
+        }
+        SdkExecutionTopology::TypeScriptScriptletInteractive
+            if subject.enforce_scriptlet_topology =>
+        {
+            !matches!(
+                topology,
+                SdkExecutionTopology::TypeScriptScriptletInteractive
+                    | SdkExecutionTopology::TypeScriptScriptlet
+            )
+        }
+        SdkExecutionTopology::TypeScriptScriptlet if subject.enforce_scriptlet_topology => {
+            topology != SdkExecutionTopology::TypeScriptScriptlet
+        }
+        _ => false,
+    };
+    if incompatible {
+        return Err(Box::new(capability_validation_issue(
+            subject,
+            MetadataField::ExecutionTopology,
+            "`executionTopology` does not match this command's actual execution transport."
+                .to_string(),
+            ScriptValidationKind::InvalidValue {
+                value: value.to_string(),
+                reason: "sdk_execution_topology_mismatch".to_string(),
+            },
+        )));
+    }
+
+    Ok(topology)
+}
+
+fn validate_metadata_capabilities(
+    subject: &CapabilityValidationSubject<'_>,
+    metadata: &TypedMetadata,
+    availability: Option<&crate::mcp_resources::SdkHostAvailability>,
+) -> Vec<ScriptValidationIssue> {
+    // A topology is an independent author declaration. Validate it even when
+    // this command does not currently enumerate any SDK capabilities.
+    let topology =
+        match declared_execution_topology(subject, metadata.extra.get("executionTopology")) {
+            Ok(topology) => topology,
+            Err(issue) => return vec![*issue],
+        };
+    let Some(declared) = metadata.extra.get("sdkCapabilities") else {
+        return Vec::new();
+    };
+
+    let Some(capabilities) = declared.as_array() else {
+        return vec![capability_validation_issue(
+            subject,
+            MetadataField::Capability,
+            "`sdkCapabilities` must be an array of SDK capability names.".to_string(),
+            ScriptValidationKind::InvalidValue {
+                value: declared.to_string(),
+                reason: "sdk_capabilities_must_be_array".to_string(),
+            },
+        )];
+    };
+
+    let mut seen = HashSet::with_capacity(capabilities.len());
+    let mut issues = Vec::new();
+    for capability in capabilities {
+        let Some(name) = capability.as_str() else {
+            issues.push(capability_validation_issue(
+                subject,
+                MetadataField::Capability,
+                "Each SDK capability declaration must be a nonempty string.".to_string(),
+                ScriptValidationKind::InvalidValue {
+                    value: capability.to_string(),
+                    reason: "sdk_capability_must_be_string".to_string(),
+                },
+            ));
+            continue;
+        };
+        if name.trim().is_empty() || name != name.trim() {
+            issues.push(capability_validation_issue(
+                subject,
+                MetadataField::Capability,
+                "SDK capability names must be nonempty and cannot include surrounding whitespace."
+                    .to_string(),
+                ScriptValidationKind::InvalidValue {
+                    value: name.to_string(),
+                    reason: "invalid_sdk_capability_name".to_string(),
+                },
+            ));
+            continue;
+        }
+        if !seen.insert(name) {
+            issues.push(capability_validation_issue(
+                subject,
+                MetadataField::Capability,
+                format!("SDK capability `{name}` is declared more than once."),
+                ScriptValidationKind::InvalidValue {
+                    value: name.to_string(),
+                    reason: "duplicate_sdk_capability".to_string(),
+                },
+            ));
+            continue;
+        }
+
+        let diagnostic = if let Some(availability) = availability {
+            crate::mcp_resources::diagnose_sdk_capability_with_context(name, topology, availability)
+        } else {
+            crate::mcp_resources::diagnose_sdk_capability_for_current_host(name, topology)
+        };
+        if let Some(diagnostic) = diagnostic {
+            issues.push(capability_validation_issue(
+                subject,
+                MetadataField::Capability,
+                diagnostic.message,
+                ScriptValidationKind::CapabilityUnavailable {
+                    capability: diagnostic.capability,
+                    code: diagnostic.code,
+                    alternatives: diagnostic.alternatives,
+                },
+            ));
+        }
+    }
+    issues
+}
+
+fn script_validation_subject(script: &Script) -> CapabilityValidationSubject<'_> {
+    use crate::mcp_resources::SdkExecutionTopology;
+
+    CapabilityValidationSubject {
+        path: script.path.clone(),
+        name: &script.name,
+        runtime_topology: match script.extension.as_str() {
+            "sh" | "bash" | "zsh" | "fish" => SdkExecutionTopology::ShellScriptlet,
+            "py" | "python" | "python3" => SdkExecutionTopology::PythonScriptlet,
+            _ => SdkExecutionTopology::TypeScriptScript,
+        },
+        enforce_scriptlet_topology: false,
+    }
+}
+
+/// Validate explicit author metadata without heuristic parsing, OS permission
+/// probes, provider calls, or assumptions about unknown permission grants.
+pub fn validate_declared_sdk_capabilities(script: &Script) -> Vec<ScriptValidationIssue> {
+    let Some(metadata) = script.typed_metadata.as_ref() else {
+        return Vec::new();
+    };
+    validate_metadata_capabilities(&script_validation_subject(script), metadata, None)
+}
+
+/// Validate using only host facts explicitly supplied by an existing inventory.
+/// Unlike the no-probe default, this can distinguish granted from denied access.
+pub fn validate_declared_sdk_capabilities_with_host_availability(
+    script: &Script,
+    availability: &crate::mcp_resources::SdkHostAvailability,
+) -> Vec<ScriptValidationIssue> {
+    let Some(metadata) = script.typed_metadata.as_ref() else {
+        return Vec::new();
+    };
+    validate_metadata_capabilities(
+        &script_validation_subject(script),
+        metadata,
+        Some(availability),
+    )
+}
+
+#[derive(Clone)]
+struct RegisteredScriptletCapabilities {
+    source_path: PathBuf,
+    metadata: TypedMetadata,
+    issues: Vec<ScriptValidationIssue>,
+}
+
+#[derive(Default)]
+struct ScriptletCapabilityRegistry {
+    generation: u64,
+    entries: HashMap<String, RegisteredScriptletCapabilities>,
+    loaded_sources: HashMap<String, PathBuf>,
+    staged_generation: Option<u64>,
+    staged_entries: HashMap<String, RegisteredScriptletCapabilities>,
+    staged_loaded_sources: HashMap<String, PathBuf>,
+}
+
+static SCRIPTLET_CAPABILITY_REGISTRY: OnceLock<RwLock<ScriptletCapabilityRegistry>> =
+    OnceLock::new();
+
+fn scriptlet_capability_registry() -> &'static RwLock<ScriptletCapabilityRegistry> {
+    SCRIPTLET_CAPABILITY_REGISTRY
+        .get_or_init(|| RwLock::new(ScriptletCapabilityRegistry::default()))
+}
+
+fn scriptlet_source_path(scriptlet: &Scriptlet) -> PathBuf {
+    scriptlet
+        .file_path
+        .as_deref()
+        .map(|path| path.split_once('#').map_or(path, |(source, _)| source))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from("plugins")
+                .join(&scriptlet.plugin_id)
+                .join("scriptlets")
+        })
+}
+
+fn scriptlet_capability_identity(scriptlet: &Scriptlet) -> String {
+    let command = scriptlet
+        .command
+        .as_deref()
+        .filter(|command| !command.trim().is_empty())
+        .or_else(|| {
+            scriptlet
+                .file_path
+                .as_deref()
+                .and_then(|path| path.split_once('#').map(|(_, command)| command))
+        })
+        .unwrap_or(&scriptlet.name);
+    format!("{}#{command}", scriptlet_source_path(scriptlet).display())
+}
+
+fn scriptlet_validation_subject(scriptlet: &Scriptlet) -> CapabilityValidationSubject<'_> {
+    use crate::mcp_resources::SdkExecutionTopology;
+
+    let normalized = crate::scriptlets::normalize_scriptlet_tool(&scriptlet.tool);
+    let runtime_topology = match normalized.as_str() {
+        "kit" | "ts" | "bun" | "deno" | "js" => {
+            SdkExecutionTopology::TypeScriptScriptletInteractive
+        }
+        "python" | "py" | "python3" => SdkExecutionTopology::PythonScriptlet,
+        _ => SdkExecutionTopology::ShellScriptlet,
+    };
+    CapabilityValidationSubject {
+        path: scriptlet_source_path(scriptlet),
+        name: &scriptlet.name,
+        runtime_topology,
+        enforce_scriptlet_topology: true,
+    }
+}
+
+/// Begin a complete scriptlet reload without exposing partially parsed data.
+/// Existing launcher rows retain their current blocking diagnostics until the
+/// completed replacement is published in one write-lock transaction.
+pub(crate) fn begin_scriptlet_capability_generation() -> u64 {
+    let mut registry = scriptlet_capability_registry()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry.generation = registry.generation.wrapping_add(1);
+    registry.staged_generation = Some(registry.generation);
+    registry.staged_entries.clear();
+    registry.staged_loaded_sources.clear();
+    registry.generation
+}
+
+/// Publish only a fully parsed current generation. A panic or abandoned loader
+/// leaves the existing active snapshot intact and never marks blocked rows safe.
+pub(crate) fn complete_scriptlet_capability_generation(generation: u64) -> bool {
+    let mut registry = scriptlet_capability_registry()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !scriptlet_generation_is_current(registry.generation, Some(generation))
+        || registry.staged_generation != Some(generation)
+    {
+        return false;
+    }
+    registry.entries = std::mem::take(&mut registry.staged_entries);
+    registry.loaded_sources = std::mem::take(&mut registry.staged_loaded_sources);
+    registry.staged_generation = None;
+    true
+}
+
+fn invalidate_staged_scriptlet_capability_generation(registry: &mut ScriptletCapabilityRegistry) {
+    if registry.staged_generation.take().is_some() {
+        registry.generation = registry.generation.wrapping_add(1);
+        registry.staged_entries.clear();
+        registry.staged_loaded_sources.clear();
+    }
+}
+
+/// Invalidate exactly one changed/deleted markdown source on incremental load.
+pub(crate) fn clear_scriptlet_capabilities_for_source(path: &Path) {
+    let mut registry = scriptlet_capability_registry()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    invalidate_staged_scriptlet_capability_generation(&mut registry);
+    registry
+        .entries
+        .retain(|_, entry| entry.source_path != path);
+    registry.loaded_sources.retain(|_, source| source != path);
+    registry
+        .staged_entries
+        .retain(|_, entry| entry.source_path != path);
+    registry
+        .staged_loaded_sources
+        .retain(|_, source| source != path);
+}
+
+/// Merge supported legacy HTML-comment declarations without treating ordinary
+/// source text, custom metadata, or `Array.prototype.find` as SDK usage.
+pub(crate) fn merge_scriptlet_capability_metadata(
+    typed: Option<&TypedMetadata>,
+    legacy: &HashMap<String, String>,
+) -> Option<TypedMetadata> {
+    let mut metadata = typed.cloned().unwrap_or_default();
+    let mut has_metadata = typed.is_some();
+    for (key, value) in legacy {
+        let canonical = if key.eq_ignore_ascii_case("sdkCapabilities") {
+            "sdkCapabilities"
+        } else if key.eq_ignore_ascii_case("executionTopology") {
+            "executionTopology"
+        } else {
+            continue;
+        };
+        metadata
+            .extra
+            .entry(canonical.to_string())
+            .or_insert_with(|| {
+                serde_json::from_str(value)
+                    .unwrap_or_else(|_| serde_json::Value::String(value.clone()))
+            });
+        has_metadata = true;
+    }
+    has_metadata.then_some(metadata)
+}
+
+fn scriptlet_generation_is_current(current: u64, expected: Option<u64>) -> bool {
+    expected.is_none_or(|generation| generation == current)
+}
+
+type ScriptletCapabilityWriteTarget<'a> = (
+    &'a mut HashMap<String, RegisteredScriptletCapabilities>,
+    &'a mut HashMap<String, PathBuf>,
+);
+
+fn scriptlet_registry_write_target(
+    registry: &mut ScriptletCapabilityRegistry,
+    expected_generation: Option<u64>,
+) -> Option<ScriptletCapabilityWriteTarget<'_>> {
+    match expected_generation {
+        Some(generation)
+            if scriptlet_generation_is_current(registry.generation, Some(generation))
+                && registry.staged_generation == Some(generation) =>
+        {
+            Some((
+                &mut registry.staged_entries,
+                &mut registry.staged_loaded_sources,
+            ))
+        }
+        Some(_) => None,
+        None => {
+            invalidate_staged_scriptlet_capability_generation(registry);
+            Some((&mut registry.entries, &mut registry.loaded_sources))
+        }
+    }
+}
+
+/// Preserve codefence metadata independently of the legacy public Scriptlet
+/// shape, which is initialized by many pre-existing scriptlet fixtures.
+pub(crate) fn register_scriptlet_capabilities(
+    scriptlet: &Scriptlet,
+    metadata: Option<&TypedMetadata>,
+) {
+    register_scriptlet_capabilities_inner(scriptlet, metadata, None);
+}
+
+/// Commit a full-load result only when it belongs to the current generation;
+/// overlapping stale refreshes cannot overwrite newer author diagnostics.
+pub(crate) fn register_scriptlet_capabilities_for_generation(
+    scriptlet: &Scriptlet,
+    metadata: Option<&TypedMetadata>,
+    generation: u64,
+) {
+    register_scriptlet_capabilities_inner(scriptlet, metadata, Some(generation));
+}
+
+fn register_scriptlet_capabilities_inner(
+    scriptlet: &Scriptlet,
+    metadata: Option<&TypedMetadata>,
+    expected_generation: Option<u64>,
+) {
+    let identity = scriptlet_capability_identity(scriptlet);
+    let Some(metadata) = metadata else {
+        let mut registry = scriptlet_capability_registry()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((entries, loaded_sources)) =
+            scriptlet_registry_write_target(&mut registry, expected_generation)
+        else {
+            return;
+        };
+        loaded_sources.insert(identity.clone(), scriptlet_source_path(scriptlet));
+        entries.remove(&identity);
+        return;
+    };
+    let issues =
+        validate_metadata_capabilities(&scriptlet_validation_subject(scriptlet), metadata, None);
+    if !issues.is_empty() {
+        tracing::warn!(
+            scriptlet = %scriptlet.name,
+            source = %scriptlet_source_path(scriptlet).display(),
+            issue_count = issues.len(),
+            "scriptlet_sdk_capability_validation_failed"
+        );
+    }
+    let entry = RegisteredScriptletCapabilities {
+        source_path: scriptlet_source_path(scriptlet),
+        metadata: metadata.clone(),
+        issues,
+    };
+    let mut registry = scriptlet_capability_registry()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some((entries, loaded_sources)) =
+        scriptlet_registry_write_target(&mut registry, expected_generation)
+    else {
+        return;
+    };
+    loaded_sources.insert(identity.clone(), entry.source_path.clone());
+    entries.insert(identity, entry);
+}
+
+/// Return stable, typed diagnostics without removing the scriptlet from its
+/// launcher. Dispatch owners must reject a nonempty result before side effects.
+pub fn validate_scriptlet_capabilities(scriptlet: &Scriptlet) -> Vec<ScriptValidationIssue> {
+    scriptlet_capability_registry()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entries
+        .get(&scriptlet_capability_identity(scriptlet))
+        .map(|entry| entry.issues.clone())
+        .unwrap_or_default()
+}
+
+/// Return only explicitly declared, syntactically string-valued SDK capability
+/// names. Malformed values remain available through the typed issue channel;
+/// this never scans source or invents claims from unrelated custom fields.
+pub fn scriptlet_declared_sdk_capabilities(scriptlet: &Scriptlet) -> Vec<String> {
+    scriptlet_capability_registry()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entries
+        .get(&scriptlet_capability_identity(scriptlet))
+        .and_then(|entry| entry.metadata.extra.get("sdkCapabilities"))
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Recheck a retained scriptlet against an explicitly known permission snapshot.
+/// This can safely resolve a pending grant without probing or opening Settings.
+pub fn validate_scriptlet_capabilities_with_host_availability(
+    scriptlet: &Scriptlet,
+    availability: &crate::mcp_resources::SdkHostAvailability,
+) -> Vec<ScriptValidationIssue> {
+    let metadata = scriptlet_capability_registry()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entries
+        .get(&scriptlet_capability_identity(scriptlet))
+        .map(|entry| entry.metadata.clone());
+    metadata.map_or_else(Vec::new, |metadata| {
+        validate_metadata_capabilities(
+            &scriptlet_validation_subject(scriptlet),
+            &metadata,
+            Some(availability),
+        )
+    })
+}
+
+/// Validate the separate synchronous legacy executor directly against its rich
+/// parsed scriptlet. Unlike launcher execution, its Bun `.output()` transport
+/// has no interactive response pipe, so prompt APIs must fail before spawn.
+pub fn validate_legacy_scriptlet_capabilities(
+    scriptlet: &crate::scriptlets::Scriptlet,
+) -> Vec<ScriptValidationIssue> {
+    use crate::mcp_resources::SdkExecutionTopology;
+
+    let Some(metadata) = merge_scriptlet_capability_metadata(
+        scriptlet.typed_metadata.as_ref(),
+        &scriptlet.metadata.extra,
+    ) else {
+        return Vec::new();
+    };
+    let normalized = crate::scriptlets::normalize_scriptlet_tool(&scriptlet.tool);
+    let runtime_topology = match normalized.as_str() {
+        "kit" | "ts" | "bun" | "deno" => SdkExecutionTopology::TypeScriptScriptlet,
+        "python" | "py" | "python3" => SdkExecutionTopology::PythonScriptlet,
+        _ => SdkExecutionTopology::ShellScriptlet,
+    };
+    let subject = CapabilityValidationSubject {
+        path: scriptlet
+            .source_path
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(format!("scriptlet/{}", scriptlet.command))),
+        name: &scriptlet.name,
+        runtime_topology,
+        enforce_scriptlet_topology: true,
+    };
+    validate_metadata_capabilities(&subject, &metadata, None)
+}
+
+/// Current complete-load generation for deterministic refresh evidence.
+pub fn scriptlet_capability_registry_generation() -> u64 {
+    scriptlet_capability_registry()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .generation
+}
+
+fn merge_scriptlet_issue_snapshot(
+    report: &ValidationReport,
+    candidate_count: usize,
+    mut retained_issues: Vec<ScriptValidationIssue>,
+) -> ValidationReport {
+    retained_issues.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.script_name.cmp(&right.script_name))
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    retained_issues.dedup();
+
+    let fatal_count = retained_issues
+        .iter()
+        .filter(|issue| issue.severity == ValidationSeverity::Fatal)
+        .count();
+    let warning_count = retained_issues
+        .iter()
+        .filter(|issue| issue.severity == ValidationSeverity::Warning)
+        .count();
+    let blocked_candidates: HashSet<_> = retained_issues
+        .iter()
+        .filter(|issue| issue.severity == ValidationSeverity::Fatal)
+        .map(|issue| (&issue.path, &issue.script_name))
+        .collect();
+
+    ValidationReport {
+        schema_version: report.schema_version,
+        total_candidates: report.total_candidates.saturating_add(candidate_count),
+        valid_count: report
+            .valid_count
+            .saturating_add(candidate_count.saturating_sub(blocked_candidates.len())),
+        fatal_count: report.fatal_count.saturating_add(fatal_count),
+        warning_count: report.warning_count.saturating_add(warning_count),
+        failed_scripts: Arc::clone(&report.failed_scripts),
+        warnings: Arc::clone(&report.warnings),
+        retained_issues: Arc::from(retained_issues),
+    }
+}
+
+/// Merge exact currently loaded scriptlets into the author report. Retained
+/// fatal rows remain visible/disabled, while warning-only rows stay valid but
+/// may still be waiting for an explicitly known permission inventory.
+pub fn merge_scriptlet_validation_issues(
+    report: &ValidationReport,
+    scriptlets: &[Arc<Scriptlet>],
+) -> ValidationReport {
+    let retained_issues = scriptlets
+        .iter()
+        .flat_map(|scriptlet| validate_scriptlet_capabilities(scriptlet))
+        .collect();
+    merge_scriptlet_issue_snapshot(report, scriptlets.len(), retained_issues)
+}
+
+/// Build the same mixed-catalog report from the already-loaded sidecar without
+/// reading markdown files, rerunning startup, requesting privacy access, or
+/// replacing the existing scriptlet generation.
+pub fn merge_registered_scriptlet_validation_issues(report: &ValidationReport) -> ValidationReport {
+    let (candidate_count, retained_issues) = {
+        let registry = scriptlet_capability_registry()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            registry.loaded_sources.len(),
+            registry
+                .entries
+                .values()
+                .flat_map(|entry| entry.issues.iter().cloned())
+                .collect(),
+        )
+    };
+    merge_scriptlet_issue_snapshot(report, candidate_count, retained_issues)
+}
+
 /// Validate a catalog of already-loaded scripts. This is the entry point
 /// the loader wraps via `read_scripts_report()`.
 ///
@@ -265,6 +1032,11 @@ pub fn validate_script_catalog(scripts: Vec<Arc<Script>>) -> ScriptCatalogReport
     let mut by_path: HashMap<PathBuf, Vec<ScriptValidationIssue>> = HashMap::new();
     for issue in detect_binding_collisions(&scripts) {
         by_path.entry(issue.path.clone()).or_default().push(issue);
+    }
+    for script in &scripts {
+        for issue in validate_declared_sdk_capabilities(script) {
+            by_path.entry(issue.path.clone()).or_default().push(issue);
+        }
     }
 
     let total_candidates = scripts.len();
@@ -304,6 +1076,7 @@ pub fn validate_script_catalog(scripts: Vec<Arc<Script>>) -> ScriptCatalogReport
         warning_count,
         failed_scripts: Arc::from(failed),
         warnings: Arc::from(warnings),
+        retained_issues: Arc::from(Vec::new()),
     });
 
     ScriptCatalogReport {
@@ -326,6 +1099,13 @@ mod tests {
         }
     }
 
+    fn scriptlet_registry_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_utils::SK_PATH_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn with_shortcut(mut script: Script, shortcut: &str) -> Script {
         script.shortcut = Some(shortcut.to_string());
         script
@@ -346,6 +1126,42 @@ mod tests {
 
     fn arc(script: Script) -> Arc<Script> {
         Arc::new(script)
+    }
+
+    fn with_sdk_capabilities(mut script: Script, capabilities: serde_json::Value) -> Script {
+        let metadata = script
+            .typed_metadata
+            .get_or_insert_with(TypedMetadata::default);
+        metadata
+            .extra
+            .insert("sdkCapabilities".to_string(), capabilities);
+        script
+    }
+
+    fn make_scriptlet(name: &str, source: &str, tool: &str) -> Scriptlet {
+        let command = name.to_ascii_lowercase().replace(' ', "-");
+        Scriptlet {
+            name: name.to_string(),
+            description: None,
+            code: "items.find(item => item.ready)".to_string(),
+            tool: tool.to_string(),
+            shortcut: None,
+            keyword: None,
+            group: None,
+            plugin_id: "main".to_string(),
+            plugin_title: Some("Main".to_string()),
+            file_path: Some(format!("{source}#{command}")),
+            command: Some(command),
+            alias: None,
+            icon: None,
+        }
+    }
+
+    fn capability_metadata(capabilities: serde_json::Value) -> TypedMetadata {
+        TypedMetadata {
+            extra: HashMap::from([("sdkCapabilities".to_string(), capabilities)]),
+            ..TypedMetadata::default()
+        }
     }
 
     #[test]
@@ -497,6 +1313,84 @@ mod tests {
     }
 
     #[test]
+    fn repair_diagnostics_distinguish_excluded_retained_pending_and_repair_hints() {
+        let excluded_issue = ScriptValidationIssue {
+            severity: ValidationSeverity::Fatal,
+            path: PathBuf::from("/tmp/excluded.ts"),
+            script_name: "Excluded Script".to_string(),
+            field: Some(MetadataField::Shortcut),
+            message: "Shortcut collides with another command".to_string(),
+            kind: ScriptValidationKind::DuplicateBinding {
+                binding: BindingKind::Shortcut,
+                value: "cmd k".to_string(),
+            },
+            related: vec![RelatedScript {
+                path: PathBuf::from("/tmp/other.ts"),
+                name: "Other Script".to_string(),
+            }],
+        };
+        let retained_issue = ScriptValidationIssue {
+            severity: ValidationSeverity::Fatal,
+            path: PathBuf::from("/tmp/retained.md"),
+            script_name: "Retained Scriptlet".to_string(),
+            field: Some(MetadataField::Capability),
+            message: "Shell scriptlets do not receive SDK globals".to_string(),
+            kind: ScriptValidationKind::CapabilityUnavailable {
+                capability: "readFile".to_string(),
+                code: crate::mcp_resources::SdkCapabilityDiagnosticCode::MissingSdkTransport,
+                alternatives: vec!["Move this command into a TypeScript script".to_string()],
+            },
+            related: Vec::new(),
+        };
+        let pending_issue = ScriptValidationIssue {
+            severity: ValidationSeverity::Warning,
+            path: PathBuf::from("/tmp/pending.ts"),
+            script_name: "Pending Permission".to_string(),
+            field: Some(MetadataField::Capability),
+            message: "Permission inventory has not been supplied".to_string(),
+            kind: ScriptValidationKind::CapabilityUnavailable {
+                capability: "moveWindow".to_string(),
+                code: crate::mcp_resources::SdkCapabilityDiagnosticCode::PermissionInventoryUnavailable,
+                alternatives: vec!["Supply an already-known permission inventory".to_string()],
+            },
+            related: Vec::new(),
+        };
+        let report = ValidationReport {
+            schema_version: VALIDATION_SCHEMA_VERSION,
+            total_candidates: 3,
+            valid_count: 1,
+            fatal_count: 2,
+            warning_count: 1,
+            failed_scripts: Arc::from(vec![FailedScript {
+                path: excluded_issue.path.clone(),
+                name: excluded_issue.script_name.clone(),
+                fatal: Arc::from(vec![excluded_issue]),
+            }]),
+            warnings: Arc::from(vec![pending_issue]),
+            retained_issues: Arc::from(vec![retained_issue]),
+        };
+
+        let text = format_script_validation_diagnostics(&report);
+        assert!(text.contains("1 excluded · 1 retained issue(s) · 2 fatal · 1 warning(s)"));
+        assert!(text.contains("## Excluded Script"));
+        assert!(text.contains("↔ Other Script — /tmp/other.ts"));
+        assert!(text.contains("## Retained Scriptlet"));
+        assert!(text.contains("status: blocked, retained in launcher"));
+        assert!(text.contains("readFile (MissingSdkTransport) — try Move this command"));
+        assert!(text.contains("## Pending Permission"));
+        assert!(text.contains("status: warning, retained in launcher"));
+        assert!(text.contains("Supply an already-known permission inventory"));
+    }
+
+    #[test]
+    fn empty_repair_diagnostics_are_explicit() {
+        let report = validate_script_catalog(Vec::new());
+        let text = format_script_validation_diagnostics(&report.validation);
+        assert!(text.contains("0 excluded · 0 retained issue(s)"));
+        assert!(text.contains("No failing scripts in this report."));
+    }
+
+    #[test]
     fn report_is_serializable() {
         let a = arc(with_shortcut(make_script("a", "/tmp/a.ts"), "cmd k"));
         let b = arc(with_shortcut(make_script("b", "/tmp/b.ts"), "cmd k"));
@@ -506,5 +1400,600 @@ mod tests {
         assert!(json.contains("\"schemaVersion\":1"));
         assert!(json.contains("\"duplicateBinding\""));
         assert!(json.contains("\"shortcut\""));
+    }
+
+    #[test]
+    fn supported_explicit_sdk_capabilities_remain_in_the_catalog() {
+        let script = with_sdk_capabilities(
+            make_script("supported", "/tmp/supported.ts"),
+            serde_json::json!(["arg", "readFile", "writeFile", "exec"]),
+        );
+        let report = validate_script_catalog(vec![arc(script)]);
+
+        assert_eq!(report.validation.valid_count, 1);
+        assert_eq!(report.validation.fatal_count, 0);
+    }
+
+    #[test]
+    fn unsupported_sdk_capability_fails_before_a_script_can_be_indexed() {
+        let script = with_sdk_capabilities(
+            make_script("widget-script", "/tmp/widget.ts"),
+            serde_json::json!(["widget"]),
+        );
+        let report = validate_script_catalog(vec![arc(script)]);
+        let issue = &report.validation.failed_scripts[0].fatal[0];
+
+        assert!(report.scripts.is_empty());
+        assert_eq!(issue.field, Some(MetadataField::Capability));
+        assert!(matches!(
+            issue.kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                ref capability,
+                code: crate::mcp_resources::SdkCapabilityDiagnosticCode::UnsupportedCapability,
+                ..
+            } if capability == "widget"
+        ));
+        assert!(!issue.message.is_empty());
+    }
+
+    #[test]
+    fn unknown_sdk_capability_is_reported_with_a_typed_diagnostic() {
+        let script = with_sdk_capabilities(
+            make_script("unknown", "/tmp/unknown.ts"),
+            serde_json::json!(["imaginaryCapability"]),
+        );
+        let report = validate_script_catalog(vec![arc(script)]);
+
+        assert!(matches!(
+            report.validation.failed_scripts[0].fatal[0].kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                code: crate::mcp_resources::SdkCapabilityDiagnosticCode::UnknownCapability,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn typescript_scriptlet_cannot_claim_an_interactive_prompt() {
+        let mut script = with_sdk_capabilities(
+            make_script("scriptlet", "/tmp/scriptlet.ts"),
+            serde_json::json!(["arg"]),
+        );
+        script
+            .typed_metadata
+            .as_mut()
+            .expect("fixture metadata")
+            .extra
+            .insert(
+                "executionTopology".to_string(),
+                serde_json::json!("typescript-scriptlet"),
+            );
+        let report = validate_script_catalog(vec![arc(script)]);
+
+        assert!(matches!(
+            report.validation.failed_scripts[0].fatal[0].kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                code:
+                    crate::mcp_resources::SdkCapabilityDiagnosticCode::InteractivePromptUnavailable,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn shell_scripts_cannot_claim_a_typescript_sdk_transport() {
+        let mut script = make_script("shell", "/tmp/scriptlet.sh");
+        script.extension = "sh".to_string();
+        let script = with_sdk_capabilities(script, serde_json::json!(["readFile"]));
+        let report = validate_script_catalog(vec![arc(script)]);
+
+        assert!(matches!(
+            report.validation.failed_scripts[0].fatal[0].kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                code: crate::mcp_resources::SdkCapabilityDiagnosticCode::MissingSdkTransport,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn malformed_duplicate_and_unknown_topology_declarations_fail_closed() {
+        let malformed = with_sdk_capabilities(
+            make_script("malformed", "/tmp/malformed.ts"),
+            serde_json::json!("arg"),
+        );
+        let duplicate = with_sdk_capabilities(
+            make_script("duplicate", "/tmp/duplicate.ts"),
+            serde_json::json!(["arg", "arg"]),
+        );
+        let mut unknown_topology = with_sdk_capabilities(
+            make_script("topology", "/tmp/topology.ts"),
+            serde_json::json!(["arg"]),
+        );
+        unknown_topology
+            .typed_metadata
+            .as_mut()
+            .expect("fixture metadata")
+            .extra
+            .insert("executionTopology".to_string(), serde_json::json!("magic"));
+        let report =
+            validate_script_catalog(vec![arc(malformed), arc(duplicate), arc(unknown_topology)]);
+
+        assert_eq!(report.validation.valid_count, 0);
+        assert_eq!(report.validation.fatal_count, 3);
+        assert!(report
+            .validation
+            .failed_scripts
+            .iter()
+            .any(|failed| { failed.fatal[0].field == Some(MetadataField::ExecutionTopology) }));
+    }
+
+    #[test]
+    fn execution_topology_is_validated_without_a_capability_declaration() {
+        let mut script = make_script("standalone-topology", "/tmp/standalone-topology.ts");
+        script.typed_metadata = Some(TypedMetadata {
+            extra: HashMap::from([(
+                "executionTopology".to_string(),
+                serde_json::json!("ruby-scriptlet"),
+            )]),
+            ..TypedMetadata::default()
+        });
+
+        let report = validate_script_catalog(vec![arc(script)]);
+        assert_eq!(report.validation.fatal_count, 1);
+        let issue = &report.validation.failed_scripts[0].fatal[0];
+        assert_eq!(issue.field, Some(MetadataField::ExecutionTopology));
+        assert!(matches!(
+            &issue.kind,
+            ScriptValidationKind::InvalidValue { reason, .. }
+                if reason == "unknown_sdk_execution_topology"
+        ));
+    }
+
+    #[test]
+    fn explicit_known_host_facts_enforce_version_platform_and_permission() {
+        let script = with_sdk_capabilities(
+            make_script("native", "/tmp/native.ts"),
+            serde_json::json!(["moveWindow"]),
+        );
+        let mut host = crate::mcp_resources::SdkHostAvailability {
+            host_version: "not-semver".to_string(),
+            platform: "macos".to_string(),
+            granted_permissions: vec!["accessibility".to_string()],
+        };
+
+        let malformed = validate_declared_sdk_capabilities_with_host_availability(&script, &host);
+        assert!(matches!(
+            malformed[0].kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                code: crate::mcp_resources::SdkCapabilityDiagnosticCode::InvalidHostVersion,
+                ..
+            }
+        ));
+
+        host.host_version = "0.0.0".to_string();
+        let outdated = validate_declared_sdk_capabilities_with_host_availability(&script, &host);
+        assert!(matches!(
+            outdated[0].kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                code: crate::mcp_resources::SdkCapabilityDiagnosticCode::HostVersionTooOld,
+                ..
+            }
+        ));
+
+        host.host_version = env!("CARGO_PKG_VERSION").to_string();
+        host.platform = "linux".to_string();
+        let wrong_platform =
+            validate_declared_sdk_capabilities_with_host_availability(&script, &host);
+        assert!(matches!(
+            wrong_platform[0].kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                code: crate::mcp_resources::SdkCapabilityDiagnosticCode::UnsupportedPlatform,
+                ..
+            }
+        ));
+
+        host.platform = "macos".to_string();
+        host.granted_permissions.clear();
+        let denied = validate_declared_sdk_capabilities_with_host_availability(&script, &host);
+        assert!(matches!(
+            denied[0].kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                code: crate::mcp_resources::SdkCapabilityDiagnosticCode::MissingPermission,
+                ..
+            }
+        ));
+
+        host.granted_permissions.push("accessibility".to_string());
+        assert!(
+            validate_declared_sdk_capabilities_with_host_availability(&script, &host).is_empty()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unknown_permission_inventory_keeps_script_visible_with_pending_warning() {
+        let script = with_sdk_capabilities(
+            make_script("pending-native", "/tmp/pending-native.ts"),
+            serde_json::json!(["moveWindow"]),
+        );
+        let report = validate_script_catalog(vec![arc(script)]);
+
+        assert_eq!(report.validation.valid_count, 1);
+        assert_eq!(report.validation.fatal_count, 0);
+        assert_eq!(report.validation.warning_count, 1);
+        assert!(matches!(
+            report.validation.warnings[0].kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                code:
+                    crate::mcp_resources::SdkCapabilityDiagnosticCode::PermissionInventoryUnavailable,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn interactive_launcher_scriptlet_prompts_stay_supported() {
+        let _registry = scriptlet_registry_test_guard();
+        let scriptlet =
+            make_scriptlet("Interactive Prompt", "/tmp/sdk-interactive-prompt.md", "ts");
+        register_scriptlet_capabilities(
+            &scriptlet,
+            Some(&capability_metadata(serde_json::json!(["arg", "fields"]))),
+        );
+
+        assert!(validate_scriptlet_capabilities(&scriptlet).is_empty());
+    }
+
+    #[test]
+    fn explicitly_noninteractive_scriptlet_rejects_prompt_without_hiding_row() {
+        let _registry = scriptlet_registry_test_guard();
+        let scriptlet = make_scriptlet("Legacy Prompt", "/tmp/sdk-noninteractive-prompt.md", "ts");
+        let mut metadata = capability_metadata(serde_json::json!(["arg"]));
+        metadata.extra.insert(
+            "executionTopology".to_string(),
+            serde_json::json!("typescript-scriptlet"),
+        );
+        register_scriptlet_capabilities(&scriptlet, Some(&metadata));
+
+        let issues = validate_scriptlet_capabilities(&scriptlet);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0].path,
+            PathBuf::from("/tmp/sdk-noninteractive-prompt.md")
+        );
+        assert!(matches!(
+            issues[0].kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                code:
+                    crate::mcp_resources::SdkCapabilityDiagnosticCode::InteractivePromptUnavailable,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn shell_and_python_scriptlets_cannot_claim_or_spoof_sdk_transport() {
+        let _registry = scriptlet_registry_test_guard();
+        for (tool, path) in [
+            ("bash", "/tmp/sdk-shell-topology.md"),
+            ("python", "/tmp/sdk-python-topology.md"),
+        ] {
+            let scriptlet = make_scriptlet("Non SDK", path, tool);
+            let metadata = capability_metadata(serde_json::json!(["readFile"]));
+            register_scriptlet_capabilities(&scriptlet, Some(&metadata));
+            assert!(matches!(
+                validate_scriptlet_capabilities(&scriptlet)[0].kind,
+                ScriptValidationKind::CapabilityUnavailable {
+                    code: crate::mcp_resources::SdkCapabilityDiagnosticCode::MissingSdkTransport,
+                    ..
+                }
+            ));
+
+            let mut spoofed = metadata.clone();
+            spoofed.extra.insert(
+                "executionTopology".to_string(),
+                serde_json::json!("typescript-scriptlet-interactive"),
+            );
+            register_scriptlet_capabilities(&scriptlet, Some(&spoofed));
+            assert!(matches!(
+                &validate_scriptlet_capabilities(&scriptlet)[0].kind,
+                ScriptValidationKind::InvalidValue { reason, .. }
+                    if reason == "sdk_execution_topology_mismatch"
+            ));
+        }
+    }
+
+    #[test]
+    fn scriptlet_refresh_removes_only_stale_source_diagnostics() {
+        let _registry = scriptlet_registry_test_guard();
+        let stale = make_scriptlet("Stale", "/tmp/sdk-stale-source.md", "bash");
+        let retained = make_scriptlet("Retained", "/tmp/sdk-retained-source.md", "bash");
+        let metadata = capability_metadata(serde_json::json!(["readFile"]));
+        register_scriptlet_capabilities(&stale, Some(&metadata));
+        register_scriptlet_capabilities(&retained, Some(&metadata));
+
+        clear_scriptlet_capabilities_for_source(Path::new("/tmp/sdk-stale-source.md"));
+        assert!(validate_scriptlet_capabilities(&stale).is_empty());
+        assert_eq!(validate_scriptlet_capabilities(&retained).len(), 1);
+    }
+
+    #[test]
+    fn stale_full_reload_generation_cannot_publish_old_diagnostics() {
+        let _registry = scriptlet_registry_test_guard();
+        assert!(!scriptlet_generation_is_current(42, Some(41)));
+        assert!(scriptlet_generation_is_current(42, Some(42)));
+        assert!(scriptlet_generation_is_current(42, None));
+        let stale_generation = begin_scriptlet_capability_generation();
+        let stale = make_scriptlet("Old Generation", "/tmp/sdk-stale-generation.md", "bash");
+        let metadata = capability_metadata(serde_json::json!(["readFile"]));
+
+        let current_generation = begin_scriptlet_capability_generation();
+        assert_ne!(stale_generation, current_generation);
+        register_scriptlet_capabilities_for_generation(&stale, Some(&metadata), stale_generation);
+        assert!(validate_scriptlet_capabilities(&stale).is_empty());
+
+        let current = make_scriptlet(
+            "Current Generation",
+            "/tmp/sdk-current-generation.md",
+            "bash",
+        );
+        register_scriptlet_capabilities_for_generation(
+            &current,
+            Some(&metadata),
+            current_generation,
+        );
+        assert!(validate_scriptlet_capabilities(&current).is_empty());
+        assert!(!complete_scriptlet_capability_generation(stale_generation));
+        assert!(complete_scriptlet_capability_generation(current_generation));
+        assert_eq!(validate_scriptlet_capabilities(&current).len(), 1);
+    }
+
+    #[test]
+    fn blocked_scriptlet_stays_blocked_until_full_refresh_publishes_atomically() {
+        let _registry = scriptlet_registry_test_guard();
+        let blocked = make_scriptlet(
+            "Blocked During Refresh",
+            "/tmp/sdk-refresh-atomic.md",
+            "bash",
+        );
+        let metadata = capability_metadata(serde_json::json!(["readFile"]));
+        register_scriptlet_capabilities(&blocked, Some(&metadata));
+        assert_eq!(validate_scriptlet_capabilities(&blocked).len(), 1);
+
+        let generation = begin_scriptlet_capability_generation();
+        assert_eq!(validate_scriptlet_capabilities(&blocked).len(), 1);
+        register_scriptlet_capabilities_for_generation(&blocked, None, generation);
+        assert_eq!(validate_scriptlet_capabilities(&blocked).len(), 1);
+
+        assert!(complete_scriptlet_capability_generation(generation));
+        assert!(validate_scriptlet_capabilities(&blocked).is_empty());
+    }
+
+    #[test]
+    fn incremental_scriptlet_fix_invalidates_overlapping_stale_full_reload() {
+        let _registry = scriptlet_registry_test_guard();
+        let scriptlet = make_scriptlet(
+            "Incremental Wins",
+            "/tmp/sdk-refresh-incremental.md",
+            "bash",
+        );
+        let metadata = capability_metadata(serde_json::json!(["readFile"]));
+        register_scriptlet_capabilities(&scriptlet, Some(&metadata));
+        assert_eq!(validate_scriptlet_capabilities(&scriptlet).len(), 1);
+
+        let generation = begin_scriptlet_capability_generation();
+        register_scriptlet_capabilities_for_generation(&scriptlet, Some(&metadata), generation);
+        assert_eq!(validate_scriptlet_capabilities(&scriptlet).len(), 1);
+
+        clear_scriptlet_capabilities_for_source(Path::new("/tmp/sdk-refresh-incremental.md"));
+        register_scriptlet_capabilities(&scriptlet, None);
+        assert!(validate_scriptlet_capabilities(&scriptlet).is_empty());
+        assert!(!complete_scriptlet_capability_generation(generation));
+        assert!(validate_scriptlet_capabilities(&scriptlet).is_empty());
+    }
+
+    #[test]
+    fn mixed_validation_report_retains_blocked_rows_without_fabricating_exclusion() {
+        let _registry = scriptlet_registry_test_guard();
+        let report = validate_script_catalog(vec![arc(make_script("Safe", "/tmp/safe-report.ts"))]);
+        let allowed = Arc::new(make_scriptlet(
+            "Allowed Interactive",
+            "/tmp/sdk-report-allowed.md",
+            "ts",
+        ));
+        register_scriptlet_capabilities(
+            &allowed,
+            Some(&capability_metadata(serde_json::json!(["arg"]))),
+        );
+        let blocked = Arc::new(make_scriptlet(
+            "Blocked Shell",
+            "/tmp/sdk-report-blocked.md",
+            "bash",
+        ));
+        register_scriptlet_capabilities(
+            &blocked,
+            Some(&capability_metadata(serde_json::json!(["readFile"]))),
+        );
+
+        let mixed = merge_scriptlet_validation_issues(&report.validation, &[allowed, blocked]);
+        assert_eq!(mixed.total_candidates, 3);
+        assert_eq!(mixed.valid_count, 2);
+        assert_eq!(mixed.fatal_count, 1);
+        assert_eq!(mixed.warning_count, 0);
+        assert!(mixed.failed_scripts.is_empty());
+        assert!(mixed.warnings.is_empty());
+        assert_eq!(mixed.retained_issues.len(), 1);
+        assert_eq!(mixed.retained_issues[0].severity, ValidationSeverity::Fatal);
+
+        let json = serde_json::to_value(&mixed).expect("serialize mixed report");
+        assert_eq!(json["retainedIssues"][0]["severity"], "fatal");
+        assert_eq!(json["failedScripts"], serde_json::json!([]));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pending_permission_scriptlet_remains_valid_but_visible_in_retained_issues() {
+        let _registry = scriptlet_registry_test_guard();
+        let report = validate_script_catalog(Vec::new());
+        let pending = Arc::new(make_scriptlet(
+            "Pending Permission",
+            "/tmp/sdk-report-pending.md",
+            "ts",
+        ));
+        register_scriptlet_capabilities(
+            &pending,
+            Some(&capability_metadata(serde_json::json!(["moveWindow"]))),
+        );
+
+        let mixed = merge_scriptlet_validation_issues(&report.validation, &[pending]);
+        assert_eq!(mixed.total_candidates, 1);
+        assert_eq!(mixed.valid_count, 1);
+        assert_eq!(mixed.fatal_count, 0);
+        assert_eq!(mixed.warning_count, 1);
+        assert!(mixed.failed_scripts.is_empty());
+        assert!(mixed.warnings.is_empty());
+        assert_eq!(
+            mixed.retained_issues[0].severity,
+            ValidationSeverity::Warning
+        );
+    }
+
+    #[test]
+    fn legacy_validation_reports_deserialize_without_retained_issue_field() {
+        let current = validate_script_catalog(Vec::new());
+        let mut legacy = serde_json::to_value(&*current.validation).expect("serialize report");
+        legacy
+            .as_object_mut()
+            .expect("report object")
+            .remove("retainedIssues");
+
+        let restored: ValidationReport =
+            serde_json::from_value(legacy).expect("older validation reports must remain readable");
+        assert!(restored.retained_issues.is_empty());
+    }
+
+    #[test]
+    fn scriptlet_known_host_inventory_can_resolve_a_pending_permission() {
+        let _registry = scriptlet_registry_test_guard();
+        let scriptlet = make_scriptlet("Native", "/tmp/sdk-known-host.md", "ts");
+        register_scriptlet_capabilities(
+            &scriptlet,
+            Some(&capability_metadata(serde_json::json!(["moveWindow"]))),
+        );
+        let host = crate::mcp_resources::SdkHostAvailability {
+            host_version: env!("CARGO_PKG_VERSION").to_string(),
+            platform: "macos".to_string(),
+            granted_permissions: vec!["accessibility".to_string()],
+        };
+
+        assert!(
+            validate_scriptlet_capabilities_with_host_availability(&scriptlet, &host).is_empty()
+        );
+    }
+
+    #[test]
+    fn legacy_executor_scriptlet_rejects_prompt_but_safe_noninteractive_api_works() {
+        let mut legacy = crate::scriptlets::Scriptlet::new(
+            "Legacy Interactive".to_string(),
+            "ts".to_string(),
+            "await arg('Prompt')".to_string(),
+        );
+        legacy.source_path = Some("/tmp/legacy-executor.md".to_string());
+        legacy.typed_metadata = Some(capability_metadata(serde_json::json!(["arg"])));
+
+        let issues = validate_legacy_scriptlet_capabilities(&legacy);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].path, PathBuf::from("/tmp/legacy-executor.md"));
+        assert!(matches!(
+            issues[0].kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                code:
+                    crate::mcp_resources::SdkCapabilityDiagnosticCode::InteractivePromptUnavailable,
+                ..
+            }
+        ));
+
+        legacy.typed_metadata = Some(capability_metadata(serde_json::json!(["home"])));
+        assert!(validate_legacy_scriptlet_capabilities(&legacy).is_empty());
+    }
+
+    #[test]
+    fn legacy_executor_rejects_claimed_interactive_transport_and_keeps_old_scripts() {
+        let mut legacy = crate::scriptlets::Scriptlet::new(
+            "Existing".to_string(),
+            "ts".to_string(),
+            "items.find(item => item.ready)".to_string(),
+        );
+        assert!(validate_legacy_scriptlet_capabilities(&legacy).is_empty());
+
+        legacy.typed_metadata = Some(TypedMetadata {
+            extra: HashMap::from([(
+                "executionTopology".to_string(),
+                serde_json::json!("typescript-scriptlet-interactive"),
+            )]),
+            ..TypedMetadata::default()
+        });
+        let issues = validate_legacy_scriptlet_capabilities(&legacy);
+        assert!(matches!(
+            &issues[0].kind,
+            ScriptValidationKind::InvalidValue { reason, .. }
+                if reason == "sdk_execution_topology_mismatch"
+        ));
+    }
+
+    #[test]
+    fn legacy_html_capability_metadata_is_recognized_without_scanning_code() {
+        let mut legacy = crate::scriptlets::Scriptlet::new(
+            "Legacy Metadata".to_string(),
+            "bash".to_string(),
+            "items.find(item => item.ready)".to_string(),
+        );
+        legacy
+            .metadata
+            .extra
+            .insert("sdkcapabilities".to_string(), "[\"readFile\"]".to_string());
+
+        assert!(matches!(
+            validate_legacy_scriptlet_capabilities(&legacy)[0].kind,
+            ScriptValidationKind::CapabilityUnavailable {
+                code: crate::mcp_resources::SdkCapabilityDiagnosticCode::MissingSdkTransport,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn ordinary_array_find_calls_and_undeclared_custom_metadata_are_not_sdk_claims() {
+        let mut script = make_script("ordinary", "/tmp/ordinary.ts");
+        script.body = Some("items.find(item => item.name === 'find')".to_string());
+        script.typed_metadata = Some(TypedMetadata {
+            extra: HashMap::from([(
+                "capabilities".to_string(),
+                serde_json::json!({ "unrelated": true }),
+            )]),
+            ..TypedMetadata::default()
+        });
+
+        let report = validate_script_catalog(vec![arc(script)]);
+        assert_eq!(report.validation.valid_count, 1);
+        assert_eq!(report.validation.fatal_count, 0);
+    }
+
+    #[test]
+    fn capability_failure_serializes_code_and_migration_alternatives() {
+        let script = with_sdk_capabilities(
+            make_script("widget", "/tmp/widget.ts"),
+            serde_json::json!(["widget"]),
+        );
+        let report = validate_script_catalog(vec![arc(script)]);
+        let json = serde_json::to_value(&*report.validation).expect("serialize capability report");
+        let issue = &json["failedScripts"][0]["fatal"][0];
+
+        assert_eq!(issue["field"], "capability");
+        assert_eq!(issue["kind"]["kind"], "capabilityUnavailable");
+        assert_eq!(issue["kind"]["code"], "unsupported_capability");
+        assert_eq!(issue["kind"]["capability"], "widget");
+        assert!(issue["kind"]["alternatives"].is_array());
     }
 }

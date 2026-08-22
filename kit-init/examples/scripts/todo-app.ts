@@ -6,6 +6,8 @@ export const metadata = {
     "Todo app: projects, labels, priorities, due dates, Today/Upcoming views, and ;todo capture sync",
   alias: "todo",
   icon: "list-todo",
+  sdkCapabilities: ["arg", "div", "fields", "hud", "select", "skPath"],
+  executionTopology: "typescript-script",
   menuSyntax: [
     {
       family: "capture.v1",

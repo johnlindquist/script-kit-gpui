@@ -226,6 +226,8 @@ fn generate_script_template(name: &str) -> String {
 export const metadata = {{
   name: "{title}",
   description: "",
+  sdkCapabilities: ["arg", "div", "md"],
+  executionTopology: "typescript-script",
 }};
 
 /*
@@ -241,7 +243,7 @@ C) Background Task
    Use async functions and status updates for longer work.
 */
 
-// Quick starter: input prompt → show result in a HUD
+// Quick starter: input prompt → render the result in the prompt
 const result = await arg("What should this script do?");
 await div(md(`## ${{result}}`));
 "#
@@ -306,7 +308,35 @@ await notify("Saved");
 pub fn create_new_script(name: &str) -> Result<PathBuf> {
     create_new_script_in_dir(name, &scripts_dir())
 }
+
+/// Create one uniquely named script and write its final contents through the
+/// original `create_new(true)` file handle. The path is never reopened, so a
+/// colliding file or swapped symlink cannot overwrite another user file.
+#[instrument(name = "create_new_script_with_contents", skip_all)]
+pub fn create_new_script_with_contents(name: &str, contents: &str) -> Result<PathBuf> {
+    create_new_script_with_contents_in_dir(name, contents, &scripts_dir())
+}
+
 fn create_new_script_in_dir(name: &str, scripts_dir: &Path) -> Result<PathBuf> {
+    create_new_script_using_builder(name, scripts_dir, generate_script_template)
+}
+
+fn create_new_script_with_contents_in_dir(
+    name: &str,
+    contents: &str,
+    scripts_dir: &Path,
+) -> Result<PathBuf> {
+    create_new_script_using_builder(name, scripts_dir, |_| contents.to_string())
+}
+
+fn create_new_script_using_builder<F>(
+    name: &str,
+    scripts_dir: &Path,
+    content_for_name: F,
+) -> Result<PathBuf>
+where
+    F: Fn(&str) -> String,
+{
     let sanitized_name = sanitize_name(name);
     validate_sanitized_name(name, &sanitized_name, "ts", "Script")?;
 
@@ -324,13 +354,13 @@ fn create_new_script_in_dir(name: &str, scripts_dir: &Path) -> Result<PathBuf> {
         scripts_dir,
         "ts",
         "script",
-        generate_script_template,
+        content_for_name,
     )?;
 
     info!(
         path = %script_path.display(),
         name = %created_name,
-        requested_name = %name,
+        requested_name = %sanitized_name,
         "Created new script"
     );
 
@@ -554,6 +584,36 @@ mod tests {
     }
 
     #[test]
+    fn generated_starter_template_passes_real_host_capability_validation() {
+        let source = generate_script_template("safe-starter");
+        let parsed = crate::metadata_parser::extract_typed_metadata(&source);
+        assert!(
+            parsed.errors.is_empty(),
+            "invalid starter metadata: {:?}",
+            parsed.errors
+        );
+        let metadata = parsed.metadata.expect("starter declares typed metadata");
+        assert_eq!(
+            metadata.extra.get("sdkCapabilities"),
+            Some(&serde_json::json!(["arg", "div", "md"]))
+        );
+        assert_eq!(
+            metadata.extra.get("executionTopology"),
+            Some(&serde_json::json!("typescript-script"))
+        );
+
+        let script = crate::scripts::Script {
+            name: "Safe Starter".to_string(),
+            path: PathBuf::from("safe-starter.ts"),
+            extension: "ts".to_string(),
+            plugin_id: "main".to_string(),
+            typed_metadata: Some(metadata),
+            ..crate::scripts::Script::default()
+        };
+        assert!(crate::scripts::validate_declared_sdk_capabilities(&script).is_empty());
+    }
+
+    #[test]
     fn test_generate_scriptlet_template() {
         let template = generate_scriptlet_template("my-extension");
         assert!(template.starts_with("---"));
@@ -645,6 +705,109 @@ mod tests {
         assert_eq!(second.file_name().unwrap(), "untitled-1.ts");
         assert!(first.exists());
         assert!(second.exists());
+    }
+
+    #[test]
+    fn atomic_generated_script_creation_preserves_existing_file_and_final_bytes() {
+        let temp_dir = tempdir().expect("create isolated script workspace");
+        let scripts_dir = temp_dir.path().join("scripts");
+        let first = create_new_script_with_contents_in_dir(
+            "Safe Script",
+            "const first = true;\n",
+            &scripts_dir,
+        )
+        .expect("create initial exclusive script");
+        let second = create_new_script_with_contents_in_dir(
+            "Safe Script",
+            "const second = true;\n",
+            &scripts_dir,
+        )
+        .expect("resolve collision without reopening the existing script");
+
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("safe-script.ts")
+        );
+        assert_eq!(
+            second.file_name().and_then(|name| name.to_str()),
+            Some("safe-script-1.ts")
+        );
+        assert_eq!(
+            fs::read_to_string(first).expect("read first"),
+            "const first = true;\n"
+        );
+        assert_eq!(
+            fs::read_to_string(second).expect("read second"),
+            "const second = true;\n"
+        );
+    }
+
+    #[test]
+    fn exclusive_generated_script_creation_preserves_rendered_starter_metadata_and_bytes() {
+        let temp_dir = tempdir().expect("create isolated rendered-starter workspace");
+        let scripts_dir = temp_dir.path().join("scripts");
+        let rendered_starter = concat!(
+            "// Name: Review Private Notes\n",
+            "// Description: Canonical starter metadata\n",
+            "import '@johnlindquist/kit';\n",
+            "await arg('Choose a note');\n",
+        );
+
+        let created = create_new_script_with_contents_in_dir(
+            "Review Private Notes",
+            rendered_starter,
+            &scripts_dir,
+        )
+        .expect("write rendered starter through its original exclusive handle");
+
+        assert_eq!(
+            created.file_name().and_then(|name| name.to_str()),
+            Some("review-private-notes.ts")
+        );
+        assert_eq!(
+            fs::read(&created).expect("read the returned script path"),
+            rendered_starter.as_bytes()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_generated_script_creation_never_follows_existing_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempdir().expect("create isolated symlink workspace");
+        let scripts_dir = temp_dir.path().join("scripts");
+        fs::create_dir_all(&scripts_dir).expect("create isolated scripts directory");
+        let protected = temp_dir.path().join("protected.txt");
+        fs::write(&protected, "never overwrite").expect("create protected fixture");
+        symlink(&protected, scripts_dir.join("unsafe.ts"))
+            .expect("install isolated hostile symlink");
+
+        let created = create_new_script_with_contents_in_dir(
+            "unsafe",
+            "const isolated = true;\n",
+            &scripts_dir,
+        )
+        .expect("resolve symlink collision without following it");
+        assert_eq!(
+            created.file_name().and_then(|name| name.to_str()),
+            Some("unsafe-1.ts")
+        );
+        assert_eq!(
+            fs::read_to_string(&protected).expect("read protected fixture"),
+            "never overwrite"
+        );
+        assert!(
+            fs::symlink_metadata(scripts_dir.join("unsafe.ts"))
+                .expect("inspect original hostile destination")
+                .file_type()
+                .is_symlink(),
+            "the colliding symlink must remain untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(&created).expect("read the exclusively created sibling"),
+            "const isolated = true;\n"
+        );
     }
 
     #[test]

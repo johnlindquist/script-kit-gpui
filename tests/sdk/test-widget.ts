@@ -7,28 +7,21 @@
  * Tests the widget(), term(), and media prompt functions.
  * 
  * Test cases:
- * 1. widget-basic: Basic widget creation
- * 2. widget-options: Widget with position/size options
- * 3. widget-events: Widget event handlers exist
+ * 1. widget-basic: Unsupported widget rejects before dispatch
+ * 2. widget-options: Widget options do not bypass the support boundary
+ * 3. widget-events: Unsupported widgets never return fake event controllers
  * 4. term-basic: term() function exists
  * 5. media-apis: Media API functions exist
  * 6. find-api: find() rejects with typed unsupported error before sending
  * 
  * Expected behavior:
- * - widget() returns a controller, but visible widget UI is unsupported
+ * - widget() rejects explicitly because GPUI has no widget surface
  * - term() opens terminal
  * - Media APIs (webcam, mic, eyeDropper) are available but unsupported
  * - find() is an explicit unsupported GPUI boundary; use fileSearch() for non-interactive file results
  */
 
 import '../../scripts/kit-sdk';
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
-// Local delay helper (wait() was removed from SDK)
-const wait = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
 
 // =============================================================================
 // Test Infrastructure
@@ -59,6 +52,41 @@ function debug(msg: string) {
   console.error(`[TEST] ${msg}`);
 }
 
+async function expectUnsupportedWidget(call: () => Promise<unknown>) {
+  let failure: any;
+  const dispatched: string[] = [];
+  const originalWrite = process.stdout.write;
+  process.stdout.write = ((chunk: unknown, ..._args: unknown[]) => {
+    dispatched.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+
+  try {
+    await call();
+  } catch (error) {
+    failure = error;
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+
+  if (
+    failure?.name !== 'UnsupportedSdkFeatureError' ||
+    failure?.code !== 'ERR_UNSUPPORTED_SDK_FEATURE' ||
+    failure?.supported !== false ||
+    failure?.feature !== 'widget' ||
+    !Array.isArray(failure?.alternatives) ||
+    !failure.alternatives.some((alternative: string) => alternative.includes('div('))
+  ) {
+    throw new Error(`Expected actionable widget compatibility failure: ${String(failure)}`);
+  }
+
+  if (dispatched.length > 0) {
+    throw new Error(`Unsupported widget emitted protocol traffic: ${dispatched.join('')}`);
+  }
+
+  return failure;
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -67,131 +95,68 @@ debug('test-widget.ts starting...');
 debug(`SDK globals: widget=${typeof widget}, term=${typeof term}`);
 
 // -----------------------------------------------------------------------------
-// Test 1: Basic widget creation
+// Test 1: Unsupported widgets reject before dispatch.
 // -----------------------------------------------------------------------------
 const test1 = 'widget-basic';
 logTest(test1, 'running');
 const start1 = Date.now();
 
 try {
-  debug('Test 1: Basic widget creation');
-  
-  const w = await widget(`
-    <div style="padding: 20px; background: #1e1e1e; color: white; border-radius: 8px;">
-      <h2>Hello Widget!</h2>
-      <p>This is a floating HTML widget.</p>
-      <button data-action="close">Close</button>
-    </div>
-  `);
-  
-  debug('Widget created successfully');
-  debug(`Widget has close method: ${typeof w.close === 'function'}`);
-  debug(`Widget has onClick method: ${typeof w.onClick === 'function'}`);
-  
-  // Set up close handler and close immediately
-  w.onClick((event) => {
-    if (event.dataset?.action === 'close') {
-      w.close();
-    }
+  debug('Test 1: Widget rejects before a fake surface or controller is created');
+  const failure = await expectUnsupportedWidget(() =>
+    widget('<div><h2>Hello Widget!</h2></div>'),
+  );
+  logTest(test1, 'pass', {
+    result: { code: failure.code, alternatives: failure.alternatives },
+    duration_ms: Date.now() - start1,
   });
-  
-  // Close after brief display
-  setTimeout(() => w.close(), 500);
-  
-  if (typeof w.close === 'function' && typeof w.onClick === 'function') {
-    logTest(test1, 'pass', { result: 'Widget created with methods', duration_ms: Date.now() - start1 });
-  } else {
-    logTest(test1, 'fail', { 
-      error: 'Widget missing expected methods',
-      duration_ms: Date.now() - start1 
-    });
-  }
 } catch (err) {
   logTest(test1, 'fail', { error: String(err), duration_ms: Date.now() - start1 });
 }
 
 // -----------------------------------------------------------------------------
-// Test 2: Widget with options
+// Test 2: Widget options do not bypass the unsupported boundary.
 // -----------------------------------------------------------------------------
 const test2 = 'widget-options';
 logTest(test2, 'running');
 const start2 = Date.now();
 
 try {
-  debug('Test 2: Widget with position/size options');
-  
-  const w = await widget(
-    `<div style="padding: 16px;">
-      <h3>Positioned Widget</h3>
-      <p>I have custom position and size!</p>
-    </div>`,
-    {
+  debug('Test 2: Widget options cannot manufacture an unsupported native surface');
+  const failure = await expectUnsupportedWidget(() =>
+    widget('<div>Positioned Widget</div>', {
       x: 100,
       y: 100,
       width: 300,
       height: 200,
       alwaysOnTop: true,
-      transparent: false,
-      draggable: true,
-      hasShadow: true,
-    }
+    }),
   );
-  
-  debug('Widget with options created successfully');
-  
-  // Close after brief display
-  setTimeout(() => w.close(), 500);
-  
-  logTest(test2, 'pass', { result: 'Widget with options created', duration_ms: Date.now() - start2 });
+  logTest(test2, 'pass', {
+    result: { code: failure.code, feature: failure.feature },
+    duration_ms: Date.now() - start2,
+  });
 } catch (err) {
   logTest(test2, 'fail', { error: String(err), duration_ms: Date.now() - start2 });
 }
 
 // -----------------------------------------------------------------------------
-// Test 3: Widget event handlers
+// Test 3: Unsupported widgets never return a pretend event controller.
 // -----------------------------------------------------------------------------
 const test3 = 'widget-events';
 logTest(test3, 'running');
 const start3 = Date.now();
 
 try {
-  debug('Test 3: Widget event handlers exist');
-  
-  const w = await widget(`<div style="padding: 20px;"><h3>Event Test</h3></div>`);
-  
-  const hasOnClick = typeof w.onClick === 'function';
-  const hasOnInput = typeof w.onInput === 'function';
-  const hasOnMoved = typeof w.onMoved === 'function';
-  const hasOnResized = typeof w.onResized === 'function';
-  const hasOnClose = typeof w.onClose === 'function';
-  const hasSetState = typeof w.setState === 'function';
-  
-  debug(`onClick: ${hasOnClick}`);
-  debug(`onInput: ${hasOnInput}`);
-  debug(`onMoved: ${hasOnMoved}`);
-  debug(`onResized: ${hasOnResized}`);
-  debug(`onClose: ${hasOnClose}`);
-  debug(`setState: ${hasSetState}`);
-  
-  // Close after check
-  setTimeout(() => w.close(), 500);
-  
-  const checks = [hasOnClick, hasOnInput, hasOnMoved, hasOnResized, hasOnClose, hasSetState];
-  
-  if (checks.every(Boolean)) {
-    logTest(test3, 'pass', { result: 'All event handlers present', duration_ms: Date.now() - start3 });
-  } else {
-    logTest(test3, 'fail', { 
-      error: 'Some event handlers missing',
-      duration_ms: Date.now() - start3 
-    });
-  }
+  debug('Test 3: Unsupported widget does not return a fake controller');
+  await expectUnsupportedWidget(() => widget('<div>Event Test</div>'));
+  logTest(test3, 'pass', {
+    result: { controllerReturned: false },
+    duration_ms: Date.now() - start3,
+  });
 } catch (err) {
   logTest(test3, 'fail', { error: String(err), duration_ms: Date.now() - start3 });
 }
-
-// Wait for widgets to close
-await wait(600);
 
 // -----------------------------------------------------------------------------
 // Test 4: term() function exists
@@ -316,9 +281,9 @@ await div(md(`# Widget and Media Tests Complete
 All widget and media API tests have been executed.
 
 ## Test Cases Run
-1. **widget-basic**: Basic widget creation
-2. **widget-options**: Widget with position/size options
-3. **widget-events**: Widget event handlers
+1. **widget-basic**: Unsupported widget fails with an actionable error
+2. **widget-options**: Options do not bypass the unsupported boundary
+3. **widget-events**: Unsupported widgets never return fake controllers
 4. **term-exists**: term() function availability
 5. **media-apis**: webcam, mic, eyeDropper availability
 6. **find-api**: find() function availability

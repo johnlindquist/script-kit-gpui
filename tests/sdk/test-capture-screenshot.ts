@@ -1,10 +1,12 @@
 // Name: SDK Test - captureScreenshot()
-// Description: Tests captureScreenshot() function for visual testing support
+// Description: Tests synthetic screenshot protocol responses without GUI, capture, or user input.
 
 /**
  * SDK TEST: test-capture-screenshot.ts
  *
- * Tests the captureScreenshot() function which captures the Script Kit window.
+ * Tests the captureScreenshot() SDK protocol using its hard-coded in-memory PNG
+ * response. This never opens the app, captures a display, or proves native
+ * rendering/screen-recording behavior.
  *
  * Test cases:
  * 1. captureScreenshot-function-exists: Verify function is defined
@@ -21,18 +23,11 @@
 
 import "../../scripts/kit-sdk";
 
-// =============================================================================
-// Helpers
-// =============================================================================
-
-// Local delay helper (wait() was removed from SDK)
-const wait = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
-
-// =============================================================================
-// CI Detection
-// =============================================================================
-
-const isCI = Boolean(process.env.CI || process.env.GITHUB_ACTIONS || process.env.TRAVIS || process.env.CIRCLECI);
+if (process.env.SDK_TEST_AUTOSUBMIT !== "1") {
+  throw new Error(
+    "Synthetic screenshot protocol tests require isolated SDK_TEST_AUTOSUBMIT=1 and must never capture the screen."
+  );
+}
 
 // =============================================================================
 // Test Infrastructure
@@ -112,12 +107,6 @@ const start2 = Date.now();
 try {
   debug("Test 2: Basic capture returns valid ScreenshotData");
 
-  // Display something first so we have content to capture
-  await div("<div class='p-4 bg-blue-500 text-white'>Screenshot Test</div>");
-
-  // Wait for render
-  await wait(500);
-
   const screenshot = await captureScreenshot();
 
   debug(`Screenshot: ${screenshot.width}x${screenshot.height}, data length: ${screenshot.data.length}`);
@@ -138,27 +127,21 @@ try {
         width: screenshot.width,
         height: screenshot.height,
         dataLength: screenshot.data.length,
+        syntheticFixture: true,
+        screenCapturePerformed: false,
       },
       duration_ms: Date.now() - start2,
     });
   } else {
-    // Skip in CI or when screenshot capture isn't working (no display)
-    if (isCI || screenshot.data.length === 0) {
-      logTest(test2, "skip", {
-        error: "Screenshot capture not available (CI or no display)",
-        duration_ms: Date.now() - start2,
-      });
-    } else {
-      logTest(test2, "fail", {
-        error: "Screenshot data structure is invalid",
-        actual: JSON.stringify({
-          hasData: typeof screenshot.data === "string",
-          hasWidth: typeof screenshot.width === "number",
-          hasHeight: typeof screenshot.height === "number",
-        }),
-        duration_ms: Date.now() - start2,
-      });
-    }
+    logTest(test2, "fail", {
+      error: "Synthetic screenshot response structure is invalid",
+      actual: JSON.stringify({
+        hasData: typeof screenshot.data === "string",
+        hasWidth: typeof screenshot.width === "number",
+        hasHeight: typeof screenshot.height === "number",
+      }),
+      duration_ms: Date.now() - start2,
+    });
   }
 } catch (err) {
   logTest(test2, "fail", {
@@ -177,7 +160,7 @@ const start3 = Date.now();
 try {
   debug("Test 3: Captured dimensions are reasonable");
 
-  // Capture after the previous div is still displayed
+  // Decode a synthetic response; no Script Kit window is shown.
   const screenshot = await captureScreenshot();
 
   // Typical Script Kit window is around 500-600px wide, 300-800px tall
@@ -226,10 +209,9 @@ try {
 
   const screenshot = await captureScreenshot();
 
-  // Skip if screenshot data is empty (CI or no display)
   if (!screenshot.data || screenshot.data.length === 0) {
-    logTest(test4, "skip", {
-      error: "Screenshot capture not available (CI or no display)",
+    logTest(test4, "fail", {
+      error: "The synthetic PNG fixture must contain a non-empty payload.",
       duration_ms: Date.now() - start4,
     });
   } else {
@@ -268,20 +250,12 @@ try {
       const headerHex = Array.from(bytes.subarray(0, 8))
         .map((b) => b.toString(16).padStart(2, "0"))
         .join(" ");
-      // Skip if in CI (screenshot may return invalid data without display)
-      if (isCI) {
-        logTest(test4, "skip", {
-          error: "Screenshot data invalid in CI environment",
-          duration_ms: Date.now() - start4,
-        });
-      } else {
-        logTest(test4, "fail", {
-          error: "Data does not start with PNG magic bytes",
-          expected: "89 50 4E 47 0D 0A 1A 0A",
-          actual: headerHex,
-          duration_ms: Date.now() - start4,
-        });
-      }
+      logTest(test4, "fail", {
+        error: "Synthetic data does not start with PNG magic bytes",
+        expected: "89 50 4E 47 0D 0A 1A 0A",
+        actual: headerHex,
+        duration_ms: Date.now() - start4,
+      });
     }
   }
 } catch (err) {
@@ -311,19 +285,16 @@ try {
     `1x: ${screenshot1x.width}x${screenshot1x.height}, 2x: ${screenshot2x.width}x${screenshot2x.height}`
   );
 
-  // On a retina display, 2x should be double the dimensions
-  // On non-retina, they might be the same
-  // We'll check that both return valid data
+  // The isolated fixture guarantees a deterministic 2x metadata transform.
   const bothValid =
     screenshot1x.width > 0 &&
     screenshot1x.height > 0 &&
     screenshot2x.width > 0 &&
     screenshot2x.height > 0;
 
-  // On retina displays, 2x should be >= 1x dimensions
   const dimensionsReasonable =
-    screenshot2x.width >= screenshot1x.width &&
-    screenshot2x.height >= screenshot1x.height;
+    screenshot2x.width === screenshot1x.width * 2 &&
+    screenshot2x.height === screenshot1x.height * 2;
 
   if (bothValid && dimensionsReasonable) {
     logTest(test5, "pass", {
@@ -331,6 +302,7 @@ try {
         "1x": { width: screenshot1x.width, height: screenshot1x.height },
         "2x": { width: screenshot2x.width, height: screenshot2x.height },
         ratio: screenshot2x.width / screenshot1x.width,
+        syntheticFixture: true,
       },
       duration_ms: Date.now() - start5,
     });
@@ -351,31 +323,5 @@ try {
   });
 }
 
-// -----------------------------------------------------------------------------
-// Show Summary
-// -----------------------------------------------------------------------------
 debug("test-capture-screenshot.ts completed!");
-
-await div(
-  md(`# captureScreenshot() Tests Complete
-
-All captureScreenshot() tests have been executed.
-
-## Test Cases Run
-
-| # | Test | Description |
-|---|------|-------------|
-| 1 | captureScreenshot-function-exists | Verify function is defined |
-| 2 | captureScreenshot-basic | Basic capture returns valid data |
-| 3 | captureScreenshot-dimensions | Dimensions are reasonable |
-| 4 | captureScreenshot-png-data | Data is valid base64 PNG |
-| 5 | captureScreenshot-hidpi-option | hiDpi option works |
-
----
-
-*Check the JSONL output for detailed results*
-
-Press Escape or click to exit.`)
-);
-
 debug("test-capture-screenshot.ts exiting...");

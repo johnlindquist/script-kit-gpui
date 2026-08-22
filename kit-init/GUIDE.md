@@ -158,8 +158,31 @@ export const metadata = {
   description: "Shown in the launcher",
   shortcut: "cmd shift m",
   alias: "ms",
+  sdkCapabilities: ["arg", "div"],
+  executionTopology: "typescript-script",
 };
 ```
+
+`sdkCapabilities` is optional and explicitly lists the SDK globals or namespace
+methods the script requires. The host rejects unsupported, unknown, or duplicate
+ordinary-script declarations before indexing. Invalid scriptlets remain visible
+but disabled, with typed repair diagnostics and execution blocked before side
+effects; `kit://failed-scripts` exposes them as `retainedIssues`. The host also
+verifies that `executionTopology` can provide the necessary transport. Valid
+topologies are
+`typescript-script`, `typescript-scriptlet`,
+`typescript-scriptlet-interactive`, `shell-scriptlet`, and `python-scriptlet`.
+Launcher-opened TypeScript scriptlets run interactively and can use prompts;
+the legacy `typescript-scriptlet` mode has no interactive stdin response pipe.
+Shell and Python scriptlets do not receive SDK globals.
+
+For a side-effect-free authoring diagnosis, read the host MCP resource
+`kit://command-doctor`. Its typed `HostCommandDoctorReport` lists already-loaded
+commands, genuine launcher action availability, capability compatibility,
+repair alternatives, and `permissionPending` when no existing permission
+inventory is available. `kit://sdk-reference` advertises this resource in
+`authoringResources`. Resource URIs are not SDK functions: never invent
+`commandDoctor()` or prompt for a permission merely to inspect readiness.
 
 ### Harness-Safe Creation Rules
 
@@ -335,6 +358,10 @@ const values = await fields([
   { name: "number", label: "Number", type: "number" },
   { name: "date", label: "Date", type: "date" },
   { name: "time", label: "Time", type: "time" },
+  { name: "appointment", label: "Appointment", type: "datetime-local" },
+  { name: "month", label: "Month", type: "month" },
+  { name: "week", label: "Week", type: "week" },
+  { name: "query", label: "Search", type: "search" },
   { name: "url", label: "URL", type: "url" },
   { name: "tel", label: "Phone", type: "tel" },
   { name: "color", label: "Color", type: "color" },
@@ -477,8 +504,8 @@ description: Save a quick note
 ```tool:quick-note
 import "@scriptkit/sdk";
 
-const note = await arg("Note");
-await Bun.write(`${env.HOME}/quick-note.txt`, note);
+const note = `Quick note created ${new Date().toISOString()}`;
+await writeFile(home("quick-note.txt"), note);
 hud("Saved");
 ```
 ~~~
@@ -532,10 +559,16 @@ file:///Applications/Safari.app
 #### `ts` or `typescript` - TypeScript Code
 ```markdown
 \`\`\`ts
-const name = await arg("What's your name?");
-await div(\`<h1>Hello, \${name}!</h1>\`);
+const message = \`Scriptlet ran at \${new Date().toISOString()}\`;
+await writeFile(home("scriptlet-ran.txt"), message);
+hud("Saved scriptlet output");
 \`\`\`
 ```
+
+TypeScript scriptlets receive noninteractive SDK helpers but not an interactive
+stdin response pipe. Put `arg()`, `div()`, `fields()`, `mini()`, `micro()`,
+`hotkey()`, and other prompts in a regular TypeScript script instead. Shell and
+Python scriptlets do not receive SDK globals.
 
 #### `applescript` - AppleScript Commands
 ```markdown
@@ -1102,7 +1135,8 @@ Script Kit includes Agent Chat - a built-in chat surface for command-line agents
 
 ### Opening Agent Chat
 
-- **From script**: Use `aiStartChat()` to create or continue an Agent Chat conversation
+- **From script**: Use `aiStartChat()` to create an Agent Chat conversation; it
+  may invoke a configured provider unless `noResponse: true` is explicit
 - **Focus existing Agent Chat**: Use `aiFocus()`
 - **From skills**: Selecting a skill opens Agent Chat
 - **Hotkey**: `Cmd+Shift+Space` (default, configurable)
@@ -1119,22 +1153,28 @@ Agent defaults, model preferences, profiles, and related runtime settings live i
 - **Model picker** to select agent-advertised models
 - **Chat history** with sidebar navigation
 - **Multiple agent support** (Claude Code, OpenCode, AGY, Codex, and compatible adapters)
-- **Context injection** — the harness terminal captures desktop context automatically via Tab
+- **Explicit context** — attach only the user-selected launcher row, note, file,
+  or other reviewed context; Tab never authorizes implicit desktop capture
 
 ### Agent Chat SDK
 
-Scripts can programmatically create and manage Agent Chat conversations:
+Scripts can programmatically create and manage Agent Chat conversations. Both
+`aiStartChat()` and `aiSendMessage()` can submit a request to a configured AI
+provider, which may use paid inference. Use `noResponse: true` to intentionally
+stage a new conversation without requesting a provider response; send a follow-up
+only after an explicit user action:
 
 ```typescript
-// Start a new chat with context parts
+// Stage a new chat with explicit context parts without provider inference
 const result = await aiStartChat("Summarize this context", {
   systemPrompt: "Be concise",
   modelId: "claude-3-5-sonnet-20241022",
+  noResponse: true,
   parts: [{ kind: "resourceUri", uri: "kit://context?profile=minimal", label: "Current Context" }],
 });
 console.log(result.chatId); // use for follow-up messages
 
-// Send a follow-up with a file attachment
+// Intentional user-approved provider request with an explicit file attachment
 await aiSendMessage(result.chatId, "Now review this file", undefined, [
   { kind: "filePath", path: "/tmp/example.rs", label: "example.rs" },
 ]);
@@ -1352,11 +1392,11 @@ export SK_PATH=~/Projects/my-app/.kit
 | `select(placeholder, choices)` | Multi-select | `Promise<string[]>` |
 | `term(command?)` | Terminal emulator | `Promise<string>` |
 | `chat(options?)` | Chat interface (prompt-level) | `Promise<ChatResult>` |
-| `widget(html, options?)` | Floating widget window | `Promise<WidgetController>` |
-| `webcam()` | Camera capture | `Promise<Buffer>` |
-| `mic()` | Audio recording | `Promise<Buffer>` |
-| `eyeDropper()` | Color picker | `Promise<ColorInfo>` |
-| `find(placeholder, options?)` | File search (Spotlight) | `Promise<string>` |
+| `widget(html, options?)` | Unsupported; use `div(html)` | Rejects with `ERR_UNSUPPORTED_SDK_FEATURE` |
+| `webcam()` | Unsupported; use an explicitly configured external camera tool | Rejects with `ERR_UNSUPPORTED_SDK_FEATURE` |
+| `mic()` | Unsupported; use an explicitly configured external audio tool | Rejects with `ERR_UNSUPPORTED_SDK_FEATURE` |
+| `eyeDropper()` | Unsupported; request a color through `arg(...)` | Rejects with `ERR_UNSUPPORTED_SDK_FEATURE` |
+| `find(placeholder, options?)` | Unsupported; use `fileSearch(query, options)` or `path(options)` | Rejects with `ERR_UNSUPPORTED_SDK_FEATURE` |
 
 ### System Functions
 
@@ -1368,12 +1408,13 @@ export SK_PATH=~/Projects/my-app/.kit
 | `hud(message, options?)` | Brief HUD notification |
 | `setStatus(options)` | Unsupported in GPUI; returns `ERR_UNSUPPORTED_SDK_FEATURE` |
 | `menu(icon, scripts?)` | Unsupported in GPUI; returns `ERR_UNSUPPORTED_SDK_FEATURE` |
+| `exec(command, args?)` | Execute an explicit subprocess without invoking a shell; returns stdout, stderr, and exit code |
 | `copy(text)` | Copy to clipboard |
-| `paste()` | Paste from clipboard |
-| `setSelectedText(text)` | Replace selected text |
-| `getSelectedText()` | Get selected text |
+| `paste()` | Read clipboard text; does not inject input or send a paste shortcut |
+| `setSelectedText(text)` | Replace explicitly selected text; requires Accessibility permission |
+| `getSelectedText()` | Read explicitly selected text; requires Accessibility permission |
 | `hasAccessibilityPermission()` | Check accessibility permission |
-| `requestAccessibilityPermission()` | Request accessibility permission |
+| `requestAccessibilityPermission()` | Explicitly request Accessibility permission; may open macOS System Settings |
 
 ### Clipboard Object
 
@@ -1410,10 +1451,9 @@ export SK_PATH=~/Projects/my-app/.kit
 | `getWindowBounds()` | Get window bounds |
 | `submit(value)` | Force submit |
 | `exit(code?)` | Exit script |
-| `wait(ms)` | Delay |
-| `setPanel(html)` | Set panel content |
-| `setPreview(html)` | Set preview content |
-| `setPrompt(html)` | Set prompt content |
+| `setPanel(html)` | Unsupported; throws `ERR_UNSUPPORTED_SDK_FEATURE`. Use `div(html)` |
+| `setPreview(html)` | Unsupported; throws `ERR_UNSUPPORTED_SDK_FEATURE`. Use `arg(...)` choice previews |
+| `setPrompt(html)` | Unsupported; throws `ERR_UNSUPPORTED_SDK_FEATURE`. Open a supported prompt |
 | `setActions(actions)` | Set prompt actions |
 | `setInput(text)` | Set input text |
 
@@ -1433,6 +1473,8 @@ export SK_PATH=~/Projects/my-app/.kit
 | `isFile(path)` | Check if path is a file |
 | `isDir(path)` | Check if path is a directory |
 | `isBin(path)` | Check if file is executable |
+| `readFile(path, encoding?)` | Read text from an explicit path; UTF-8 by default |
+| `writeFile(path, content, encoding?)` | Write text to an explicit path; UTF-8 by default |
 | `fileSearch(query, options?)` | Search for files |
 
 ### Clipboard History
@@ -1443,7 +1485,7 @@ export SK_PATH=~/Projects/my-app/.kit
 | `clipboardHistoryPin(entryId)` | Pin an entry |
 | `clipboardHistoryUnpin(entryId)` | Unpin an entry |
 | `clipboardHistoryRemove(entryId)` | Remove an entry |
-| `clipboardHistoryClear()` | Clear all entries |
+| `clipboardHistoryClear()` | Clear non-pinned entries while preserving pinned entries |
 | `clipboardHistoryTrimOversize()` | Remove oversized entries |
 
 ### Window Management
@@ -1467,9 +1509,9 @@ export SK_PATH=~/Projects/my-app/.kit
 | `aiGetActiveChat()` | Get the active chat info |
 | `aiListChats(limit?, includeDeleted?)` | List all chats |
 | `aiGetConversation(chatId?, limit?)` | Get messages from a chat |
-| `aiStartChat(message, options?)` | Start a new Agent Chat conversation (supports `parts` for context) |
+| `aiStartChat(message, options?)` | Start Agent Chat; may trigger paid provider inference unless `options.noResponse` is `true` |
 | `aiAppendMessage(chatId, content, role)` | Append a message without triggering a response |
-| `aiSendMessage(chatId, content, imagePath?, parts?)` | Send a follow-up message (supports `parts` for context) |
+| `aiSendMessage(chatId, content, imagePath?, parts?)` | Send a user-approved follow-up; triggers potentially paid provider inference |
 | `aiOn(eventType, handler, chatId?)` | Subscribe to Agent Chat events |
 | `aiSetSystemPrompt(chatId, prompt)` | Set the system prompt for a chat |
 | `aiFocus()` | Focus Agent Chat |

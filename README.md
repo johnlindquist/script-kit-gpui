@@ -27,7 +27,7 @@ This rewrite takes a **focused approach** to the SDK:
 > **Important**: This is NOT a drop-in replacement for previous Script Kit versions.
 
 What's preserved:
-- Core prompt APIs (`arg`, `div`, `editor`, `fields`, `form`, `drop`, `hotkey`, `path`, `term`, `chat`, `mic`, `webcam`)
+- Core prompt APIs (`arg`, `div`, `editor`, `fields`, `form`, `drop`, `hotkey`, `mini`, `micro`, `path`, `term`, `chat`)
 - Choice/option structure and props
 - Basic script metadata format
 
@@ -409,10 +409,16 @@ bash scripts/verify-macos-bundle.sh
 | `path(options?)` | File/folder picker |
 | `drop()` | Drag and drop zone |
 | `hotkey(placeholder?)` | Capture keyboard shortcut |
+| `mini(placeholder, choices)` | Native compact-choice prompt |
+| `micro(placeholder, choices)` | Native minimal-choice prompt |
 | `term(command?)` | Interactive terminal |
 | `chat(options?)` | Chat interface |
-| `mic()` | Audio recording |
-| `webcam()` | Camera capture |
+
+`mic()`, `webcam()`, `eyeDropper()`, floating `widget()` windows, and legacy
+`setPanel()` / `setPreview()` / `setPrompt()` mutations are not supported by the
+GPUI host. They fail explicitly with `ERR_UNSUPPORTED_SDK_FEATURE` and an
+actionable alternative instead of pretending to succeed. Search **SDK
+Reference** in the launcher for the host-owned, versioned capability catalog.
 
 ## AI & Context Features
 

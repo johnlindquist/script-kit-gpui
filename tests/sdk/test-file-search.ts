@@ -143,7 +143,7 @@ try {
 	debug("Test 3: fileSearch() with onlyin option");
 
 	// Search for any file in the project root directory
-	const projectPath = "/Users/johnlindquist/dev/script-kit-gpui";
+	const projectPath = process.cwd();
 	const results = await fileSearch("Cargo", { onlyin: projectPath });
 
 	debug(`Test 3: Got ${results.length} results with onlyin filter`);
@@ -234,9 +234,8 @@ try {
 			duration_ms: Date.now() - start5,
 		});
 	} else if (results.length === 0) {
-		// Skip if no results - can't validate structure
-		logTest(test5, "skip", {
-			result: { reason: "No results to validate structure" },
+		logTest(test5, "fail", {
+			error: "The deterministic README fixture must provide a result for structure validation.",
 			duration_ms: Date.now() - start5,
 		});
 	} else {

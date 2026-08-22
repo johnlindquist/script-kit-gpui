@@ -21,6 +21,159 @@ bench('imports_complete');
 // =============================================================================
 export const SDK_VERSION = '0.2.0';
 
+/** Wire version published by the Rust-owned kit://sdk-reference capability catalog. */
+export const SDK_CAPABILITY_CATALOG_SCHEMA_VERSION = 1;
+
+/** Read-only MCP resource identifiers, not callable SDK functions. */
+export const COMMAND_DOCTOR_RESOURCE_URI = 'kit://command-doctor';
+export const FAILED_SCRIPTS_RESOURCE_URI = 'kit://failed-scripts';
+export const COMMAND_DOCTOR_RESOURCE_SCHEMA_VERSION = 1;
+
+export type SdkCapabilitySupport = 'supported' | 'experimental' | 'unsupported';
+
+export type SdkExecutionTopology =
+  | 'typescript-script'
+  | 'typescript-scriptlet'
+  | 'typescript-scriptlet-interactive'
+  | 'shell-scriptlet'
+  | 'python-scriptlet';
+
+export interface HostSdkCapability {
+  name: string;
+  support: SdkCapabilitySupport;
+  /** First host version guaranteed to expose this reviewed contract, not its historical debut. */
+  minimumHostVersion: string;
+  requiresInteractivePrompt: boolean;
+  requiredPermissions?: string[];
+  supportedPlatforms?: string[];
+  alternatives?: string[];
+  migrationNote?: string;
+}
+
+export interface HostSdkCapabilityCatalog {
+  schemaVersion: typeof SDK_CAPABILITY_CATALOG_SCHEMA_VERSION;
+  hostVersion: string;
+  capabilities: HostSdkCapability[];
+}
+
+/** Host MCP resource discoverable under kit://sdk-reference.authoringResources. */
+export interface HostSdkAuthoringResource {
+  uri: string;
+  name: string;
+  description: string;
+}
+
+export type SdkCapabilityDiagnosticCode =
+  | 'unknown_capability'
+  | 'unsupported_capability'
+  | 'missing_sdk_transport'
+  | 'interactive_prompt_unavailable'
+  | 'unsupported_platform'
+  | 'missing_permission'
+  | 'permission_inventory_unavailable'
+  | 'host_version_too_old'
+  | 'invalid_host_version';
+
+/** Explicit host facts supplied by an already-authorized, read-only inventory. */
+export interface HostSdkAvailability {
+  hostVersion: string;
+  platform: string;
+  grantedPermissions: string[];
+}
+
+export interface SdkCapabilityDiagnostic {
+  code: SdkCapabilityDiagnosticCode;
+  capability: string;
+  message: string;
+  alternatives?: string[];
+}
+
+export type HostCommandDoctorState =
+  | 'ready'
+  | 'experimental'
+  | 'unsupported'
+  | 'blocked'
+  | 'permissionPending';
+
+export type HostScriptValidationKind =
+  | { kind: 'metadataParse' | 'schemaParse'; detail: string }
+  | { kind: 'invalidValue'; value: string; reason: string }
+  | { kind: 'duplicateBinding'; binding: 'shortcut' | 'alias' | 'keyword' | 'trigger'; value: string }
+  | {
+      kind: 'capabilityUnavailable';
+      capability: string;
+      code: SdkCapabilityDiagnosticCode;
+      alternatives?: string[];
+    };
+
+export interface HostScriptValidationIssue {
+  severity: 'fatal' | 'warning';
+  path: string;
+  scriptName: string;
+  field?: string;
+  message: string;
+  kind: HostScriptValidationKind;
+  related?: { path: string; name: string }[];
+}
+
+export interface HostCommandDoctorCapability {
+  name: string;
+  support: SdkCapabilitySupport;
+  requiredPermissions?: string[];
+  supportedPlatforms?: string[];
+  minimumHostVersion?: string;
+  alternatives?: string[];
+}
+
+/** The existing launcher's actual primary action; identity is never raw. */
+export interface HostCommandDoctorPrimaryAction {
+  title: string;
+  enabled: boolean;
+  reason?: string;
+  identityFingerprint: `sha256:${string}`;
+}
+
+export interface HostCommandDoctorEntry {
+  source: string;
+  name: string;
+  path: string;
+  pluginId: string;
+  pluginTitle?: string;
+  state: HostCommandDoctorState;
+  executable: boolean;
+  primaryAction?: HostCommandDoctorPrimaryAction;
+  capabilities?: HostCommandDoctorCapability[];
+  issues?: HostScriptValidationIssue[];
+  alternatives?: string[];
+}
+
+/** Receipt returned by reading the host's kit://command-doctor MCP resource. */
+export interface HostCommandDoctorReport {
+  schemaVersion: typeof COMMAND_DOCTOR_RESOURCE_SCHEMA_VERSION;
+  hostVersion: string;
+  platform: string;
+  permissionInventoryKnown: boolean;
+  totalCommands: number;
+  readyCount: number;
+  experimentalCount: number;
+  unsupportedCount: number;
+  blockedCount: number;
+  permissionPendingCount: number;
+  commands: HostCommandDoctorEntry[];
+}
+
+/** Captured output from an explicit, shell-free child process. */
+export interface ExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+export type SdkExecErrorCode =
+  | 'ERR_SDK_EXEC_INVALID_COMMAND'
+  | 'ERR_SDK_EXEC_SPAWN_FAILED'
+  | 'ERR_SDK_EXEC_NONZERO_EXIT';
+
 // =============================================================================
 // SDK Status & Architecture
 // =============================================================================
@@ -33,31 +186,30 @@ export const SDK_VERSION = '0.2.0';
  *
  * IMPLEMENTATION STATUS:
  *
- * ✅ FULLY IMPLEMENTED (~45 methods):
+ * ✅ IMPLEMENTED GLOBALS AND NAMESPACE METHODS:
  *    - Core prompts: arg, div, editor, term, form, fields, select, confirm,
- *      path, drop, template, env, chat
+ *      path, drop, template, env, chat, mini, micro, hotkey
  *    - Window control: show, hide, captureScreenshot, getLayoutInfo, hud
  *    - Clipboard: read/write text/images, clipboard history with all operations
  *    - Window management: getWindows, focusWindow, tileWindow, getDisplays (macOS)
  *    - AI integration: aiIsOpen, aiStartChat, aiSendMessage, aiListChats, etc.
  *    - File/menu: fileSearch, getMenuBar, executeMenuAction
  *    - Pure utilities: home, skPath, uuid, compile, memoryMap
+ *    - Explicit filesystem/subprocess helpers: readFile, writeFile, exec
  *
- * ⚠️  NOT YET IMPLEMENTED (~15 methods):
- *    Most of these functions send messages but the GPUI app doesn't handle
- *    them yet. Explicit unsupported helpers reject with
- *    UnsupportedSdkFeatureError before sending because they do not have a
- *    visible behavior or receipt contract.
+ * ⚠️  UNSUPPORTED COMPATIBILITY HELPERS:
+ *    Input/prompt/media helpers reject with UnsupportedSdkFeatureError before
+ *    dispatch; setStatus()/menu() return an explicit unsupported feedback
+ *    receipt. None claims a successful native behavior or delivery contract.
  *
  *    - Status/menu: setStatus(), menu()
  *    - Automation: keyboard.type(), keyboard.tap(), mouse.move(),
  *      mouse.leftClick(), mouse.rightClick(), mouse.setPosition()
  *    - UI updates: setPanel(), setPreview(), setPrompt()
- *    - Compact prompts: mini(), micro()
- *    - Advanced: hotkey(), widget(), find()
+ *    - Advanced: widget(), find()
  *
- * ❌ NOT FEASIBLE (removed):
- *    These don't fit the message-passing architecture and throw errors:
+ * ❌ UNSUPPORTED MEDIA/CAPTURE HELPERS:
+ *    Compatibility globals remain discoverable but reject before dispatch:
  *
  *    - webcam(), mic() - Media streaming requires real-time bidirectional
  *      communication beyond the JSONL protocol
@@ -65,8 +217,9 @@ export const SDK_VERSION = '0.2.0';
  *
  * EXTENSION SUPPORT:
  *    - TypeScript scripts (.ts, .js): Full SDK access with stdin/stdout
- *    - TypeScript scriptlets (markdown): SDK loaded but NO interactive prompts
- *      (no stdin pipe - arg(), div(), chat() will hang)
+ *    - Launcher TypeScript scriptlets: Interactive SDK transport; prompts work
+ *    - Legacy TypeScript scriptlets: SDK loaded without interactive response
+ *      transport; prompt capabilities are rejected before execution
  *    - Non-TypeScript scriptlets (bash, python): NO SDK access
  *
  * See .omegathink/20260120-142315-sdk-audit-methods-payload-scripts-extensions.md
@@ -86,7 +239,20 @@ export interface Choice {
 export interface FieldDef {
   name: string;
   label: string;
-  type?: 'text' | 'password' | 'email' | 'number' | 'date' | 'time' | 'url' | 'tel' | 'color';
+  type?:
+    | 'text'
+    | 'password'
+    | 'email'
+    | 'number'
+    | 'date'
+    | 'time'
+    | 'datetime-local'
+    | 'month'
+    | 'week'
+    | 'search'
+    | 'url'
+    | 'tel'
+    | 'color';
   placeholder?: string;
   value?: string;
 }
@@ -2652,6 +2818,8 @@ export interface ScriptMetadata {
   enter?: string;
   /** Short alias for quick triggering (e.g., 'gc' for 'git-commit') */
   alias?: string;
+  /** Text-expansion keyword trigger; `snippet`/`expand` are compatibility aliases. */
+  keyword?: string;
   /** Icon name (e.g., 'File', 'Terminal', 'Star') */
   icon?: string;
   /** Keyboard shortcut (e.g., 'opt i', 'cmd shift k') */
@@ -2672,6 +2840,14 @@ export interface ScriptMetadata {
   background?: boolean;
   /** System-level script (higher privileges) */
   system?: boolean;
+  /** Offer this command when no other launcher results match the current input. */
+  fallback?: boolean;
+  /** Fallback row label; use `{input}` to interpolate the current launcher text. */
+  fallbackLabel?: string;
+  /** Explicit SDK globals/object methods required by this script; validated before indexing. */
+  sdkCapabilities?: string[];
+  /** Declared transport topology; interactive prompts require `typescript-script`. */
+  executionTopology?: SdkExecutionTopology;
   /** Additional custom metadata fields */
   [key: string]: unknown;
 }
@@ -3374,6 +3550,28 @@ export class UnsupportedSdkFeatureError extends Error {
   }
 }
 
+export class SdkExecError extends Error {
+  readonly code: SdkExecErrorCode;
+  readonly command: string;
+  readonly args: string[];
+  readonly result?: ExecResult;
+
+  constructor(
+    code: SdkExecErrorCode,
+    message: string,
+    command: string,
+    args: string[] = [],
+    result?: ExecResult,
+  ) {
+    super(message);
+    this.name = 'SdkExecError';
+    this.code = code;
+    this.command = command;
+    this.args = args;
+    this.result = result;
+  }
+}
+
 interface SubmitMessage {
   type: 'submit';
   id: string;
@@ -3879,6 +4077,33 @@ function send(msg: object): void {
 // This allows SDK tests to run without GPUI interaction
 const SDK_TEST_AUTOSUBMIT = process.env.SDK_TEST_AUTOSUBMIT === '1';
 const SDK_TEST_AUTOSUBMIT_DELAY = parseInt(process.env.SDK_TEST_AUTOSUBMIT_DELAY || '10', 10);
+const SDK_TEST_WINDOW_FIXTURES = SDK_TEST_AUTOSUBMIT && process.env.SDK_TEST_WINDOW_FIXTURES === '1';
+const SDK_TEST_CLIPBOARD_FIXTURES = SDK_TEST_AUTOSUBMIT && process.env.SDK_TEST_CLIPBOARD_FIXTURES === '1';
+const SDK_TEST_FILE_FIXTURES = SDK_TEST_AUTOSUBMIT && process.env.SDK_TEST_FILE_FIXTURES === '1';
+const SDK_TEST_MENU_FIXTURES = SDK_TEST_AUTOSUBMIT && process.env.SDK_TEST_MENU_FIXTURES === '1';
+// Test fixtures exist only inside the isolated preload child. They never read,
+// write, focus, enumerate, or otherwise inspect actual operating-system state.
+const autoSubmitClipboardEntries: ClipboardHistoryEntry[] = [];
+const autoSubmitWindows: SystemWindowInfo[] = SDK_TEST_WINDOW_FIXTURES
+  ? [
+      {
+        windowId: 42_001,
+        title: 'SK Window Fixture — Synthetic',
+        appName: 'Window Engine Fixture',
+        bounds: { x: 20, y: 30, width: 800, height: 600 },
+        isMinimized: false,
+        isActive: false,
+      },
+      {
+        windowId: 42_002,
+        title: 'SK Window Fixture — Disposable Synthetic',
+        appName: 'Window Engine Fixture',
+        bounds: { x: 40, y: 50, width: 400, height: 300 },
+        isMinimized: false,
+        isActive: false,
+      },
+    ]
+  : [];
 
 if (SDK_TEST_AUTOSUBMIT) {
   console.error('[SDK] Auto-submit mode enabled - prompts will auto-resolve');
@@ -4139,16 +4364,18 @@ declare global {
   /**
    * Multi-field form prompt
    * @param fieldDefs - Array of field definitions (strings become both name and label)
+   * @param actions - Optional prompt-scoped actions for the actions panel
    * @returns Array of field values in order
    */
-  function fields(fieldDefs: (string | FieldDef)[]): Promise<string[]>;
+  function fields(fieldDefs: (string | FieldDef)[], actions?: Action[]): Promise<string[]>;
   
   /**
    * Custom HTML form prompt
    * @param html - HTML string containing form fields
+   * @param actions - Optional prompt-scoped actions for the actions panel
    * @returns Object with form field names as keys and their values
    */
-  function form(html: string): Promise<Record<string, string>>;
+  function form(html: string, actions?: Action[]): Promise<Record<string, string>>;
   
   /**
    * File/folder browser prompt
@@ -4201,6 +4428,18 @@ declare global {
   // =============================================================================
   // System APIs (TIER 3)
   // =============================================================================
+
+  /**
+   * Execute an explicit subprocess without invoking a shell. Prefer the argv
+   * form for user-provided values; shell operators/substitution are rejected.
+   */
+  function exec(command: string, args?: readonly string[]): Promise<ExecResult>;
+
+  /** Read text from an explicitly named filesystem path. */
+  function readFile(path: string, encoding?: BufferEncoding): Promise<string>;
+
+  /** Write text to an explicitly named filesystem path. */
+  function writeFile(path: string, content: string, encoding?: BufferEncoding): Promise<void>;
   
   /**
    * Play system beep sound
@@ -4356,7 +4595,7 @@ declare global {
    */
   interface ChatFunction {
     (options?: ChatOptions): Promise<ChatResult>;
-    addMessage(msg: ChatMessage): void;
+    addMessage(msg: ChatMessage | CoreMessage): void;
     startStream(position?: 'left' | 'right'): string;
     appendChunk(messageId: string, chunk: string): void;
     completeStream(messageId: string): void;
@@ -4411,37 +4650,36 @@ declare global {
   // =============================================================================
   
   /**
-   * Creates a floating HTML widget window
-   * @param html - HTML content for the widget
-   * @param options - Widget positioning and behavior options
-   * @returns WidgetController for managing the widget
+   * @deprecated Floating widget windows are unsupported in GPUI. Use div(...).
+   * @throws UnsupportedSdkFeatureError before sending a host request.
    */
-  function widget(html: string, options?: WidgetOptions): Promise<WidgetController>;
+  function widget(html: string, options?: WidgetOptions): Promise<never>;
   
   /**
    * Opens a terminal window
    * @param command - Optional command to run in the terminal
+   * @param actions - Optional prompt-scoped actions for the actions panel
    * @returns Terminal output when command completes
    */
-  function term(command?: string): Promise<string>;
+  function term(command?: string, actions?: Action[]): Promise<string>;
   
   /**
-   * Opens webcam preview, captures on Enter
-   * @returns Image buffer of captured photo
+   * @deprecated Camera streaming is unsupported in the JSONL SDK transport.
+   * @throws UnsupportedSdkFeatureError without accessing a camera.
    */
-  function webcam(): Promise<Buffer>;
+  function webcam(): Promise<never>;
   
   /**
-   * Records audio from microphone
-   * @returns Audio buffer of recording
+   * @deprecated Microphone streaming is unsupported in the JSONL SDK transport.
+   * @throws UnsupportedSdkFeatureError without accessing a microphone.
    */
-  function mic(): Promise<Buffer>;
+  function mic(): Promise<never>;
   
   /**
-   * Pick a color from the screen using eye dropper
-   * @returns Color information in multiple formats
+   * @deprecated Native screen color picking is unsupported in GPUI.
+   * @throws UnsupportedSdkFeatureError without capturing the screen.
    */
-  function eyeDropper(): Promise<ColorInfo>;
+  function eyeDropper(): Promise<never>;
   
   /**
    * Legacy interactive find prompt.
@@ -4578,22 +4816,22 @@ declare global {
   function exit(code?: number): void;
   
   /**
-   * Set the panel HTML content
-   * @param html - HTML content
+   * @deprecated Legacy panel mutation is unsupported. Use div(...) instead.
+   * @throws UnsupportedSdkFeatureError before sending a host request.
    */
-  function setPanel(html: string): void;
+  function setPanel(html: string): never;
   
   /**
-   * Set the preview HTML content
-   * @param html - HTML content
+   * @deprecated Legacy preview mutation is unsupported. Use arg(...) or div(...).
+   * @throws UnsupportedSdkFeatureError before sending a host request.
    */
-  function setPreview(html: string): void;
+  function setPreview(html: string): never;
   
   /**
-   * Set the prompt HTML content
-   * @param html - HTML content
+   * @deprecated Legacy prompt mutation is unsupported. Open a supported prompt.
+   * @throws UnsupportedSdkFeatureError before sending a host request.
    */
-  function setPrompt(html: string): void;
+  function setPrompt(html: string): never;
   
   /**
    * Generate a UUID
@@ -5431,12 +5669,10 @@ globalThis.editor = async function editor(
   });
 };
 
-// NOTE: mini() is not yet implemented - use arg() instead
 globalThis.mini = async function mini(
   placeholder: string,
   choices: (string | Choice)[]
 ): Promise<string> {
-  console.warn('[SDK] mini() is not yet implemented in the GPUI app - use arg() instead');
   const id = nextId();
 
   const normalizedChoices: Choice[] = choices.map((c) => {
@@ -5471,12 +5707,10 @@ globalThis.mini = async function mini(
   });
 };
 
-// NOTE: micro() is not yet implemented - use arg() instead
 globalThis.micro = async function micro(
   placeholder: string,
   choices: (string | Choice)[]
 ): Promise<string> {
-  console.warn('[SDK] micro() is not yet implemented in the GPUI app - use arg() instead');
   const id = nextId();
 
   const normalizedChoices: Choice[] = choices.map((c) => {
@@ -6252,7 +6486,7 @@ globalThis.clipboard = {
     return new Promise((resolve) => {
       addPending(id, (msg: SubmitMessage) => {
         resolve(msg.value ?? '');
-      }, { value: '' }); // Auto-submit: empty clipboard
+      }, { value: SDK_TEST_CLIPBOARD_FIXTURES ? autoSubmitClipboardEntries[0]?.content ?? '' : '' });
 
       const message: ClipboardMessage = {
         type: 'clipboard',
@@ -6268,6 +6502,16 @@ globalThis.clipboard = {
     const id = nextId();
 
     return new Promise((resolve) => {
+      if (SDK_TEST_CLIPBOARD_FIXTURES) {
+        autoSubmitClipboardEntries.unshift({
+          entryId: `synthetic-clipboard-${id}`,
+          content: text,
+          contentType: 'text',
+          timestamp: new Date().toISOString(),
+          pinned: false,
+        });
+      }
+
       addPending(id, () => {
         resolve();
       }, undefined); // Auto-submit: void return
@@ -6541,9 +6785,11 @@ const chatFn: ChatFunction = async function chat(options?: ChatOptions): Promise
   bench('chat_sending_message');
   send(message);
 
-  // IMPORTANT: Ref stdin BEFORE onInit to prevent process from exiting
-  // while onInit runs async work. addPending() will manage ref counting after.
-  (process.stdin as any).ref?.();
+  // Real hosts must keep stdin alive through onInit. The isolated auto-submit
+  // harness has no host pipe, so referencing stdin there leaks the process.
+  if (!SDK_TEST_AUTOSUBMIT) {
+    (process.stdin as any).ref?.();
+  }
 
   // Call onInit if provided (allows script to add initial messages)
   if (options?.onInit) {
@@ -6818,85 +7064,14 @@ function handleWidgetEvent(msg: { id: string; event: string; data?: unknown }) {
 // Register widget event handler with the stdin message handler
 process.on('widgetEvent' as any, handleWidgetEvent);
 
-// NOTE: widget() is not yet implemented
 globalThis.widget = async function widget(
-  html: string,
-  options?: WidgetOptions
-): Promise<WidgetController> {
-  console.warn('[SDK] widget() is not yet implemented in the GPUI app');
-  const id = nextId();
-
-  // Initialize handlers for this widget
-  widgetHandlers.set(id, {});
-
-  // Send widget creation message
-  const message: WidgetMessage = {
-    type: 'widget',
-    id,
-    html,
-    options,
-  };
-  send(message);
-
-  // Return controller object
-  const controller: WidgetController = {
-    setState(state: Record<string, unknown>): void {
-      const actionMessage: WidgetActionMessage = {
-        type: 'widgetAction',
-        id,
-        action: 'setState',
-        state,
-      };
-      send(actionMessage);
-    },
-
-    onClick(handler: (event: WidgetEvent) => void): void {
-      const handlers = widgetHandlers.get(id);
-      if (handlers) {
-        handlers.onClick = handler;
-      }
-    },
-
-    onInput(handler: (event: WidgetInputEvent) => void): void {
-      const handlers = widgetHandlers.get(id);
-      if (handlers) {
-        handlers.onInput = handler;
-      }
-    },
-
-    onClose(handler: () => void): void {
-      const handlers = widgetHandlers.get(id);
-      if (handlers) {
-        handlers.onClose = handler;
-      }
-    },
-
-    onMoved(handler: (pos: { x: number; y: number }) => void): void {
-      const handlers = widgetHandlers.get(id);
-      if (handlers) {
-        handlers.onMoved = handler;
-      }
-    },
-
-    onResized(handler: (size: { width: number; height: number }) => void): void {
-      const handlers = widgetHandlers.get(id);
-      if (handlers) {
-        handlers.onResized = handler;
-      }
-    },
-
-    close(): void {
-      const actionMessage: WidgetActionMessage = {
-        type: 'widgetAction',
-        id,
-        action: 'close',
-      };
-      send(actionMessage);
-      widgetHandlers.delete(id);
-    },
-  };
-
-  return controller;
+  _html: string,
+  _options?: WidgetOptions
+): Promise<never> {
+  return rejectUnsupportedSdkFeature('widget', [
+    'div(html) for an in-launcher surface',
+    'arg(placeholder, choices) for a supported native prompt',
+  ]);
 };
 
 globalThis.term = async function term(command?: string, actionsInput?: Action[]): Promise<string> {
@@ -6954,33 +7129,28 @@ globalThis.term = async function term(command?: string, actionsInput?: Action[])
   });
 };
 
-// REMOVED: webcam() is not feasible in the message-passing architecture
-// Media streaming requires complex real-time communication beyond the JSONL protocol
-globalThis.webcam = async function webcam(): Promise<Buffer> {
-  throw new Error(
-    'webcam() is not implemented in Script Kit GPUI. ' +
-    'Media streaming is not feasible with the message-passing architecture. ' +
-    'Consider using external tools or the camera via system APIs.'
-  );
+// Unsupported compatibility global: camera streaming has no JSONL transport.
+globalThis.webcam = async function webcam(): Promise<never> {
+  return rejectUnsupportedSdkFeature('webcam', [
+    'an explicitly configured external camera tool',
+    'processing an existing image file',
+  ]);
 };
 
-// REMOVED: mic() is not feasible in the message-passing architecture
-// Audio streaming requires complex real-time communication beyond the JSONL protocol
-globalThis.mic = async function mic(): Promise<Buffer> {
-  throw new Error(
-    'mic() is not implemented in Script Kit GPUI. ' +
-    'Audio streaming is not feasible with the message-passing architecture. ' +
-    'Consider using external tools or audio capture via system APIs.'
-  );
+// Unsupported compatibility global: microphone streaming has no JSONL transport.
+globalThis.mic = async function mic(): Promise<never> {
+  return rejectUnsupportedSdkFeature('mic', [
+    'an explicitly configured external audio tool',
+    'processing an existing audio file',
+  ]);
 };
 
-// REMOVED: eyeDropper() is not yet implemented
-// Could potentially be implemented via screen capture + pixel reading
-globalThis.eyeDropper = async function eyeDropper(): Promise<ColorInfo> {
-  throw new Error(
-    'eyeDropper() is not implemented in Script Kit GPUI. ' +
-    'Consider using macOS system color picker or external color tools.'
-  );
+// Unsupported compatibility global: native screen color picking is unavailable.
+globalThis.eyeDropper = async function eyeDropper(): Promise<never> {
+  return rejectUnsupportedSdkFeature('eyeDropper', [
+    "arg('Enter a color value')",
+    'an explicitly configured external color picker',
+  ]);
 };
 
 globalThis.find = function find(
@@ -7856,24 +8026,27 @@ globalThis.exit = function exit(code?: number): void {
   process.exit(code ?? 0);
 };
 
-// Content Setters
-// NOTE: These functions send messages to the app but handlers are not yet implemented
-globalThis.setPanel = function setPanel(html: string): void {
-  console.warn('[SDK] setPanel() is not yet implemented in the GPUI app');
-  const message: SetPanelMessage = { type: 'setPanel', html };
-  send(message);
+// Content setters have no GPUI handler. Refuse before emitting an unhandled
+// fire-and-forget message so authors cannot mistake a no-op for success.
+globalThis.setPanel = function setPanel(_html: string): never {
+  throw new UnsupportedSdkFeatureError('setPanel', [
+    'div(html)',
+    'arg(placeholder, choices)',
+  ]);
 };
 
-globalThis.setPreview = function setPreview(html: string): void {
-  console.warn('[SDK] setPreview() is not yet implemented in the GPUI app');
-  const message: SetPreviewMessage = { type: 'setPreview', html };
-  send(message);
+globalThis.setPreview = function setPreview(_html: string): never {
+  throw new UnsupportedSdkFeatureError('setPreview', [
+    'arg(placeholder, choices)',
+    'div(html)',
+  ]);
 };
 
-globalThis.setPrompt = function setPrompt(html: string): void {
-  console.warn('[SDK] setPrompt() is not yet implemented in the GPUI app');
-  const message: SetPromptMessage = { type: 'setPrompt', html };
-  send(message);
+globalThis.setPrompt = function setPrompt(_html: string): never {
+  throw new UnsupportedSdkFeatureError('setPrompt', [
+    'arg(placeholder, choices)',
+    'fields(definitions)',
+  ]);
 };
 
 // Misc Utilities
@@ -7916,6 +8089,195 @@ globalThis.tmpPath = function tmpPath(...segments: string[]): string {
 // =============================================================================
 // TIER 5B: File Utilities (pure JS using Node fs)
 // =============================================================================
+
+function parseShellFreeCommand(command: string): string[] {
+  if (typeof command !== 'string' || command.trim().length === 0) {
+    throw new SdkExecError(
+      'ERR_SDK_EXEC_INVALID_COMMAND',
+      'exec() requires a non-empty executable name.',
+      String(command),
+    );
+  }
+
+  const tokens: string[] = [];
+  let token = '';
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  let tokenStarted = false;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+
+    if (escaped) {
+      token += char;
+      escaped = false;
+      tokenStarted = true;
+      continue;
+    }
+
+    if (char === '\\' && quote !== "'") {
+      escaped = true;
+      tokenStarted = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        token += char;
+      }
+      tokenStarted = true;
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      tokenStarted = true;
+      continue;
+    }
+
+    if (
+      '|&;<>`\n\r'.includes(char) ||
+      (char === '$' && (command[index + 1] === '(' || command[index + 1] === '{'))
+    ) {
+      throw new SdkExecError(
+        'ERR_SDK_EXEC_INVALID_COMMAND',
+        'exec() never invokes a shell; shell operators and command substitution are not allowed. Pass an executable plus an explicit args array.',
+        command,
+      );
+    }
+
+    if (/\s/.test(char)) {
+      if (tokenStarted) {
+        tokens.push(token);
+        token = '';
+        tokenStarted = false;
+      }
+      continue;
+    }
+
+    token += char;
+    tokenStarted = true;
+  }
+
+  if (escaped || quote) {
+    throw new SdkExecError(
+      'ERR_SDK_EXEC_INVALID_COMMAND',
+      'exec() received an unfinished quote or escape sequence.',
+      command,
+    );
+  }
+  if (tokenStarted) {
+    tokens.push(token);
+  }
+  if (tokens.length === 0 || tokens[0].length === 0) {
+    throw new SdkExecError(
+      'ERR_SDK_EXEC_INVALID_COMMAND',
+      'exec() requires a non-empty executable name.',
+      command,
+    );
+  }
+  return tokens;
+}
+
+globalThis.exec = async function exec(
+  command: string,
+  args?: readonly string[],
+): Promise<ExecResult> {
+  if (typeof command !== 'string' || command.trim().length === 0) {
+    throw new SdkExecError(
+      'ERR_SDK_EXEC_INVALID_COMMAND',
+      'exec() requires a non-empty executable name.',
+      String(command),
+    );
+  }
+
+  if (args !== undefined && !Array.isArray(args)) {
+    throw new SdkExecError(
+      'ERR_SDK_EXEC_INVALID_COMMAND',
+      'exec() arguments must be an explicit string array.',
+      command,
+    );
+  }
+
+  const argv = args === undefined ? parseShellFreeCommand(command) : [command, ...args];
+  if (argv.some((value) => typeof value !== 'string' || value.includes('\0'))) {
+    throw new SdkExecError(
+      'ERR_SDK_EXEC_INVALID_COMMAND',
+      'exec() arguments must be strings without NUL characters.',
+      command,
+      argv.slice(1),
+    );
+  }
+
+  const [executable, ...childArgs] = argv;
+
+  return new Promise((resolve, reject) => {
+    const child = spawnChildProcess(executable, childArgs, {
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+
+    child.stdout.on('data', (chunk: Buffer | string) => {
+      stdout.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    child.stderr.on('data', (chunk: Buffer | string) => {
+      stderr.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+
+    child.once('error', (error) => {
+      reject(new SdkExecError(
+        'ERR_SDK_EXEC_SPAWN_FAILED',
+        `exec() could not start ${JSON.stringify(executable)}: ${error.message}`,
+        executable,
+        childArgs,
+      ));
+    });
+
+    child.once('close', (exitCode, signal) => {
+      const result: ExecResult = {
+        stdout: Buffer.concat(stdout).toString('utf8'),
+        stderr: Buffer.concat(stderr).toString('utf8'),
+        exitCode: exitCode ?? 1,
+      };
+
+      if (exitCode === 0) {
+        resolve(result);
+        return;
+      }
+
+      const termination = signal
+        ? `signal ${signal}`
+        : `exit code ${result.exitCode}`;
+      reject(new SdkExecError(
+        'ERR_SDK_EXEC_NONZERO_EXIT',
+        `exec() failed with ${termination}${result.stderr ? `: ${result.stderr.trim()}` : ''}`,
+        executable,
+        childArgs,
+        result,
+      ));
+    });
+  });
+};
+
+globalThis.readFile = async function readFile(
+  path: string,
+  encoding: BufferEncoding = 'utf8',
+): Promise<string> {
+  return fs.readFile(path, { encoding });
+};
+
+globalThis.writeFile = async function writeFile(
+  path: string,
+  content: string,
+  encoding: BufferEncoding = 'utf8',
+): Promise<void> {
+  await fs.writeFile(path, content, { encoding });
+};
 
 globalThis.isFile = async function isFile(filePath: string): Promise<boolean> {
   try {
@@ -8019,11 +8381,56 @@ globalThis.inspect = async function inspect(data: unknown): Promise<void> {
 // Clipboard History Functions
 // =============================================================================
 
+function autoSubmitClipboardAction(
+  requestId: string,
+  action: 'pin' | 'unpin' | 'remove' | 'clear' | 'trimOversize',
+  entryId?: string,
+): ClipboardHistoryResultMessage {
+  if (!SDK_TEST_CLIPBOARD_FIXTURES) {
+    return { type: 'clipboardHistoryResult', requestId, success: true };
+  }
+
+  if (action === 'clear') {
+    const pinned = autoSubmitClipboardEntries.filter((entry) => entry.pinned);
+    autoSubmitClipboardEntries.splice(0, autoSubmitClipboardEntries.length, ...pinned);
+    return { type: 'clipboardHistoryResult', requestId, success: true };
+  }
+
+  if (action === 'trimOversize') {
+    const withinLimit = autoSubmitClipboardEntries.filter((entry) => entry.content.length <= 100_000);
+    autoSubmitClipboardEntries.splice(0, autoSubmitClipboardEntries.length, ...withinLimit);
+    return { type: 'clipboardHistoryResult', requestId, success: true };
+  }
+
+  const index = autoSubmitClipboardEntries.findIndex((entry) => entry.entryId === entryId);
+  if (index < 0) {
+    return {
+      type: 'clipboardHistoryResult',
+      requestId,
+      success: false,
+      error: `Unknown synthetic clipboard entry id ${JSON.stringify(entryId)}.`,
+    };
+  }
+
+  if (action === 'remove') {
+    autoSubmitClipboardEntries.splice(index, 1);
+  } else {
+    autoSubmitClipboardEntries[index].pinned = action === 'pin';
+  }
+
+  return { type: 'clipboardHistoryResult', requestId, success: true };
+}
+
 globalThis.clipboardHistory = async function clipboardHistory(): Promise<ClipboardHistoryEntry[]> {
   const id = nextId();
 
-  // Auto-submit: empty clipboard history
-  const autoSubmitValue = { type: 'clipboardHistoryList', entries: [] };
+  const autoSubmitValue: ClipboardHistoryListMessage = {
+    type: 'clipboardHistoryList',
+    requestId: id,
+    entries: SDK_TEST_CLIPBOARD_FIXTURES
+      ? autoSubmitClipboardEntries.map((entry) => ({ ...entry }))
+      : [],
+  };
 
   return new Promise((resolve) => {
     addPending(id, (msg: ResponseMessage) => {
@@ -8082,8 +8489,7 @@ globalThis.clipboardHistory = async function clipboardHistory(): Promise<Clipboa
 globalThis.clipboardHistoryPin = async function clipboardHistoryPin(entryId: string): Promise<void> {
   const id = nextId();
 
-  // Auto-submit: success
-  const autoSubmitValue = { type: 'clipboardHistoryResult', success: true };
+  const autoSubmitValue = autoSubmitClipboardAction(id, 'pin', entryId);
 
   return new Promise((resolve, reject) => {
     addPending(id, (msg: ResponseMessage) => {
@@ -8113,8 +8519,7 @@ globalThis.clipboardHistoryPin = async function clipboardHistoryPin(entryId: str
 globalThis.clipboardHistoryUnpin = async function clipboardHistoryUnpin(entryId: string): Promise<void> {
   const id = nextId();
 
-  // Auto-submit: success
-  const autoSubmitValue = { type: 'clipboardHistoryResult', success: true };
+  const autoSubmitValue = autoSubmitClipboardAction(id, 'unpin', entryId);
 
   return new Promise((resolve, reject) => {
     addPending(id, (msg: ResponseMessage) => {
@@ -8144,7 +8549,7 @@ globalThis.clipboardHistoryUnpin = async function clipboardHistoryUnpin(entryId:
 globalThis.clipboardHistoryRemove = async function clipboardHistoryRemove(entryId: string): Promise<void> {
   const id = nextId();
 
-  const autoSubmitValue = { type: 'clipboardHistoryResult', success: true };
+  const autoSubmitValue = autoSubmitClipboardAction(id, 'remove', entryId);
 
   return new Promise((resolve, reject) => {
     addPending(id, (msg: ResponseMessage) => {
@@ -8174,7 +8579,7 @@ globalThis.clipboardHistoryRemove = async function clipboardHistoryRemove(entryI
 globalThis.clipboardHistoryClear = async function clipboardHistoryClear(): Promise<void> {
   const id = nextId();
 
-  const autoSubmitValue = { type: 'clipboardHistoryResult', success: true };
+  const autoSubmitValue = autoSubmitClipboardAction(id, 'clear');
 
   return new Promise((resolve, reject) => {
     addPending(id, (msg: ResponseMessage) => {
@@ -8203,7 +8608,7 @@ globalThis.clipboardHistoryClear = async function clipboardHistoryClear(): Promi
 globalThis.clipboardHistoryTrimOversize = async function clipboardHistoryTrimOversize(): Promise<void> {
   const id = nextId();
 
-  const autoSubmitValue = { type: 'clipboardHistoryResult', success: true };
+  const autoSubmitValue = autoSubmitClipboardAction(id, 'trimOversize');
 
   return new Promise((resolve, reject) => {
     addPending(id, (msg: ResponseMessage) => {
@@ -8236,7 +8641,14 @@ globalThis.clipboardHistoryTrimOversize = async function clipboardHistoryTrimOve
 globalThis.getWindows = async function getWindows(): Promise<SystemWindowInfo[]> {
   const id = nextId();
 
-  const autoSubmitValue = { type: 'windowListResult', windows: [] };
+  const autoSubmitValue: WindowListResultMessage = {
+    type: 'windowListResult',
+    requestId: id,
+    windows: autoSubmitWindows.map((window) => ({
+      ...window,
+      bounds: window.bounds ? { ...window.bounds } : undefined,
+    })),
+  };
 
   return new Promise((resolve) => {
     addPending(id, (msg: ResponseMessage) => {
@@ -8296,143 +8708,130 @@ globalThis.getWindows = async function getWindows(): Promise<SystemWindowInfo[]>
   });
 };
 
-globalThis.focusWindow = async function focusWindow(windowId: number): Promise<void> {
-  const id = nextId();
+function autoSubmitWindowActionResult(message: WindowActionMessage): WindowActionResultMessage {
+  const windowIndex = autoSubmitWindows.findIndex(
+    (window) => window.windowId === message.windowId,
+  );
+
+  if (windowIndex === -1) {
+    return {
+      type: 'windowActionResult',
+      requestId: message.requestId,
+      success: false,
+      error: `stale or unknown legacy window id ${message.windowId}`,
+    };
+  }
+
+  const fixture = autoSubmitWindows[windowIndex];
+
+  switch (message.action) {
+    case 'close':
+      autoSubmitWindows.splice(windowIndex, 1);
+      break;
+    case 'focus':
+      for (const window of autoSubmitWindows) {
+        window.isActive = window.windowId === message.windowId;
+      }
+      break;
+    case 'minimize':
+      fixture.isMinimized = true;
+      break;
+    case 'maximize':
+      fixture.isMinimized = false;
+      break;
+    case 'move':
+      if (fixture.bounds && message.bounds) {
+        fixture.bounds = { ...fixture.bounds, x: message.bounds.x, y: message.bounds.y };
+      }
+      break;
+    case 'resize':
+      if (fixture.bounds && message.bounds) {
+        fixture.bounds = {
+          ...fixture.bounds,
+          width: message.bounds.width,
+          height: message.bounds.height,
+        };
+      }
+      break;
+    case 'tile':
+    case 'moveToNextDisplay':
+    case 'moveToPreviousDisplay':
+      break;
+  }
+
+  return {
+    type: 'windowActionResult',
+    requestId: message.requestId,
+    success: true,
+  };
+}
+
+function performWindowAction(
+  action: WindowActionMessage['action'],
+  windowId: number,
+  options?: Pick<WindowActionMessage, 'bounds' | 'tilePosition'>,
+): Promise<void> {
+  const requestId = nextId();
+  const message: WindowActionMessage = {
+    type: 'windowAction',
+    requestId,
+    action,
+    windowId,
+    ...options,
+  };
+  const autoSubmitValue = SDK_TEST_AUTOSUBMIT
+    ? autoSubmitWindowActionResult(message)
+    : undefined;
 
   return new Promise((resolve, reject) => {
-    addPending(id, (msg: SubmitMessage) => {
-      if (msg.value && msg.value.startsWith('ERROR:')) {
-        reject(new Error(msg.value.substring(6).trim()));
-      } else {
+    addPending(requestId, (response: ResponseMessage) => {
+      if (response.type === 'windowActionResult') {
+        if (!response.success) {
+          reject(new Error(response.error ?? `Window ${action} failed`));
+          return;
+        }
         resolve();
+        return;
       }
-    }, { value: '' });
 
-    const message: WindowActionMessage = {
-      type: 'windowAction',
-      requestId: id,
-      action: 'focus',
-      windowId,
-    };
+      const submitResponse = response as SubmitMessage;
+      if (submitResponse.value?.startsWith('ERROR:')) {
+        reject(new Error(submitResponse.value.substring(6).trim()));
+        return;
+      }
+
+      resolve();
+    }, autoSubmitValue);
 
     send(message);
   });
+}
+
+globalThis.focusWindow = async function focusWindow(windowId: number): Promise<void> {
+  return performWindowAction('focus', windowId);
 };
 
 globalThis.closeWindow = async function closeWindow(windowId: number): Promise<void> {
-  const id = nextId();
-
-  return new Promise((resolve, reject) => {
-    addPending(id, (msg: SubmitMessage) => {
-      if (msg.value && msg.value.startsWith('ERROR:')) {
-        reject(new Error(msg.value.substring(6).trim()));
-      } else {
-        resolve();
-      }
-    }, { value: '' });
-
-    const message: WindowActionMessage = {
-      type: 'windowAction',
-      requestId: id,
-      action: 'close',
-      windowId,
-    };
-
-    send(message);
-  });
+  return performWindowAction('close', windowId);
 };
 
 globalThis.minimizeWindow = async function minimizeWindow(windowId: number): Promise<void> {
-  const id = nextId();
-
-  return new Promise((resolve, reject) => {
-    addPending(id, (msg: SubmitMessage) => {
-      if (msg.value && msg.value.startsWith('ERROR:')) {
-        reject(new Error(msg.value.substring(6).trim()));
-      } else {
-        resolve();
-      }
-    }, { value: '' });
-
-    const message: WindowActionMessage = {
-      type: 'windowAction',
-      requestId: id,
-      action: 'minimize',
-      windowId,
-    };
-
-    send(message);
-  });
+  return performWindowAction('minimize', windowId);
 };
 
 globalThis.maximizeWindow = async function maximizeWindow(windowId: number): Promise<void> {
-  const id = nextId();
-
-  return new Promise((resolve, reject) => {
-    addPending(id, (msg: SubmitMessage) => {
-      if (msg.value && msg.value.startsWith('ERROR:')) {
-        reject(new Error(msg.value.substring(6).trim()));
-      } else {
-        resolve();
-      }
-    }, { value: '' });
-
-    const message: WindowActionMessage = {
-      type: 'windowAction',
-      requestId: id,
-      action: 'maximize',
-      windowId,
-    };
-
-    send(message);
-  });
+  return performWindowAction('maximize', windowId);
 };
 
 globalThis.moveWindow = async function moveWindow(windowId: number, x: number, y: number): Promise<void> {
-  const id = nextId();
-
-  return new Promise((resolve, reject) => {
-    addPending(id, (msg: SubmitMessage) => {
-      if (msg.value && msg.value.startsWith('ERROR:')) {
-        reject(new Error(msg.value.substring(6).trim()));
-      } else {
-        resolve();
-      }
-    }, { value: '' });
-
-    const message: WindowActionMessage = {
-      type: 'windowAction',
-      requestId: id,
-      action: 'move',
-      windowId,
-      bounds: { x, y, width: 0, height: 0 },
-    };
-
-    send(message);
+  return performWindowAction('move', windowId, {
+    bounds: { x, y, width: 0, height: 0 },
   });
 };
 
 globalThis.resizeWindow = async function resizeWindow(windowId: number, width: number, height: number): Promise<void> {
-  const id = nextId();
-
-  return new Promise((resolve, reject) => {
-    addPending(id, (msg: SubmitMessage) => {
-      if (msg.value && msg.value.startsWith('ERROR:')) {
-        reject(new Error(msg.value.substring(6).trim()));
-      } else {
-        resolve();
-      }
-    }, { value: '' });
-
-    const message: WindowActionMessage = {
-      type: 'windowAction',
-      requestId: id,
-      action: 'resize',
-      windowId,
-      bounds: { x: 0, y: 0, width, height },
-    };
-
-    send(message);
+  return performWindowAction('resize', windowId, {
+    bounds: { x: 0, y: 0, width, height },
   });
 };
 
@@ -8443,38 +8842,7 @@ globalThis.resizeWindow = async function resizeWindow(windowId: number, width: n
  * @param position - The tile position
  */
 globalThis.tileWindow = async function tileWindow(windowId: number, position: TilePosition): Promise<void> {
-  const id = nextId();
-
-  return new Promise((resolve, reject) => {
-    addPending(id, (msg: ResponseMessage) => {
-      if (msg.type === 'windowActionResult') {
-        const resultMsg = msg as { success?: boolean; error?: string };
-        if (resultMsg.success === false && resultMsg.error) {
-          reject(new Error(resultMsg.error));
-        } else {
-          resolve();
-        }
-        return;
-      }
-      // Fallback
-      const submitMsg = msg as SubmitMessage;
-      if (submitMsg.value && submitMsg.value.startsWith('ERROR:')) {
-        reject(new Error(submitMsg.value.substring(6).trim()));
-      } else {
-        resolve();
-      }
-    }, { value: '' });
-
-    const message = {
-      type: 'windowAction',
-      requestId: id,
-      action: 'tile',
-      windowId,
-      tilePosition: position,
-    };
-
-    send(message);
-  });
+  return performWindowAction('tile', windowId, { tilePosition: position });
 };
 
 /**
@@ -8542,37 +8910,7 @@ globalThis.getFrontmostWindow = async function getFrontmostWindow(): Promise<Sys
  * @param windowId - The ID of the window to move
  */
 globalThis.moveToNextDisplay = async function moveToNextDisplay(windowId: number): Promise<void> {
-  const id = nextId();
-
-  return new Promise((resolve, reject) => {
-    addPending(id, (msg: ResponseMessage) => {
-      if (msg.type === 'windowActionResult') {
-        const resultMsg = msg as { success?: boolean; error?: string };
-        if (resultMsg.success === false && resultMsg.error) {
-          reject(new Error(resultMsg.error));
-        } else {
-          resolve();
-        }
-        return;
-      }
-      // Fallback
-      const submitMsg = msg as SubmitMessage;
-      if (submitMsg.value && submitMsg.value.startsWith('ERROR:')) {
-        reject(new Error(submitMsg.value.substring(6).trim()));
-      } else {
-        resolve();
-      }
-    }, { value: '' });
-
-    const message: WindowActionMessage = {
-      type: 'windowAction',
-      requestId: id,
-      action: 'moveToNextDisplay',
-      windowId,
-    };
-
-    send(message);
-  });
+  return performWindowAction('moveToNextDisplay', windowId);
 };
 
 /**
@@ -8580,37 +8918,7 @@ globalThis.moveToNextDisplay = async function moveToNextDisplay(windowId: number
  * @param windowId - The ID of the window to move
  */
 globalThis.moveToPreviousDisplay = async function moveToPreviousDisplay(windowId: number): Promise<void> {
-  const id = nextId();
-
-  return new Promise((resolve, reject) => {
-    addPending(id, (msg: ResponseMessage) => {
-      if (msg.type === 'windowActionResult') {
-        const resultMsg = msg as { success?: boolean; error?: string };
-        if (resultMsg.success === false && resultMsg.error) {
-          reject(new Error(resultMsg.error));
-        } else {
-          resolve();
-        }
-        return;
-      }
-      // Fallback
-      const submitMsg = msg as SubmitMessage;
-      if (submitMsg.value && submitMsg.value.startsWith('ERROR:')) {
-        reject(new Error(submitMsg.value.substring(6).trim()));
-      } else {
-        resolve();
-      }
-    }, { value: '' });
-
-    const message: WindowActionMessage = {
-      type: 'windowAction',
-      requestId: id,
-      action: 'moveToPreviousDisplay',
-      windowId,
-    };
-
-    send(message);
-  });
+  return performWindowAction('moveToPreviousDisplay', windowId);
 };
 
 // =============================================================================
@@ -8620,7 +8928,49 @@ globalThis.moveToPreviousDisplay = async function moveToPreviousDisplay(windowId
 globalThis.fileSearch = async function fileSearch(query: string, options?: FindOptions): Promise<FileSearchResult[]> {
   const id = nextId();
 
-  const autoSubmitValue = { type: 'fileSearchResult', files: [] };
+  const fixtureRoot = process.cwd();
+  const fixtureFiles: FileSearchResult[] = SDK_TEST_FILE_FIXTURES
+    ? [
+        {
+          path: nodePath.join(fixtureRoot, 'package.json'),
+          name: 'package.json',
+          isDirectory: false,
+          size: 1024,
+          modifiedAt: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          path: nodePath.join(fixtureRoot, 'README.md'),
+          name: 'README.md',
+          isDirectory: false,
+          size: 2048,
+          modifiedAt: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          path: nodePath.join(fixtureRoot, 'Cargo.toml'),
+          name: 'Cargo.toml',
+          isDirectory: false,
+          size: 4096,
+          modifiedAt: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          path: nodePath.join(os.tmpdir(), 'sdk-synthetic-search', 'Cargo.external'),
+          name: 'Cargo.external',
+          isDirectory: false,
+        },
+      ]
+    : [];
+  const normalizedQuery = query.trim().toLowerCase();
+  const onlyin = options?.onlyin ? nodePath.resolve(options.onlyin) : undefined;
+  const autoSubmitValue: FileSearchResultMessage = {
+    type: 'fileSearchResult',
+    requestId: id,
+    files: normalizedQuery.length === 0
+      ? []
+      : fixtureFiles.filter((file) => (
+          file.name.toLowerCase().includes(normalizedQuery)
+          && (!onlyin || file.path === onlyin || file.path.startsWith(`${onlyin}${nodePath.sep}`))
+        )),
+  };
 
   return new Promise((resolve) => {
     addPending(id, (msg: ResponseMessage) => {
@@ -8703,6 +9053,25 @@ globalThis.fileSearch = async function fileSearch(query: string, options?: FindO
  */
 globalThis.getMenuBar = async function getMenuBar(bundleId?: string): Promise<MenuBarItem[]> {
   const id = nextId();
+  const fixtureItems: MenuBarItem[] = SDK_TEST_MENU_FIXTURES
+    && (bundleId === undefined || bundleId === 'com.apple.finder')
+    ? [
+        {
+          title: 'File',
+          enabled: true,
+          menuPath: ['File'],
+          children: [
+            {
+              title: 'New Window',
+              enabled: true,
+              shortcut: '⌘N',
+              menuPath: ['File', 'New Window'],
+              children: [],
+            },
+          ],
+        },
+      ]
+    : [];
 
   return new Promise((resolve) => {
     const resolver = (msg: ResponseMessage) => {
@@ -8734,7 +9103,11 @@ globalThis.getMenuBar = async function getMenuBar(bundleId?: string): Promise<Me
       }
     };
 
-    addPending(id, resolver, []);
+    addPending(id, resolver, {
+      type: 'menuBarResult',
+      requestId: id,
+      items: fixtureItems,
+    } satisfies MenuBarResultMessage);
 
     const message: GetMenuBarMessage = {
       type: 'getMenuBar',
@@ -8772,9 +9145,22 @@ globalThis.executeMenuAction = async function executeMenuAction(
   menuPath: string[]
 ): Promise<void> {
   const id = nextId();
+  const autoSubmitResult: MenuActionResultMessage = {
+    type: 'menuActionResult',
+    requestId: id,
+    success: false,
+    error: menuPath.length === 0
+      ? 'Invalid menu path: at least one menu item is required.'
+      : `Application ${bundleId} is not running in the isolated SDK harness.`,
+  };
 
   return new Promise((resolve, reject) => {
-    const resolver = (msg: ResponseMessage) => {
+    const resolver = (msg: ResponseMessage | undefined) => {
+      if (msg === undefined) {
+        reject(new Error('Menu action did not receive a host response.'));
+        return;
+      }
+
       // Handle MenuActionResult message type
       if (msg.type === 'menuActionResult') {
         const resultMsg = msg as MenuActionResultMessage;
@@ -8783,12 +9169,6 @@ globalThis.executeMenuAction = async function executeMenuAction(
         } else {
           reject(new Error(resultMsg.error ?? 'Menu action failed'));
         }
-        return;
-      }
-
-      // Handle auto-submit (msg will be undefined for void)
-      if (msg === undefined) {
-        resolve();
         return;
       }
 
@@ -8801,7 +9181,7 @@ globalThis.executeMenuAction = async function executeMenuAction(
       }
     };
 
-    addPending(id, resolver, undefined);
+    addPending(id, resolver, autoSubmitResult);
 
     const message: ExecuteMenuActionMessage = {
       type: 'executeMenuAction',

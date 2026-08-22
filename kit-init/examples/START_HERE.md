@@ -27,6 +27,23 @@ const url3 = await arg("URL 3");
 
 Do not start multiple prompts concurrently.
 
+Regular TypeScript scripts receive the interactive SDK transport. TypeScript
+scriptlets do not receive an interactive stdin pipe, so prompts such as
+`arg()`, `fields()`, `mini()`, and `hotkey()` belong in a regular script. Shell
+and Python scriptlets do not receive SDK globals. Search **SDK Reference** in
+the launcher to inspect supported APIs, permissions, and migration alternatives
+before choosing a starter.
+
+For local files, use `readFile(path, encoding?)` and
+`writeFile(path, contents, encoding?)` with explicit paths. For subprocesses,
+prefer `exec(binary, [arg1, arg2])`: it never starts a shell and rejects shell
+pipes, redirects, and command substitution. `paste()` reads clipboard text; it
+does not inject a system-wide paste shortcut.
+
+AI state readers such as `aiIsOpen()`, `aiGetActiveChat()`, and
+`aiGetConversation()` do not request provider inference. `aiSendMessage()` does,
+and `aiStartChat()` may unless response generation is explicitly disabled.
+
 ## Mandatory Script Verification
 
 Use `bun build` for a non-running syntax/bundle check, then use `SK_VERIFY=1` for a non-interactive execution check.

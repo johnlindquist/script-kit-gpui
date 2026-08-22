@@ -1547,13 +1547,14 @@ A simple greeting script demonstrating Script Kit basics.
 ## Features shown:
 - `arg()` - Prompt for user input with choices
 - `div()` - Display HTML content with Tailwind CSS
-- `md()` - Render markdown to HTML
 */
 
 export const metadata = {
   name: "Hello World",
   description: "A simple greeting script",
   // shortcut: "cmd shift h",  // Uncomment to add a global hotkey
+  sdkCapabilities: ["arg", "div"],
+  executionTopology: "typescript-script",
 };
 
 // Prompt the user to select or type their name
@@ -2012,6 +2013,39 @@ mod tests {
                 "{filename} should declare a capture.v1 handler"
             );
         }
+
+        let hello_path = main_scripts.join("hello-world.ts");
+        let hello_source = fs::read_to_string(&hello_path)
+            .expect("the actual fresh-install Hello World script must be readable");
+        let parsed = crate::metadata_parser::extract_typed_metadata(&hello_source);
+        assert!(
+            parsed.errors.is_empty(),
+            "the seeded starter must have parseable host compatibility metadata: {:?}",
+            parsed.errors
+        );
+        let metadata = parsed
+            .metadata
+            .expect("the seeded starter must expose typed metadata");
+        assert_eq!(
+            metadata.extra.get("sdkCapabilities"),
+            Some(&serde_json::json!(["arg", "div"]))
+        );
+        assert_eq!(
+            metadata.extra.get("executionTopology"),
+            Some(&serde_json::json!("typescript-script"))
+        );
+        let hello_script = crate::scripts::Script {
+            name: "Hello World".to_owned(),
+            path: hello_path,
+            extension: "ts".to_owned(),
+            plugin_id: "main".to_owned(),
+            typed_metadata: Some(metadata),
+            ..crate::scripts::Script::default()
+        };
+        assert!(
+            crate::scripts::validate_declared_sdk_capabilities(&hello_script).is_empty(),
+            "the first-run starter must satisfy its actual interactive SDK contract"
+        );
 
         std::env::remove_var(SK_PATH_ENV);
         drop(lock);

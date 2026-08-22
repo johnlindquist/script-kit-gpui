@@ -17,6 +17,7 @@
  *   SDK_TEST_TIMEOUT=10    # Max seconds per test (default: 30)
  *   SDK_TEST_VERBOSE=true  # Extra debug output
  *   SDK_TEST_CONCURRENCY=4 # Max concurrent tests in parallel mode (default: 4)
+ *   SCRIPT_KIT_NONINTERACTIVE=1 # Refuse system-input tests before starting children
  * 
  * =============================================================================
  * MANUAL VERIFICATION TESTS - UI Bug Fixes
@@ -117,7 +118,15 @@ const VERBOSE = process.env.SDK_TEST_VERBOSE === 'true';
 const JSON_ONLY = process.argv.includes('--json');
 const PARALLEL = process.argv.includes('--parallel');
 const INCLUDE_SYSTEM = process.argv.includes('--include-system');
+const NONINTERACTIVE = process.env.SCRIPT_KIT_NONINTERACTIVE === '1';
 const CONCURRENCY = parseInt(process.env.SDK_TEST_CONCURRENCY || '4', 10);
+
+if (NONINTERACTIVE && INCLUDE_SYSTEM) {
+  console.error(
+    'Refusing --include-system: SCRIPT_KIT_NONINTERACTIVE=1 prohibits real system input.',
+  );
+  process.exit(1);
+}
 
 // Tests that send real keystrokes/clipboard writes to the OS or exercise
 // GPUI-unsupported SDK helpers.
@@ -247,6 +256,14 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
       env: {
         ...process.env,
         SDK_TEST_AUTOSUBMIT: '1',
+        SDK_TEST_WINDOW_FIXTURES: fileName === 'test-window-management.ts' ? '1' : '0',
+        SDK_TEST_CLIPBOARD_FIXTURES: fileName === 'test-clipboard-history.ts' ? '1' : '0',
+        SDK_TEST_FILE_FIXTURES: fileName === 'test-file-search.ts' ? '1' : '0',
+        SDK_TEST_MENU_FIXTURES: fileName === 'test-menu-bar-api.ts' ? '1' : '0',
+        SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: '0',
+        SCRIPT_KIT_ALLOW_VISIBLE_PROBES: '0',
+        SCRIPT_KIT_ALLOW_LIVE_AI: '0',
+        ...(NONINTERACTIVE ? { INCLUDE_SYSTEM_INPUT: '0' } : {}),
       },
     });
     
@@ -255,8 +272,13 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
     let stderr = '';
     
     // Create a timeout promise
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    let timeoutError: Error | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error(`Test timed out after ${TIMEOUT_MS}ms`)), TIMEOUT_MS);
+      timeoutHandle = setTimeout(() => {
+        timeoutError = new Error(`Test timed out after ${TIMEOUT_MS}ms`);
+        reject(timeoutError);
+      }, TIMEOUT_MS);
     });
     
     // Read stdout in chunks
@@ -286,20 +308,20 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
       }
     })();
     
-    // For SDK-only testing (no GPUI app), we need to simulate responses
-    // The test will hang waiting for submit messages, so we just let it timeout
-    // In a real integration test with the GPUI app, the app would respond
-    
-    // For now, just wait for the process or timeout
     try {
       await Promise.race([
         Promise.all([stdoutReader, stderrReader, proc.exited]),
         timeoutPromise,
       ]);
-    } catch {
-      // Kill the process on timeout
+    } catch (error) {
       proc.kill();
-      logVerbose(`Process killed due to timeout`);
+      await Promise.allSettled([stdoutReader, stderrReader, proc.exited]);
+      timeoutError ??= error instanceof Error ? error : new Error(String(error));
+      logVerbose(`Process killed: ${timeoutError.message}`);
+    } finally {
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle);
+      }
     }
     
     const exitCode = await proc.exited;
@@ -313,6 +335,18 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
       try {
         const result = JSON.parse(line) as TestResult;
         if (result.test && result.status) {
+          if (!['running', 'pass', 'fail', 'skip'].includes(result.status)) {
+            tests.push({
+              test: `${result.test} [invalid status]`,
+              status: 'fail',
+              timestamp: new Date().toISOString(),
+              error: `Unrecognized test status: ${String(result.status)}`,
+              duration_ms: result.duration_ms,
+            });
+            log(`  ❌ ${result.test} - Unrecognized test status: ${String(result.status)}`);
+            continue;
+          }
+
           tests.push(result);
           
           // Print result in human-readable format
@@ -331,9 +365,44 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
         logVerbose(`Non-JSON line: ${line.substring(0, 80)}...`);
       }
     }
+
+    const terminalNames = new Set(
+      tests.filter((result) => result.status !== 'running').map((result) => result.test),
+    );
+    for (const result of tests.filter((candidate) => candidate.status === 'running')) {
+      if (!terminalNames.has(result.test)) {
+        tests.push({
+          test: `${result.test} [missing terminal result]`,
+          status: 'fail',
+          timestamp: new Date().toISOString(),
+          error: 'Test started but never emitted pass, fail, or an explicit skip.',
+          duration_ms: Date.now() - startTime,
+        });
+      }
+    }
+
+    if (timeoutError) {
+      tests.push({
+        test: `${fileName} [process timeout]`,
+        status: 'fail',
+        timestamp: new Date().toISOString(),
+        error: timeoutError.message,
+        duration_ms: Date.now() - startTime,
+      });
+      log(`  ❌ ${fileName} - ${timeoutError.message}`);
+    } else if (exitCode !== 0) {
+      tests.push({
+        test: `${fileName} [process exit]`,
+        status: 'fail',
+        timestamp: new Date().toISOString(),
+        error: `Test process exited with code ${exitCode}.`,
+        duration_ms: Date.now() - startTime,
+      });
+      log(`  ❌ ${fileName} - Process exited with code ${exitCode}`);
+    }
     
     // If no tests were parsed, mark as failed
-    if (tests.length === 0) {
+    if (!tests.some((result) => result.status !== 'running')) {
       tests.push({
         test: fileName,
         status: 'fail',
@@ -380,14 +449,18 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
 
 async function findTestFiles(specificTest?: string): Promise<string[]> {
   if (specificTest) {
-    // Handle relative or absolute path
-    if (specificTest.startsWith('/')) {
-      return [specificTest];
+    const testPath = specificTest.startsWith('/')
+      ? specificTest
+      : specificTest.includes('/')
+        ? join(PROJECT_ROOT, specificTest)
+        : join(TESTS_DIR, specificTest);
+
+    if (SYSTEM_INPUT_TESTS.has(basename(testPath)) && !INCLUDE_SYSTEM) {
+      throw new Error(
+        `Refusing system-input test ${basename(testPath)} without --include-system.`,
+      );
     }
-    // Check if it's just a filename
-    const testPath = specificTest.includes('/') 
-      ? join(PROJECT_ROOT, specificTest)
-      : join(TESTS_DIR, specificTest);
+
     return [testPath];
   }
   

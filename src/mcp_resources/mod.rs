@@ -13,9 +13,12 @@ mod transaction_resources;
 use crate::scripts::Script;
 use crate::scripts::Scriptlet;
 use crate::scripts::{FailedScript, ScriptValidationIssue, ValidationReport};
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 
 const NOTES_RESOURCE_URI: &str = "kit://notes";
 const NOTES_RESOURCE_SCHEMA_VERSION: u32 = 1;
@@ -223,10 +226,18 @@ pub fn get_resource_definitions() -> Vec<McpResource> {
             mime_type: "application/json".to_string(),
         },
         McpResource {
+            uri: COMMAND_DOCTOR_RESOURCE_URI.to_string(),
+            name: "Command Doctor".to_string(),
+            description: Some(
+                "Read-only command readiness, SDK capability support, safe permission-pending state, and actionable author repairs.".to_string(),
+            ),
+            mime_type: "application/json".to_string(),
+        },
+        McpResource {
             uri: "kit://sdk-reference".to_string(),
             name: "SDK Reference".to_string(),
             description: Some(
-                "Concise Script Kit SDK function reference, script metadata format, and directory conventions for harness script creation."
+                "Script Kit SDK functions, host capability contracts, authoring diagnostics resources, script metadata, and harness-safe directory conventions."
                     .to_string(),
             ),
             mime_type: "application/json".to_string(),
@@ -235,7 +246,7 @@ pub fn get_resource_definitions() -> Vec<McpResource> {
             uri: FAILED_SCRIPTS_RESOURCE_URI.to_string(),
             name: "Failed Scripts".to_string(),
             description: Some(
-                "Scripts that were excluded from the kept catalog at startup because they fail validation — currently duplicate `shortcut` / `alias` / `keyword` / `trigger` bindings. Each entry names the offending path, the fatal issues, and related colliding scripts so authors can repair the metadata. Backed by `crate::scripts::read_scripts_report()`."
+                "Author diagnostics for excluded invalid scripts and retained, disabled scriptlets, including metadata collisions, unsupported SDK capabilities, incompatible execution topologies, permission-pending state, source paths, and actionable repairs."
                     .to_string(),
             ),
             mime_type: "application/json".to_string(),
@@ -396,6 +407,7 @@ pub fn read_resource(
         "kit://scripts" => read_kit_scripts_resource(scripts),
         "kit://scriptlets" => read_kit_scriptlets_resource(scriptlets),
         "kit://sdk-reference" => read_sdk_reference_resource(),
+        COMMAND_DOCTOR_RESOURCE_URI => read_command_doctor_resource(scripts, scriptlets),
         FAILED_SCRIPTS_RESOURCE_URI => read_kit_failed_scripts_resource(),
         SCRIPT_TEMPLATES_RESOURCE_URI => read_kit_script_templates_resource(),
         _ if uri == "kit://context"
@@ -849,10 +861,12 @@ pub const SCRIPTS_RESOURCE_SCHEMA_VERSION: u32 = 1;
 pub const SCRIPTLETS_RESOURCE_SCHEMA_VERSION: u32 = 1;
 
 /// Schema version for the `kit://sdk-reference` resource.
-/// Bumped to 5: adds per-function GPUI support status (`support`,
-/// `unsupportedNote`) so agents can refuse to generate calls into
-/// SDK APIs the current GPUI shell does not implement.
-pub const SDK_REFERENCE_SCHEMA_VERSION: u32 = 5;
+/// Bumped to 6: adds a versioned host-owned capability catalog containing
+/// support, transport, platform, permission, and migration requirements.
+pub const SDK_REFERENCE_SCHEMA_VERSION: u32 = 6;
+
+/// Independent schema version for the reusable SDK capability catalog.
+pub const SDK_CAPABILITY_CATALOG_SCHEMA_VERSION: u32 = 1;
 
 /// URI for the `kit://failed-scripts` resource.
 ///
@@ -865,6 +879,10 @@ pub const FAILED_SCRIPTS_RESOURCE_URI: &str = "kit://failed-scripts";
 
 /// Schema version for the `kit://failed-scripts` resource envelope.
 pub const FAILED_SCRIPTS_RESOURCE_SCHEMA_VERSION: u32 = 1;
+
+/// Pure readiness projection over already-loaded command snapshots.
+pub const COMMAND_DOCTOR_RESOURCE_URI: &str = "kit://command-doctor";
+pub const COMMAND_DOCTOR_RESOURCE_SCHEMA_VERSION: u32 = 1;
 
 /// URI for the `kit://script-templates` resource.
 ///
@@ -936,6 +954,94 @@ pub struct FailedScriptsResourceDocument {
     pub warning_count: usize,
     pub failed_scripts: Vec<FailedScriptEntry>,
     pub warnings: Vec<ScriptValidationIssue>,
+    /// Scriptlet issues stay separate: their rows remain present but disabled,
+    /// so they must never be mislabeled excluded failures or warning-only.
+    #[serde(default)]
+    pub retained_issue_count: usize,
+    #[serde(default)]
+    pub retained_issues: Vec<ScriptValidationIssue>,
+}
+
+/// Stable, safe command readiness. Permission uncertainty is neither silently
+/// granted nor mislabeled denied; callers must supply an explicit inventory.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CommandDoctorState {
+    Ready,
+    Experimental,
+    Unsupported,
+    Blocked,
+    PermissionPending,
+}
+
+/// One explicitly declared API projected from the reviewed host catalog.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandDoctorCapability {
+    pub name: String,
+    pub support: SdkSupport,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_permissions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_platforms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_host_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
+}
+
+/// Safe action preview derived only from an actual canonical descriptor.
+/// Identity is fingerprinted so the preview never repeats a raw command key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandDoctorPrimaryAction {
+    pub title: String,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub identity_fingerprint: String,
+}
+
+/// Read-only diagnostics for a real script or retained scriptlet snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandDoctorEntry {
+    pub source: String,
+    pub name: String,
+    pub path: String,
+    pub plugin_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_title: Option<String>,
+    pub state: CommandDoctorState,
+    pub executable: bool,
+    /// Present only when an existing canonical descriptor was explicitly
+    /// supplied; bare catalog snapshots must never invent an action or label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_action: Option<CommandDoctorPrimaryAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<CommandDoctorCapability>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<ScriptValidationIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
+}
+
+/// Deterministic command-doctor receipt. Building it never loads another
+/// process, scans source bodies, probes permissions, or contacts a provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandDoctorReport {
+    pub schema_version: u32,
+    pub host_version: String,
+    pub platform: String,
+    pub permission_inventory_known: bool,
+    pub total_commands: usize,
+    pub ready_count: usize,
+    pub experimental_count: usize,
+    pub unsupported_count: usize,
+    pub blocked_count: usize,
+    pub permission_pending_count: usize,
+    pub commands: Vec<CommandDoctorEntry>,
 }
 
 /// GPUI support status for a single SDK function.
@@ -943,9 +1049,8 @@ pub struct FailedScriptsResourceDocument {
 /// `Supported` is the default; absent JSON fields deserialize as
 /// `Supported` so older clients that do not know about this enum
 /// continue to round-trip. `Unsupported` entries are documented in
-/// `scripts/kit-sdk.ts` but the GPUI app does not currently handle
-/// their message (typically they `console.warn` and resolve to nothing
-/// or throw). `Experimental` is reserved for partially-implemented
+/// `scripts/kit-sdk.ts` and fail before dispatch or return an explicit
+/// negative compatibility receipt. `Experimental` is reserved for partially implemented
 /// APIs so the next marking wave does not require another schema bump.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -954,6 +1059,102 @@ pub enum SdkSupport {
     Supported,
     Unsupported,
     Experimental,
+}
+
+/// Execution topologies have different transport guarantees even when their
+/// source language is identical.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SdkExecutionTopology {
+    #[serde(rename = "typescript-script")]
+    TypeScriptScript,
+    #[serde(rename = "typescript-scriptlet")]
+    TypeScriptScriptlet,
+    /// Launcher-owned TypeScript scriptlet executed through the interactive
+    /// runner, which supplies the same piped prompt transport as a script.
+    #[serde(rename = "typescript-scriptlet-interactive")]
+    TypeScriptScriptletInteractive,
+    ShellScriptlet,
+    PythonScriptlet,
+}
+
+/// Machine-readable author-facing compatibility failure.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SdkCapabilityDiagnosticCode {
+    UnknownCapability,
+    UnsupportedCapability,
+    MissingSdkTransport,
+    InteractivePromptUnavailable,
+    UnsupportedPlatform,
+    MissingPermission,
+    PermissionInventoryUnavailable,
+    HostVersionTooOld,
+    InvalidHostVersion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SdkCapabilityDiagnostic {
+    pub code: SdkCapabilityDiagnosticCode,
+    pub capability: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
+}
+
+/// Explicit, read-only facts used to preflight a capability without probing
+/// permissions, revealing the app, or requesting access on the author's behalf.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SdkHostAvailability {
+    pub host_version: String,
+    /// Uses `std::env::consts::OS` identifiers such as `macos` and `linux`.
+    pub platform: String,
+    #[serde(default)]
+    pub granted_permissions: Vec<String>,
+}
+
+impl SdkHostAvailability {
+    /// Construct host facts from process constants and permissions explicitly
+    /// supplied by an existing, separately authorized permission inventory.
+    pub fn current(granted_permissions: Vec<String>) -> Self {
+        Self {
+            host_version: env!("CARGO_PKG_VERSION").into(),
+            platform: std::env::consts::OS.into(),
+            granted_permissions,
+        }
+    }
+}
+
+/// Rich compatibility metadata derived from the same function rows displayed
+/// in the launcher and published through kit://sdk-reference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SdkCapability {
+    pub name: String,
+    pub support: SdkSupport,
+    /// Earliest host version guaranteed to expose this reviewed capability
+    /// contract; this is not a claim about historical feature introduction.
+    pub minimum_host_version: String,
+    pub requires_interactive_prompt: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_permissions: Vec<String>,
+    /// Empty means no platform-specific restriction is currently declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_platforms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SdkCapabilityCatalog {
+    pub schema_version: u32,
+    pub host_version: String,
+    pub capabilities: Vec<SdkCapability>,
 }
 
 /// A single SDK function reference entry.
@@ -1027,33 +1228,38 @@ impl SdkFunctionRef {
     }
 }
 
-/// SDK inventory flagged unsupported by `scripts/kit-sdk.ts`. Sourced
-/// from explicit unsupported throws, `console.warn(...)` lines, and NOTE
-/// comments in that file. Only entries that also appear in
-/// [`build_sdk_function_refs`] are marked in the generated SDK
-/// reference — adding missing entries is deliberately out of scope
-/// for this pass so the reference does not silently grow. The list
-/// is consumed by
+/// SDK capabilities that reject before an unsupported native operation can be
+/// dispatched. Every entry is included in the same host-owned SDK reference;
+/// implemented prompt variants must never appear in this inventory. Consumed by
 /// [`tests::sdk_reference_marks_every_documented_unsupported_api`]
-/// as a canonical test input; it is deliberately kept in the non-test
-/// binary so future agents can `rg` for it.
-#[allow(dead_code)]
+/// and by the capability catalog consistency audit.
 const SDK_NOT_YET_IMPLEMENTED_IN_GPUI: &[&str] = &[
     "setStatus",
+    "keyboard",
     "keyboard.type",
     "keyboard.tap",
+    "mouse",
     "mouse.move",
-    "mouse.click",
+    "mouse.leftClick",
+    "mouse.rightClick",
+    "mouse.setPosition",
     "setPanel",
     "setPreview",
     "setPrompt",
-    "mini",
-    "micro",
-    "hotkey",
     "widget",
     "find",
     "menu",
+    "webcam",
+    "mic",
+    "eyeDropper",
 ];
+
+/// Exact SDK feature identifiers that must fail before native dispatch. Kept
+/// public so author validators and generation prompts can share the same
+/// reviewed inventory as the SDK reference without parsing prose or source.
+pub fn unsupported_sdk_capability_names() -> &'static [&'static str] {
+    SDK_NOT_YET_IMPLEMENTED_IN_GPUI
+}
 
 /// Default explanation for "not yet implemented" SDK APIs. The
 /// [`SdkFunctionRef::unsupported`] constructor takes a custom note so
@@ -1129,6 +1335,16 @@ pub struct HarnessWorkflow {
 /// Schema-versioned SDK reference document.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct SdkAuthoringResource {
+    /// Read-only MCP resource URI; this is not a callable SDK global.
+    pub uri: String,
+    pub name: String,
+    pub description: String,
+}
+
+/// Schema-versioned SDK reference document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct SdkReferenceDocument {
     pub schema_version: u32,
     pub sdk_package: String,
@@ -1136,6 +1352,12 @@ pub struct SdkReferenceDocument {
     pub scriptlet_pattern: String,
     pub metadata_format: String,
     pub functions: Vec<SdkFunctionRef>,
+    /// Versioned compatibility, permission, platform, and transport contract.
+    #[serde(default)]
+    pub capability_catalog: SdkCapabilityCatalog,
+    /// Read-only host diagnostics; these resource URIs are not SDK functions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authoring_resources: Vec<SdkAuthoringResource>,
     /// Non-interactive workflow for harness-driven script creation and execution.
     pub harness_workflow: HarnessWorkflow,
 }
@@ -1280,53 +1502,95 @@ struct FocusedItemDiagnosticsMeta {
 }
 
 fn build_sdk_function_refs() -> Vec<SdkFunctionRef> {
-    vec![
+    let mut functions = vec![
         SdkFunctionRef::supported(
             "arg",
-            "await arg(prompt: string, choices?: Choice[]): Promise<string>",
+            "await arg(prompt?: string | ArgConfig, choices?: ChoicesInput, actions?: Action[]): Promise<string>",
             "Prompt the user with an input field, optionally with a list of choices.",
             "prompts",
         ),
         SdkFunctionRef::supported(
             "div",
-            "await div(html: string): Promise<void>",
+            "await div(html?: string | DivConfig, actions?: Action[]): Promise<string | void>",
             "Display HTML content in a panel.",
             "prompts",
         ),
         SdkFunctionRef::supported(
             "editor",
-            "await editor(options?: EditorOptions): Promise<string>",
+            "await editor(content?: string, language?: string, actions?: Action[]): Promise<string>",
             "Open a full-screen code editor and return the content.",
             "prompts",
         ),
         SdkFunctionRef::supported(
+            "mini",
+            "await mini(placeholder: string, choices: (string | Choice)[]): Promise<string>",
+            "Show the native compact-choice prompt and return the selected value.",
+            "prompts",
+        ),
+        SdkFunctionRef::supported(
+            "micro",
+            "await micro(placeholder: string, choices: (string | Choice)[]): Promise<string>",
+            "Show the native minimal-choice prompt and return the selected value.",
+            "prompts",
+        ),
+        SdkFunctionRef::supported(
+            "hotkey",
+            "await hotkey(placeholder?: string): Promise<HotkeyInfo>",
+            "Capture a keyboard shortcut using the native shortcut-recorder prompt.",
+            "prompts",
+        ),
+        SdkFunctionRef::supported(
+            "fields",
+            "await fields(definitions: (string | FieldDef)[], actions?: Action[]): Promise<string[]>",
+            "Show a native multi-field prompt and return field values in definition order.",
+            "prompts",
+        ),
+        SdkFunctionRef::supported(
+            "form",
+            "await form(html: string, actions?: Action[]): Promise<Record<string, string>>",
+            "Parse supported HTML form controls into the native form prompt.",
+            "prompts",
+        ),
+        SdkFunctionRef::supported(
+            "select",
+            "await select(placeholder: string, choices: (string | Choice)[]): Promise<string[]>",
+            "Show the native multi-select prompt and return its selected values.",
+            "prompts",
+        ),
+        SdkFunctionRef::supported(
+            "path",
+            "await path(options?: PathOptions): Promise<string>",
+            "Show the native path prompt and return the selected filesystem path.",
+            "prompts",
+        ),
+        SdkFunctionRef::supported(
             "term",
-            "await term(command?: string): Promise<string>",
+            "await term(command?: string, actions?: Action[]): Promise<string>",
             "Open an interactive terminal, optionally running a command.",
             "prompts",
         ),
         SdkFunctionRef::supported(
             "drop",
-            "await drop(options?: DropOptions): Promise<DroppedItem[]>",
+            "await drop(): Promise<FileInfo[]>",
             "Accept drag-and-drop files from the user.",
             "prompts",
         ),
         SdkFunctionRef::supported(
             "template",
-            "await template(template: string): Promise<string>",
+            "await template(template: string, options?: { language?: string }): Promise<string>",
             "Fill in a template string with user-provided values.",
             "prompts",
         ),
         SdkFunctionRef::supported(
             "exec",
-            "await exec(command: string, args?: string[]): Promise<ExecResult>",
-            "Execute a shell command and return its output.",
+            "await exec(command: string, args?: readonly string[]): Promise<ExecResult>",
+            "Execute an explicitly named subprocess without invoking a shell; return stdout, stderr, and exitCode or a typed execution failure.",
             "system",
         ),
         SdkFunctionRef::supported(
             "clipboard",
-            "await clipboard.readText(): Promise<string>",
-            "Read the current clipboard text content.",
+            "clipboard: ClipboardApi",
+            "Read and write text/images through the host-owned clipboard namespace.",
             "clipboard",
         ),
         SdkFunctionRef::supported(
@@ -1337,8 +1601,8 @@ fn build_sdk_function_refs() -> Vec<SdkFunctionRef> {
         ),
         SdkFunctionRef::supported(
             "paste",
-            "await paste(text: string): Promise<void>",
-            "Paste text to the focused application.",
+            "await paste(): Promise<string>",
+            "Read current clipboard text; this compatibility alias does not inject global input.",
             "clipboard",
         ),
         SdkFunctionRef::supported(
@@ -1375,14 +1639,14 @@ fn build_sdk_function_refs() -> Vec<SdkFunctionRef> {
         ),
         SdkFunctionRef::supported(
             "readFile",
-            "await readFile(path: string): Promise<string>",
-            "Read a file's contents as UTF-8 text.",
+            "await readFile(path: string, encoding?: BufferEncoding): Promise<string>",
+            "Read text from an explicitly named filesystem path (UTF-8 by default).",
             "filesystem",
         ),
         SdkFunctionRef::supported(
             "writeFile",
-            "await writeFile(path: string, content: string): Promise<void>",
-            "Write UTF-8 text content to a file.",
+            "await writeFile(path: string, content: string, encoding?: BufferEncoding): Promise<void>",
+            "Write text to an explicitly named filesystem path (UTF-8 by default).",
             "filesystem",
         ),
         SdkFunctionRef::supported(
@@ -1391,9 +1655,45 @@ fn build_sdk_function_refs() -> Vec<SdkFunctionRef> {
             "Resolve a path relative to the user's home directory.",
             "filesystem",
         ),
+        SdkFunctionRef::supported(
+            "fileSearch",
+            "await fileSearch(query: string, options?: FindOptions): Promise<FileSearchResult[]>",
+            "Search indexed files without opening the unsupported legacy find prompt.",
+            "filesystem",
+        ),
+        SdkFunctionRef::supported(
+            "getWindows",
+            "await getWindows(): Promise<SystemWindowInfo[]>",
+            "List observed native windows without activating, moving, or resizing them.",
+            "window-management",
+        ),
+        SdkFunctionRef::supported(
+            "focusWindow",
+            "await focusWindow(windowId: number): Promise<void>",
+            "Focus an explicitly identified native window; stale window IDs reject.",
+            "window-management",
+        ),
+        SdkFunctionRef::supported(
+            "moveWindow",
+            "await moveWindow(windowId: number, x: number, y: number): Promise<void>",
+            "Move an explicitly identified native window; stale window IDs reject.",
+            "window-management",
+        ),
+        SdkFunctionRef::supported(
+            "resizeWindow",
+            "await resizeWindow(windowId: number, width: number, height: number): Promise<void>",
+            "Resize an explicitly identified native window; stale window IDs reject.",
+            "window-management",
+        ),
+        SdkFunctionRef::supported(
+            "tileWindow",
+            "await tileWindow(windowId: number, position: TilePosition): Promise<void>",
+            "Tile an explicitly identified native window; stale window IDs reject.",
+            "window-management",
+        ),
         SdkFunctionRef::unsupported(
             "find",
-            "find(placeholder, options?)",
+            "await find(placeholder: string, options?: FindOptions): Promise<never>",
             "Legacy interactive find prompt. GPUI does not currently implement a Rust find prompt route, renderer, submit contract, or onlyin prompt semantics.",
             "filesystem",
             "Use fileSearch(query, { onlyin }) for non-interactive Spotlight/mdfind results, or path({ startPath }) / arg(...) for supported prompt-driven selection.",
@@ -1437,18 +1737,1052 @@ fn build_sdk_function_refs() -> Vec<SdkFunctionRef> {
         SdkFunctionRef::unsupported(
             "setStatus",
             "await setStatus(options: { status: 'busy' | 'idle' | 'error'; message: string }): Promise<SystemFeedbackResult>",
-            "Set application status text.",
+            "Return an explicit unsupported receipt; GPUI has no application-status surface.",
             "feedback",
             "setStatus(...) currently has no visible GPUI status surface or receipt. The SDK returns ERR_UNSUPPORTED_SDK_FEATURE before sending; use hud(message) for visible feedback, or render progress in a prompt.",
         ),
         SdkFunctionRef::unsupported(
             "menu",
             "await menu(icon: string, scripts?: string[]): Promise<SystemFeedbackResult>",
-            "Show a menu-bar icon with quick-access scripts.",
+            "Return an explicit unsupported receipt; GPUI cannot mutate the tray/menu.",
             "system",
             "menu(...) currently has no GPUI tray/menu mutation handler. The SDK returns ERR_UNSUPPORTED_SDK_FEATURE before sending; use the built-in tray icon (System Actions) or prompt-scoped setActions(...) today.",
         ),
-    ]
+        SdkFunctionRef::unsupported(
+            "setPanel",
+            "setPanel(html: string): never",
+            "Legacy panel mutation is not handled by the GPUI prompt host.",
+            "prompt-control",
+            "Use div(html), an arg(...) preview, or prompt-scoped setActions(...).",
+        ),
+        SdkFunctionRef::unsupported(
+            "setPreview",
+            "setPreview(html: string): never",
+            "Legacy preview mutation is not handled by the GPUI prompt host.",
+            "prompt-control",
+            "Supply preview content through an arg(...) choice or display it with div(html).",
+        ),
+        SdkFunctionRef::unsupported(
+            "setPrompt",
+            "setPrompt(html: string): never",
+            "Legacy prompt mutation is not handled by the GPUI prompt host.",
+            "prompt-control",
+            "Open a supported arg(...), div(...), fields(...), or editor(...) prompt.",
+        ),
+        SdkFunctionRef::unsupported(
+            "widget",
+            "await widget(html: string, options?: WidgetOptions): Promise<never>",
+            "Floating HTML widgets have no native GPUI surface, event owner, or delivery receipt.",
+            "prompts",
+            "Use div(html) for an in-launcher surface or a supported native prompt.",
+        ),
+        SdkFunctionRef::unsupported(
+            "keyboard.type",
+            "await keyboard.type(text: string): Promise<never>",
+            "Global keyboard injection has no explicit target, permission, or delivery receipt.",
+            "system-input",
+            "Use batch setInput plus getState/getElements/waitFor for prompt text.",
+        ),
+        SdkFunctionRef::unsupported(
+            "keyboard",
+            "keyboard: KeyboardApi",
+            "The keyboard namespace exists for compatibility, but global input injection is unsupported.",
+            "system-input",
+            "Use batch setInput/forceSubmit and semantic action APIs instead of global keyboard injection.",
+        ),
+        SdkFunctionRef::unsupported(
+            "keyboard.tap",
+            "await keyboard.tap(...keys: string[]): Promise<never>",
+            "Global keyboard injection has no explicit target, permission, or delivery receipt.",
+            "system-input",
+            "Use batch forceSubmit or semantic action APIs instead of global key injection.",
+        ),
+        SdkFunctionRef::unsupported(
+            "mouse.move",
+            "await mouse.move(positions: Position[]): Promise<never>",
+            "Global pointer injection has no explicit target, permission, or delivery receipt.",
+            "system-input",
+            "Use semantic action APIs or batch/getState/getElements/waitFor.",
+        ),
+        SdkFunctionRef::unsupported(
+            "mouse",
+            "mouse: MouseApi",
+            "The mouse namespace exists for compatibility, but global pointer injection is unsupported.",
+            "system-input",
+            "Use semantic action APIs or batch/getState/getElements/waitFor instead of global pointer injection.",
+        ),
+        SdkFunctionRef::unsupported(
+            "mouse.leftClick",
+            "await mouse.leftClick(): Promise<never>",
+            "Global pointer injection has no explicit target, permission, or delivery receipt.",
+            "system-input",
+            "Use semantic action APIs instead of coordinate clicks.",
+        ),
+        SdkFunctionRef::unsupported(
+            "mouse.rightClick",
+            "await mouse.rightClick(): Promise<never>",
+            "Global pointer injection has no explicit target, permission, or delivery receipt.",
+            "system-input",
+            "Use semantic action APIs instead of coordinate clicks.",
+        ),
+        SdkFunctionRef::unsupported(
+            "mouse.setPosition",
+            "await mouse.setPosition(position: Position): Promise<never>",
+            "Global pointer injection has no explicit target, permission, or delivery receipt.",
+            "system-input",
+            "Use semantic action APIs instead of coordinate positioning.",
+        ),
+        SdkFunctionRef::unsupported(
+            "webcam",
+            "await webcam(): Promise<never>",
+            "The JSONL SDK transport cannot stream camera frames.",
+            "media",
+            "Use an explicitly configured external camera tool and process its saved output.",
+        ),
+        SdkFunctionRef::unsupported(
+            "mic",
+            "await mic(): Promise<never>",
+            "The JSONL SDK transport cannot stream microphone audio.",
+            "media",
+            "Use an explicitly configured external audio tool and process its saved output.",
+        ),
+        SdkFunctionRef::unsupported(
+            "eyeDropper",
+            "await eyeDropper(): Promise<never>",
+            "Native color picking does not have a supported permission and capture contract.",
+            "media",
+            "Use a supported input prompt to request a color value explicitly.",
+        ),
+    ];
+
+    // Keep executable global functions and object methods visible to authors.
+    // These entries extend the reviewed rows above rather than creating a
+    // parallel capabilities registry.
+    functions.extend(
+        [
+            (
+                "confirm",
+                "await confirm(message?: string | ConfirmConfig): Promise<boolean>",
+                "Show a native confirmation prompt and return the user's explicit choice.",
+                "prompts",
+            ),
+            (
+                "chat",
+                "await chat(options?: ChatOptions): Promise<ChatResult>",
+                "Open an inline conversation UI; the calling script owns provider requests and this prompt never starts built-in inference.",
+                "prompts",
+            ),
+            (
+                "chat.addMessage",
+                "chat.addMessage(message: ChatMessage | CoreMessage): void",
+                "Append a message to an already-active inline chat prompt; rejects outside a chat session and never requests provider inference.",
+                "prompt-control",
+            ),
+            (
+                "chat.startStream",
+                "chat.startStream(position?: 'left' | 'right'): string",
+                "Start a script-owned streaming UI message in an already-active inline chat prompt; never starts provider inference.",
+                "prompt-control",
+            ),
+            (
+                "chat.appendChunk",
+                "chat.appendChunk(messageId: string, chunk: string): void",
+                "Append an explicitly supplied UI text chunk to an active inline-chat stream; no provider request is made.",
+                "prompt-control",
+            ),
+            (
+                "chat.completeStream",
+                "chat.completeStream(messageId: string): void",
+                "Mark an active inline-chat UI stream complete without contacting an AI provider.",
+                "prompt-control",
+            ),
+            (
+                "chat.clear",
+                "chat.clear(): void",
+                "Clear messages from an already-active inline chat prompt; rejects outside a chat session.",
+                "prompt-control",
+            ),
+            (
+                "chat.setError",
+                "chat.setError(messageId: string, error: string): void",
+                "Attach an explicit script-owned error to an active inline-chat message without provider inference.",
+                "prompt-control",
+            ),
+            (
+                "chat.clearError",
+                "chat.clearError(messageId: string): void",
+                "Clear an inline-chat message error in an already-active chat session.",
+                "prompt-control",
+            ),
+            (
+                "chat.getMessages",
+                "chat.getMessages(): CoreMessage[]",
+                "Read script-local inline-chat message state without opening a prompt, sending protocol traffic, or requesting inference.",
+                "ai-context",
+            ),
+            (
+                "chat.getResult",
+                "chat.getResult(): ChatResult",
+                "Read the script-local inline-chat result snapshot without opening a prompt or requesting provider inference.",
+                "ai-context",
+            ),
+            (
+                "env",
+                "await env(key: string, config?: string | EnvConfig | (() => Promise<string>)): Promise<string>",
+                "Read an existing environment value or prompt explicitly when it is absent.",
+                "prompts",
+            ),
+            (
+                "md",
+                "md(markdown: string): string",
+                "Convert Markdown into displayable HTML without dispatching host commands.",
+                "utilities",
+            ),
+            (
+                "hud",
+                "hud(message: string, options?: { duration?: number }): void",
+                "Show a transient in-launcher status message without claiming OS notification delivery.",
+                "feedback",
+            ),
+            (
+                "setActions",
+                "await setActions(actions: Action[]): Promise<void>",
+                "Register executable actions for the currently active prompt.",
+                "prompt-control",
+            ),
+            (
+                "setInput",
+                "setInput(text: string): void",
+                "Update the active prompt input through its scoped SDK protocol.",
+                "prompt-control",
+            ),
+            (
+                "submit",
+                "submit(value: unknown): void",
+                "Submit the current prompt with an explicit value.",
+                "prompt-control",
+            ),
+            (
+                "exit",
+                "exit(code?: number): void",
+                "Terminate the current script with an explicit exit status.",
+                "script-lifecycle",
+            ),
+            (
+                "hasAccessibilityPermission",
+                "await hasAccessibilityPermission(): Promise<boolean>",
+                "Read current accessibility authorization without prompting for access.",
+                "permissions",
+            ),
+            (
+                "requestAccessibilityPermission",
+                "await requestAccessibilityPermission(): Promise<boolean>",
+                "Explicitly request accessibility access; may open system privacy settings.",
+                "permissions",
+            ),
+            (
+                "clipboard.readText",
+                "await clipboard.readText(): Promise<string>",
+                "Read current clipboard text through the host clipboard bridge.",
+                "clipboard",
+            ),
+            (
+                "clipboard.writeText",
+                "await clipboard.writeText(text: string): Promise<void>",
+                "Replace clipboard text through the host clipboard bridge.",
+                "clipboard",
+            ),
+            (
+                "clipboard.readImage",
+                "await clipboard.readImage(): Promise<Buffer>",
+                "Read PNG clipboard bytes or reject with a typed clipboard failure.",
+                "clipboard",
+            ),
+            (
+                "clipboard.writeImage",
+                "await clipboard.writeImage(buffer: Buffer): Promise<void>",
+                "Write image bytes only after the host confirms clipboard delivery.",
+                "clipboard",
+            ),
+            (
+                "clipboardHistory",
+                "await clipboardHistory(): Promise<ClipboardHistoryEntry[]>",
+                "Return available clipboard-history entries without modifying them.",
+                "clipboard",
+            ),
+            (
+                "clipboardHistoryPin",
+                "await clipboardHistoryPin(entryId: string): Promise<void>",
+                "Pin an explicitly identified clipboard-history entry.",
+                "clipboard",
+            ),
+            (
+                "clipboardHistoryUnpin",
+                "await clipboardHistoryUnpin(entryId: string): Promise<void>",
+                "Unpin an explicitly identified clipboard-history entry.",
+                "clipboard",
+            ),
+            (
+                "clipboardHistoryRemove",
+                "await clipboardHistoryRemove(entryId: string): Promise<void>",
+                "Remove an explicitly identified clipboard-history entry.",
+                "clipboard",
+            ),
+            (
+                "clipboardHistoryClear",
+                "await clipboardHistoryClear(): Promise<void>",
+                "Clear non-pinned clipboard-history entries while preserving pinned entries.",
+                "clipboard",
+            ),
+            (
+                "clipboardHistoryTrimOversize",
+                "await clipboardHistoryTrimOversize(): Promise<void>",
+                "Remove clipboard-history entries exceeding the configured maximum size.",
+                "clipboard",
+            ),
+            (
+                "show",
+                "await show(): Promise<void>",
+                "Explicitly reveal the Script Kit prompt window.",
+                "window-control",
+            ),
+            (
+                "hide",
+                "await hide(): Promise<void>",
+                "Explicitly hide the Script Kit prompt window.",
+                "window-control",
+            ),
+            (
+                "blur",
+                "await blur(): Promise<void>",
+                "Return focus from Script Kit to the previously focused application.",
+                "window-control",
+            ),
+            (
+                "showGrid",
+                "await showGrid(options?: GridOptions): Promise<void>",
+                "Show the prompt debug-grid overlay for an explicitly requested inspection.",
+                "window-control",
+            ),
+            (
+                "hideGrid",
+                "await hideGrid(): Promise<void>",
+                "Hide the prompt debug-grid overlay.",
+                "window-control",
+            ),
+            (
+                "getWindowBounds",
+                "await getWindowBounds(): Promise<WindowBounds>",
+                "Read the current Script Kit window bounds.",
+                "window-control",
+            ),
+            (
+                "captureScreenshot",
+                "await captureScreenshot(options?: ScreenshotOptions): Promise<ScreenshotData>",
+                "Capture the current Script Kit window only after explicit authorization.",
+                "window-control",
+            ),
+            (
+                "getLayoutInfo",
+                "await getLayoutInfo(): Promise<LayoutInfo>",
+                "Inspect the current prompt layout without screen capture.",
+                "window-control",
+            ),
+            (
+                "closeWindow",
+                "await closeWindow(windowId: number): Promise<void>",
+                "Close an explicitly identified native window; stale IDs reject.",
+                "window-management",
+            ),
+            (
+                "minimizeWindow",
+                "await minimizeWindow(windowId: number): Promise<void>",
+                "Minimize an explicitly identified native window; stale IDs reject.",
+                "window-management",
+            ),
+            (
+                "maximizeWindow",
+                "await maximizeWindow(windowId: number): Promise<void>",
+                "Maximize an explicitly identified native window; stale IDs reject.",
+                "window-management",
+            ),
+            (
+                "getDisplays",
+                "await getDisplays(): Promise<DisplayInfo[]>",
+                "Read connected display geometry without moving or focusing a window.",
+                "window-management",
+            ),
+            (
+                "getFrontmostWindow",
+                "await getFrontmostWindow(): Promise<SystemWindowInfo | null>",
+                "Read the previously active application's frontmost window.",
+                "window-management",
+            ),
+            (
+                "moveToNextDisplay",
+                "await moveToNextDisplay(windowId: number): Promise<void>",
+                "Move an explicitly identified window to the next display; stale IDs reject.",
+                "window-management",
+            ),
+            (
+                "moveToPreviousDisplay",
+                "await moveToPreviousDisplay(windowId: number): Promise<void>",
+                "Move an explicitly identified window to the previous display; stale IDs reject.",
+                "window-management",
+            ),
+            (
+                "getMenuBar",
+                "await getMenuBar(bundleId?: string): Promise<MenuBarItem[]>",
+                "Read native menu structure without selecting a menu action.",
+                "menu-bar",
+            ),
+            (
+                "executeMenuAction",
+                "await executeMenuAction(bundleId: string, menuPath: string[]): Promise<void>",
+                "Execute one explicitly targeted native menu action and reject invalid targets.",
+                "menu-bar",
+            ),
+            (
+                "aiIsOpen",
+                "await aiIsOpen(): Promise<{ isOpen: boolean; activeChatId?: string }>",
+                "Read Agent Chat visibility and active conversation identity without starting a provider request.",
+                "ai-context",
+            ),
+            (
+                "aiGetActiveChat",
+                "await aiGetActiveChat(): Promise<AiChatInfo | null>",
+                "Read the active Agent Chat conversation without triggering inference.",
+                "ai-context",
+            ),
+            (
+                "aiListChats",
+                "await aiListChats(limit?: number, includeDeleted?: boolean): Promise<AiChatInfo[]>",
+                "Read conversation metadata from Agent Chat storage without triggering inference.",
+                "ai-context",
+            ),
+            (
+                "aiGetConversation",
+                "await aiGetConversation(chatId?: string, limit?: number): Promise<AiMessageInfo[]>",
+                "Read explicitly selected conversation messages without triggering inference.",
+                "ai-context",
+            ),
+            (
+                "aiStartChat",
+                "await aiStartChat(message: string, options?: AiChatOptions): Promise<AiStartChatResult>",
+                "Start an Agent Chat conversation with explicitly declared context parts; noResponse controls whether inference begins.",
+                "ai-interaction",
+            ),
+            (
+                "aiAppendMessage",
+                "await aiAppendMessage(chatId: string, content: string, role: 'user' | 'assistant' | 'system'): Promise<string>",
+                "Append an explicitly scoped conversation message without triggering provider inference.",
+                "ai-context",
+            ),
+            (
+                "aiSendMessage",
+                "await aiSendMessage(chatId: string, content: string, imagePath?: string, parts?: AiContextPartInput[]): Promise<{ userMessageId: string; streamingStarted: boolean }>",
+                "Submit explicit text/context to one conversation and request provider inference.",
+                "ai-interaction",
+            ),
+            (
+                "aiSetSystemPrompt",
+                "await aiSetSystemPrompt(chatId: string, prompt: string): Promise<void>",
+                "Update one explicitly identified conversation's system prompt.",
+                "ai-context",
+            ),
+            (
+                "aiFocus",
+                "await aiFocus(): Promise<{ wasOpen: boolean }>",
+                "Explicitly reveal/focus Agent Chat without implicitly submitting a provider request.",
+                "ai-interaction",
+            ),
+            (
+                "aiGetStreamingStatus",
+                "await aiGetStreamingStatus(chatId?: string): Promise<{ isStreaming: boolean; chatId?: string; partialContent?: string }>",
+                "Read one conversation's streaming state without initiating inference.",
+                "ai-context",
+            ),
+            (
+                "aiDeleteChat",
+                "await aiDeleteChat(chatId: string, permanent?: boolean): Promise<void>",
+                "Delete an explicitly identified conversation; permanent removal must be requested.",
+                "ai-context",
+            ),
+            (
+                "aiOn",
+                "await aiOn(eventType: AiEventType, handler: AiEventHandler, chatId?: string): Promise<() => void>",
+                "Subscribe to explicitly selected Agent Chat events and receive an unsubscribe callback.",
+                "ai-context",
+            ),
+            (
+                "uuid",
+                "uuid(): string",
+                "Generate a cryptographically random UUID without host dispatch.",
+                "utilities",
+            ),
+            (
+                "compile",
+                "compile(template: string): (values: Record<string, unknown>) => string",
+                "Compile a local string-interpolation template without host dispatch.",
+                "utilities",
+            ),
+            (
+                "skPath",
+                "skPath(...segments: string[]): string",
+                "Resolve a path inside the Script Kit home directory.",
+                "filesystem",
+            ),
+            (
+                "kitPath",
+                "kitPath(...segments: string[]): string",
+                "Compatibility alias for a path inside the Script Kit home directory.",
+                "filesystem",
+            ),
+            (
+                "tmpPath",
+                "tmpPath(...segments: string[]): string",
+                "Resolve a path inside the Script Kit temporary directory.",
+                "filesystem",
+            ),
+            (
+                "isFile",
+                "await isFile(path: string): Promise<boolean>",
+                "Inspect whether an explicit path currently names a regular file.",
+                "filesystem",
+            ),
+            (
+                "isDir",
+                "await isDir(path: string): Promise<boolean>",
+                "Inspect whether an explicit path currently names a directory.",
+                "filesystem",
+            ),
+            (
+                "isBin",
+                "await isBin(path: string): Promise<boolean>",
+                "Inspect whether an explicit path currently names an executable file.",
+                "filesystem",
+            ),
+            (
+                "memoryMap",
+                "memoryMap: MemoryMapAPI",
+                "Access the script-local in-memory key/value namespace.",
+                "utilities",
+            ),
+            (
+                "memoryMap.get",
+                "memoryMap.get(key: string): unknown",
+                "Read a script-local in-memory value.",
+                "utilities",
+            ),
+            (
+                "memoryMap.set",
+                "memoryMap.set(key: string, value: unknown): void",
+                "Store a script-local in-memory value.",
+                "utilities",
+            ),
+            (
+                "memoryMap.delete",
+                "memoryMap.delete(key: string): boolean",
+                "Delete a script-local in-memory value.",
+                "utilities",
+            ),
+            (
+                "memoryMap.clear",
+                "memoryMap.clear(): void",
+                "Clear script-local in-memory values.",
+                "utilities",
+            ),
+            (
+                "browse",
+                "await browse(url: string): Promise<void>",
+                "Explicitly request that the host open one URL in the default browser.",
+                "system",
+            ),
+            (
+                "editFile",
+                "await editFile(path: string): Promise<void>",
+                "Explicitly request that the host open one path in its configured editor.",
+                "system",
+            ),
+            (
+                "run",
+                "await run(scriptName: string, ...args: string[]): Promise<unknown>",
+                "Invoke another explicitly identified Script Kit script and await its result.",
+                "script-lifecycle",
+            ),
+            (
+                "inspect",
+                "await inspect(data: unknown): Promise<void>",
+                "Send an explicit value to the host inspector.",
+                "prompt-control",
+            ),
+            (
+                "defineSchema",
+                "defineSchema<T extends ScriptSchema>(schema: T): TypedSchemaAPI<InferInput<T>, InferOutput<T>>",
+                "Declare a typed local script input/output schema without starting an AI request.",
+                "script-lifecycle",
+            ),
+            (
+                "input",
+                "await input<T extends Record<string, unknown>>(): Promise<T>",
+                "Receive explicit typed input supplied to the current script.",
+                "script-lifecycle",
+            ),
+            (
+                "output",
+                "output(data: Record<string, unknown>): void",
+                "Publish explicit typed output from the current script.",
+                "script-lifecycle",
+            ),
+            (
+                "mcp",
+                "mcp: McpApi",
+                "Access explicitly configured MCP server discovery and tool-call methods.",
+                "mcp",
+            ),
+            (
+                "mcp.listServers",
+                "await mcp.listServers(): Promise<McpServerInfo[]>",
+                "List locally configured, enabled MCP servers without calling their tools.",
+                "mcp",
+            ),
+            (
+                "mcp.getServer",
+                "await mcp.getServer(id: string): Promise<McpServerInfo | null>",
+                "Inspect one explicitly identified MCP server configuration.",
+                "mcp",
+            ),
+            (
+                "mcp.listTools",
+                "await mcp.listTools(serverId?: string): Promise<McpToolInfo[]>",
+                "Discover tools from explicitly configured MCP servers.",
+                "mcp",
+            ),
+            (
+                "mcp.discover",
+                "await mcp.discover(query: string): Promise<McpToolInfo[]>",
+                "Find configured MCP tools matching an explicit search query.",
+                "mcp",
+            ),
+            (
+                "mcp.call",
+                "await mcp.call(serverId: string, toolName: string, args?: Record<string, unknown>): Promise<McpToolCallResult>",
+                "Call one explicitly selected MCP server/tool with explicit arguments.",
+                "mcp",
+            ),
+            (
+                "computer",
+                "computer: ComputerUseApi",
+                "Access explicitly permission-scoped native window observation tools.",
+                "computer-use",
+            ),
+        ]
+        .into_iter()
+        .map(|(name, signature, description, category)| {
+            SdkFunctionRef::supported(name, signature, description, category)
+        }),
+    );
+
+    functions
+}
+
+fn sdk_capability_from_function(entry: &SdkFunctionRef) -> SdkCapability {
+    let required_permissions = match entry.name.as_str() {
+        "getSelectedText"
+        | "setSelectedText"
+        | "focusWindow"
+        | "moveWindow"
+        | "resizeWindow"
+        | "tileWindow"
+        | "closeWindow"
+        | "minimizeWindow"
+        | "maximizeWindow"
+        | "moveToNextDisplay"
+        | "moveToPreviousDisplay"
+        | "getMenuBar"
+        | "executeMenuAction" => vec!["accessibility".into()],
+        "captureScreenshot" => vec!["screen-recording".into()],
+        "computer.captureNativeWindow" => {
+            vec!["accessibility".into(), "screen-recording".into()]
+        }
+        _ => Vec::new(),
+    };
+
+    let supported_platforms = match entry.name.as_str() {
+        "notify"
+        | "beep"
+        | "say"
+        | "getSelectedText"
+        | "setSelectedText"
+        | "hasAccessibilityPermission"
+        | "requestAccessibilityPermission"
+        | "getWindows"
+        | "focusWindow"
+        | "moveWindow"
+        | "resizeWindow"
+        | "tileWindow"
+        | "closeWindow"
+        | "minimizeWindow"
+        | "maximizeWindow"
+        | "getDisplays"
+        | "getFrontmostWindow"
+        | "moveToNextDisplay"
+        | "moveToPreviousDisplay"
+        | "getMenuBar"
+        | "executeMenuAction"
+        | "computer"
+        | "computer.listNativeWindows"
+        | "computer.captureNativeWindow" => {
+            vec!["macos".into()]
+        }
+        _ => Vec::new(),
+    };
+
+    let alternatives = match entry.name.as_str() {
+        "find" => vec!["fileSearch(query, { onlyin })", "path({ startPath })"],
+        "setStatus" => vec!["hud(message)", "div(html)"],
+        "menu" => vec!["built-in System Actions", "setActions(actions)"],
+        "setPanel" | "setPreview" => vec!["div(html)", "arg(placeholder, choices)"],
+        "setPrompt" => vec!["arg(placeholder, choices)", "fields(definitions)"],
+        "widget" => vec!["div(html)", "arg(placeholder, choices)"],
+        "keyboard" | "keyboard.type" => vec!["batch([{ type: 'setInput', text }])"],
+        "keyboard.tap" => vec!["batch([{ type: 'forceSubmit', value }])"],
+        "mouse" | "mouse.move" | "mouse.leftClick" | "mouse.rightClick" | "mouse.setPosition" => {
+            vec!["batch(commands)", "getElements()"]
+        }
+        "webcam" => vec!["an explicitly configured external camera tool"],
+        "mic" => vec!["an explicitly configured external audio tool"],
+        "eyeDropper" => vec!["arg('Enter a color value')"],
+        _ => Vec::new(),
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    SdkCapability {
+        name: entry.name.clone(),
+        support: entry.support,
+        minimum_host_version: env!("CARGO_PKG_VERSION").into(),
+        requires_interactive_prompt: entry.category == "prompts"
+            || matches!(
+                entry.name.as_str(),
+                "setActions"
+                    | "setInput"
+                    | "submit"
+                    | "chat.addMessage"
+                    | "chat.startStream"
+                    | "chat.appendChunk"
+                    | "chat.completeStream"
+                    | "chat.clear"
+                    | "chat.setError"
+                    | "chat.clearError"
+            ),
+        required_permissions,
+        supported_platforms,
+        alternatives,
+        migration_note: entry.unsupported_note.clone(),
+    }
+}
+
+fn build_sdk_capability_catalog(functions: &[SdkFunctionRef]) -> SdkCapabilityCatalog {
+    SdkCapabilityCatalog {
+        schema_version: SDK_CAPABILITY_CATALOG_SCHEMA_VERSION,
+        host_version: env!("CARGO_PKG_VERSION").into(),
+        capabilities: functions.iter().map(sdk_capability_from_function).collect(),
+    }
+}
+
+/// One immutable, versioned host contract shared by every capability lookup.
+///
+/// Script indexing can inspect many declarations on many commands. Rebuilding
+/// all author-facing strings for each declaration made that work proportional
+/// to `scripts * declarations * catalog_size`; retain one reviewed snapshot and
+/// borrow its entries through a name index instead.
+struct SdkCapabilityCatalogIndex {
+    catalog: SdkCapabilityCatalog,
+    positions: HashMap<String, usize>,
+    generation: u64,
+}
+
+static SDK_CAPABILITY_CATALOG_CACHE: OnceLock<RwLock<Option<Arc<SdkCapabilityCatalogIndex>>>> =
+    OnceLock::new();
+static SDK_CAPABILITY_CATALOG_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn sdk_capability_catalog_index() -> Arc<SdkCapabilityCatalogIndex> {
+    let cache = SDK_CAPABILITY_CATALOG_CACHE.get_or_init(|| RwLock::new(None));
+    if let Some(index) = cache
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+    {
+        return Arc::clone(index);
+    }
+
+    let mut guard = cache
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(index) = guard.as_ref() {
+        return Arc::clone(index);
+    }
+
+    let functions = build_sdk_function_refs();
+    let catalog = build_sdk_capability_catalog(&functions);
+    let positions = catalog
+        .capabilities
+        .iter()
+        .enumerate()
+        .map(|(index, capability)| (capability.name.clone(), index))
+        .collect();
+    let index = Arc::new(SdkCapabilityCatalogIndex {
+        catalog,
+        positions,
+        generation: SDK_CAPABILITY_CATALOG_GENERATION.load(Ordering::Acquire),
+    });
+    *guard = Some(Arc::clone(&index));
+    index
+}
+
+/// Explicitly invalidate the reviewed catalog when a host/schema contract is
+/// replaced. Ordinary command indexing and scriptlet refreshes must not call
+/// this: their declarations do not alter the host's supported capabilities.
+pub fn invalidate_sdk_capability_catalog() -> u64 {
+    let cache = SDK_CAPABILITY_CATALOG_CACHE.get_or_init(|| RwLock::new(None));
+    let mut guard = cache
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let generation = SDK_CAPABILITY_CATALOG_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    *guard = None;
+    generation
+}
+
+/// Reviewed catalog generation. Schema and host version remain available in
+/// the published catalog; this changes only on explicit contract invalidation.
+pub fn sdk_capability_catalog_generation() -> u64 {
+    sdk_capability_catalog_index().generation
+}
+
+/// Public authoring contract shared by the SDK Reference, MCP clients, and
+/// future script validation without a second independently maintained list.
+pub fn sdk_capability_catalog() -> SdkCapabilityCatalog {
+    sdk_capability_catalog_index().catalog.clone()
+}
+
+/// Read one reviewed capability through the shared O(1) name index. Only the
+/// selected row is cloned; launcher/dispatch projections never rebuild or copy
+/// the complete author-reference catalog.
+pub fn sdk_capability(name: &str) -> Option<SdkCapability> {
+    let index = sdk_capability_catalog_index();
+    index
+        .positions
+        .get(name)
+        .and_then(|position| index.catalog.capabilities.get(*position))
+        .cloned()
+}
+
+#[derive(Clone, Copy)]
+struct SdkHostDiagnosticContext<'a> {
+    host_version: &'a str,
+    platform: &'a str,
+    /// `None` means nobody supplied an already-known permission inventory. It
+    /// never means permission is granted and never triggers a system probe.
+    granted_permissions: Option<&'a [String]>,
+}
+
+/// Explain unsupported APIs and impossible scriptlet prompt topologies before
+/// dispatch. `None` means this catalog knows no compatibility blocker.
+pub fn diagnose_sdk_capability(
+    name: &str,
+    topology: SdkExecutionTopology,
+) -> Option<SdkCapabilityDiagnostic> {
+    diagnose_sdk_capability_inner(name, topology, None)
+}
+
+/// Validate process-known platform/version facts without querying macOS,
+/// opening privacy settings, or assuming unavailable permission facts.
+/// Permission-scoped features return `PermissionInventoryUnavailable` until a
+/// caller supplies an explicitly known inventory through the context API.
+pub fn diagnose_sdk_capability_for_current_host(
+    name: &str,
+    topology: SdkExecutionTopology,
+) -> Option<SdkCapabilityDiagnostic> {
+    diagnose_sdk_capability_inner(
+        name,
+        topology,
+        Some(SdkHostDiagnosticContext {
+            host_version: env!("CARGO_PKG_VERSION"),
+            platform: std::env::consts::OS,
+            granted_permissions: None,
+        }),
+    )
+}
+
+/// Diagnose a capability against explicit, already-known host facts. This
+/// never opens privacy settings, requests permissions, captures the display,
+/// or probes the current app state.
+pub fn diagnose_sdk_capability_with_context(
+    name: &str,
+    topology: SdkExecutionTopology,
+    availability: &SdkHostAvailability,
+) -> Option<SdkCapabilityDiagnostic> {
+    diagnose_sdk_capability_inner(
+        name,
+        topology,
+        Some(SdkHostDiagnosticContext {
+            host_version: &availability.host_version,
+            platform: &availability.platform,
+            granted_permissions: Some(&availability.granted_permissions),
+        }),
+    )
+}
+
+fn diagnose_sdk_capability_inner(
+    name: &str,
+    topology: SdkExecutionTopology,
+    availability: Option<SdkHostDiagnosticContext<'_>>,
+) -> Option<SdkCapabilityDiagnostic> {
+    let index = sdk_capability_catalog_index();
+    let Some(capability) = index
+        .positions
+        .get(name)
+        .and_then(|position| index.catalog.capabilities.get(*position))
+    else {
+        return Some(SdkCapabilityDiagnostic {
+            code: SdkCapabilityDiagnosticCode::UnknownCapability,
+            capability: name.into(),
+            message: format!("`{name}` is not present in this host's SDK capability catalog."),
+            alternatives: vec!["Open SDK Reference to choose a supported API.".into()],
+        });
+    };
+
+    if matches!(
+        topology,
+        SdkExecutionTopology::ShellScriptlet | SdkExecutionTopology::PythonScriptlet
+    ) {
+        return Some(SdkCapabilityDiagnostic {
+            code: SdkCapabilityDiagnosticCode::MissingSdkTransport,
+            capability: name.into(),
+            message: format!(
+                "`{name}` requires the TypeScript SDK transport; shell and Python scriptlets do not receive SDK globals."
+            ),
+            alternatives: vec!["Move this command into a TypeScript script.".into()],
+        });
+    }
+
+    if capability.support == SdkSupport::Unsupported {
+        return Some(SdkCapabilityDiagnostic {
+            code: SdkCapabilityDiagnosticCode::UnsupportedCapability,
+            capability: name.into(),
+            message: capability
+                .migration_note
+                .clone()
+                .unwrap_or_else(|| format!("`{name}` is unsupported by this host.")),
+            alternatives: capability.alternatives.clone(),
+        });
+    }
+
+    if topology == SdkExecutionTopology::TypeScriptScriptlet
+        && capability.requires_interactive_prompt
+    {
+        return Some(SdkCapabilityDiagnostic {
+            code: SdkCapabilityDiagnosticCode::InteractivePromptUnavailable,
+            capability: name.into(),
+            message: format!(
+                "`{name}` requires an interactive stdin prompt response, but TypeScript scriptlets do not receive an interactive stdin pipe."
+            ),
+            alternatives: vec!["Move the interactive command into a TypeScript script.".into()],
+        });
+    }
+
+    if let Some(availability) = availability {
+        let Ok(host_version) = Version::parse(availability.host_version) else {
+            return Some(SdkCapabilityDiagnostic {
+                code: SdkCapabilityDiagnosticCode::InvalidHostVersion,
+                capability: name.into(),
+                message: format!(
+                    "Host version `{}` is not valid semantic version data; capability availability cannot be verified.",
+                    availability.host_version
+                ),
+                alternatives: vec!["Refresh the host capability catalog.".into()],
+            });
+        };
+        let Ok(minimum_version) = Version::parse(&capability.minimum_host_version) else {
+            return Some(SdkCapabilityDiagnostic {
+                code: SdkCapabilityDiagnosticCode::InvalidHostVersion,
+                capability: name.into(),
+                message: format!(
+                    "Capability `{name}` declares an invalid minimum host version `{}`.",
+                    capability.minimum_host_version
+                ),
+                alternatives: vec!["Refresh the host capability catalog.".into()],
+            });
+        };
+
+        if host_version < minimum_version {
+            return Some(SdkCapabilityDiagnostic {
+                code: SdkCapabilityDiagnosticCode::HostVersionTooOld,
+                capability: name.into(),
+                message: format!(
+                    "`{name}` requires host version {} or newer; the inspected host is {}.",
+                    capability.minimum_host_version, availability.host_version
+                ),
+                alternatives: vec!["Update Script Kit before running this command.".into()],
+            });
+        }
+
+        if !capability.supported_platforms.is_empty()
+            && !capability
+                .supported_platforms
+                .iter()
+                .any(|platform| platform == availability.platform)
+        {
+            return Some(SdkCapabilityDiagnostic {
+                code: SdkCapabilityDiagnosticCode::UnsupportedPlatform,
+                capability: name.into(),
+                message: format!(
+                    "`{name}` supports {}, but the inspected host runs {}.",
+                    capability.supported_platforms.join(", "),
+                    availability.platform
+                ),
+                alternatives: vec!["Use a capability supported on this platform.".into()],
+            });
+        }
+
+        if !capability.required_permissions.is_empty() {
+            let Some(granted_permissions) = availability.granted_permissions else {
+                return Some(SdkCapabilityDiagnostic {
+                    code: SdkCapabilityDiagnosticCode::PermissionInventoryUnavailable,
+                    capability: name.into(),
+                    message: format!(
+                        "`{name}` requires {}, but no already-known permission inventory was supplied; access cannot be assumed.",
+                        capability.required_permissions.join(", ")
+                    ),
+                    alternatives: vec![
+                        "Supply an existing read-only permission inventory before running this command."
+                            .into(),
+                    ],
+                });
+            };
+
+            if let Some(permission) = capability.required_permissions.iter().find(|permission| {
+                !granted_permissions
+                    .iter()
+                    .any(|granted| granted == *permission)
+            }) {
+                return Some(SdkCapabilityDiagnostic {
+                    code: SdkCapabilityDiagnosticCode::MissingPermission,
+                    capability: name.into(),
+                    message: format!(
+                        "`{name}` requires the `{permission}` permission, which the inspected host has not granted."
+                    ),
+                    alternatives: vec![format!(
+                        "Grant `{permission}` in System Settings, then refresh the permission inventory."
+                    )],
+                });
+            }
+        }
+    }
+
+    None
 }
 
 /// Cheap UI-facing slice of the SDK reference document.
@@ -1558,7 +2892,7 @@ pub fn sdk_reference_visible_target_rows<'a>(
 pub fn format_sdk_reference_entry_markdown(entry: &SdkFunctionRef) -> String {
     let mut out = String::new();
     if entry.support == SdkSupport::Unsupported {
-        out.push_str("> ⚠ Unsupported in GPUI — this function is defined in kit-sdk.ts but currently no-ops or throws.\n");
+        out.push_str("> ⚠ Unsupported in GPUI — this function fails before dispatch or returns an explicit unsupported receipt.\n");
         if let Some(note) = entry.unsupported_note.as_deref() {
             out.push_str("> ");
             out.push_str(note);
@@ -1572,6 +2906,9 @@ pub fn format_sdk_reference_entry_markdown(entry: &SdkFunctionRef) -> String {
         signature = entry.signature,
         category = entry.category,
         description = entry.description,
+    ));
+    out.push_str(&format!(
+        "\nAuthor diagnostics: read `{COMMAND_DOCTOR_RESOURCE_URI}` for command readiness, permissions, and compatibility; read `{FAILED_SCRIPTS_RESOURCE_URI}` for excluded or retained validation issues. These are host MCP resources, not callable SDK globals.\n"
     ));
     out
 }
@@ -1600,6 +2937,8 @@ fn build_script_templates() -> Vec<ScriptTemplateRef> {
                 "export const metadata = {\n",
                 "  name: \"{{NAME}}\",\n",
                 "  description: \"{{DESCRIPTION}}\",\n",
+                "  sdkCapabilities: [\"arg\", \"div\", \"md\"],\n",
+                "  executionTopology: \"typescript-script\",\n",
                 "};\n",
                 "\n",
                 "const value = await arg(\"Enter a value\");\n",
@@ -1622,6 +2961,8 @@ fn build_script_templates() -> Vec<ScriptTemplateRef> {
                 "export const metadata = {\n",
                 "  name: \"{{NAME}}\",\n",
                 "  description: \"{{DESCRIPTION}}\",\n",
+                "  sdkCapabilities: [\"arg\", \"div\", \"md\"],\n",
+                "  executionTopology: \"typescript-script\",\n",
                 "};\n",
                 "\n",
                 "const choice = await arg(\"Pick one\", [\"A\", \"B\", \"C\"]);\n",
@@ -1747,21 +3088,54 @@ pub fn script_template_catalog_visible_target_rows<'a>(
 ///
 /// Substitutes `{{NAME}}` with `friendly_name` and `{{DESCRIPTION}}` with
 /// the template's `metadata_defaults.description` (falling back to the
-/// template title). The returned string is the exact content that
+/// template title). Substitution is single-pass and JSON-string escaped: valid
+/// friendly names can contain quotes, braces, Unicode, or placeholder-shaped
+/// text without becoming executable TypeScript or being expanded recursively.
+/// The returned string is the exact content that
 /// [`crate::app_impl::naming_dialog::ScriptListApp::handle_naming_dialog_completion`]
-/// writes over the freshly-created script file between
-/// [`crate::script_creation::create_new_script`] and
+/// supplies to [`crate::script_creation::create_new_script_with_contents`], so
+/// the original exclusively created file handle writes the final bytes before
 /// [`crate::script_creation::open_in_editor`].
 pub fn render_script_template_file(template: &ScriptTemplateRef, friendly_name: &str) -> String {
+    const NAME_PLACEHOLDER: &str = "{{NAME}}";
+    const DESCRIPTION_PLACEHOLDER: &str = "{{DESCRIPTION}}";
+
     let description = template
         .metadata_defaults
         .description
         .as_deref()
         .unwrap_or(&template.title);
-    template
-        .body_template
-        .replace("{{NAME}}", friendly_name)
-        .replace("{{DESCRIPTION}}", description)
+
+    // Value::Display serializes strings infallibly. The surrounding quotes are
+    // supplied by the TypeScript template, so retain only escaped JSON content.
+    let encoded_name = Value::String(friendly_name.to_owned()).to_string();
+    let encoded_description = Value::String(description.to_owned()).to_string();
+    let escaped_name = &encoded_name[1..encoded_name.len() - 1];
+    let escaped_description = &encoded_description[1..encoded_description.len() - 1];
+
+    let source = template.body_template.as_str();
+    let mut rendered = String::with_capacity(source.len());
+    let mut cursor = 0;
+
+    while let Some(offset) = source[cursor..].find("{{") {
+        let start = cursor + offset;
+        rendered.push_str(&source[cursor..start]);
+        let remainder = &source[start..];
+
+        if remainder.starts_with(NAME_PLACEHOLDER) {
+            rendered.push_str(escaped_name);
+            cursor = start + NAME_PLACEHOLDER.len();
+        } else if remainder.starts_with(DESCRIPTION_PLACEHOLDER) {
+            rendered.push_str(escaped_description);
+            cursor = start + DESCRIPTION_PLACEHOLDER.len();
+        } else {
+            rendered.push_str("{{");
+            cursor = start + 2;
+        }
+    }
+
+    rendered.push_str(&source[cursor..]);
+    rendered
 }
 
 /// Markdown preview for a single template — used by the catalog view's
@@ -1789,6 +3163,9 @@ pub fn find_script_template(id: &str) -> Option<ScriptTemplateRef> {
 }
 
 pub(crate) fn build_sdk_reference_document() -> SdkReferenceDocument {
+    let functions = build_sdk_function_refs();
+    let capability_catalog = build_sdk_capability_catalog(&functions);
+
     SdkReferenceDocument {
         schema_version: SDK_REFERENCE_SCHEMA_VERSION,
         sdk_package: "@scriptkit/sdk".into(),
@@ -1796,7 +3173,20 @@ pub(crate) fn build_sdk_reference_document() -> SdkReferenceDocument {
         scriptlet_pattern: "~/.scriptkit/plugins/*/scriptlets/*.md".into(),
         metadata_format:
             "export const metadata = { name: \"My Script\", description: \"What it does\" }".into(),
-        functions: build_sdk_function_refs(),
+        functions,
+        capability_catalog,
+        authoring_resources: vec![
+            SdkAuthoringResource {
+                uri: COMMAND_DOCTOR_RESOURCE_URI.to_string(),
+                name: "Command Doctor".to_string(),
+                description: "Read-only readiness, capability support, safe permission-pending state, genuine launcher action previews, and repair guidance for already-loaded commands.".to_string(),
+            },
+            SdkAuthoringResource {
+                uri: FAILED_SCRIPTS_RESOURCE_URI.to_string(),
+                name: "Script Issues".to_string(),
+                description: "Excluded invalid scripts and retained scriptlet diagnostics with source paths, typed reasons, and repair alternatives.".to_string(),
+            },
+        ],
         harness_workflow: build_harness_workflow(),
     }
 }
@@ -1892,6 +3282,304 @@ fn build_harness_workflow() -> HarnessWorkflow {
     }
 }
 
+fn doctor_capability(name: &str) -> CommandDoctorCapability {
+    match sdk_capability(name) {
+        Some(capability) => CommandDoctorCapability {
+            name: capability.name,
+            support: capability.support,
+            required_permissions: capability.required_permissions,
+            supported_platforms: capability.supported_platforms,
+            minimum_host_version: Some(capability.minimum_host_version),
+            alternatives: capability.alternatives,
+        },
+        None => CommandDoctorCapability {
+            name: name.to_string(),
+            support: SdkSupport::Unsupported,
+            required_permissions: Vec::new(),
+            supported_platforms: Vec::new(),
+            minimum_host_version: None,
+            alternatives: vec!["Open SDK Reference to choose a supported API.".to_string()],
+        },
+    }
+}
+
+fn doctor_entry(
+    source: &str,
+    name: &str,
+    path: String,
+    plugin_id: &str,
+    plugin_title: Option<String>,
+    declared_capabilities: Vec<String>,
+    mut issues: Vec<ScriptValidationIssue>,
+) -> CommandDoctorEntry {
+    let mut capabilities: Vec<_> = declared_capabilities
+        .into_iter()
+        .map(|name| doctor_capability(&name))
+        .collect();
+    capabilities.sort_by(|left, right| left.name.cmp(&right.name));
+    capabilities.dedup_by(|left, right| left.name == right.name);
+    issues.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.message.cmp(&right.message))
+    });
+
+    let has_unsupported = capabilities
+        .iter()
+        .any(|capability| capability.support == SdkSupport::Unsupported)
+        || issues.iter().any(|issue| {
+            matches!(
+                &issue.kind,
+                crate::scripts::ScriptValidationKind::CapabilityUnavailable {
+                    code: SdkCapabilityDiagnosticCode::UnknownCapability
+                        | SdkCapabilityDiagnosticCode::UnsupportedCapability,
+                    ..
+                }
+            )
+        });
+    let has_blocking_issue = issues
+        .iter()
+        .any(|issue| issue.severity == crate::scripts::ValidationSeverity::Fatal);
+    let permission_pending = issues.iter().any(|issue| {
+        matches!(
+            &issue.kind,
+            crate::scripts::ScriptValidationKind::CapabilityUnavailable {
+                code: SdkCapabilityDiagnosticCode::PermissionInventoryUnavailable,
+                ..
+            }
+        )
+    });
+
+    let state = if has_unsupported {
+        CommandDoctorState::Unsupported
+    } else if has_blocking_issue {
+        CommandDoctorState::Blocked
+    } else if permission_pending {
+        CommandDoctorState::PermissionPending
+    } else if capabilities
+        .iter()
+        .any(|capability| capability.support == SdkSupport::Experimental)
+    {
+        CommandDoctorState::Experimental
+    } else {
+        CommandDoctorState::Ready
+    };
+
+    let mut alternatives: Vec<_> = capabilities
+        .iter()
+        .flat_map(|capability| capability.alternatives.iter().cloned())
+        .chain(issues.iter().flat_map(|issue| match &issue.kind {
+            crate::scripts::ScriptValidationKind::CapabilityUnavailable {
+                alternatives, ..
+            } => alternatives.clone(),
+            _ => Vec::new(),
+        }))
+        .collect();
+    alternatives.sort();
+    alternatives.dedup();
+
+    CommandDoctorEntry {
+        source: source.to_string(),
+        name: name.to_string(),
+        path,
+        plugin_id: plugin_id.to_string(),
+        plugin_title,
+        state,
+        executable: matches!(
+            state,
+            CommandDoctorState::Ready | CommandDoctorState::Experimental
+        ),
+        primary_action: None,
+        capabilities,
+        issues,
+        alternatives,
+    }
+}
+
+/// Project the host-owned descriptor's real action and disabled reason. This
+/// never synthesizes an SDK call, executes a command, or exposes its raw key.
+pub fn command_doctor_preview_from_descriptor(
+    descriptor: &sk_protocol::command_contract::CommandDescriptor,
+) -> Option<CommandDoctorPrimaryAction> {
+    let primary = descriptor.primary_action()?;
+    let identity_fingerprint = crate::protocol::RedactedElementContent::new(
+        crate::protocol::ElementContentKind::ExternalContent,
+        descriptor.identity.as_str(),
+    )
+    .fingerprint;
+    Some(CommandDoctorPrimaryAction {
+        title: primary.title.clone(),
+        enabled: descriptor.availability.is_executable() && primary.availability.is_executable(),
+        reason: primary
+            .availability
+            .reason_code()
+            .or_else(|| descriptor.availability.reason_code())
+            .map(str::to_string),
+        identity_fingerprint,
+    })
+}
+
+/// Attach a genuine launcher descriptor to an existing doctor row. A blocked
+/// capability remains blocked even if an outdated descriptor says otherwise.
+pub fn attach_command_doctor_descriptor_preview(
+    entry: &mut CommandDoctorEntry,
+    descriptor: &sk_protocol::command_contract::CommandDescriptor,
+) -> bool {
+    let Some(mut preview) = command_doctor_preview_from_descriptor(descriptor) else {
+        return false;
+    };
+    preview.enabled &= entry.executable;
+    entry.primary_action = Some(preview);
+    true
+}
+
+/// Build a complete command-doctor receipt from explicitly supplied snapshots.
+/// This is pure: missing permission facts remain pending and never cause an OS
+/// preflight, settings dialog, capture, app launch, or provider request.
+pub fn build_command_doctor_report(
+    scripts: &[Arc<Script>],
+    scriptlets: &[Arc<Scriptlet>],
+    availability: Option<&SdkHostAvailability>,
+) -> CommandDoctorReport {
+    let mut commands = Vec::with_capacity(scripts.len() + scriptlets.len());
+    for script in scripts {
+        let issues = availability.map_or_else(
+            || crate::scripts::validate_declared_sdk_capabilities(script),
+            |host| {
+                crate::scripts::validate_declared_sdk_capabilities_with_host_availability(
+                    script, host,
+                )
+            },
+        );
+        let declared_capabilities = script
+            .typed_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.extra.get("sdkCapabilities"))
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut entry = doctor_entry(
+            "script",
+            &script.name,
+            script.path.to_string_lossy().into_owned(),
+            &script.plugin_id,
+            script.plugin_title.clone(),
+            declared_capabilities,
+            issues,
+        );
+        let row = crate::scripts::SearchResult::Script(crate::scripts::ScriptMatch {
+            script: Arc::clone(script),
+            score: 0,
+            filename: script
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            match_indices: crate::scripts::MatchIndices::default(),
+            match_kind: crate::scripts::ScriptMatchKind::default(),
+            content_match: None,
+            match_evidence: None,
+        });
+        let descriptor = availability.map_or_else(
+            || row.command_descriptor(),
+            |host| row.command_descriptor_with_host_availability(host),
+        );
+        if let Ok(descriptor) = descriptor {
+            attach_command_doctor_descriptor_preview(&mut entry, &descriptor);
+        }
+        commands.push(entry);
+    }
+
+    for scriptlet in scriptlets {
+        let issues = availability.map_or_else(
+            || crate::scripts::validate_scriptlet_capabilities(scriptlet),
+            |host| {
+                crate::scripts::validate_scriptlet_capabilities_with_host_availability(
+                    scriptlet, host,
+                )
+            },
+        );
+        let path = scriptlet.file_path.clone().unwrap_or_else(|| {
+            format!(
+                "plugins/{}/scriptlets/{}",
+                scriptlet.plugin_id,
+                scriptlet.command.as_deref().unwrap_or(&scriptlet.name)
+            )
+        });
+        let mut entry = doctor_entry(
+            "scriptlet",
+            &scriptlet.name,
+            path,
+            &scriptlet.plugin_id,
+            scriptlet.plugin_title.clone(),
+            crate::scripts::scriptlet_declared_sdk_capabilities(scriptlet),
+            issues,
+        );
+        let row = crate::scripts::SearchResult::Scriptlet(crate::scripts::ScriptletMatch {
+            scriptlet: Arc::clone(scriptlet),
+            score: 0,
+            display_file_path: scriptlet.file_path.clone(),
+            match_indices: crate::scripts::MatchIndices::default(),
+            match_evidence: None,
+        });
+        let descriptor = availability.map_or_else(
+            || row.command_descriptor(),
+            |host| row.command_descriptor_with_host_availability(host),
+        );
+        if let Ok(descriptor) = descriptor {
+            attach_command_doctor_descriptor_preview(&mut entry, &descriptor);
+        }
+        commands.push(entry);
+    }
+
+    commands.sort_by(|left, right| {
+        left.source
+            .cmp(&right.source)
+            .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    let count = |state| commands.iter().filter(|entry| entry.state == state).count();
+    CommandDoctorReport {
+        schema_version: COMMAND_DOCTOR_RESOURCE_SCHEMA_VERSION,
+        host_version: availability
+            .map(|host| host.host_version.clone())
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+        platform: availability
+            .map(|host| host.platform.clone())
+            .unwrap_or_else(|| std::env::consts::OS.to_string()),
+        permission_inventory_known: availability.is_some(),
+        total_commands: commands.len(),
+        ready_count: count(CommandDoctorState::Ready),
+        experimental_count: count(CommandDoctorState::Experimental),
+        unsupported_count: count(CommandDoctorState::Unsupported),
+        blocked_count: count(CommandDoctorState::Blocked),
+        permission_pending_count: count(CommandDoctorState::PermissionPending),
+        commands,
+    }
+}
+
+fn read_command_doctor_resource(
+    scripts: &[Arc<Script>],
+    scriptlets: &[Arc<Scriptlet>],
+) -> Result<ResourceContent, String> {
+    let report = build_command_doctor_report(scripts, scriptlets, None);
+    let text = serde_json::to_string_pretty(&report)
+        .map_err(|error| format!("Failed to serialize command doctor: {error}"))?;
+    Ok(ResourceContent {
+        uri: COMMAND_DOCTOR_RESOURCE_URI.to_string(),
+        mime_type: "application/json".to_string(),
+        text,
+    })
+}
+
 /// Read kit://scripts schema-versioned resource
 fn read_kit_scripts_resource(scripts: &[Arc<Script>]) -> Result<ResourceContent, String> {
     let entries: Vec<ScriptResourceEntry> = scripts
@@ -1931,6 +3619,8 @@ pub(crate) fn build_failed_scripts_document(
             .map(FailedScriptEntry::from)
             .collect(),
         warnings: report.warnings.iter().cloned().collect(),
+        retained_issue_count: report.retained_issues.len(),
+        retained_issues: report.retained_issues.iter().cloned().collect(),
     }
 }
 
@@ -1942,7 +3632,8 @@ pub(crate) fn build_failed_scripts_document(
 /// to MCP request cadence — script loading already runs at startup.
 fn read_kit_failed_scripts_resource() -> Result<ResourceContent, String> {
     let report = crate::scripts::read_scripts_report();
-    let doc = build_failed_scripts_document(&report.validation);
+    let merged = crate::scripts::merge_registered_scriptlet_validation_issues(&report.validation);
+    let doc = build_failed_scripts_document(&merged);
     let json = serde_json::to_string_pretty(&doc)
         .map_err(|e| format!("Failed to serialize failed-scripts document: {e}"))?;
     Ok(ResourceContent {
@@ -2938,7 +4629,6 @@ pub fn resource_list_to_value(resources: &[McpResource]) -> Value {
 // Context resource types and helpers
 // ---------------------------------------------------------------
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4304,6 +5994,29 @@ mod tests {
     }
 
     #[test]
+    fn sdk_reference_discovers_host_diagnostics_without_inventing_sdk_globals() {
+        let doc = build_sdk_reference_document();
+        let doctor = doc
+            .authoring_resources
+            .iter()
+            .find(|resource| resource.uri == COMMAND_DOCTOR_RESOURCE_URI)
+            .expect("command doctor is discoverable in the host authoring reference");
+        assert_eq!(doctor.name, "Command Doctor");
+        assert!(doc
+            .authoring_resources
+            .iter()
+            .any(|resource| resource.uri == FAILED_SCRIPTS_RESOURCE_URI));
+        assert!(!doc
+            .functions
+            .iter()
+            .any(|function| function.name == "commandDoctor"));
+
+        let json = serde_json::to_string(&doc).expect("serialize machine-readable reference");
+        assert!(json.contains("\"authoringResources\""));
+        assert!(json.contains(COMMAND_DOCTOR_RESOURCE_URI));
+    }
+
+    #[test]
     fn sdk_reference_roundtrips_through_json() {
         let doc = build_sdk_reference_document();
         let json = serde_json::to_string(&doc).expect("serialize");
@@ -4314,6 +6027,218 @@ mod tests {
     // =======================================================
     // kit://failed-scripts resource tests
     // =======================================================
+
+    #[test]
+    fn command_doctor_reports_supported_unsupported_and_malformed_commands() {
+        use crate::metadata_parser::TypedMetadata;
+        use std::path::PathBuf;
+
+        let make_script = |name: &str, extension: &str, capabilities: Value| {
+            Arc::new(Script {
+                name: name.to_string(),
+                path: PathBuf::from(format!("/tmp/{name}.{extension}")),
+                extension: extension.to_string(),
+                plugin_id: "main".to_string(),
+                plugin_title: Some("Main".to_string()),
+                typed_metadata: Some(TypedMetadata {
+                    extra: HashMap::from([("sdkCapabilities".to_string(), capabilities)]),
+                    ..TypedMetadata::default()
+                }),
+                ..Script::default()
+            })
+        };
+        let supported = make_script("supported", "ts", serde_json::json!(["home"]));
+        let unsupported = make_script("unsupported", "ts", serde_json::json!(["widget"]));
+        let malformed = make_script("malformed", "ts", serde_json::json!("home"));
+        let no_transport = make_script("shell", "sh", serde_json::json!(["readFile"]));
+
+        let report = build_command_doctor_report(
+            &[no_transport, unsupported, supported, malformed],
+            &[],
+            None,
+        );
+        assert_eq!(report.total_commands, 4);
+        assert_eq!(report.ready_count, 1);
+        assert_eq!(report.unsupported_count, 1);
+        assert_eq!(report.blocked_count, 2);
+        assert!(!report.permission_inventory_known);
+        assert_eq!(
+            report
+                .commands
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["malformed", "shell", "supported", "unsupported"]
+        );
+        let denied = report
+            .commands
+            .iter()
+            .find(|entry| entry.name == "unsupported")
+            .expect("unsupported command stays visible");
+        assert_eq!(denied.state, CommandDoctorState::Unsupported);
+        assert!(!denied.executable);
+        assert!(!denied.alternatives.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn command_doctor_treats_unknown_permission_as_pending_not_denied() {
+        let script = Arc::new(Script {
+            name: "Move Window".to_string(),
+            path: std::path::PathBuf::from("/tmp/move-window.ts"),
+            extension: "ts".to_string(),
+            plugin_id: "main".to_string(),
+            typed_metadata: Some(crate::metadata_parser::TypedMetadata {
+                extra: HashMap::from([(
+                    "sdkCapabilities".to_string(),
+                    serde_json::json!(["moveWindow"]),
+                )]),
+                ..crate::metadata_parser::TypedMetadata::default()
+            }),
+            ..Script::default()
+        });
+
+        let pending = build_command_doctor_report(&[Arc::clone(&script)], &[], None);
+        assert_eq!(pending.permission_pending_count, 1);
+        assert_eq!(pending.blocked_count, 0);
+        assert!(!pending.commands[0].executable);
+        assert_eq!(
+            pending.commands[0].state,
+            CommandDoctorState::PermissionPending
+        );
+        let pending_action = pending.commands[0]
+            .primary_action
+            .as_ref()
+            .expect("pending script retains its actual canonical launcher action");
+        assert!(!pending_action.enabled);
+        assert_eq!(pending_action.reason.as_deref(), Some("permission_pending"));
+
+        let known = SdkHostAvailability {
+            host_version: env!("CARGO_PKG_VERSION").to_string(),
+            platform: "macos".to_string(),
+            granted_permissions: vec!["accessibility".to_string()],
+        };
+        let ready = build_command_doctor_report(&[script], &[], Some(&known));
+        assert!(ready.permission_inventory_known);
+        assert_eq!(ready.ready_count, 1);
+        assert_eq!(ready.commands[0].state, CommandDoctorState::Ready);
+        assert!(
+            ready.commands[0]
+                .primary_action
+                .as_ref()
+                .expect("granted script exposes its actual canonical launcher action")
+                .enabled
+        );
+    }
+
+    #[test]
+    fn command_doctor_experimental_features_remain_explicitly_executable() {
+        let script = Arc::new(Script {
+            name: "Experimental Feedback".to_string(),
+            path: std::path::PathBuf::from("/tmp/experimental-feedback.ts"),
+            extension: "ts".to_string(),
+            plugin_id: "main".to_string(),
+            typed_metadata: Some(crate::metadata_parser::TypedMetadata {
+                extra: HashMap::from([(
+                    "sdkCapabilities".to_string(),
+                    serde_json::json!(["beep"]),
+                )]),
+                ..crate::metadata_parser::TypedMetadata::default()
+            }),
+            ..Script::default()
+        });
+        let host = SdkHostAvailability {
+            host_version: env!("CARGO_PKG_VERSION").to_string(),
+            platform: "macos".to_string(),
+            granted_permissions: Vec::new(),
+        };
+
+        let report = build_command_doctor_report(&[script], &[], Some(&host));
+        assert_eq!(report.experimental_count, 1);
+        assert_eq!(report.commands[0].state, CommandDoctorState::Experimental);
+        assert_eq!(
+            report.commands[0].capabilities[0].support,
+            SdkSupport::Experimental
+        );
+        assert!(report.commands[0].executable);
+    }
+
+    #[test]
+    fn command_doctor_preview_uses_real_descriptor_without_leaking_identity() {
+        use sk_protocol::command_contract::{
+            CommandAvailability, CommandDescriptor, CommandIdentity, CommandSource,
+        };
+
+        let identity = CommandIdentity::new(CommandSource::Script, "main:private-script")
+            .expect("canonical identity");
+        let mut descriptor = CommandDescriptor::new(identity, "Private Script", "Run Script")
+            .expect("real canonical descriptor");
+        let ready = command_doctor_preview_from_descriptor(&descriptor)
+            .expect("descriptor has real primary action");
+        assert_eq!(ready.title, "Run Script");
+        assert!(ready.enabled);
+        let digest = ready
+            .identity_fingerprint
+            .strip_prefix("sha256:")
+            .expect("identity uses the shared cryptographic receipt-redaction contract");
+        assert_eq!(digest.len(), 64);
+        assert!(digest
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+        assert!(!ready.identity_fingerprint.contains("private-script"));
+
+        descriptor.availability = CommandAvailability::TemporarilyUnavailable;
+        descriptor.actions[0].availability = CommandAvailability::TemporarilyUnavailable;
+        let blocked = command_doctor_preview_from_descriptor(&descriptor)
+            .expect("blocked real action remains inspectable");
+        assert!(!blocked.enabled);
+        assert_eq!(blocked.reason.as_deref(), Some("temporarily_unavailable"));
+        assert_eq!(blocked.identity_fingerprint, ready.identity_fingerprint);
+    }
+
+    #[test]
+    fn command_doctor_excludes_source_code_credentials_and_custom_secret_values() {
+        let secret = "sk_live_doctor_must_never_appear";
+        let script = Arc::new(Script {
+            name: "Safe author diagnostics".to_string(),
+            path: std::path::PathBuf::from("/tmp/safe-author-command.ts"),
+            extension: "ts".to_string(),
+            plugin_id: "main".to_string(),
+            body: Some(format!("const token = '{secret}';")),
+            typed_metadata: Some(crate::metadata_parser::TypedMetadata {
+                extra: HashMap::from([
+                    ("sdkCapabilities".to_string(), serde_json::json!(["home"])),
+                    ("privateToken".to_string(), serde_json::json!(secret)),
+                ]),
+                ..crate::metadata_parser::TypedMetadata::default()
+            }),
+            ..Script::default()
+        });
+
+        let report = build_command_doctor_report(&[script], &[], None);
+        let json = serde_json::to_string(&report).expect("serialize safe receipt");
+        assert!(json.contains("/tmp/safe-author-command.ts"));
+        assert!(json.contains("Safe author diagnostics"));
+        assert!(!json.contains(secret));
+        assert!(!json.contains("privateToken"));
+        assert!(!json.contains("const token"));
+    }
+
+    #[test]
+    fn command_doctor_resource_uses_only_explicit_loaded_snapshots() {
+        let resource = read_resource(COMMAND_DOCTOR_RESOURCE_URI, &[], &[], None)
+            .expect("command doctor resolves without app/provider access");
+        assert_eq!(resource.uri, COMMAND_DOCTOR_RESOURCE_URI);
+        let report: CommandDoctorReport =
+            serde_json::from_str(&resource.text).expect("parse command doctor receipt");
+        assert_eq!(
+            report.schema_version,
+            COMMAND_DOCTOR_RESOURCE_SCHEMA_VERSION
+        );
+        assert_eq!(report.total_commands, 0);
+        assert!(report.commands.is_empty());
+        assert!(!report.permission_inventory_known);
+    }
 
     #[test]
     fn failed_scripts_resource_is_listed() {
@@ -4370,6 +6295,7 @@ mod tests {
             warning_count: 0,
             failed_scripts: Arc::from(failed),
             warnings: Arc::from(Vec::<ScriptValidationIssue>::new()),
+            retained_issues: Arc::from(Vec::<ScriptValidationIssue>::new()),
         };
 
         let doc = build_failed_scripts_document(&report);
@@ -4414,6 +6340,7 @@ mod tests {
             warning_count: 0,
             failed_scripts: Arc::from(Vec::new()),
             warnings: Arc::from(Vec::new()),
+            retained_issues: Arc::from(Vec::new()),
         };
         let doc = build_failed_scripts_document(&report);
         assert_eq!(doc.fatal_count, 0);
@@ -4427,6 +6354,83 @@ mod tests {
             parsed.schema_version,
             FAILED_SCRIPTS_RESOURCE_SCHEMA_VERSION
         );
+        assert_eq!(parsed.retained_issue_count, 0);
+        assert!(parsed.retained_issues.is_empty());
+    }
+
+    #[test]
+    fn failed_scripts_resource_keeps_retained_fatal_scriptlet_issues_distinct() {
+        use crate::scripts::{
+            MetadataField, ScriptValidationIssue, ScriptValidationKind, ValidationReport,
+            ValidationSeverity, VALIDATION_SCHEMA_VERSION,
+        };
+
+        let issue = ScriptValidationIssue {
+            severity: ValidationSeverity::Fatal,
+            path: std::path::PathBuf::from("/tmp/retained-scriptlet.md"),
+            script_name: "Retained Shell Command".to_string(),
+            field: Some(MetadataField::Capability),
+            message: "Shell scriptlets do not receive SDK globals.".to_string(),
+            kind: ScriptValidationKind::CapabilityUnavailable {
+                capability: "readFile".to_string(),
+                code: SdkCapabilityDiagnosticCode::MissingSdkTransport,
+                alternatives: vec!["Move the command into a TypeScript script.".to_string()],
+            },
+            related: Vec::new(),
+        };
+        let report = ValidationReport {
+            schema_version: VALIDATION_SCHEMA_VERSION,
+            total_candidates: 1,
+            valid_count: 0,
+            fatal_count: 1,
+            warning_count: 0,
+            failed_scripts: Arc::from(Vec::new()),
+            warnings: Arc::from(Vec::new()),
+            retained_issues: Arc::from(vec![issue]),
+        };
+
+        let document = build_failed_scripts_document(&report);
+        assert!(document.failed_scripts.is_empty());
+        assert!(document.warnings.is_empty());
+        assert_eq!(document.retained_issue_count, 1);
+        assert_eq!(
+            document.retained_issues[0].severity,
+            ValidationSeverity::Fatal
+        );
+        assert_eq!(
+            document.retained_issues[0].path,
+            std::path::PathBuf::from("/tmp/retained-scriptlet.md")
+        );
+        assert!(!document.retained_issues[0].message.is_empty());
+
+        let json = serde_json::to_value(&document).expect("serialize resource");
+        assert_eq!(json["retainedIssueCount"], 1);
+        assert_eq!(json["retainedIssues"][0]["severity"], "fatal");
+        assert_eq!(json["failedScripts"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn failed_scripts_resource_accepts_legacy_documents_without_retained_fields() {
+        let report = ValidationReport {
+            schema_version: crate::scripts::VALIDATION_SCHEMA_VERSION,
+            total_candidates: 0,
+            valid_count: 0,
+            fatal_count: 0,
+            warning_count: 0,
+            failed_scripts: Arc::from(Vec::new()),
+            warnings: Arc::from(Vec::new()),
+            retained_issues: Arc::from(Vec::new()),
+        };
+        let mut legacy = serde_json::to_value(build_failed_scripts_document(&report))
+            .expect("serialize current resource");
+        let object = legacy.as_object_mut().expect("resource object");
+        object.remove("retainedIssueCount");
+        object.remove("retainedIssues");
+
+        let restored: FailedScriptsResourceDocument =
+            serde_json::from_value(legacy).expect("legacy authoring resources remain readable");
+        assert_eq!(restored.retained_issue_count, 0);
+        assert!(restored.retained_issues.is_empty());
     }
 
     #[test]
@@ -5081,6 +7085,9 @@ mod tests {
             md.contains("Prompts the user for input"),
             "missing description: {md}"
         );
+        assert!(md.contains(COMMAND_DOCTOR_RESOURCE_URI));
+        assert!(md.contains(FAILED_SCRIPTS_RESOURCE_URI));
+        assert!(md.contains("host MCP resources, not callable SDK globals"));
     }
 
     #[test]
@@ -5161,29 +7168,488 @@ mod tests {
 
     #[test]
     fn sdk_reference_marks_every_documented_unsupported_api() {
-        // Pins the expanded/contracted list safely: every name in the
-        // SDK_NOT_YET_IMPLEMENTED_IN_GPUI inventory that also appears in the
-        // reference MUST be labeled Unsupported with a note. Names NOT in the
-        // reference are skipped deliberately (this PR does not expand the
-        // reference inventory).
         let doc = build_sdk_reference_document();
         for unsupported_name in SDK_NOT_YET_IMPLEMENTED_IN_GPUI {
-            if let Some(entry) = doc
+            let entry = doc
                 .functions
                 .iter()
                 .find(|entry| entry.name == *unsupported_name)
-            {
-                assert_eq!(
-                    entry.support,
-                    SdkSupport::Unsupported,
-                    "`{unsupported_name}` appears in kit-sdk.ts's 'not yet implemented' inventory but is marked Supported in the SDK reference"
-                );
-                assert!(
-                    entry.unsupported_note.is_some(),
-                    "`{unsupported_name}` must carry an unsupported_note explaining the status"
-                );
+                .unwrap_or_else(|| panic!("unsupported SDK API `{unsupported_name}` is missing from the author-facing reference"));
+            assert_eq!(
+                entry.support,
+                SdkSupport::Unsupported,
+                "`{unsupported_name}` appears in the unsupported inventory but is marked available in the SDK reference"
+            );
+            assert!(
+                entry.unsupported_note.is_some(),
+                "`{unsupported_name}` must carry an actionable support explanation"
+            );
+        }
+    }
+
+    #[test]
+    fn sdk_reference_marks_implemented_prompt_variants_as_supported() {
+        let doc = build_sdk_reference_document();
+
+        for name in [
+            "mini", "micro", "hotkey", "fields", "form", "select", "path",
+        ] {
+            let entry = doc
+                .functions
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("implemented native prompt `{name}` is missing"));
+
+            assert_eq!(entry.support, SdkSupport::Supported);
+            assert!(entry.unsupported_note.is_none());
+            assert!(
+                !SDK_NOT_YET_IMPLEMENTED_IN_GPUI.contains(&name),
+                "implemented prompt `{name}` must not appear in the unsupported inventory"
+            );
+        }
+    }
+
+    #[test]
+    fn sdk_capability_catalog_matches_every_reference_row_exactly_once() {
+        let doc = build_sdk_reference_document();
+        assert_eq!(
+            doc.capability_catalog.schema_version,
+            SDK_CAPABILITY_CATALOG_SCHEMA_VERSION
+        );
+        assert_eq!(
+            doc.capability_catalog.host_version,
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
+            doc.capability_catalog.capabilities.len(),
+            doc.functions.len()
+        );
+
+        let mut seen = std::collections::HashSet::new();
+        for (entry, capability) in doc
+            .functions
+            .iter()
+            .zip(doc.capability_catalog.capabilities.iter())
+        {
+            assert!(seen.insert(capability.name.as_str()));
+            assert_eq!(capability.name, entry.name);
+            assert_eq!(capability.support, entry.support);
+            assert!(!capability.minimum_host_version.is_empty());
+            if capability.support == SdkSupport::Unsupported {
+                assert!(!capability.alternatives.is_empty());
+                assert!(capability.migration_note.is_some());
             }
         }
+    }
+
+    #[test]
+    fn sdk_capability_catalog_reuses_index_until_explicit_invalidation() {
+        let first = sdk_capability_catalog_index();
+        let second = sdk_capability_catalog_index();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            first.catalog.schema_version,
+            SDK_CAPABILITY_CATALOG_SCHEMA_VERSION
+        );
+        assert_eq!(first.catalog.host_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(first.positions.len(), first.catalog.capabilities.len());
+
+        let next_generation = invalidate_sdk_capability_catalog();
+        let refreshed = sdk_capability_catalog_index();
+        assert!(!Arc::ptr_eq(&first, &refreshed));
+        assert_eq!(refreshed.generation, next_generation);
+        assert_eq!(sdk_capability_catalog_generation(), next_generation);
+        assert_eq!(refreshed.catalog, first.catalog);
+    }
+
+    #[test]
+    fn sdk_capability_catalog_declares_native_permission_and_platform_boundaries() {
+        let catalog = sdk_capability_catalog();
+        let move_window = catalog
+            .capabilities
+            .iter()
+            .find(|capability| capability.name == "moveWindow")
+            .expect("moveWindow capability");
+        assert_eq!(move_window.required_permissions, vec!["accessibility"]);
+        assert_eq!(move_window.supported_platforms, vec!["macos"]);
+
+        let screenshot = catalog
+            .capabilities
+            .iter()
+            .find(|capability| capability.name == "computer.captureNativeWindow")
+            .expect("capture capability");
+        assert_eq!(
+            screenshot.required_permissions,
+            vec!["accessibility", "screen-recording"]
+        );
+
+        for name in [
+            "closeWindow",
+            "minimizeWindow",
+            "maximizeWindow",
+            "moveToNextDisplay",
+            "moveToPreviousDisplay",
+            "getMenuBar",
+            "executeMenuAction",
+        ] {
+            let capability = catalog
+                .capabilities
+                .iter()
+                .find(|capability| capability.name == name)
+                .unwrap_or_else(|| panic!("missing native capability `{name}`"));
+            assert_eq!(capability.required_permissions, vec!["accessibility"]);
+            assert_eq!(capability.supported_platforms, vec!["macos"]);
+        }
+    }
+
+    #[test]
+    fn sdk_capability_catalog_covers_real_namespaces_without_claiming_input_injection() {
+        let catalog = sdk_capability_catalog();
+        for name in [
+            "exec",
+            "readFile",
+            "writeFile",
+            "confirm",
+            "chat",
+            "clipboard.readImage",
+            "clipboardHistoryPin",
+            "chat.addMessage",
+            "chat.startStream",
+            "chat.getMessages",
+            "chat.getResult",
+            "memoryMap.get",
+            "mcp.call",
+            "aiGetActiveChat",
+            "aiSendMessage",
+        ] {
+            let capability = catalog
+                .capabilities
+                .iter()
+                .find(|capability| capability.name == name)
+                .unwrap_or_else(|| panic!("missing executable capability `{name}`"));
+            assert_eq!(capability.support, SdkSupport::Supported);
+        }
+
+        for name in ["keyboard", "mouse"] {
+            let capability = catalog
+                .capabilities
+                .iter()
+                .find(|capability| capability.name == name)
+                .unwrap_or_else(|| panic!("missing denied input namespace `{name}`"));
+            assert_eq!(capability.support, SdkSupport::Unsupported);
+            assert!(!capability.alternatives.is_empty());
+        }
+
+        let paste = build_sdk_reference_document()
+            .functions
+            .into_iter()
+            .find(|entry| entry.name == "paste")
+            .expect("paste reference");
+        assert_eq!(paste.signature, "await paste(): Promise<string>");
+        assert!(paste.description.contains("does not inject global input"));
+    }
+
+    #[test]
+    fn unsupported_sdk_capability_inventory_matches_public_author_contract() {
+        let catalog = sdk_capability_catalog();
+        for name in unsupported_sdk_capability_names() {
+            let capability = catalog
+                .capabilities
+                .iter()
+                .find(|capability| capability.name == *name)
+                .unwrap_or_else(|| panic!("missing denied capability `{name}`"));
+            assert_eq!(capability.support, SdkSupport::Unsupported);
+        }
+    }
+
+    #[test]
+    fn sdk_capability_transport_names_match_the_typescript_wire_contract() {
+        for (topology, expected) in [
+            (SdkExecutionTopology::TypeScriptScript, "typescript-script"),
+            (
+                SdkExecutionTopology::TypeScriptScriptlet,
+                "typescript-scriptlet",
+            ),
+            (
+                SdkExecutionTopology::TypeScriptScriptletInteractive,
+                "typescript-scriptlet-interactive",
+            ),
+            (SdkExecutionTopology::ShellScriptlet, "shell-scriptlet"),
+            (SdkExecutionTopology::PythonScriptlet, "python-scriptlet"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(topology).expect("serialize topology"),
+                serde_json::json!(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn sdk_reference_deserializes_legacy_documents_without_a_capability_catalog() {
+        let mut legacy = serde_json::to_value(build_sdk_reference_document())
+            .expect("serialize current SDK reference");
+        legacy
+            .as_object_mut()
+            .expect("reference object")
+            .remove("capabilityCatalog");
+        let restored: SdkReferenceDocument =
+            serde_json::from_value(legacy).expect("legacy SDK reference remains readable");
+        assert!(restored.capability_catalog.capabilities.is_empty());
+    }
+
+    #[test]
+    fn sdk_capability_diagnostics_reject_unsupported_apis_before_dispatch() {
+        for name in [
+            "widget",
+            "setPanel",
+            "keyboard.type",
+            "mouse.leftClick",
+            "find",
+        ] {
+            let diagnostic = diagnose_sdk_capability(name, SdkExecutionTopology::TypeScriptScript)
+                .unwrap_or_else(|| panic!("unsupported capability `{name}` needs a diagnostic"));
+            assert_eq!(
+                diagnostic.code,
+                SdkCapabilityDiagnosticCode::UnsupportedCapability
+            );
+            assert!(!diagnostic.alternatives.is_empty());
+        }
+
+        assert!(diagnose_sdk_capability("mini", SdkExecutionTopology::TypeScriptScript).is_none());
+        assert!(
+            diagnose_sdk_capability("fields", SdkExecutionTopology::TypeScriptScript).is_none()
+        );
+    }
+
+    #[test]
+    fn sdk_capability_diagnostics_reject_impossible_scriptlet_prompt_topologies() {
+        let interactive = diagnose_sdk_capability("arg", SdkExecutionTopology::TypeScriptScriptlet)
+            .expect("interactive scriptlet prompt must fail closed");
+        assert_eq!(
+            interactive.code,
+            SdkCapabilityDiagnosticCode::InteractivePromptUnavailable
+        );
+        assert!(interactive.message.contains("stdin"));
+
+        assert!(diagnose_sdk_capability(
+            "arg",
+            SdkExecutionTopology::TypeScriptScriptletInteractive,
+        )
+        .is_none());
+        assert!(diagnose_sdk_capability(
+            "chat.startStream",
+            SdkExecutionTopology::TypeScriptScriptletInteractive,
+        )
+        .is_none());
+
+        for topology in [
+            SdkExecutionTopology::ShellScriptlet,
+            SdkExecutionTopology::PythonScriptlet,
+        ] {
+            let unavailable = diagnose_sdk_capability("home", topology)
+                .expect("non-TypeScript scriptlets have no SDK transport");
+            assert_eq!(
+                unavailable.code,
+                SdkCapabilityDiagnosticCode::MissingSdkTransport
+            );
+        }
+
+        assert!(
+            diagnose_sdk_capability("home", SdkExecutionTopology::TypeScriptScriptlet).is_none()
+        );
+
+        let active_chat = diagnose_sdk_capability(
+            "chat.startStream",
+            SdkExecutionTopology::TypeScriptScriptlet,
+        )
+        .expect("inline-chat mutations require an interactive active chat session");
+        assert_eq!(
+            active_chat.code,
+            SdkCapabilityDiagnosticCode::InteractivePromptUnavailable
+        );
+        assert!(diagnose_sdk_capability(
+            "chat.getMessages",
+            SdkExecutionTopology::TypeScriptScriptlet
+        )
+        .is_none());
+        assert!(diagnose_sdk_capability(
+            "chat.getResult",
+            SdkExecutionTopology::TypeScriptScriptlet
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn sdk_capability_diagnostics_reject_unknown_apis() {
+        let diagnostic =
+            diagnose_sdk_capability("doesNotExist", SdkExecutionTopology::TypeScriptScript)
+                .expect("unknown capability must not be assumed supported");
+        assert_eq!(
+            diagnostic.code,
+            SdkCapabilityDiagnosticCode::UnknownCapability
+        );
+    }
+
+    #[test]
+    fn sdk_capability_context_rejects_unknown_or_outdated_semver_fail_closed() {
+        let mut host = SdkHostAvailability {
+            host_version: "not-a-semver".into(),
+            platform: "macos".into(),
+            granted_permissions: Vec::new(),
+        };
+        let malformed = diagnose_sdk_capability_with_context(
+            "home",
+            SdkExecutionTopology::TypeScriptScript,
+            &host,
+        )
+        .expect("invalid version must not pass capability preflight");
+        assert_eq!(
+            malformed.code,
+            SdkCapabilityDiagnosticCode::InvalidHostVersion
+        );
+
+        host.host_version = "0.0.0".into();
+        let outdated = diagnose_sdk_capability_with_context(
+            "home",
+            SdkExecutionTopology::TypeScriptScript,
+            &host,
+        )
+        .expect("older host must not claim current capability support");
+        assert_eq!(
+            outdated.code,
+            SdkCapabilityDiagnosticCode::HostVersionTooOld
+        );
+        assert!(outdated.message.contains("0.0.0"));
+    }
+
+    #[test]
+    fn sdk_capability_context_enforces_platform_then_explicit_permission_facts() {
+        let mut host = SdkHostAvailability {
+            host_version: env!("CARGO_PKG_VERSION").into(),
+            platform: "linux".into(),
+            granted_permissions: vec!["accessibility".into()],
+        };
+        let unsupported = diagnose_sdk_capability_with_context(
+            "moveWindow",
+            SdkExecutionTopology::TypeScriptScript,
+            &host,
+        )
+        .expect("native macOS capability must reject other platforms");
+        assert_eq!(
+            unsupported.code,
+            SdkCapabilityDiagnosticCode::UnsupportedPlatform
+        );
+
+        host.platform = "macos".into();
+        host.granted_permissions.clear();
+        let missing = diagnose_sdk_capability_with_context(
+            "moveWindow",
+            SdkExecutionTopology::TypeScriptScript,
+            &host,
+        )
+        .expect("accessibility grant is an explicit capability prerequisite");
+        assert_eq!(missing.code, SdkCapabilityDiagnosticCode::MissingPermission);
+        assert!(missing.message.contains("accessibility"));
+
+        host.granted_permissions.push("accessibility".into());
+        assert!(diagnose_sdk_capability_with_context(
+            "moveWindow",
+            SdkExecutionTopology::TypeScriptScript,
+            &host,
+        )
+        .is_none());
+
+        let capture = diagnose_sdk_capability_with_context(
+            "computer.captureNativeWindow",
+            SdkExecutionTopology::TypeScriptScript,
+            &host,
+        )
+        .expect("capture requires both accessibility and screen-recording");
+        assert_eq!(capture.code, SdkCapabilityDiagnosticCode::MissingPermission);
+        assert!(capture.message.contains("screen-recording"));
+
+        host.granted_permissions.push("screen-recording".into());
+        assert!(diagnose_sdk_capability_with_context(
+            "computer.captureNativeWindow",
+            SdkExecutionTopology::TypeScriptScript,
+            &host,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn sdk_capability_current_host_never_assumes_unknown_permission_granted() {
+        assert!(diagnose_sdk_capability_for_current_host(
+            "home",
+            SdkExecutionTopology::TypeScriptScript,
+        )
+        .is_none());
+
+        let host = SdkHostDiagnosticContext {
+            host_version: env!("CARGO_PKG_VERSION"),
+            platform: "macos",
+            granted_permissions: None,
+        };
+        let pending = diagnose_sdk_capability_inner(
+            "moveWindow",
+            SdkExecutionTopology::TypeScriptScript,
+            Some(host),
+        )
+        .expect("unknown permission inventory must never be treated as a grant");
+        assert_eq!(
+            pending.code,
+            SdkCapabilityDiagnosticCode::PermissionInventoryUnavailable
+        );
+        assert!(pending
+            .message
+            .contains("no already-known permission inventory"));
+        assert!(!pending.message.contains("has not granted"));
+    }
+
+    #[test]
+    fn sdk_capability_context_preserves_topology_and_unsupported_precedence() {
+        let host = SdkHostAvailability {
+            host_version: "not-a-semver".into(),
+            platform: "linux".into(),
+            granted_permissions: Vec::new(),
+        };
+        let denied = diagnose_sdk_capability_with_context(
+            "keyboard.type",
+            SdkExecutionTopology::TypeScriptScript,
+            &host,
+        )
+        .expect("unsupported global input must reject before inspecting host facts");
+        assert_eq!(
+            denied.code,
+            SdkCapabilityDiagnosticCode::UnsupportedCapability
+        );
+
+        let missing_transport = diagnose_sdk_capability_with_context(
+            "home",
+            SdkExecutionTopology::ShellScriptlet,
+            &host,
+        )
+        .expect("missing SDK transport must reject before inspecting host facts");
+        assert_eq!(
+            missing_transport.code,
+            SdkCapabilityDiagnosticCode::MissingSdkTransport
+        );
+    }
+
+    #[test]
+    fn sdk_host_availability_wire_is_explicit_and_does_not_probe_permissions() {
+        let host = SdkHostAvailability::current(vec!["accessibility".into()]);
+        assert_eq!(host.host_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(host.platform, std::env::consts::OS);
+        assert_eq!(host.granted_permissions, vec!["accessibility"]);
+
+        let encoded = serde_json::to_value(&host).expect("serialize host availability");
+        assert_eq!(encoded["hostVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(encoded["platform"], std::env::consts::OS);
+        assert_eq!(
+            encoded["grantedPermissions"],
+            serde_json::json!(["accessibility"])
+        );
     }
 
     #[test]
@@ -5295,10 +7761,10 @@ mod tests {
     }
 
     #[test]
-    fn sdk_reference_schema_version_is_five() {
+    fn sdk_reference_schema_version_is_six() {
         // Pin the current schema version so any accidental bump is visible
         // in the diff and stays paired with an envelope-shape change.
-        assert_eq!(SDK_REFERENCE_SCHEMA_VERSION, 5);
+        assert_eq!(SDK_REFERENCE_SCHEMA_VERSION, 6);
     }
 
     #[test]
@@ -5412,6 +7878,49 @@ mod tests {
     }
 
     #[test]
+    fn every_starter_template_declares_only_real_supported_host_capabilities() {
+        for template in build_script_templates_document().templates {
+            let source = render_script_template_file(&template, "Compatibility Fixture");
+            let parsed = crate::metadata_parser::extract_typed_metadata(&source);
+            assert!(
+                parsed.errors.is_empty(),
+                "template {} has malformed metadata: {:?}",
+                template.id,
+                parsed.errors
+            );
+            let metadata = parsed
+                .metadata
+                .expect("starter template declares typed metadata");
+            assert_eq!(
+                metadata.extra.get("sdkCapabilities"),
+                Some(&serde_json::json!(["arg", "div", "md"])),
+                "template {} must truthfully declare the globals it invokes",
+                template.id
+            );
+            assert_eq!(
+                metadata.extra.get("executionTopology"),
+                Some(&serde_json::json!("typescript-script")),
+                "template {} must declare its real interactive script transport",
+                template.id
+            );
+
+            let script = Script {
+                name: "Compatibility Fixture".to_string(),
+                path: std::path::PathBuf::from("compatibility-fixture.ts"),
+                extension: "ts".to_string(),
+                plugin_id: "main".to_string(),
+                typed_metadata: Some(metadata),
+                ..Script::default()
+            };
+            assert!(
+                crate::scripts::validate_declared_sdk_capabilities(&script).is_empty(),
+                "template {} must satisfy its actual host capability contract",
+                template.id
+            );
+        }
+    }
+
+    #[test]
     fn script_template_ids_are_unique() {
         let doc = build_script_templates_document();
         let mut ids: Vec<&str> = doc.templates.iter().map(|t| t.id.as_str()).collect();
@@ -5486,6 +7995,114 @@ mod tests {
             !rendered.contains("{{DESCRIPTION}}"),
             "all placeholders should be replaced: {rendered}"
         );
+    }
+
+    #[test]
+    fn render_script_template_file_escapes_valid_names_without_changing_host_metadata() {
+        let friendly_names = [
+            r#"John's "Favorite" Script"#,
+            "Crème brûlée 東京 🦀 {draft}",
+            "Literal {{DESCRIPTION}} and {{NAME}}",
+            r#"Harmless"; globalThis.__scriptKitTemplateInjection = true; const text = "data"#,
+        ];
+
+        for template in build_script_templates_document().templates {
+            for friendly_name in friendly_names {
+                let rendered = render_script_template_file(&template, friendly_name);
+                let parsed = crate::metadata_parser::extract_typed_metadata(&rendered);
+                assert!(
+                    parsed.errors.is_empty(),
+                    "template {} must parse an accepted friendly name safely: {:?}",
+                    template.id,
+                    parsed.errors,
+                );
+                let metadata = parsed
+                    .metadata
+                    .expect("escaped starter must retain its real typed metadata");
+                assert_eq!(metadata.name.as_deref(), Some(friendly_name));
+                assert_eq!(
+                    metadata.extra.get("sdkCapabilities"),
+                    Some(&serde_json::json!(["arg", "div", "md"])),
+                );
+                assert_eq!(
+                    metadata.extra.get("executionTopology"),
+                    Some(&serde_json::json!("typescript-script")),
+                );
+
+                let name_line = rendered
+                    .lines()
+                    .find(|line| line.trim_start().starts_with("name:"))
+                    .expect("starter must expose one metadata name field");
+                let expected_literal = Value::String(friendly_name.to_owned()).to_string();
+                assert_eq!(name_line.trim(), format!("name: {expected_literal},"));
+
+                let script = Script {
+                    name: friendly_name.to_owned(),
+                    path: std::path::PathBuf::from("escaped-starter.ts"),
+                    extension: "ts".to_owned(),
+                    plugin_id: "main".to_owned(),
+                    typed_metadata: Some(metadata),
+                    ..Script::default()
+                };
+                assert!(
+                    crate::scripts::validate_declared_sdk_capabilities(&script).is_empty(),
+                    "escaping must preserve the actual supported starter capabilities"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn render_script_template_file_never_recursively_expands_name_or_description_data() {
+        let mut template = find_script_template("blank-starter")
+            .expect("the real first-run starter must remain available");
+        let friendly_name = r#"Keep {{DESCRIPTION}}, {{NAME}}, {braces}, and "quotes" 東京"#;
+        let description =
+            "Keep {{NAME}}, {{DESCRIPTION}}, braces {}, \\slashes\\, \"quotes\", and\nnewlines";
+        template.metadata_defaults.description = Some(description.to_owned());
+
+        let rendered = render_script_template_file(&template, friendly_name);
+        let parsed = crate::metadata_parser::extract_typed_metadata(&rendered);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let metadata = parsed
+            .metadata
+            .expect("both escaped template fields must parse as ordinary strings");
+        assert_eq!(metadata.name.as_deref(), Some(friendly_name));
+        assert_eq!(metadata.description.as_deref(), Some(description));
+
+        let expected_name = Value::String(friendly_name.to_owned()).to_string();
+        let expected_description = Value::String(description.to_owned()).to_string();
+        assert!(rendered.contains(&format!("  name: {expected_name},\n")));
+        assert!(rendered.contains(&format!("  description: {expected_description},\n")));
+        assert!(rendered.contains("{{NAME}}"));
+        assert!(rendered.contains("{{DESCRIPTION}}"));
+    }
+
+    #[test]
+    fn render_script_template_file_keeps_statement_injection_inside_one_string_literal() {
+        let template = find_script_template("choice-list")
+            .expect("the production choice-list starter must remain available");
+        let friendly_name = r#"Safe"}; globalThis.__SCRIPT_KIT_HOSTILE__ = true; {"name":"Again"#;
+        let rendered = render_script_template_file(&template, friendly_name);
+
+        let parsed = crate::metadata_parser::extract_typed_metadata(&rendered);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let metadata = parsed
+            .metadata
+            .expect("hostile-looking text must remain one parsed metadata value");
+        assert_eq!(metadata.name.as_deref(), Some(friendly_name));
+        assert_eq!(
+            metadata.extra.get("sdkCapabilities"),
+            Some(&serde_json::json!(["arg", "div", "md"])),
+        );
+
+        let expected_literal = Value::String(friendly_name.to_owned()).to_string();
+        let name_line = rendered
+            .lines()
+            .find(|line| line.trim_start().starts_with("name:"))
+            .expect("starter name must remain on one metadata line");
+        assert_eq!(name_line.trim(), format!("name: {expected_literal},"));
+        assert!(!rendered.contains("name: \"Safe\"}; globalThis"));
     }
 
     #[test]

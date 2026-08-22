@@ -27,8 +27,13 @@
 // Helpers
 // =============================================================================
 
-// Local delay helper (wait() was removed from SDK)
-const wait = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
+// Isolated auto-submit fixtures update immediately; retain propagation waits
+// only for deliberately requested host-backed runs.
+const wait = async (ms: number): Promise<void> => {
+  if (process.env.SDK_TEST_AUTOSUBMIT !== '1') {
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
+  }
+};
 
 // =============================================================================
 // Test Infrastructure
@@ -148,10 +153,8 @@ try {
       });
     }
   } else {
-    // Entry not found - this could be expected if clipboard history is not persisted
-    // or if the backend doesn't yet implement this feature
-    logTest(test2, 'skip', { 
-      result: `Entry not found in history (may not be implemented)`,
+    logTest(test2, 'fail', {
+      error: 'A copied entry must be present in deterministic clipboard history.',
       duration_ms: Date.now() - start2 
     });
   }
@@ -173,8 +176,8 @@ try {
   const history = await clipboardHistory();
   
   if (history.length === 0) {
-    logTest(test3, 'skip', { 
-      result: 'No entries in clipboard history to test pinning',
+    logTest(test3, 'fail', {
+      error: 'The previous copy test must leave an entry available for pinning.',
       duration_ms: Date.now() - start3 
     });
   } else {
@@ -196,9 +199,8 @@ try {
         duration_ms: Date.now() - start3 
       });
     } else if (pinnedEntry) {
-      // Pin command didn't fail but state wasn't updated
-      logTest(test3, 'skip', { 
-        result: 'Pin command executed but state may not be persisted',
+      logTest(test3, 'fail', {
+        error: 'Pin completed without updating clipboard entry state.',
         duration_ms: Date.now() - start3 
       });
     } else {
@@ -209,12 +211,7 @@ try {
     }
   }
 } catch (err) {
-  // If pinning fails with an error, it might be expected if not implemented
-  if (String(err).includes('not implemented') || String(err).includes('ERROR:')) {
-    logTest(test3, 'skip', { result: `Pin not implemented: ${err}`, duration_ms: Date.now() - start3 });
-  } else {
-    logTest(test3, 'fail', { error: String(err), duration_ms: Date.now() - start3 });
-  }
+  logTest(test3, 'fail', { error: String(err), duration_ms: Date.now() - start3 });
 }
 
 // -----------------------------------------------------------------------------
@@ -232,8 +229,8 @@ try {
   const pinnedEntry = history.find(e => e.pinned === true);
   
   if (!pinnedEntry) {
-    logTest(test4, 'skip', { 
-      result: 'No pinned entries to unpin',
+    logTest(test4, 'fail', {
+      error: 'The pin test must leave a pinned clipboard entry.',
       duration_ms: Date.now() - start4 
     });
   } else {
@@ -254,8 +251,8 @@ try {
         duration_ms: Date.now() - start4 
       });
     } else if (unpinnedEntry) {
-      logTest(test4, 'skip', { 
-        result: 'Unpin command executed but state may not be persisted',
+      logTest(test4, 'fail', {
+        error: 'Unpin completed without updating clipboard entry state.',
         duration_ms: Date.now() - start4 
       });
     } else {
@@ -266,11 +263,7 @@ try {
     }
   }
 } catch (err) {
-  if (String(err).includes('not implemented') || String(err).includes('ERROR:')) {
-    logTest(test4, 'skip', { result: `Unpin not implemented: ${err}`, duration_ms: Date.now() - start4 });
-  } else {
-    logTest(test4, 'fail', { error: String(err), duration_ms: Date.now() - start4 });
-  }
+  logTest(test4, 'fail', { error: String(err), duration_ms: Date.now() - start4 });
 }
 
 // -----------------------------------------------------------------------------
@@ -293,8 +286,8 @@ try {
   const entryToRemove = historyBefore.find(e => e.content === testText);
   
   if (!entryToRemove) {
-    logTest(test5, 'skip', { 
-      result: 'Could not create test entry to remove',
+    logTest(test5, 'fail', {
+      error: 'A copied removal fixture must exist before remove is called.',
       duration_ms: Date.now() - start5 
     });
   } else {
@@ -315,18 +308,14 @@ try {
         duration_ms: Date.now() - start5 
       });
     } else {
-      logTest(test5, 'skip', { 
-        result: 'Remove command executed but entry still present',
+      logTest(test5, 'fail', {
+        error: 'Remove completed but the entry remained in clipboard history.',
         duration_ms: Date.now() - start5 
       });
     }
   }
 } catch (err) {
-  if (String(err).includes('not implemented') || String(err).includes('ERROR:')) {
-    logTest(test5, 'skip', { result: `Remove not implemented: ${err}`, duration_ms: Date.now() - start5 });
-  } else {
-    logTest(test5, 'fail', { error: String(err), duration_ms: Date.now() - start5 });
-  }
+  logTest(test5, 'fail', { error: String(err), duration_ms: Date.now() - start5 });
 }
 
 // -----------------------------------------------------------------------------
@@ -369,8 +358,8 @@ try {
       duration_ms: Date.now() - start6 
     });
   } else if (countAfter === countBefore) {
-    logTest(test6, 'skip', { 
-      result: 'Clear command executed but entries remain',
+    logTest(test6, 'fail', {
+      error: 'Clear completed without removing non-pinned clipboard entries.',
       duration_ms: Date.now() - start6 
     });
   } else {
@@ -380,18 +369,80 @@ try {
     });
   }
 } catch (err) {
-  if (String(err).includes('not implemented') || String(err).includes('ERROR:')) {
-    logTest(test6, 'skip', { result: `Clear not implemented: ${err}`, duration_ms: Date.now() - start6 });
-  } else {
-    logTest(test6, 'fail', { error: String(err), duration_ms: Date.now() - start6 });
+  logTest(test6, 'fail', { error: String(err), duration_ms: Date.now() - start6 });
+}
+
+// -----------------------------------------------------------------------------
+// Test 7: Unknown entry IDs reject instead of claiming a successful mutation.
+// -----------------------------------------------------------------------------
+const test7 = 'clipboard-history-unknown-id-rejects';
+logTest(test7, 'running');
+const start7 = Date.now();
+
+try {
+  for (const [name, action] of [
+    ['pin', clipboardHistoryPin],
+    ['unpin', clipboardHistoryUnpin],
+    ['remove', clipboardHistoryRemove],
+  ] as const) {
+    let rejected = false;
+    try {
+      await action('synthetic-clipboard-does-not-exist');
+    } catch (error) {
+      rejected = String(error).includes('Unknown synthetic clipboard entry id');
+    }
+    if (!rejected) {
+      throw new Error(`${name} must reject an unknown clipboard history entry id.`);
+    }
   }
+
+  logTest(test7, 'pass', {
+    result: 'pin, unpin, and remove reject unknown synthetic entry IDs',
+    duration_ms: Date.now() - start7,
+  });
+} catch (error) {
+  logTest(test7, 'fail', { error: String(error), duration_ms: Date.now() - start7 });
+}
+
+// -----------------------------------------------------------------------------
+// Test 8: Clear preserves explicitly pinned entries and removes other entries.
+// -----------------------------------------------------------------------------
+const test8 = 'clipboard-history-clear-preserves-pinned';
+logTest(test8, 'running');
+const start8 = Date.now();
+
+try {
+  await copy('synthetic-pinned-entry');
+  const pinned = (await clipboardHistory()).find((entry) => entry.content === 'synthetic-pinned-entry');
+  if (!pinned) {
+    throw new Error('Could not prepare synthetic pinned clipboard entry.');
+  }
+  await clipboardHistoryPin(pinned.entryId);
+  await copy('synthetic-disposable-entry');
+  await clipboardHistoryClear();
+
+  const remaining = await clipboardHistory();
+  if (
+    remaining.length !== 1
+    || remaining[0].entryId !== pinned.entryId
+    || !remaining[0].pinned
+  ) {
+    throw new Error(`Clear must preserve only the pinned entry: ${JSON.stringify(remaining)}`);
+  }
+
+  logTest(test8, 'pass', {
+    result: { entryId: pinned.entryId, pinned: true },
+    duration_ms: Date.now() - start8,
+  });
+} catch (error) {
+  logTest(test8, 'fail', { error: String(error), duration_ms: Date.now() - start8 });
 }
 
 // -----------------------------------------------------------------------------
 // Summary and Exit
 // -----------------------------------------------------------------------------
 debug('test-clipboard-history.ts completed!');
-debug('All 6 tests executed. Check JSONL output for detailed results.');
+debug('All 8 isolated clipboard protocol tests executed.');
 
 // Exit cleanly for autonomous testing
 exit(0);

@@ -16,13 +16,16 @@ fn naming_prompt_scripts_write_receipt_after_template_body_before_editor() {
     let source = read_source("src/app_impl/naming_dialog.rs");
     let body = source_between(
         &source,
-        "match create_result {\n            Ok(path) => {",
+        "pub(crate) fn handle_naming_dialog_completion(",
         "self.open_creation_feedback_payload(",
     );
 
-    let template_write = body
+    let template_render = body
         .find("render_script_template_file")
-        .expect("script-template body should be rendered before the editor opens");
+        .expect("script-template body should be rendered before creating its final file");
+    let exclusive_create = body
+        .find("create_new_script_with_contents")
+        .expect("script-template final bytes must use the exclusive creation handle");
     let receipt_write = body
         .find("write_script_creation_receipt_for_path")
         .expect("script creation must write a generated-script receipt");
@@ -31,8 +34,14 @@ fn naming_prompt_scripts_write_receipt_after_template_body_before_editor() {
         .expect("created script should still open in the editor");
 
     assert!(
-        template_write < receipt_write && receipt_write < editor_open,
-        "receipt must describe the final template-written file before editor/CreationFeedback"
+        template_render < exclusive_create
+            && exclusive_create < receipt_write
+            && receipt_write < editor_open,
+        "rendered final bytes must be created exclusively before receipt verification and editor launch"
+    );
+    assert!(
+        !body[exclusive_create..editor_open].contains("std::fs::write("),
+        "an exclusively created script must never be reopened for a second vulnerable template write"
     );
     assert!(
         source.contains("self.open_creation_feedback_payload("),
@@ -45,40 +54,56 @@ fn receipt_plumbing_is_script_only_and_scriptlets_stay_unverified() {
     let source = read_source("src/app_impl/naming_dialog.rs");
     let body = source_between(
         &source,
-        "let create_result = match result.target {",
+        "let rendered_script_template =",
         "self.open_creation_feedback_payload(",
     );
 
-    let receipt_guard = "if result.target == prompts::NamingTarget::Script";
-    let first_guard = body
-        .find(receipt_guard)
-        .expect("template overwrite must be guarded to NamingTarget::Script");
-    let after_first = &body[first_guard + receipt_guard.len()..];
-    let second_guard = after_first
-        .find(receipt_guard)
-        .expect("receipt plumbing must have its own NamingTarget::Script guard");
-    let template_arm = &after_first[..second_guard];
-    let receipt_arm = &after_first[second_guard..];
+    let create_start = body
+        .find("let create_result = match result.target {")
+        .expect("naming result must retain one target-specific creation match");
+    let template_preparation = &body[..create_start];
     assert!(
-        template_arm.contains("find_script_template"),
-        "first NamingTarget::Script guard must own the template-overwrite plumbing"
+        template_preparation.contains("result.target == prompts::NamingTarget::Script")
+            && template_preparation.contains("find_script_template")
+            && template_preparation.contains("render_script_template_file"),
+        "only scripts may resolve and render their final starter before file creation"
+    );
+
+    let creation_match = source_between(
+        &body[create_start..],
+        "let create_result = match result.target {",
+        "match create_result {",
+    );
+    let script_arm = source_between(
+        creation_match,
+        "prompts::NamingTarget::Script =>",
+        "prompts::NamingTarget::Extension =>",
     );
     assert!(
-        receipt_arm.contains("write_script_creation_receipt_for_path"),
-        "second NamingTarget::Script guard must own the receipt plumbing"
+        script_arm.contains("create_new_script_with_contents")
+            && script_arm.contains("create_new_script(&filename_stem)"),
+        "scripts must use exclusive final-byte creation while preserving their default starter fallback"
     );
+
+    let extension_arm = source_between(creation_match, "prompts::NamingTarget::Extension =>", "};");
     assert!(
-        body.contains("prompts::NamingTarget::Extension => script_creation::create_new_scriptlet"),
+        extension_arm.contains("script_creation::create_new_scriptlet"),
         "extension/scriptlet creation should keep the existing create_new_scriptlet path"
-    );
-    let extension_arm = source_between(
-        body,
-        "prompts::NamingTarget::Extension => script_creation::create_new_scriptlet",
-        "};",
     );
     assert!(
         !extension_arm.contains("write_script_creation_receipt_for_path"),
         "scriptlet creation must not pretend to have TypeScript generated-script verification"
+    );
+
+    let receipt_region = &body[body
+        .find("match create_result {")
+        .expect("successful creation must precede receipt verification")..];
+    let receipt_guard = receipt_region
+        .find("if result.target == prompts::NamingTarget::Script")
+        .expect("receipt verification must remain guarded to scripts");
+    assert!(
+        receipt_region[receipt_guard..].contains("write_script_creation_receipt_for_path"),
+        "script-only success handling must own generated-script receipt verification"
     );
 }
 

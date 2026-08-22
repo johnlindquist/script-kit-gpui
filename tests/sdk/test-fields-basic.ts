@@ -6,11 +6,8 @@
  *
  * Tests the fields() SDK function with basic input types.
  * 
- * NOTE: As of 2025-01-02, the GPUI backend does NOT yet implement the Fields
- * message handler. This test verifies:
- * 1. The SDK correctly sends Fields messages to the backend
- * 2. The message structure matches the protocol specification
- * 3. Screenshots capture the current (unhandled) state for tracking progress
+ * Verifies the SDK request/response contract, ordered result values, and field
+ * defaults. Native styling and password masking require separate runtime proof.
  *
  * Test cases:
  * 1. fields-string-labels: Simple string labels (fields(["Name", "Email"]))
@@ -20,21 +17,12 @@
  * 5. fields-number-type: Number field with placeholder
  * 6. fields-prefilled-values: Pre-filled default values
  *
- * Expected current behavior:
- * - SDK sends Fields message correctly
- * - GPUI shows "Unhandled message type: Fields" warning
- * - Test captures screenshot for visual verification
- * 
- * Expected future behavior (when implemented):
+ * Expected behavior:
  * - fields() returns array of strings matching number of fields
- * - Each field type renders correctly with proper input styling
- * - Password fields mask input characters
- * - Pre-filled values appear in the input fields
+ * - Pre-filled values remain in field-definition order
  */
 
 import "../../scripts/kit-sdk.ts";
-import { writeFileSync, mkdirSync, existsSync } from "fs";
-import { join } from "path";
 
 // =============================================================================
 // Test Infrastructure
@@ -47,7 +35,6 @@ interface TestResult {
 	result?: unknown;
 	error?: string;
 	duration_ms?: number;
-	screenshot?: string;
 }
 
 function logTest(
@@ -66,30 +53,6 @@ function logTest(
 
 function debug(msg: string) {
 	console.error(`[TEST] ${msg}`);
-}
-
-// Screenshot helper
-async function captureAndSave(testName: string): Promise<string> {
-	const screenshotDir = join(process.cwd(), ".test-screenshots");
-	if (!existsSync(screenshotDir)) {
-		mkdirSync(screenshotDir, { recursive: true });
-	}
-
-	const timestamp = Date.now();
-	const filename = `fields-basic-${testName}-${timestamp}.png`;
-	const filepath = join(screenshotDir, filename);
-
-	try {
-		const screenshot = await captureScreenshot();
-		debug(`Captured screenshot: ${screenshot.width}x${screenshot.height}`);
-
-		writeFileSync(filepath, Buffer.from(screenshot.data, "base64"));
-		debug(`[SCREENSHOT] ${filepath}`);
-		return filepath;
-	} catch (err) {
-		debug(`Screenshot capture failed: ${err}`);
-		return "";
-	}
 }
 
 // =============================================================================
@@ -152,12 +115,10 @@ const testCases = [
 // =============================================================================
 
 debug("test-fields-basic.ts starting...");
-debug(`SDK globals: fields=${typeof fields}, captureScreenshot=${typeof captureScreenshot}`);
+debug(`SDK globals: fields=${typeof fields}`);
 debug(`Running ${testCases.length} test cases`);
 
-// Run all tests sequentially - each test sends a fields() message
-// Currently: GPUI will show "Unhandled message" for each
-// Future: GPUI will render the actual form fields
+// Run all tests sequentially; prompts share one host and must not overlap.
 
 for (let i = 0; i < testCases.length; i++) {
 	const tc = testCases[i];
@@ -171,31 +132,27 @@ for (let i = 0; i < testCases.length; i++) {
 	debug(`Fields: ${JSON.stringify(tc.fields)}`);
 
 	try {
-		// Send the fields message (this starts the promise but doesn't block)
-		// The SDK will send a Fields message to GPUI
-		const fieldsPromise = fields(tc.fields);
+		const result = await fields(tc.fields);
+		const expected = tc.fields.map((field) =>
+			typeof field === "string" ? "" : field.value ?? "",
+		);
+		if (!Array.isArray(result) || JSON.stringify(result) !== JSON.stringify(expected)) {
+			throw new Error(
+				`Expected ordered values ${JSON.stringify(expected)}, got ${JSON.stringify(result)}`,
+			);
+		}
 
-		// Wait for the UI to process and render
-		await new Promise((r) => setTimeout(r, 800));
-
-		// Capture screenshot to document current state
-		const screenshotPath = await captureAndSave(testName);
-
-		// Log the test result
-		// Currently marking as "pass" because the SDK correctly sends the message
-		// The "Unhandled message" state is expected until GPUI implements Fields handler
 		logTest(testName, "pass", {
 			result: {
 				description: tc.description,
 				fieldCount: tc.fields.length,
-				fields: tc.fields,
-				note: "SDK message sent successfully. GPUI Fields handler not yet implemented.",
+				values: result,
+				proof: "sdk-auto-submit-request-response",
 			},
 			duration_ms: Date.now() - startTime,
-			screenshot: screenshotPath,
 		});
 
-		debug(`Test ${testName} passed - message sent, screenshot captured`);
+		debug(`Test ${testName} passed - ordered field response verified`);
 	} catch (err) {
 		logTest(testName, "fail", {
 			error: String(err),
@@ -213,7 +170,6 @@ debug("\n=== Test Summary ===");
 debug(`Ran ${testCases.length} test cases for fields() SDK function`);
 debug("All tests verify that the SDK correctly sends Fields messages.");
 debug("Note: GPUI backend does not yet implement Fields message handler.");
-debug("Screenshots saved to: .test-screenshots/fields-basic-*.png");
 debug("");
 debug("When Fields handler is implemented in GPUI, these tests should:");
 debug("  1. Render actual form fields");

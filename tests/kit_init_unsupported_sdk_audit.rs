@@ -65,8 +65,45 @@ fn collect_checked_files(root: &Path, out: &mut Vec<PathBuf>) {
 fn contains_unsupported_call<'a>(line: &str, names: &'a [String]) -> Option<&'a str> {
     names
         .iter()
-        .find(|name| line.contains(&format!("{name}(")))
+        .find(|name| {
+            let needle = format!("{name}(");
+            line.match_indices(&needle).any(|(offset, _)| {
+                line[..offset].chars().next_back().is_none_or(|previous| {
+                    previous != '.'
+                        && previous != '_'
+                        && previous != '$'
+                        && !previous.is_ascii_alphanumeric()
+                })
+            })
+        })
         .map(|s| s.as_str())
+}
+
+#[test]
+fn unsupported_global_detection_does_not_confuse_array_methods_with_sdk_calls() {
+    let names = vec!["find".to_string(), "widget".to_string()];
+
+    assert_eq!(
+        contains_unsupported_call("await find('file')", &names),
+        Some("find")
+    );
+    assert_eq!(
+        contains_unsupported_call("await widget('<div />')", &names),
+        Some("widget")
+    );
+    assert_eq!(
+        contains_unsupported_call("items.find(item => item.id)", &names),
+        None
+    );
+    assert_eq!(
+        contains_unsupported_call("items?.find(item => item.id)", &names),
+        None
+    );
+    assert_eq!(
+        contains_unsupported_call("helpers.widget('<div />')", &names),
+        None
+    );
+    assert_eq!(contains_unsupported_call("refind('text')", &names), None);
 }
 
 /// Markdown-table prose allowlist. An API-reference row of the shape

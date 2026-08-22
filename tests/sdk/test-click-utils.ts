@@ -22,9 +22,11 @@ import '../../scripts/kit-sdk';
 
 // Node built-ins are available in Bun runtime
 // @ts-ignore - Bun provides Node compatibility
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, existsSync, mkdtempSync, rmSync } from 'fs';
 // @ts-ignore - Bun provides Node compatibility
 import { join } from 'path';
+// @ts-ignore - Bun provides Node compatibility
+import { tmpdir } from 'os';
 
 // =============================================================================
 // Types
@@ -161,6 +163,7 @@ export async function waitForRender(ms: number = 100): Promise<void> {
  * The directory ./test-screenshots/ is created if it doesn't exist.
  *
  * @param name - Base name for the screenshot file (without extension)
+ * @param outputDirectory - Optional explicit destination for isolated fixtures
  * @returns Promise that resolves to the full path of the saved screenshot
  *
  * @example
@@ -170,10 +173,10 @@ export async function waitForRender(ms: number = 100): Promise<void> {
  * console.error(`Screenshot saved to: ${filepath}`);
  * ```
  */
-export async function captureAndSave(name: string): Promise<string> {
+export async function captureAndSave(name: string, outputDirectory?: string): Promise<string> {
   // Ensure the screenshots directory exists
   // @ts-ignore - process.cwd() available in Bun
-  const screenshotDir = join(process.cwd(), 'test-screenshots');
+  const screenshotDir = outputDirectory ?? join(process.cwd(), 'test-screenshots');
   if (!existsSync(screenshotDir)) {
     mkdirSync(screenshotDir, { recursive: true });
   }
@@ -420,12 +423,22 @@ if (require.main === module) {
     const start3 = Date.now();
     try {
       if (typeof captureScreenshot === 'function') {
-        const filepath = await captureAndSave('self-test');
-        logTestResult('click-utils-capture', 'pass', {
-          duration_ms: Date.now() - start3,
-          result: filepath,
-          screenshot: filepath,
-        });
+        if (process.env.SDK_TEST_AUTOSUBMIT !== '1') {
+          throw new Error(
+            'Click utility self-tests require isolated SDK_TEST_AUTOSUBMIT=1; native screen capture is forbidden.',
+          );
+        }
+        const fixtureDirectory = mkdtempSync(join(tmpdir(), 'script-kit-sdk-click-utils-'));
+        try {
+          const filepath = await captureAndSave('self-test', fixtureDirectory);
+          logTestResult('click-utils-capture', 'pass', {
+            duration_ms: Date.now() - start3,
+            result: filepath,
+            screenshot: filepath,
+          });
+        } finally {
+          rmSync(fixtureDirectory, { recursive: true, force: true });
+        }
       } else {
         logTestResult('click-utils-capture', 'skip', {
           duration_ms: Date.now() - start3,

@@ -9,8 +9,8 @@
  * Test cases:
  * 1. utils-uuid: uuid() generation
  * 2. utils-compile: compile() template function
- * 3. http-get: native fetch() GET request (if network available)
- * 4. http-post: native fetch() POST request (if network available)
+ * 3. http-get: native fetch() GET against an in-memory data URL
+ * 4. http-post: native fetch() POST against an in-memory data URL
  * 
  * Expected behavior:
  * - uuid() generates valid v4 UUIDs
@@ -138,15 +138,18 @@ logTest(test4, 'running');
 const start4 = Date.now();
 
 try {
-  debug('Test 4: HTTP GET request (using native fetch)');
+  debug('Test 4: GET request against an in-memory data URL');
   
-  const response = await fetch('https://httpbin.org/get');
+  const response = await fetch('data:application/json,%7B%22fixture%22%3A%22get%22%7D');
   const data = await response.json();
   
   debug(`GET response has data: ${!!data}`);
   
-  if (data && typeof data === 'object') {
-    logTest(test4, 'pass', { result: 'GET request successful', duration_ms: Date.now() - start4 });
+  if (data && typeof data === 'object' && data.fixture === 'get') {
+    logTest(test4, 'pass', {
+      result: { fixture: data.fixture, externalNetworkUsed: false },
+      duration_ms: Date.now() - start4,
+    });
   } else {
     logTest(test4, 'fail', { 
       error: 'GET request did not return expected data',
@@ -154,8 +157,7 @@ try {
     });
   }
 } catch (err) {
-  debug(`HTTP GET test skipped (network unavailable): ${err}`);
-  logTest(test4, 'skip', { error: 'Network unavailable', duration_ms: Date.now() - start4 });
+  logTest(test4, 'fail', { error: String(err), duration_ms: Date.now() - start4 });
 }
 
 // -----------------------------------------------------------------------------
@@ -166,19 +168,27 @@ logTest(test5, 'running');
 const start5 = Date.now();
 
 try {
-  debug('Test 5: HTTP POST request (using native fetch)');
+  debug('Test 5: POST request against an in-memory data URL');
   
-  const response = await fetch('https://httpbin.org/post', {
+  const request = new Request('data:application/json,%7B%22fixture%22%3A%22post%22%7D', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: 'hello' })
+    body: JSON.stringify({ message: 'hello' }),
   });
+  const body = await request.clone().json();
+  const response = await fetch(request);
   const data = await response.json();
   
   debug(`POST response has data: ${!!data}`);
   
-  if (data && typeof data === 'object') {
-    logTest(test5, 'pass', { result: 'POST request successful', duration_ms: Date.now() - start5 });
+  if (
+    data && typeof data === 'object' && data.fixture === 'post'
+    && request.method === 'POST' && body.message === 'hello'
+  ) {
+    logTest(test5, 'pass', {
+      result: { fixture: data.fixture, method: request.method, externalNetworkUsed: false },
+      duration_ms: Date.now() - start5,
+    });
   } else {
     logTest(test5, 'fail', { 
       error: 'POST request did not return expected data',
@@ -186,8 +196,7 @@ try {
     });
   }
 } catch (err) {
-  debug(`HTTP POST test skipped (network unavailable): ${err}`);
-  logTest(test5, 'skip', { error: 'Network unavailable', duration_ms: Date.now() - start5 });
+  logTest(test5, 'fail', { error: String(err), duration_ms: Date.now() - start5 });
 }
 
 // -----------------------------------------------------------------------------
@@ -200,18 +209,16 @@ const start6 = Date.now();
 try {
   debug('Test 6: Window control functions');
   
-  // These are fire-and-forget, just verify they don't throw
-  await show();
-  debug('show() completed');
-  
-  // Note: hide() and blur() would affect the test runner, so just verify they exist
+  // Inspect function availability only; never reveal, hide, or focus a window.
+  const hasShow = typeof show === 'function';
   const hasHide = typeof hide === 'function';
   const hasBlur = typeof blur === 'function';
   
+  debug(`show function exists: ${hasShow}`);
   debug(`hide function exists: ${hasHide}`);
   debug(`blur function exists: ${hasBlur}`);
   
-  if (hasHide && hasBlur) {
+  if (hasShow && hasHide && hasBlur) {
     logTest(test6, 'pass', { result: 'Window control functions available', duration_ms: Date.now() - start6 });
   } else {
     logTest(test6, 'fail', { 
@@ -224,26 +231,56 @@ try {
 }
 
 // -----------------------------------------------------------------------------
-// Test 7: Content setters (fire-and-forget)
+// Test 7: Unsupported content setters fail before emitting dead protocol messages.
 // -----------------------------------------------------------------------------
 const test7 = 'utils-content-setters';
 logTest(test7, 'running');
 const start7 = Date.now();
 
 try {
-  debug('Test 7: Content setter functions');
-  
-  // These are fire-and-forget, just verify they don't throw
-  setPanel('<div>Panel content</div>');
-  debug('setPanel() called');
-  
-  setPreview('<div>Preview content</div>');
-  debug('setPreview() called');
-  
-  setPrompt('<div>Prompt content</div>');
-  debug('setPrompt() called');
-  
-  logTest(test7, 'pass', { result: 'Content setters work', duration_ms: Date.now() - start7 });
+  debug('Test 7: Content setter compatibility boundaries');
+
+  const setters = [
+    { name: 'setPanel', call: () => setPanel('<div>Panel content</div>') },
+    { name: 'setPreview', call: () => setPreview('<div>Preview content</div>') },
+    { name: 'setPrompt', call: () => setPrompt('<div>Prompt content</div>') },
+  ];
+
+  for (const setter of setters) {
+    let failure: any;
+    const dispatched: string[] = [];
+    const originalWrite = process.stdout.write;
+    process.stdout.write = ((chunk: unknown, ..._args: unknown[]) => {
+      dispatched.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+
+    try {
+      setter.call();
+    } catch (error) {
+      failure = error;
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+
+    if (
+      failure?.name !== 'UnsupportedSdkFeatureError' ||
+      failure?.code !== 'ERR_UNSUPPORTED_SDK_FEATURE' ||
+      failure?.feature !== setter.name ||
+      !Array.isArray(failure?.alternatives) ||
+      failure.alternatives.length === 0
+    ) {
+      throw new Error(`${setter.name} did not expose a typed actionable failure: ${String(failure)}`);
+    }
+    if (dispatched.length > 0) {
+      throw new Error(`${setter.name} emitted unsupported protocol traffic: ${dispatched.join('')}`);
+    }
+  }
+
+  logTest(test7, 'pass', {
+    result: { rejected: setters.map((setter) => setter.name) },
+    duration_ms: Date.now() - start7,
+  });
 } catch (err) {
   logTest(test7, 'fail', { error: String(err), duration_ms: Date.now() - start7 });
 }
@@ -252,23 +289,4 @@ try {
 // Show Summary
 // -----------------------------------------------------------------------------
 debug('test-utils.ts completed!');
-
-await div(md(`# Utility Functions Tests Complete
-
-All utility function tests have been executed.
-
-## Test Cases Run
-1. **utils-uuid**: uuid() generation
-2. **utils-compile**: compile() template function
-3. **http-get**: Native fetch() GET request (network dependent)
-4. **http-post**: Native fetch() POST request (network dependent)
-5. **utils-window-control**: Window control functions
-6. **utils-content-setters**: Content setter functions
-
----
-
-*Check the JSONL output for detailed results*
-
-Press Escape or click to exit.`));
-
 debug('test-utils.ts exiting...');

@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,6 +23,7 @@ const AI_SCRIPT_USER_REQUEST_END_DELIMITER: &str = "---END_REQUEST---";
 pub const AI_GENERATED_SCRIPT_RECEIPT_SCHEMA_VERSION: u32 = 2;
 const AI_GENERATED_SCRIPT_VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
 const AI_GENERATED_SCRIPT_VERIFY_OUTPUT_LIMIT: usize = 4096;
+static AI_GENERATED_RECEIPT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const AI_SCRIPT_SHELL_EXECUTION_PATTERNS: [(&str, &str); 5] = [
     ("child_process", "child_process"),
@@ -32,21 +35,7 @@ const AI_SCRIPT_SHELL_EXECUTION_PATTERNS: [(&str, &str); 5] = [
 
 pub const AI_SCRIPT_GENERATION_SYSTEM_PROMPT: &str = r#"You write production-ready Script Kit TypeScript scripts.
 
-CRITICAL: Your ENTIRE response must be valid TypeScript. No prose, no markdown, no explanations, no preamble, no postamble. Start immediately with valid TypeScript source (e.g. `import "@scriptkit/sdk";`). If you include ANY text that is not valid TypeScript, the script will fail to parse and crash.
-
-WRONG (will crash):
-**Assumed:** You want a script that...
-import "@scriptkit/sdk";
-
-WRONG (will crash):
-Here's a script that does X:
-```typescript
-import "@scriptkit/sdk";
-```
-
-RIGHT:
-import "@scriptkit/sdk";
-export const metadata = { name: "My Script", description: "Does something useful" };
+CRITICAL: Return ONLY TypeScript code. No prose, markdown fences, explanations, preamble, or postamble. Start immediately with valid TypeScript source code.
 
 NON-NEGOTIABLE OUTPUT FORMAT
 
@@ -55,225 +44,168 @@ import "@scriptkit/sdk";
 export const metadata = {
   name: "<short, clear, user-facing title>",
   description: "<one-line summary>",
+  sdkCapabilities: ["<every SDK capability this script actually invokes>"],
+  executionTopology: "typescript-script",
 };
 
 Do NOT use legacy comment-header metadata (// Name:, // Description:). Always use export const metadata.
 
 RULES:
 1. Include EXACTLY ONE import (and no others): import "@scriptkit/sdk";
-2. Follow the import with export const metadata = { name, description }.
+2. Follow the import with export const metadata = { name, description, sdkCapabilities, executionTopology }.
 3. Use top-level await (no main(), no async IIFE, no servers).
 4. Prefer Script Kit prompts + UI over console.log.
 5. NO markdown fences. NO explanations. NO commentary. ONLY TypeScript code.
+6. Use only actual supported SDK capabilities; the host-owned denylist appended to this prompt is authoritative.
+7. TypeScript scripts and launcher-opened TypeScript scriptlets have interactive SDK transport. Only legacy synchronous TypeScript scriptlets lack interactive stdin; shell/Python scriptlets do not receive SDK globals.
 
 RUNTIME ASSUMPTIONS
 
-* Script Kit provides globals for prompts/UI, filesystem, HTTP, clipboard, automation, and AI.
-* Do not import node:* modules. Use global path.* utilities plus prompts like path()/find().
+* Script Kit provides the exact reviewed globals listed below; JavaScript's standard fetch is available for HTTP.
+* Do not import node:* modules. Use home/skPath/kitPath/tmpPath for filesystem paths.
+* path(...) is a prompt function, not Node's path module: there is no path.join/path.basename/path.extname.
 * Write scripts that feel like native tools: interactive, fast, keyboard-friendly.
 
 UX QUALITY BAR
 
-* Ask for missing inputs (arg/fields/path/find/drop/editor). Don't hardcode what you can prompt for.
+* Ask for missing inputs (arg/fields/path/drop/editor). Don't hardcode what you can prompt for.
 * Default to the shared main-menu-sized prompt flow. Prefer arg/fields/select on the launcher shell before inventing a denser surface.
 * Expanded split-view browsers are rare exceptions for preview-dense workflows like file search or clipboard history. Do not build one unless the preview is essential to the selection decision.
 * Prefer interactive UI over logs: use arg/fields/select for input and use div(md(...)) or editor(...) after the user has made a choice.
 * Lists should usually be simple choice objects: { name, value, description? }.
-* Do not use choice `preview` fields, `setPreview()`, or `setPanel()` for ordinary commands.
-* Add actions for common operations (Copy/Open/Save/Reveal/Retry) via Action[] on arg/div/editor or setActions().
-* Use sensible defaults and remember preferences when helpful (env/db/store).
+* Do not use choice `preview` fields, `setPreview()`, or `setPanel()` for ordinary commands. setPreview and setPanel are unsupported in GPUI and must never be called.
+* Add actions for common operations (Copy/Open/Save/Retry) via Action[] on arg/div/editor/fields/form or setActions().
+* Action shortcuts are explicit strings such as "cmd+c"; no global cmd helper exists.
 * Prompt APIs are stateful UI surfaces. Never call them concurrently.
-  * Do NOT use Promise.all / Promise.race / Promise.any / Promise.allSettled with arg, fields, editor, div, form, drop, find, path, textarea, select, or grid.
+  * Do NOT use Promise.all / Promise.race / Promise.any / Promise.allSettled with arg, fields, editor, div, form, drop, path, select, mini, micro, hotkey, or confirm.
   * Multi-step prompt flows must always be sequential:
     `const first = await arg("First");`
     `const second = await arg("Second");`
 
-WRONG:
-const [url1, url2, url3] = await Promise.all([
-  arg("URL 1"),
-  arg("URL 2"),
-  arg("URL 3"),
-]);
-
-RIGHT:
-const url1 = await arg("URL 1");
-const url2 = await arg("URL 2");
-const url3 = await arg("URL 3");
-
 ERROR HANDLING
 
-* Treat Esc/cancel as normal: catch and exit quietly (or toast/notify if useful).
-* Validate input early; for strict validation use arg({ onSubmit }) + setHint/setEnter + preventSubmit.
-* For exec(), capture/show stderr/stdout on failure (editor/div) and suggest next steps.
-* For long tasks: show progress with setLoading/setProgress or a "working" div with onInit + submit; setStatus() is unsupported in GPUI.
+* Treat Esc/cancel as normal: catch and exit quietly, or use hud/notify if useful.
+* Validate input immediately after each sequential prompt.
+* exec(executable, args?) uses shell:false; show typed error.result.stderr/stdout on failure and suggest next steps.
+* Never use shell operators, command substitution, keyboard injection, mouse injection, screen capture, microphone, webcam, or unsupported SDK helpers.
+* For long tasks use hud or an intentional div/editor; setStatus/setLoading/setProgress are unavailable.
 
 SCRIPT KIT IDIOMS (PREFERRED)
 
-* await arg()/select()/grid()/fields()/editor()/div(md(...))
-* home()/tmpPath() + path.join/extname/basename (no imports)
-* When you must target the Script Kit workspace explicitly, use home(".scriptkit", "kit", "main", ...)
-* clipboard.* + getClipboardHistory() for clipboard tools
-* await hide() before disruptive automation (keyboard/mouse/exec) when you don't need the prompt visible
-* div({ html, onInit }) + submit(value) for "working…" screens
-* Use isMac/isWin/isLinux for platform-specific behavior when unavoidable
+* await arg()/select()/fields()/editor()/div(md(...))
+* home()/skPath()/kitPath()/tmpPath() for resolved filesystem paths (no imports)
+* When you must target the Script Kit workspace explicitly, use skPath("plugins", "main", ...)
+* clipboard.* + clipboardHistory() for clipboard tools
+* exec("open", [filePath]) executes an explicit binary/argv without a shell
+* Use process.platform for intentional platform-specific behavior
 
 TEACH BY EXAMPLE (REFERENCE ONLY — ADAPT PATTERNS, DO NOT COPY VERBATIM)
 
 Example 1 — Simple input → output (arg + file write)
 import "@scriptkit/sdk";
-export const metadata = { name: "Save Note", description: "Prompt for a note and save it as a text file" };
+export const metadata = { name: "Save Note", description: "Save a note as a text file", sdkCapabilities: ["arg", "home", "writeFile", "hud"], executionTopology: "typescript-script" };
 const note = await arg("Note text");
-const outDir = home("Documents", "Notes");
-await ensureDir(outDir);
-const filePath = path.join(outDir, `note-${new Date().toISOString().slice(0, 10)}.txt`);
+const filePath = home("Documents", `note-${Date.now()}.txt`);
 await writeFile(filePath, note, "utf8");
-await div(md(`✅ Saved to: \`${filePath}\``));
+hud("Note saved");
 
 Example 2 — Main-menu-sized list with follow-up detail
 import "@scriptkit/sdk";
-export const metadata = { name: "Clipboard Picker", description: "Search clipboard history, inspect one item, then copy it" };
-const items = (await getClipboardHistory()).slice(0, 100);
+export const metadata = { name: "Clipboard Picker", description: "Choose a recent clipboard item", sdkCapabilities: ["clipboardHistory", "arg", "clipboard.writeText", "hud"], executionTopology: "typescript-script" };
+const items = (await clipboardHistory()).filter(item => item.contentType === "text").slice(0, 100);
 const value = await arg("Pick a clipboard item", items.map((i) => ({
-  name: i.name || i.value.slice(0, 80),
-  description: i.description || formatDateToNow(new Date(i.timestamp)),
-  value: i.value,
+  name: i.content.slice(0, 80),
+  description: new Date(i.timestamp).toLocaleString(),
+  value: i.content,
 })));
-await div(md(`## Selected item\n\n${value.slice(0, 2000)}`));
 await clipboard.writeText(value);
-toast("Copied");
+hud("Copied");
 
 Example 3 — Multi-step workflow + rich HTML output (div(md()))
 import "@scriptkit/sdk";
-export const metadata = { name: "Markdown Card Builder", description: "Collect fields, edit markdown, then render a styled preview" };
+export const metadata = { name: "Markdown Card Builder", description: "Write and preview a markdown document", sdkCapabilities: ["fields", "editor", "div", "md", "clipboard.writeText", "writeFile", "home"], executionTopology: "typescript-script" };
 const [title, tags] = await fields(["Title", "Tags (comma-separated)"]);
 const initial = `# ${title}\n\nTags: ${tags}\n\nWrite your content here...\n`;
 const markdown = await editor(initial);
 await div({ html: md(markdown), containerClasses: "p-6 prose dark:prose-invert" }, [
-  { name: "Copy", shortcut: `${cmd}+c`, onAction: () => clipboard.writeText(markdown) },
-  { name: "Save", shortcut: `${cmd}+s`, onAction: () => writeFile(home("Desktop", `${title}.md`), markdown, "utf8") },
+  { name: "Copy", shortcut: "cmd+c", onAction: () => clipboard.writeText(markdown) },
+  { name: "Save", shortcut: "cmd+s", onAction: () => writeFile(home("Desktop", `${title}.md`), markdown, "utf8") },
 ]);
 
-Example 4 — AI-powered helper (ai())
+Example 4 — Explicit AI handoff without hidden provider submission
 import "@scriptkit/sdk";
-export const metadata = { name: "AI Rewrite", description: "Rewrite text in a chosen tone using ai()" };
+export const metadata = { name: "Prepare AI Rewrite", description: "Stage an explicit rewrite request for review", sdkCapabilities: ["arg", "editor", "aiStartChat"], executionTopology: "typescript-script" };
 const tone = await arg("Tone", ["Concise", "Friendly", "Professional"]);
 const input = await editor("Paste text to rewrite...");
-const rewrite = ai(`Rewrite the text in a ${tone} tone. Return only the rewritten text.`);
-const output = await rewrite(input);
-await editor(output);
+await aiStartChat(`Rewrite this text in a ${tone} tone: ${input}`, { noResponse: true });
 
 Example 5 — System automation (exec + readFile/writeFile)
 import "@scriptkit/sdk";
-export const metadata = { name: "Quick Replace In File", description: "Replace text in a file, save, then open it" };
+export const metadata = { name: "Quick Replace In File", description: "Replace text in a file and open it", sdkCapabilities: ["path", "arg", "readFile", "writeFile", "exec", "hud"], executionTopology: "typescript-script" };
 const filePath = await path({ hint: "Select a text file to edit" });
 const findText = await arg("Find");
 const replaceText = await arg("Replace with");
 const before = await readFile(filePath, "utf8");
 await writeFile(filePath, before.split(findText).join(replaceText), "utf8");
-const openCmd = isMac ? "open" : isWin ? "start" : "xdg-open";
-await exec(`${openCmd} "${filePath}"`);
-toast("Updated");
+await exec("open", [filePath]);
+hud("Updated");
 
 COMPACT API REFERENCE (ONE LINE PER FUNCTION, GROUPED)
 
 Prompts & Rendering
-* arg(...) — text input or searchable choices; default command surface
-* select(...) — multi-select list
-* grid(...) — multi-select grid
-* fields(...) — quick form, returns string[]
-* editor(...) — edit/copy large text
-* div(...) — render HTML (pair with md())
-* form(...) — HTML form, returns object
-* textarea(...) — simple textarea
-* drop(...) — drag/drop files or text
-* find(...) — file search prompt
-* path(...) — file/folder picker (also provides path.join/etc)
-* onTab(name, fn) — multi-tab prompt flows
+* arg(prompt?, choices?, actions?) — text input or searchable choices
+* select(prompt, choices) — multi-select list; returns string[]
+* fields(definitions, actions?) — typed form; returns string[]
+* editor(content?, language?, actions?) — edit text; returns string
+* div(htmlOrConfig?, actions?) — render HTML; returns string or void
+* form(html, actions?) — HTML form; returns Record<string, string>
+* drop() — chosen file descriptors; returns { path, name, size }[]
+* path({ startPath?, hint? }?) — file/folder picker only; no path.join utilities
+* mini(prompt, choices), micro(prompt, choices), hotkey(prompt?), confirm(...) — supported compact prompts
 
 UI Helpers
 * md(markdown) — markdown to HTML
-* toast(message, options?) — in-window toast
-* notify(bodyOrOptions) — system notification
-* setActions(actions, options?) — action palette w/ shortcuts
-* openActions() — open actions menu
-* setHint(text) — hint under input
-* setEnter(text) — enter button label
-* setFooter(text) — footer content
-* setPreview(html, classes?) — dense preview API; avoid for normal commands
-* setPanel(html, classes?) — dense panel API; avoid for normal commands
-* setLoading(boolean) — spinner/loading state
-* setProgress(number) — progress bar 0..1
-* setStatus({ status, message }) — unsupported in GPUI; use hud/div/progress UI instead
-* show() — show prompt
-* hide(options?) — hide prompt
-* blur() — focus previous app
-* submit(value) — force submit
-* preventSubmit — block submit from onSubmit
-
-Config, State, Time
-* env(key, promptOrFn?) — read/prompt and persist env var
-* db(dataOrKeyOrPath?, data?, fromCache?) — lightweight JSON DB
-* store(key, initial?) — persistent key-value store
-* wait(ms, submitValue?) — delay (optionally submit)
+* hud(message, { duration? }?) — host-owned status message
+* notify(bodyOrOptions) — system notification with a typed dispatch receipt; OS delivery is not guaranteed
+* setActions(actions) — action palette w/ shortcuts
 
 Files & Paths
-* home(...) — home-relative path
+* home(...) — home-relative path formed from path segments
 * home(".scriptkit", ...) — explicit Script Kit workspace path when needed
-* tmpPath(...) — temp path
-* ensureDir(path) — ensure dir exists
-* ensureFile(path) — ensure file exists
-* readFile(path, enc?) — read file
-* writeFile(path, data, enc?) — write file
-* readdir(path) — list dir
-* pathExists(path) — exists?
-* globby(patterns) — glob files
-* replace({ files, from, to }) — replace text in files
-
-Web & Data
-* get(url, config?) — HTTP GET
-* post(url, data?, config?) — HTTP POST
-* put(url, data?, config?) — HTTP PUT
-* patch(url, data?, config?) — HTTP PATCH
-* del(url, config?) — HTTP DELETE
-* download(url, destination) — download a file
-* inspect(data, extension?) — dump data to a file and open it
+* skPath(...), kitPath(...), tmpPath(...) — host-owned filesystem paths
+* readFile(filePath, encoding?) — read UTF-8 text
+* writeFile(filePath, text, encoding?) — write text
+* fileSearch(query, { onlyin? }?) — noninteractive indexed filesystem search
+* fetch(url, options?) — standard JavaScript HTTP API
 
 Automation
-* exec(command, options?) — run a shell command
+* exec(executable, args?: readonly string[]) — direct shell:false subprocess with typed stdout/stderr/exitCode
 * browse(url) — open in browser
-* edit(filePath) — open in external editor
+* editFile(filePath) — open in external editor
 * clipboard.readText() — read clipboard text
 * clipboard.writeText(text) — write clipboard text
 * clipboard.readImage() — read image buffer
 * clipboard.writeImage(buffer) — write image buffer
-* getClipboardHistory() — clipboard history items
-* removeClipboardItem(id) — remove one history item
-* clearClipboardHistory() — clear history
-* keyboard.type(...textOrKeys) — type (use with caution)
-* mouse.move(points) — move mouse (use with caution)
+* copy(text), paste() — copy text or read clipboard text; paste does not inject keystrokes
+* clipboardHistory() — { entryId, content, contentType, timestamp, pinned }[]
+* clipboardHistoryPin(entryId), clipboardHistoryUnpin(entryId), clipboardHistoryRemove(entryId)
+* clipboardHistoryClear(), clipboardHistoryTrimOversize()
 
 AI
-* ai(systemPrompt, options?) — returns (input) => text
-* ai.object(promptOrMessages, schema, options?) — structured output via zod
-* assistant(systemPrompt, options?) — multi-turn AI w/ tool calling
-* generate(promptOrMessages, schema, options?) — structured generation
-* mcp(options?) — MCP client
-
-Handy Globals
-* isMac — OS boolean
-* isWin — OS boolean
-* isLinux — OS boolean
-* cmd — "cmd" on macOS, "ctrl" elsewhere
-* args — CLI args array
-* flag — parsed CLI flags
+* aiIsOpen(), aiGetActiveChat(), aiListChats(), aiGetConversation(), aiGetStreamingStatus() — read-only AI state
+* aiStartChat(message, { noResponse: true }) — stage a visible draft without inference
+* aiSendMessage(chatId, text, imagePath?, parts?) — explicitly request AI inference
+* aiAppendMessage(chatId, text, role) — append a message without requesting inference
+* chat(options?) — prompt UI; the script owns generation
+* mcp.listServers/getServer/listTools/discover/call — MCP object methods; mcp is not callable
 
 FINAL CHECKLIST
 * Only TypeScript source code.
-* Includes export const metadata = { name, description } (do NOT use // Name: or // Description: comment headers).
+* Includes export const metadata = { name, description, sdkCapabilities, executionTopology } (do NOT use // Name: or // Description: comment headers).
 * Never use kenvPath() or reference ~/.kenv.
 * Exactly one import: import "@scriptkit/sdk";
-* Top-level await + Script Kit globals.
-* Interactive UX (prompts, previews, actions) instead of console output.
+* Top-level await + only reviewed, supported Script Kit globals.
+* Interactive UX (sequential prompts and executable actions) instead of console output.
 * Practical errors + safe cancellation."#;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -294,6 +226,16 @@ pub struct GeneratedScriptContractAudit {
     pub has_kit_import: bool,
     pub has_current_app_recipe_header: bool,
     pub current_app_recipe_header_at_top: bool,
+    /// Explicit author claims, never inferred from unrelated source text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_topology: Option<crate::mcp_resources::SdkExecutionTopology>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_parse_errors: Vec<String>,
+    /// Pending permission warnings remain recoverable; fatal claims block save.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_issues: Vec<crate::scripts::ScriptValidationIssue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -391,6 +333,44 @@ struct PreparedGeneratedScript {
     contract: GeneratedScriptContractAudit,
 }
 
+/// One pure pre-write security policy for both provider and Agent Chat saves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneratedScriptPersistencePlan {
+    requested_slug: String,
+    shell_execution_warning: bool,
+    suspicious_shell_patterns: Vec<&'static str>,
+}
+
+fn generated_script_persistence_plan(
+    prompt: &str,
+    source: &str,
+    derived_slug: &str,
+    slug_override: Option<&str>,
+) -> Result<GeneratedScriptPersistencePlan> {
+    let requested_slug =
+        crate::script_creation::sanitize_name(slug_override.unwrap_or(derived_slug));
+    if requested_slug.is_empty() {
+        anyhow::bail!("Generated script name is empty after safe sanitization");
+    }
+    let suspicious_shell_patterns = detect_unexpected_shell_execution_patterns(prompt, source);
+    Ok(GeneratedScriptPersistencePlan {
+        requested_slug,
+        shell_execution_warning: !suspicious_shell_patterns.is_empty(),
+        suspicious_shell_patterns,
+    })
+}
+
+fn generated_script_created_slug(path: &Path) -> Result<String> {
+    let slug = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Generated script path has no safe file name"))?;
+    if slug.is_empty() || crate::script_creation::sanitize_name(slug) != slug {
+        anyhow::bail!("Generated script path does not contain a safely sanitized file name");
+    }
+    Ok(slug.to_string())
+}
+
 #[derive(Debug, Clone)]
 pub struct GeneratedScriptOutput {
     pub path: PathBuf,
@@ -406,18 +386,101 @@ pub fn generated_script_receipt_path(script_path: &Path) -> PathBuf {
     receipt_path
 }
 
+fn safe_generated_script_detail(raw: &str) -> String {
+    let redacted = crate::ai::reliability::redact_diagnostic(raw);
+    redacted
+        .copyable_detail
+        .unwrap_or_else(|| format!("[REDACTED:{}]", redacted.fingerprint.0))
+}
+
+fn ensure_safe_receipt_destination(receipt_path: &Path) -> Result<()> {
+    match fs::symlink_metadata(receipt_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("Refusing to replace a symbolic-link generated script receipt")
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            anyhow::bail!("Generated script receipt destination is not a regular file")
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => anyhow::bail!(
+            "Unable to inspect generated script receipt destination: {}",
+            safe_generated_script_detail(&error.to_string())
+        ),
+    }
+}
+
+struct PendingGeneratedReceipt {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl Drop for PendingGeneratedReceipt {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 fn write_generated_script_receipt(
     receipt_path: &Path,
     receipt: &GeneratedScriptReceipt,
 ) -> Result<()> {
     let json = serde_json::to_string_pretty(receipt)
         .context("Failed to serialize generated script receipt")?;
-    fs::write(receipt_path, json).with_context(|| {
-        format!(
-            "Failed writing generated script receipt (state=receipt_write_failed, path={})",
-            receipt_path.display()
-        )
-    })
+    ensure_safe_receipt_destination(receipt_path)?;
+    let parent = receipt_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = receipt_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Generated script receipt has no safe file name"))?;
+
+    for _ in 0..32 {
+        let sequence = AI_GENERATED_RECEIPT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temp_path = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), sequence));
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => anyhow::bail!(
+                "Failed creating isolated generated script receipt: {}",
+                safe_generated_script_detail(&error.to_string())
+            ),
+        };
+        let mut pending = PendingGeneratedReceipt {
+            path: temp_path,
+            committed: false,
+        };
+        file.write_all(json.as_bytes()).map_err(|error| {
+            anyhow::anyhow!(
+                "Failed writing isolated generated script receipt: {}",
+                safe_generated_script_detail(&error.to_string())
+            )
+        })?;
+        drop(file);
+
+        // Rename replaces a directory entry rather than following it. Reject
+        // visible symlink destinations anyway so malicious adjacent files
+        // cannot become an accidental overwrite or disclosure target.
+        ensure_safe_receipt_destination(receipt_path)?;
+        fs::rename(&pending.path, receipt_path).map_err(|error| {
+            anyhow::anyhow!(
+                "Failed publishing generated script receipt atomically: {}",
+                safe_generated_script_detail(&error.to_string())
+            )
+        })?;
+        pending.committed = true;
+        return Ok(());
+    }
+
+    anyhow::bail!("Failed to allocate an isolated generated script receipt")
 }
 
 fn truncate_verification_output(output: &[u8]) -> Option<String> {
@@ -433,7 +496,7 @@ fn truncate_verification_output(output: &[u8]) -> Option<String> {
     if text.chars().count() > AI_GENERATED_SCRIPT_VERIFY_OUTPUT_LIMIT {
         excerpt.push_str("\n... truncated ...");
     }
-    Some(excerpt)
+    Some(safe_generated_script_detail(&excerpt))
 }
 
 fn verification_output_path(script_path: &Path) -> PathBuf {
@@ -481,8 +544,10 @@ fn verify_generated_script_with_bun_build(
     {
         Ok(child) => child,
         Err(error) => {
-            let mut receipt =
-                GeneratedScriptVerificationReceipt::blocked(error.to_string(), "bun_build");
+            let mut receipt = GeneratedScriptVerificationReceipt::blocked(
+                safe_generated_script_detail(&error.to_string()),
+                "bun_build",
+            );
             receipt.command = command;
             receipt.output_path = Some(output_path.display().to_string());
             return receipt;
@@ -522,7 +587,10 @@ fn verify_generated_script_with_bun_build(
                             output_path: Some(output_path.display().to_string()),
                             stdout_excerpt: None,
                             stderr_excerpt: None,
-                            diagnostics: vec![format!("verification_output_read_failed: {error}")],
+                            diagnostics: vec![format!(
+                                "verification_output_read_failed: {}",
+                                safe_generated_script_detail(&error.to_string())
+                            )],
                         };
                     }
                 }
@@ -559,7 +627,10 @@ fn verify_generated_script_with_bun_build(
                     output_path: Some(output_path.display().to_string()),
                     stdout_excerpt: None,
                     stderr_excerpt: None,
-                    diagnostics: vec![format!("verification_wait_failed: {error}")],
+                    diagnostics: vec![format!(
+                        "verification_wait_failed: {}",
+                        safe_generated_script_detail(&error.to_string())
+                    )],
                 };
             }
         }
@@ -588,17 +659,19 @@ pub(crate) fn write_script_creation_receipt_for_path(
     let contract = audit_generated_script_contract(&source);
     let verification = verify_generated_script_with_bun_build(script_path);
     let receipt_path = generated_script_receipt_path(script_path);
+    let shell_execution_warning =
+        !detect_unexpected_shell_execution_patterns(prompt, &source).is_empty();
     let receipt = GeneratedScriptReceipt {
         schema_version: AI_GENERATED_SCRIPT_RECEIPT_SCHEMA_VERSION,
-        prompt: prompt.trim().to_string(),
+        prompt: safe_generated_script_detail(prompt.trim()),
         slug,
-        slug_source: slug_source.to_string(),
+        slug_source: safe_generated_script_detail(slug_source),
         slug_source_kind: slug_source_kind.to_string(),
         model_id: model_id.to_string(),
         provider_id: provider_id.to_string(),
         script_path: script_path.display().to_string(),
         receipt_path: receipt_path.display().to_string(),
-        shell_execution_warning: false,
+        shell_execution_warning,
         contract,
         verification,
         current_app_recipe: None,
@@ -679,48 +752,49 @@ pub fn generate_script_from_prompt_with_receipt(
 
     let prepared = prepare_script_from_ai_response_with_contract(normalized_prompt, &raw_response)?;
 
-    let suspicious_shell_patterns =
-        detect_unexpected_shell_execution_patterns(normalized_prompt, &prepared.source);
-    let shell_execution_warning = !suspicious_shell_patterns.is_empty();
-    if shell_execution_warning {
+    let persistence_plan = generated_script_persistence_plan(
+        normalized_prompt,
+        &prepared.source,
+        &prepared.slug,
+        None,
+    )?;
+    if persistence_plan.shell_execution_warning {
         tracing::warn!(
             target: "ai",
             correlation_id = "ai-script-generation",
             state = "suspicious_shell_pattern_detected",
-            patterns = ?suspicious_shell_patterns,
+            patterns = ?persistence_plan.suspicious_shell_patterns,
             model_id = %selected_model.id,
             provider_id = %selected_model.provider,
             "AI-generated script includes shell execution patterns without explicit shell intent"
         );
     }
 
-    let path = crate::script_creation::create_new_script(&prepared.slug).with_context(|| {
+    let path = crate::script_creation::create_new_script_with_contents(
+        &persistence_plan.requested_slug,
+        &prepared.source,
+    )
+    .with_context(|| {
         format!(
             "Failed creating AI-generated script (state=create_failed, slug={})",
-            prepared.slug
+            persistence_plan.requested_slug
         )
     })?;
-
-    fs::write(&path, &prepared.source).with_context(|| {
-        format!(
-            "Failed writing AI-generated script content (state=write_failed, path={})",
-            path.display()
-        )
-    })?;
+    let created_slug = generated_script_created_slug(&path)?;
 
     let receipt_path = generated_script_receipt_path(&path);
     let verification = verify_generated_script_with_bun_build(&path);
     let receipt = GeneratedScriptReceipt {
         schema_version: AI_GENERATED_SCRIPT_RECEIPT_SCHEMA_VERSION,
-        prompt: normalized_prompt.to_string(),
-        slug: prepared.slug.clone(),
-        slug_source: prepared.slug_source.clone(),
+        prompt: safe_generated_script_detail(normalized_prompt),
+        slug: created_slug.clone(),
+        slug_source: safe_generated_script_detail(&prepared.slug_source),
         slug_source_kind: prepared.slug_source_kind.to_string(),
         model_id: selected_model.id.clone(),
         provider_id: selected_model.provider.clone(),
         script_path: path.display().to_string(),
         receipt_path: receipt_path.display().to_string(),
-        shell_execution_warning,
+        shell_execution_warning: persistence_plan.shell_execution_warning,
         contract: prepared.contract.clone(),
         verification,
         current_app_recipe: None,
@@ -731,7 +805,7 @@ pub fn generate_script_from_prompt_with_receipt(
     if let Err(error) = crate::ai::upsert_current_app_automation_memory_from_receipt(&receipt) {
         tracing::warn!(
             target: "ai",
-            error = %error,
+            error = %safe_generated_script_detail(&error.to_string()),
             slug = %receipt.slug,
             receipt_path = %receipt.receipt_path,
             "current_app_automation_memory.upsert_failed"
@@ -744,7 +818,7 @@ pub fn generate_script_from_prompt_with_receipt(
         state = "script_written",
         path = %path.display(),
         receipt_path = %receipt_path.display(),
-        slug = %prepared.slug,
+        slug = %created_slug,
         metadata_style = ?prepared.contract.metadata_style,
         contract_warning_count = prepared.contract.warnings.len(),
         "AI-generated script written"
@@ -752,10 +826,10 @@ pub fn generate_script_from_prompt_with_receipt(
 
     let output = GeneratedScriptOutput {
         path,
-        slug: prepared.slug,
+        slug: created_slug,
         model_id: selected_model.id,
         provider_id: selected_model.provider,
-        shell_execution_warning,
+        shell_execution_warning: persistence_plan.shell_execution_warning,
     };
 
     Ok((output, receipt))
@@ -790,7 +864,7 @@ fn prepare_script_from_ai_response_with_contract(
         correlation_id = "ai-script-generation",
         state = "slug_source_resolved",
         source = slug_source_kind,
-        slug_source = %slug_source,
+        slug_source = %safe_generated_script_detail(&slug_source),
         "Resolved slug source for generated script"
     );
 
@@ -806,6 +880,32 @@ fn prepare_script_from_ai_response_with_contract(
         anyhow::bail!(
             "Generated script contract invalid (state=concurrent_prompt_apis). \
              Script Kit prompt APIs must not be called concurrently with Promise combinators."
+        );
+    }
+
+    if !contract.metadata_parse_errors.is_empty() {
+        anyhow::bail!(
+            "Generated script host compatibility rejected before file creation \
+             (state=generated_script_metadata_invalid): {}",
+            contract.metadata_parse_errors.join("; ")
+        );
+    }
+
+    if let Some(issue) = contract
+        .capability_issues
+        .iter()
+        .find(|issue| issue.severity == crate::scripts::ValidationSeverity::Fatal)
+    {
+        let detail = crate::scripts::format_script_validation_issue_detail(issue);
+        anyhow::bail!(
+            "Generated script host compatibility rejected before file creation \
+             (state=generated_script_capability_unavailable): {}{}",
+            issue.message,
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" — {detail}")
+            }
         );
     }
 
@@ -863,32 +963,41 @@ pub(crate) fn save_generated_script_from_response_with_slug(
     slug_override: Option<&str>,
 ) -> Result<PathBuf> {
     let prepared = prepare_script_from_ai_response_with_contract(prompt, raw_response)?;
-    let slug = slug_override
-        .map(|slug| slug.to_string())
-        .unwrap_or_else(|| prepared.slug.clone());
-    let script_path = crate::script_creation::create_new_script(&slug).with_context(|| {
-        format!("Failed to create script for AI response (state=create_failed, slug={slug})")
-    })?;
-
-    fs::write(&script_path, &prepared.source).with_context(|| {
+    let persistence_plan =
+        generated_script_persistence_plan(prompt, &prepared.source, &prepared.slug, slug_override)?;
+    if persistence_plan.shell_execution_warning {
+        tracing::warn!(
+            target: "ai",
+            correlation_id = "ai-script-generation",
+            state = "suspicious_shell_pattern_detected",
+            patterns = ?persistence_plan.suspicious_shell_patterns,
+            "Saved AI-generated script includes shell execution patterns without explicit shell intent"
+        );
+    }
+    let script_path = crate::script_creation::create_new_script_with_contents(
+        &persistence_plan.requested_slug,
+        &prepared.source,
+    )
+    .with_context(|| {
         format!(
-            "Failed writing script for AI response (state=write_failed, path={})",
-            script_path.display()
+            "Failed to create script for AI response (state=create_failed, sanitized_slug={})",
+            persistence_plan.requested_slug
         )
     })?;
+    let slug = generated_script_created_slug(&script_path)?;
 
     let receipt_path = generated_script_receipt_path(&script_path);
     let mut receipt = GeneratedScriptReceipt {
         schema_version: AI_GENERATED_SCRIPT_RECEIPT_SCHEMA_VERSION,
-        prompt: prompt.trim().to_string(),
+        prompt: safe_generated_script_detail(prompt.trim()),
         slug,
-        slug_source: prepared.slug_source,
+        slug_source: safe_generated_script_detail(&prepared.slug_source),
         slug_source_kind: prepared.slug_source_kind.to_string(),
         model_id: "unknown".to_string(),
         provider_id: "unknown".to_string(),
         script_path: script_path.display().to_string(),
         receipt_path: receipt_path.display().to_string(),
-        shell_execution_warning: false,
+        shell_execution_warning: persistence_plan.shell_execution_warning,
         contract: prepared.contract,
         verification: GeneratedScriptVerificationReceipt::skipped(
             "bun_build_running_in_background",
@@ -904,7 +1013,7 @@ pub(crate) fn save_generated_script_from_response_with_slug(
         if let Err(error) = write_generated_script_receipt(&verify_receipt_path, &receipt) {
             tracing::warn!(
                 target: "ai",
-                error = %error,
+                error = %safe_generated_script_detail(&error.to_string()),
                 receipt_path = %receipt.receipt_path,
                 "generated_script_receipt.verification_rewrite_failed"
             );
@@ -912,7 +1021,7 @@ pub(crate) fn save_generated_script_from_response_with_slug(
         if let Err(error) = crate::ai::upsert_current_app_automation_memory_from_receipt(&receipt) {
             tracing::warn!(
                 target: "ai",
-                error = %error,
+                error = %safe_generated_script_detail(&error.to_string()),
                 slug = %receipt.slug,
                 receipt_path = %receipt.receipt_path,
                 "current_app_automation_memory.upsert_failed"
@@ -948,8 +1057,12 @@ pub(crate) fn select_generation_model(
 }
 
 fn build_script_generation_messages(normalized_prompt: &str) -> Vec<ProviderMessage> {
+    let unsupported = crate::mcp_resources::unsupported_sdk_capability_names().join(", ");
+    let system_prompt = format!(
+        "{AI_SCRIPT_GENERATION_SYSTEM_PROMPT}\n\nHOST SDK CAPABILITY CONTRACT\n\nThe following host-owned SDK identifiers are unsupported and MUST NEVER be invoked in generated code: {unsupported}. Choose a supported alternative from SDK Reference, preserve the user's intent, and never promise unavailable automation. If your host has already supplied MCP resource access, `kit://command-doctor` reports command readiness and safe permission-pending state, while `kit://failed-scripts` reports author validation issues. Resource URIs are host-side diagnostics, never callable SDK functions; do not invent `commandDoctor()`, request permissions, probe the system, or contact a provider merely to inspect them."
+    );
     vec![
-        ProviderMessage::system(AI_SCRIPT_GENERATION_SYSTEM_PROMPT),
+        ProviderMessage::system(system_prompt),
         ProviderMessage::user(format!(
             "Generate a Script Kit script for this user request:\n\n{}\n{}\n{}",
             AI_SCRIPT_USER_REQUEST_START_DELIMITER,
@@ -1305,6 +1418,44 @@ fn audit_generated_script_contract(script: &str) -> GeneratedScriptContractAudit
 
     let metadata_style = detect_metadata_style(script);
     let mut warnings = Vec::new();
+    let parsed_metadata = crate::metadata_parser::extract_typed_metadata(script);
+    let declared_capabilities = parsed_metadata
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.extra.get("sdkCapabilities"))
+        .and_then(serde_json::Value::as_array)
+        .map(|capabilities| {
+            capabilities
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let execution_topology = parsed_metadata
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.extra.get("executionTopology"))
+        .and_then(|topology| serde_json::from_value(topology.clone()).ok());
+    let capability_issues = parsed_metadata
+        .metadata
+        .as_ref()
+        .map(|metadata| {
+            let name = metadata
+                .name
+                .clone()
+                .unwrap_or_else(|| "AI-generated script".to_string());
+            let validation_subject = crate::scripts::Script {
+                path: PathBuf::from(format!("{}.ts", slugify_script_name(&name))),
+                extension: "ts".to_string(),
+                plugin_id: "main".to_string(),
+                typed_metadata: Some(metadata.clone()),
+                name,
+                ..crate::scripts::Script::default()
+            };
+            crate::scripts::validate_declared_sdk_capabilities(&validation_subject)
+        })
+        .unwrap_or_default();
 
     if !has_name {
         warnings.push("missing_name_contract".to_string());
@@ -1332,6 +1483,10 @@ fn audit_generated_script_contract(script: &str) -> GeneratedScriptContractAudit
         has_kit_import,
         has_current_app_recipe_header: recipe_header,
         current_app_recipe_header_at_top: recipe_at_top,
+        declared_capabilities,
+        execution_topology,
+        metadata_parse_errors: parsed_metadata.errors,
+        capability_issues,
         warnings,
     }
 }
@@ -1507,6 +1662,36 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn generated_receipt_fixture(path: &Path, prompt: &str) -> GeneratedScriptReceipt {
+        GeneratedScriptReceipt {
+            schema_version: AI_GENERATED_SCRIPT_RECEIPT_SCHEMA_VERSION,
+            prompt: safe_generated_script_detail(prompt),
+            slug: "fixture".to_string(),
+            slug_source: "Fixture".to_string(),
+            slug_source_kind: "metadata_export".to_string(),
+            model_id: "test-model".to_string(),
+            provider_id: "test-provider".to_string(),
+            script_path: path.with_extension("ts").display().to_string(),
+            receipt_path: path.display().to_string(),
+            shell_execution_warning: false,
+            contract: GeneratedScriptContractAudit {
+                metadata_style: GeneratedScriptMetadataStyle::MetadataExport,
+                has_name: true,
+                has_description: true,
+                has_kit_import: false,
+                has_current_app_recipe_header: false,
+                current_app_recipe_header_at_top: true,
+                declared_capabilities: vec![],
+                execution_topology: None,
+                metadata_parse_errors: vec![],
+                capability_issues: vec![],
+                warnings: vec![],
+            },
+            verification: GeneratedScriptVerificationReceipt::skipped("safe_test_fixture"),
+            current_app_recipe: None,
+        }
+    }
+
     #[test]
     fn test_slugify_script_name_handles_spaces_and_symbols() {
         assert_eq!(
@@ -1514,6 +1699,150 @@ mod tests {
             "build-api-client"
         );
         assert_eq!(slugify_script_name("  ___  "), "ai-script");
+    }
+
+    #[test]
+    fn generated_persistence_plan_applies_identical_shell_policy_to_both_save_paths() {
+        let source = r#"import { execSync } from "child_process";
+const output = execSync("printenv");"#;
+        let provider_save = generated_script_persistence_plan(
+            "Show deployment status",
+            source,
+            "deployment-status",
+            None,
+        )
+        .expect("provider-result save has a valid derived name");
+        let direct_save = generated_script_persistence_plan(
+            "Show deployment status",
+            source,
+            "deployment-status",
+            Some("../../Private API_TOKEN"),
+        )
+        .expect("Agent Chat save sanitizes its override before any filesystem work");
+
+        assert!(provider_save.shell_execution_warning);
+        assert!(direct_save.shell_execution_warning);
+        assert_eq!(
+            provider_save.suspicious_shell_patterns,
+            direct_save.suspicious_shell_patterns
+        );
+        assert_eq!(direct_save.requested_slug, "private-api-token");
+        assert!(!direct_save.requested_slug.contains(".."));
+        assert!(!direct_save.requested_slug.contains('/'));
+
+        let explicitly_approved = generated_script_persistence_plan(
+            "Run a shell command in the terminal",
+            source,
+            "approved-shell",
+            None,
+        )
+        .expect("an explicitly approved shell request has a valid plan");
+        assert!(!explicitly_approved.shell_execution_warning);
+    }
+
+    #[test]
+    fn generated_persistence_plan_rejects_empty_hostile_override_without_leaking_it() {
+        let raw_override = "../../🔥";
+        let error = generated_script_persistence_plan(
+            "Summarize this note",
+            "await div(\"safe\");",
+            "safe-default",
+            Some(raw_override),
+        )
+        .expect_err("a hostile override that sanitizes to empty must fail before creation");
+        let safe_error = error.to_string();
+        assert!(safe_error.contains("empty after safe sanitization"));
+        assert!(!safe_error.contains(raw_override));
+        assert!(!safe_error.contains(".."));
+    }
+
+    #[test]
+    fn generated_persistence_identity_uses_actual_collision_resolved_safe_stem() {
+        let path = Path::new("/synthetic/plugins/main/scripts/safe-script-7.ts");
+        let slug = generated_script_created_slug(path)
+            .expect("the collision-resolved filename is the only receipt identity");
+        assert_eq!(slug, "safe-script-7");
+
+        let unsafe_path = Path::new("/synthetic/plugins/main/scripts/Unsafe Script.ts");
+        let error = generated_script_created_slug(unsafe_path)
+            .expect_err("an unsanitized external path must never enter a script receipt");
+        assert!(error.to_string().contains("safely sanitized"));
+    }
+
+    #[test]
+    fn generated_receipt_atomic_rewrites_preserve_safe_content_without_temp_artifacts() {
+        let temp = tempdir().expect("create isolated receipt workspace");
+        let destination = temp.path().join("fixture.scriptkit.json");
+        let mut receipt = generated_receipt_fixture(
+            &destination,
+            "Summarize this article token=sk-private-token Authorization: Bearer sk-private-bearer api_key=sk-private-api",
+        );
+        write_generated_script_receipt(&destination, &receipt)
+            .expect("publish initial receipt atomically");
+        receipt.model_id = "updated-model".to_string();
+        write_generated_script_receipt(&destination, &receipt)
+            .expect("replace existing regular receipt atomically");
+
+        let persisted = fs::read_to_string(&destination).expect("read final receipt");
+        let saved: GeneratedScriptReceipt =
+            serde_json::from_str(&persisted).expect("parse final receipt");
+        assert_eq!(saved.model_id, "updated-model");
+        assert!(saved.prompt.contains("Summarize this article"));
+        assert!(saved.prompt.contains("[REDACTED]"));
+        assert!(!persisted.contains("sk-private-token"));
+        assert!(!persisted.contains("sk-private-bearer"));
+        assert!(!persisted.contains("sk-private-api"));
+        let entries = fs::read_dir(temp.path())
+            .expect("inspect isolated receipt workspace")
+            .count();
+        assert_eq!(
+            entries, 1,
+            "temporary sibling receipts must always be cleaned"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_receipt_refuses_symlink_destination_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().expect("create isolated receipt workspace");
+        let protected = temp.path().join("protected.txt");
+        fs::write(&protected, "protected-content").expect("seed protected fixture");
+        let destination = temp.path().join("fixture.scriptkit.json");
+        symlink(&protected, &destination).expect("install isolated hostile receipt symlink");
+        let receipt = generated_receipt_fixture(&destination, "Summarize safely");
+
+        let error = write_generated_script_receipt(&destination, &receipt)
+            .expect_err("receipt publishing must never follow an existing symlink");
+        assert!(error.to_string().contains("symbolic-link"));
+        assert_eq!(
+            fs::read_to_string(&protected).expect("read protected fixture"),
+            "protected-content"
+        );
+    }
+
+    #[test]
+    fn generated_prompt_and_verifier_output_redact_secrets_without_losing_safe_copy() {
+        let prompt = "Summarize deployment token=sk-private-do-not-save for the team";
+        let safe_prompt = safe_generated_script_detail(prompt);
+        assert!(safe_prompt.contains("Summarize deployment"));
+        assert!(safe_prompt.contains("[REDACTED]"));
+        assert!(!safe_prompt.contains("sk-private-do-not-save"));
+
+        let stderr = b"Build failed: api_key=sk-never-persist-this at /Users/alice/private.ts";
+        let excerpt = truncate_verification_output(stderr).expect("safe diagnostics remain useful");
+        assert!(excerpt.contains("Build failed"));
+        assert!(!excerpt.contains("sk-never-persist-this"));
+        assert!(!excerpt.contains("/Users/alice"));
+    }
+
+    #[test]
+    fn generated_author_prompt_distinguishes_interactive_and_legacy_scriptlets() {
+        assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT
+            .contains("launcher-opened TypeScript scriptlets have interactive SDK transport"));
+        assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT
+            .contains("Only legacy synchronous TypeScript scriptlets lack interactive stdin"));
     }
 
     #[test]
@@ -1720,7 +2049,7 @@ await div("ready");
         // New prompt includes examples and comprehensive API reference
         assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains("TEACH BY EXAMPLE"));
         assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains("COMPACT API REFERENCE"));
-        assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains("ai("));
+        assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains("aiStartChat("));
         assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains("clipboard"));
         assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains("home("));
         // All examples must use export const metadata, not comment headers
@@ -1728,6 +2057,18 @@ await div("ready");
             AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains("export const metadata"),
             "system prompt examples must use export const metadata"
         );
+    }
+
+    #[test]
+    fn ai_script_generation_reference_preserves_actual_workspace_and_api_contracts() {
+        let prompt = AI_SCRIPT_GENERATION_SYSTEM_PROMPT;
+
+        assert!(prompt.contains("skPath(\"plugins\", \"main\", ...)"));
+        assert!(!prompt.contains("home(\".scriptkit\", \"kit\", \"main\""));
+        assert!(prompt.contains("typed dispatch receipt; OS delivery is not guaranteed"));
+        assert!(!prompt.contains("typed delivery result"));
+        assert!(prompt.contains("* setActions(actions)"));
+        assert!(!prompt.contains("* setActions(actions, options?)"));
     }
 
     #[test]
@@ -1746,6 +2087,109 @@ await div("ready");
             prompt.contains("Do not use choice `preview` fields, `setPreview()`, or `setPanel()`"),
             "system prompt should steer models away from dense preview APIs by default"
         );
+    }
+
+    #[test]
+    fn generated_system_message_uses_the_live_host_unsupported_capability_inventory() {
+        let messages = build_script_generation_messages("Write a note");
+        let system = &messages[0];
+
+        assert_eq!(system.role, "system");
+        assert!(system.content.contains("HOST SDK CAPABILITY CONTRACT"));
+        for unsupported in crate::mcp_resources::unsupported_sdk_capability_names() {
+            assert!(
+                system.content.contains(unsupported),
+                "system prompt must reject the host-owned unsupported capability {unsupported}"
+            );
+        }
+        assert!(!system.content.contains("* find(...) — file search prompt"));
+        assert!(!system
+            .content
+            .contains("* keyboard.type(...textOrKeys) — type (use with caution)"));
+        assert!(!system
+            .content
+            .contains("* mouse.move(points) — move mouse (use with caution)"));
+        assert!(system.content.contains("kit://command-doctor"));
+        assert!(system.content.contains("kit://failed-scripts"));
+        assert!(system.content.contains("never callable SDK functions"));
+        assert!(system.content.contains("do not invent `commandDoctor()`"));
+    }
+
+    #[test]
+    fn script_generation_examples_use_real_host_globals_and_no_imaginary_helpers() {
+        use crate::mcp_resources::{diagnose_sdk_capability, SdkExecutionTopology};
+
+        for capability in [
+            "arg",
+            "select",
+            "fields",
+            "editor",
+            "div",
+            "form",
+            "drop",
+            "path",
+            "mini",
+            "micro",
+            "hotkey",
+            "confirm",
+            "md",
+            "hud",
+            "notify",
+            "home",
+            "skPath",
+            "kitPath",
+            "tmpPath",
+            "readFile",
+            "writeFile",
+            "fileSearch",
+            "exec",
+            "browse",
+            "editFile",
+            "clipboard.readText",
+            "clipboard.writeText",
+            "clipboardHistory",
+            "aiStartChat",
+            "aiSendMessage",
+            "mcp.discover",
+        ] {
+            assert!(
+                diagnose_sdk_capability(capability, SdkExecutionTopology::TypeScriptScript)
+                    .is_none(),
+                "AI script guidance advertises unsupported SDK capability {capability}"
+            );
+        }
+
+        for imaginary in [
+            "* grid(",
+            "* textarea(",
+            "* onTab(",
+            "* toast(",
+            "* openActions(",
+            "* setHint(",
+            "* setLoading(",
+            "* setProgress(",
+            "* db(",
+            "* store(",
+            "* ensureDir(",
+            "* globby(",
+            "* getClipboardHistory(",
+            "* removeClipboardItem(",
+            "* clearClipboardHistory(",
+            "* ai(",
+            "* assistant(",
+            "* generate(",
+            "* mcp(options?)",
+            "path.join/etc",
+            "exec(command, options?)",
+            "`${cmd}",
+        ] {
+            assert!(
+                !AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains(imaginary),
+                "AI script guidance advertises imaginary SDK helper {imaginary}"
+            );
+        }
+        assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains("exec(\"open\", [filePath])"));
+        assert!(AI_SCRIPT_GENERATION_SYSTEM_PROMPT.contains("noResponse: true"));
     }
 
     #[test]
@@ -2235,6 +2679,111 @@ await div(JSON.stringify(urls));
     }
 
     #[test]
+    fn generated_script_rejects_unsupported_capabilities_before_any_file_creation() {
+        let input = r#"export const metadata = {
+  name: "Unavailable Widget",
+  description: "An unsupported native widget",
+  sdkCapabilities: ["widget"],
+  executionTopology: "typescript-script",
+};
+await widget("<p>Hello</p>");
+"#;
+
+        let error = save_generated_script_from_response("render a widget", input)
+            .expect_err("unsupported generated commands must fail before create_new_script");
+        let message = format!("{error:#}");
+        assert!(message.contains("generated_script_capability_unavailable"));
+        assert!(message.contains("widget"));
+    }
+
+    #[test]
+    fn generated_script_rejects_malformed_capability_and_topology_declarations() {
+        let malformed_capabilities = r#"export const metadata = {
+  name: "Bad Capability Shape",
+  description: "Invalid metadata",
+  sdkCapabilities: "arg",
+};
+await arg("Name?");
+"#;
+        let capability_error =
+            prepare_script_from_ai_response_with_contract("ask for a name", malformed_capabilities)
+                .expect_err("a bare capability string is never a valid author declaration");
+        assert!(format!("{capability_error:#}").contains("must be an array"));
+
+        let malformed_topology = r#"export const metadata = {
+  name: "Bad Topology",
+  description: "Invalid transport",
+  executionTopology: "ruby-scriptlet",
+};
+await arg("Name?");
+"#;
+        let topology_error =
+            prepare_script_from_ai_response_with_contract("ask for a name", malformed_topology)
+                .expect_err("topology must be checked even without sdkCapabilities");
+        assert!(format!("{topology_error:#}").contains("executionTopology"));
+    }
+
+    #[test]
+    fn generated_script_rejects_unparseable_typed_metadata_before_creation() {
+        let malformed = r#"export const metadata = {
+  name: "Broken Metadata",
+  description: "Missing closing brace",
+  sdkCapabilities: ["arg"];
+await arg("Name?");
+"#;
+        let error = prepare_script_from_ai_response_with_contract("ask a question", malformed)
+            .expect_err("invalid typed metadata must not produce a hidden generated script");
+        assert!(format!("{error:#}").contains("generated_script_metadata_invalid"));
+    }
+
+    #[test]
+    fn generated_script_audit_reports_supported_capabilities_and_topology() {
+        let valid = r#"export const metadata = {
+  name: "Supported Author Flow",
+  description: "Prompt and format a response",
+  sdkCapabilities: ["arg", "div", "md"],
+  executionTopology: "typescript-script",
+};
+const answer = await arg("Question?");
+await div(md(answer));
+"#;
+
+        let prepared = prepare_script_from_ai_response_with_contract("ask a question", valid)
+            .expect("supported author declarations should remain saveable");
+        assert_eq!(
+            prepared.contract.declared_capabilities,
+            ["arg", "div", "md"]
+        );
+        assert_eq!(
+            prepared.contract.execution_topology,
+            Some(crate::mcp_resources::SdkExecutionTopology::TypeScriptScript)
+        );
+        assert!(prepared.contract.metadata_parse_errors.is_empty());
+        assert!(prepared.contract.capability_issues.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn generated_permission_pending_script_stays_recoverable_without_privacy_probe() {
+        let input = r#"export const metadata = {
+  name: "Move Existing Window",
+  description: "Needs explicitly granted Accessibility",
+  sdkCapabilities: ["moveWindow"],
+  executionTopology: "typescript-script",
+};
+await moveWindow("example", { x: 0, y: 0 });
+"#;
+
+        let prepared = prepare_script_from_ai_response_with_contract("move a window", input)
+            .expect("unknown permission inventory is a recoverable author warning");
+        assert_eq!(prepared.contract.capability_issues.len(), 1);
+        assert_eq!(
+            prepared.contract.capability_issues[0].severity,
+            crate::scripts::ValidationSeverity::Warning
+        );
+    }
+
+    #[test]
     fn receipt_serde_roundtrip() {
         let receipt = GeneratedScriptReceipt {
             schema_version: AI_GENERATED_SCRIPT_RECEIPT_SCHEMA_VERSION,
@@ -2254,6 +2803,10 @@ await div(JSON.stringify(urls));
                 has_kit_import: true,
                 has_current_app_recipe_header: false,
                 current_app_recipe_header_at_top: true,
+                declared_capabilities: vec![],
+                execution_topology: None,
+                metadata_parse_errors: vec![],
+                capability_issues: vec![],
                 warnings: vec![],
             },
             verification: GeneratedScriptVerificationReceipt::skipped("unit_test_fixture"),

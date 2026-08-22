@@ -337,12 +337,8 @@ try {
 
   await executeMenuAction('com.fake.nonexistent.app.12345', ['File', 'New']);
 
-  // If we get here without error, that's unexpected
-  debug('Test 8 - executeMenuAction did not throw for invalid bundleId');
-  logTest(test8, 'pass', {
-    result: { 
-      note: 'No error thrown for invalid bundleId (may be expected behavior)'
-    },
+  logTest(test8, 'fail', {
+    error: 'executeMenuAction must reject an invalid bundle identifier.',
     duration_ms: Date.now() - start8,
   });
 } catch (err) {
@@ -390,12 +386,8 @@ try {
   // Use Finder with an invalid menu path
   await executeMenuAction('com.apple.finder', ['NonExistent', 'Menu', 'Path']);
 
-  // If we get here without error, that's unexpected but possible
-  debug('Test 9 - executeMenuAction did not throw for invalid menu path');
-  logTest(test9, 'pass', {
-    result: { 
-      note: 'No error thrown for invalid menu path (may be expected behavior)'
-    },
+  logTest(test9, 'fail', {
+    error: 'executeMenuAction must reject an invalid menu path.',
     duration_ms: Date.now() - start9,
   });
 } catch (err) {
@@ -440,9 +432,8 @@ try {
   debug('Test 10: Verify MenuBarItem structure');
 
   if (menuItems.length === 0) {
-    debug('[SKIP] Test 10 - no menu items available for type verification');
-    logTest(test10, 'skip', {
-      reason: 'No menu items available (accessibility permission may be required)',
+    logTest(test10, 'fail', {
+      error: 'The deterministic native-menu fixture must include a typed menu tree.',
       duration_ms: Date.now() - start10,
     });
   } else {
@@ -525,12 +516,8 @@ try {
 
   await executeMenuAction('com.apple.finder', []);
 
-  // If we get here without error, function accepted empty path
-  debug('Test 11 - executeMenuAction accepted empty menuPath');
-  logTest(test11, 'pass', {
-    result: { 
-      note: 'Empty menuPath was accepted (may be expected behavior)'
-    },
+  logTest(test11, 'fail', {
+    error: 'executeMenuAction must reject an empty menu path.',
     duration_ms: Date.now() - start11,
   });
 } catch (err) {
