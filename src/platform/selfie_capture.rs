@@ -30,6 +30,8 @@ pub struct ScriptKitSelfieBounds {
 const SCRIPT_KIT_SELFIE_COMMAND_ID: &str = "builtin/script-kit-selfie";
 const SCRIPT_KIT_SELFIE_SHORTCUT: &str = "cmd+alt+1";
 const SCRIPT_KIT_SELFIE_MARGIN: i32 = 48;
+static SCRIPT_KIT_SELFIE_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScriptKitSelfieWindowKind {
@@ -81,8 +83,10 @@ fn classify_script_kit_selfie_candidate(
     let app_name = candidate.app_name.to_lowercase();
     let title_or_app_mentions_dictation =
         title.contains("dictation") || app_name.contains("dictation");
-    let looks_like_titleless_dictation_overlay =
-        dictation_open && candidate.height <= 220 && candidate.width >= 240 && candidate.width <= 900;
+    let looks_like_titleless_dictation_overlay = dictation_open
+        && candidate.height <= 220
+        && candidate.width >= 240
+        && candidate.width <= 900;
     if title_or_app_mentions_dictation || looks_like_titleless_dictation_overlay {
         ScriptKitSelfieWindowKind::Dictation
     } else if title.contains("notes") || app_name.contains("notes") {
@@ -113,6 +117,36 @@ pub fn script_kit_selfie_output_dir() -> std::path::PathBuf {
         .join(".scriptkit")
         .join("screenshots")
         .join("selfies")
+}
+
+fn persist_private_script_kit_selfie_artifacts(
+    directory: &std::path::Path,
+    png_path: &std::path::Path,
+    receipt_path: &std::path::Path,
+    png_bytes: &[u8],
+    receipt_bytes: &[u8],
+) -> std::io::Result<()> {
+    if png_path.parent() != Some(directory) || receipt_path.parent() != Some(directory) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Script Kit Selfie artifacts must remain inside their private directory",
+        ));
+    }
+    crate::atomic_file::ensure_private_directory(directory)?;
+    crate::atomic_file::inspect_private_file(png_path)?;
+    crate::atomic_file::inspect_private_file(receipt_path)?;
+    crate::atomic_file::write_private_atomic(png_path, png_bytes)?;
+    crate::atomic_file::write_private_atomic(receipt_path, receipt_bytes)?;
+    Ok(())
+}
+
+fn build_script_kit_selfie_receipt_id(
+    timestamp: &str,
+    state_slug: &str,
+    process_id: u32,
+    sequence: u64,
+) -> String {
+    format!("{timestamp}-{state_slug}-{process_id}-{sequence}")
 }
 
 pub fn slugify_script_kit_selfie_state(state: &str) -> String {
@@ -152,6 +186,7 @@ pub fn capture_script_kit_selfie(state: &str) -> anyhow::Result<ScriptKitSelfieR
 #[cfg(target_os = "macos")]
 fn capture_script_kit_selfie_macos(state: &str) -> anyhow::Result<ScriptKitSelfieReceipt> {
     use anyhow::Context as _;
+    use image::ImageEncoder as _;
     use xcap::Monitor;
 
     let candidates = list_script_kit_candidates().map_err(|error| {
@@ -170,7 +205,7 @@ fn capture_script_kit_selfie_macos(state: &str) -> anyhow::Result<ScriptKitSelfi
     let dictation_open = crate::dictation::is_dictation_overlay_open();
     let candidate_index =
         select_script_kit_selfie_candidate_index(&candidate_snapshots, dictation_open)
-        .context("no visible Script Kit window found for selfie capture")?;
+            .context("no visible Script Kit window found for selfie capture")?;
     let candidate = &candidates[candidate_index];
     let captured_kind =
         classify_script_kit_selfie_candidate(&candidate_snapshots[candidate_index], dictation_open);
@@ -198,10 +233,10 @@ fn capture_script_kit_selfie_macos(state: &str) -> anyhow::Result<ScriptKitSelfi
 
     let crop_left = (window_x - SCRIPT_KIT_SELFIE_MARGIN).max(monitor_x);
     let crop_top = (window_y - SCRIPT_KIT_SELFIE_MARGIN).max(monitor_y);
-    let crop_right = (window_x + window_w as i32 + SCRIPT_KIT_SELFIE_MARGIN)
-        .min(monitor_x + monitor_w as i32);
-    let crop_bottom = (window_y + window_h as i32 + SCRIPT_KIT_SELFIE_MARGIN)
-        .min(monitor_y + monitor_h as i32);
+    let crop_right =
+        (window_x + window_w as i32 + SCRIPT_KIT_SELFIE_MARGIN).min(monitor_x + monitor_w as i32);
+    let crop_bottom =
+        (window_y + window_h as i32 + SCRIPT_KIT_SELFIE_MARGIN).min(monitor_y + monitor_h as i32);
     let crop_w = (crop_right - crop_left).max(1) as u32;
     let crop_h = (crop_bottom - crop_top).max(1) as u32;
 
@@ -214,20 +249,22 @@ fn capture_script_kit_selfie_macos(state: &str) -> anyhow::Result<ScriptKitSelfi
     let created_at = chrono::Local::now();
     let timestamp = created_at.format("%Y%m%d-%H%M%S-%3f").to_string();
     let state_slug = slugify_script_kit_selfie_state(&captured_state);
-    let receipt_id = format!("{timestamp}-{state_slug}");
+    let sequence = SCRIPT_KIT_SELFIE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let receipt_id =
+        build_script_kit_selfie_receipt_id(&timestamp, &state_slug, std::process::id(), sequence);
     let dir = script_kit_selfie_output_dir();
-    std::fs::create_dir_all(&dir).with_context(|| {
-        format!(
-            "failed to create Script Kit Selfie directory {}",
-            dir.display()
-        )
-    })?;
 
     let png_path = dir.join(format!("{receipt_id}.png"));
     let receipt_path = dir.join(format!("{receipt_id}.json"));
-    image
-        .save(&png_path)
-        .with_context(|| format!("failed to write {}", png_path.display()))?;
+    let mut png_bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png_bytes)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .context("failed to encode private Script Kit Selfie image")?;
 
     let receipt = ScriptKitSelfieReceipt {
         schema_version: 1,
@@ -265,8 +302,14 @@ fn capture_script_kit_selfie_macos(state: &str) -> anyhow::Result<ScriptKitSelfi
     };
 
     let receipt_json = serde_json::to_vec_pretty(&receipt)?;
-    std::fs::write(&receipt_path, receipt_json)
-        .with_context(|| format!("failed to write {}", receipt_path.display()))?;
+    persist_private_script_kit_selfie_artifacts(
+        &dir,
+        &png_path,
+        &receipt_path,
+        &png_bytes,
+        &receipt_json,
+    )
+    .context("failed to save private Script Kit Selfie artifacts")?;
 
     Ok(receipt)
 }
@@ -274,10 +317,133 @@ fn capture_script_kit_selfie_macos(state: &str) -> anyhow::Result<ScriptKitSelfi
 #[cfg(test)]
 mod selfie_capture_tests {
     use super::{
-        classify_script_kit_selfie_candidate, select_script_kit_selfie_candidate_index,
+        build_script_kit_selfie_receipt_id, classify_script_kit_selfie_candidate,
+        persist_private_script_kit_selfie_artifacts, select_script_kit_selfie_candidate_index,
         slugify_script_kit_selfie_state, ScriptKitSelfieCandidateSnapshot,
         ScriptKitSelfieWindowKind,
     };
+
+    #[test]
+    fn selfie_private_artifacts_never_reuse_same_millisecond_capture_identities() {
+        let first = build_script_kit_selfie_receipt_id("20260822-120000-123", "notes", 42, 0);
+        let second = build_script_kit_selfie_receipt_id("20260822-120000-123", "notes", 42, 1);
+        let another_process =
+            build_script_kit_selfie_receipt_id("20260822-120000-123", "notes", 43, 0);
+
+        assert_ne!(first, second);
+        assert_ne!(first, another_process);
+        assert!(first.starts_with("20260822-120000-123-notes-"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selfie_private_artifacts_create_owner_only_directory_image_and_receipt() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let isolated = tempfile::tempdir().expect("isolated synthetic screenshot fixture");
+        let directory = isolated.path().join("private-selfies");
+        let image = directory.join("synthetic.png");
+        let receipt = directory.join("synthetic.json");
+
+        persist_private_script_kit_selfie_artifacts(
+            &directory,
+            &image,
+            &receipt,
+            b"synthetic-private-image-bytes-no-screen-capture",
+            br#"{"private":"synthetic receipt without screen capture"}"#,
+        )
+        .expect("persist synthetic screenshot bytes privately");
+
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&image).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&receipt).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selfie_private_artifacts_refuse_hostile_symlinks_before_writing_either_file() {
+        use std::os::unix::fs::symlink;
+
+        let isolated = tempfile::tempdir().expect("isolated hostile screenshot fixture");
+        let directory = isolated.path().join("private-selfies");
+        crate::atomic_file::ensure_private_directory(&directory)
+            .expect("prepare private screenshot directory");
+        let image = directory.join("synthetic.png");
+        let receipt = directory.join("synthetic.json");
+        let foreign = isolated.path().join("foreign-private-document");
+        std::fs::write(&foreign, "another owner's private document")
+            .expect("seed unrelated private document");
+        symlink(&foreign, &receipt).expect("plant hostile screenshot receipt link");
+
+        assert!(persist_private_script_kit_selfie_artifacts(
+            &directory,
+            &image,
+            &receipt,
+            b"synthetic screenshot bytes",
+            b"synthetic private receipt",
+        )
+        .is_err());
+        assert!(!image.exists(), "preflight must happen before either write");
+        assert_eq!(
+            std::fs::read_to_string(&foreign).unwrap(),
+            "another owner's private document"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selfie_private_artifacts_repair_legacy_permissions_and_reject_foreign_destinations() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let isolated = tempfile::tempdir().expect("isolated legacy screenshot fixture");
+        let directory = isolated.path().join("private-selfies");
+        std::fs::create_dir(&directory).expect("seed permissive legacy screenshot directory");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))
+            .expect("make legacy screenshot directory permissive");
+        let image = directory.join("synthetic.png");
+        let receipt = directory.join("synthetic.json");
+        std::fs::write(&image, "previously exposed screenshot bytes")
+            .expect("seed permissive legacy screenshot");
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o644))
+            .expect("make legacy screenshot permissive");
+
+        persist_private_script_kit_selfie_artifacts(
+            &directory,
+            &image,
+            &receipt,
+            b"replacement private image",
+            b"replacement private receipt",
+        )
+        .expect("repair legacy screenshot permissions before private replacement");
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&image).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let foreign = isolated.path().join("outside-private-screenshot.png");
+        assert!(persist_private_script_kit_selfie_artifacts(
+            &directory,
+            &foreign,
+            &receipt,
+            b"never escape",
+            b"never escape",
+        )
+        .is_err());
+        assert!(!foreign.exists());
+    }
 
     #[test]
     fn selfie_state_slug_is_filename_safe() {

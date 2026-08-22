@@ -61,9 +61,8 @@ fn script_kit_selfie_builtin_text_matches_capture_receipt_behavior() {
     assert!(
         SELFIE_CAPTURE.contains("pub fn capture_script_kit_selfie(state: &str)")
             && SELFIE_CAPTURE.contains("capture_method: format!(")
-            && SELFIE_CAPTURE.contains("\"xcap.monitor.capture_region.composited_desktop.{}\"")
-            && SELFIE_CAPTURE.contains("std::fs::write(&receipt_path, receipt_json)"),
-        "Script Kit Selfie platform implementation should capture the composited desktop region and write a receipt"
+            && SELFIE_CAPTURE.contains("\"xcap.monitor.capture_region.composited_desktop.{}\""),
+        "Script Kit Selfie platform implementation should capture the composited desktop region"
     );
 }
 

@@ -83,6 +83,11 @@ fn write_private_tab_ai_screenshot(path: &std::path::Path, png: &[u8]) -> Result
         .context("failed to write owner-only private screenshot")
 }
 
+fn prepare_private_tab_ai_screenshot_directory(path: &std::path::Path) -> Result<()> {
+    crate::atomic_file::ensure_private_directory(path)
+        .context("failed to prepare owner-only private screenshot directory")
+}
+
 fn log_private_tab_ai_screenshot_written(
     event: &'static str,
     path: &str,
@@ -161,7 +166,7 @@ pub fn capture_tab_ai_focused_window_screenshot_file() -> Result<Option<TabAiScr
     }
 
     let tmp_dir = screenshot_tmp_dir()?;
-    std::fs::create_dir_all(&tmp_dir).context("failed to create private screenshot directory")?;
+    prepare_private_tab_ai_screenshot_directory(&tmp_dir)?;
 
     let filename = build_tab_ai_screenshot_filename(
         chrono::Utc::now(),
@@ -223,7 +228,7 @@ pub fn capture_tab_ai_screen_screenshot_file() -> Result<Option<TabAiScreenshotF
     }
 
     let tmp_dir = screenshot_tmp_dir()?;
-    std::fs::create_dir_all(&tmp_dir).context("failed to create private screenshot directory")?;
+    prepare_private_tab_ai_screenshot_directory(&tmp_dir)?;
 
     let filename = build_tab_ai_screenshot_filename(
         chrono::Utc::now(),
@@ -375,6 +380,48 @@ pub fn tab_ai_screenshot_prefix() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_screenshot_directory_creates_and_repairs_owner_only_permissions_without_capture() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let isolated = tempfile::tempdir().expect("isolated synthetic screenshot directory");
+        let path = isolated.path().join("private-screenshot-temp");
+        prepare_private_tab_ai_screenshot_directory(&path)
+            .expect("create owner-only screenshot directory");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("simulate permissive legacy screenshot directory");
+        prepare_private_tab_ai_screenshot_directory(&path)
+            .expect("repair legacy screenshot directory before any capture bytes are written");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_screenshot_directory_refuses_hostile_links_without_capture() {
+        let isolated = tempfile::tempdir().expect("isolated hostile screenshot directory");
+        let external = isolated.path().join("another-owner");
+        std::fs::create_dir(&external).expect("seed unrelated screenshot directory");
+        let planted = isolated.path().join("hostile-screenshot-temp");
+        std::os::unix::fs::symlink(&external, &planted)
+            .expect("plant hostile screenshot directory link");
+
+        assert!(prepare_private_tab_ai_screenshot_directory(&planted).is_err());
+        assert_eq!(std::fs::read_dir(external).unwrap().count(), 0);
+        assert!(std::fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 
     fn unique_test_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
