@@ -31,6 +31,9 @@
 # sccache: SCRIPT_KIT_AGENT_USE_SCCACHE=auto (default) uses sccache when on
 # PATH, 1 requires it, 0 disables. Shared caches survive individual-pool eviction.
 # Builds default to two workers and fail before starting under the disk floor.
+# Compiler flags, inherited worker settings, and Rust test-harness threads cannot
+# exceed the configured ceiling. Noninteractive runs never exceed two workers
+# and cannot inherit intentionally heavyweight search/storage stress corpora.
 # SCRIPT_KIT_AGENT_TIMINGS=1 emits Cargo's target/cargo-timings HTML report.
 
 set -euo pipefail
@@ -39,6 +42,73 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_KIT_REPO_ROOT:-$(cd "${SCRIPT_ROOT}/../.." && pwd)}"
 # shellcheck source=scripts/agentic/cargo-cache-locks.sh
 source "${SCRIPT_ROOT}/cargo-cache-locks.sh"
+
+worker_failure() {
+  echo "AGENT_CARGO error: $1" >&2
+  exit 64
+}
+
+validate_worker_count() {
+  local value="$1" label="$2" ceiling="$3"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || worker_failure "${label} must be a positive whole worker count; got ${value}"
+  (( value <= ceiling )) || worker_failure "${label}=${value} exceeds the ${ceiling}-worker safety ceiling"
+}
+
+max_workers="${SCRIPT_KIT_AGENT_MAX_JOBS:-2}"
+[[ "$max_workers" =~ ^[1-9][0-9]*$ ]] \
+  || worker_failure "SCRIPT_KIT_AGENT_MAX_JOBS must be a positive whole worker count; got ${max_workers}"
+if [[ "${SCRIPT_KIT_NONINTERACTIVE:-0}" == "1" && "$max_workers" -gt 2 ]]; then
+  worker_failure "noninteractive builds cannot exceed two workers; got SCRIPT_KIT_AGENT_MAX_JOBS=${max_workers}"
+fi
+
+compiler_workers="${CARGO_BUILD_JOBS:-$max_workers}"
+validate_worker_count "$compiler_workers" "CARGO_BUILD_JOBS" "$max_workers"
+test_workers="${RUST_TEST_THREADS:-$compiler_workers}"
+validate_worker_count "$test_workers" "RUST_TEST_THREADS" "$max_workers"
+
+requested_args=("$@")
+for (( worker_arg_index=0; worker_arg_index<${#requested_args[@]}; worker_arg_index++ )); do
+  argument="${requested_args[$worker_arg_index]}"
+  worker_value=""
+  worker_label=""
+  case "$argument" in
+    --jobs|-j|--test-threads)
+      (( worker_arg_index + 1 < ${#requested_args[@]} )) \
+        || worker_failure "${argument} requires a positive worker count"
+      worker_value="${requested_args[$((worker_arg_index + 1))]}"
+      worker_label="$argument"
+      worker_arg_index=$((worker_arg_index + 1))
+      ;;
+    --jobs=*|--test-threads=*)
+      worker_value="${argument#*=}"
+      worker_label="${argument%%=*}"
+      ;;
+    -j*)
+      worker_value="${argument#-j}"
+      worker_value="${worker_value#=}"
+      worker_label="-j"
+      ;;
+    *)
+      continue
+      ;;
+  esac
+  validate_worker_count "$worker_value" "$worker_label" "$max_workers"
+  if [[ "$worker_label" == "--test-threads" ]]; then
+    test_workers="$worker_value"
+  else
+    compiler_workers="$worker_value"
+    if [[ -z "${RUST_TEST_THREADS:-}" ]]; then
+      test_workers="$compiler_workers"
+    fi
+  fi
+done
+
+export CARGO_BUILD_JOBS="$compiler_workers"
+export RUST_TEST_THREADS="$test_workers"
+if [[ "${SCRIPT_KIT_NONINTERACTIVE:-0}" == "1" ]]; then
+  export SCRIPT_KIT_SEARCH_FULL_STRESS=0
+  export SCRIPT_KIT_STORAGE_FULL_STRESS=0
+fi
 
 sanitize_id() {
   printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '-'
@@ -71,7 +141,6 @@ metal_module_cache="${SCRIPT_KIT_METAL_MODULE_CACHE_DIR:-${shared_cache_dir}/cla
 mkdir -p "$target_dir" "$lock_root" "$metal_module_cache"
 
 export CARGO_TARGET_DIR="$target_dir"
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-${SCRIPT_KIT_AGENT_MAX_JOBS:-2}}"
 export SCRIPT_KIT_METAL_MODULE_CACHE_DIR="$metal_module_cache"
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$metal_module_cache}"
 
@@ -323,7 +392,7 @@ if [[ -d "${target_dir}/debug/deps" ]] && [[ -n "$(find "${target_dir}/debug/dep
 fi
 started_epoch="$(date +%s)"
 free_before_gb="$(( $(free_disk_kb) / 1024 / 1024 ))"
-echo "AGENT_CARGO mode=${target_mode} pool=${pool} cache=${cache_state} jobs=${CARGO_BUILD_JOBS} target_dir=${CARGO_TARGET_DIR} metal_module_cache=${metal_module_cache} lock=${lock_name} rustc_wrapper=${rustc_wrapper_state} debug=${CARGO_PROFILE_DEV_DEBUG} incremental=${CARGO_INCREMENTAL:-default} cargo ${cargo_args[*]}" >&2
+echo "AGENT_CARGO mode=${target_mode} pool=${pool} cache=${cache_state} jobs=${CARGO_BUILD_JOBS} test_threads=${RUST_TEST_THREADS} target_dir=${CARGO_TARGET_DIR} metal_module_cache=${metal_module_cache} lock=${lock_name} rustc_wrapper=${rustc_wrapper_state} debug=${CARGO_PROFILE_DEV_DEBUG} incremental=${CARGO_INCREMENTAL:-default} cargo ${cargo_args[*]}" >&2
 
 set +e
 cargo "${cargo_args[@]}"
@@ -347,8 +416,8 @@ fi
 elapsed_seconds="$(( $(date +%s) - started_epoch ))"
 free_after_gb="$(( $(free_disk_kb) / 1024 / 1024 ))"
 receipt_path="${SCRIPT_KIT_AGENT_BUILD_RECEIPT_PATH:-${REPO_ROOT}/target-agent/build-receipts.jsonl}"
-printf '{"started_epoch":%s,"elapsed_seconds":%s,"status":%s,"pool":"%s","cache":"%s","jobs":%s,"free_before_gb":%s,"free_after_gb":%s,"command":"%s","timings":%s}\n' \
-  "$started_epoch" "$elapsed_seconds" "$status" "$pool" "$cache_state" "$CARGO_BUILD_JOBS" \
+printf '{"started_epoch":%s,"elapsed_seconds":%s,"status":%s,"pool":"%s","cache":"%s","jobs":%s,"test_threads":%s,"free_before_gb":%s,"free_after_gb":%s,"command":"%s","timings":%s}\n' \
+  "$started_epoch" "$elapsed_seconds" "$status" "$pool" "$cache_state" "$CARGO_BUILD_JOBS" "$RUST_TEST_THREADS" \
   "$free_before_gb" "$free_after_gb" "${cargo_args[0]:-unknown}" "${SCRIPT_KIT_AGENT_TIMINGS:-0}" \
   >> "$receipt_path" 2>/dev/null || true
 echo "AGENT_CARGO result status=${status} elapsed=${elapsed_seconds}s cache=${cache_state} free=${free_before_gb}G->${free_after_gb}G receipt=${receipt_path}" >&2

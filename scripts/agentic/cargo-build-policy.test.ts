@@ -39,7 +39,7 @@ function fixture() {
   writeFileSync(
     join(bin, "cargo"),
     `#!/bin/bash
-printf 'jobs=%s\\nmodule=%s\\nwrapper=%s\\nsocket=%s\\nargs=' "$CARGO_BUILD_JOBS" "$SCRIPT_KIT_METAL_MODULE_CACHE_DIR" "\${RUSTC_WRAPPER:-}" "\${SCCACHE_SERVER_UDS:-}" > "$CARGO_POLICY_CAPTURE"
+printf 'jobs=%s\\ntest_threads=%s\\nsearch_stress=%s\\nstorage_stress=%s\\nmodule=%s\\nwrapper=%s\\nsocket=%s\\nargs=' "$CARGO_BUILD_JOBS" "\${RUST_TEST_THREADS:-}" "\${SCRIPT_KIT_SEARCH_FULL_STRESS:-}" "\${SCRIPT_KIT_STORAGE_FULL_STRESS:-}" "$SCRIPT_KIT_METAL_MODULE_CACHE_DIR" "\${RUSTC_WRAPPER:-}" "\${SCCACHE_SERVER_UDS:-}" > "$CARGO_POLICY_CAPTURE"
 printf '%s ' "$@" >> "$CARGO_POLICY_CAPTURE"
 printf '\\n' >> "$CARGO_POLICY_CAPTURE"
 `,
@@ -110,6 +110,7 @@ describe("bounded Cargo builds", () => {
     expect(result.status).toBe(0);
     const invocation = readFileSync(workspace.capture, "utf8");
     expect(invocation).toContain("jobs=2\n");
+    expect(invocation).toContain("test_threads=2\n");
     expect(invocation).toContain(
       `module=${join(workspace.root, "target-agent", "shared", "clang-modules")}\n`,
     );
@@ -123,9 +124,121 @@ describe("bounded Cargo builds", () => {
       pool: "agent-debug",
       cache: "cold",
       jobs: 2,
+      test_threads: 2,
       command: "test",
       timings: 1,
     });
+  });
+
+  test.each([
+    ["--jobs", "8"],
+    ["--jobs=8"],
+    ["-j", "8"],
+    ["-j8"],
+  ])("refuses explicit compiler-worker bypass %j before Cargo runs", (...workerArgs) => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", ["test", "--lib", ...workerArgs], workspace.env);
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("exceeds the 2-worker safety ceiling");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("refuses inherited compiler and Rust-test worker bypasses before Cargo runs", () => {
+    for (const [variable, value] of [
+      ["CARGO_BUILD_JOBS", "48"],
+      ["RUST_TEST_THREADS", "48"],
+    ]) {
+      const workspace = fixture();
+      const result = run("agent-cargo.sh", ["test", "--lib"], {
+        ...workspace.env,
+        [variable!]: value,
+      });
+
+      expect(result.status).toBe(64);
+      expect(result.stderr).toContain("exceeds the 2-worker safety ceiling");
+      expect(existsSync(workspace.capture)).toBe(false);
+    }
+  });
+
+  test.each(["0", "-1", "1.5", "workers"])(
+    "refuses malformed inherited worker count %s before Cargo runs",
+    (value) => {
+      for (const variable of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "SCRIPT_KIT_AGENT_MAX_JOBS"]) {
+        const workspace = fixture();
+        const result = run("agent-cargo.sh", ["test", "--lib"], {
+          ...workspace.env,
+          [variable]: value,
+        });
+
+        expect(result.status).toBe(64);
+        expect(result.stderr).toContain("must be a positive whole worker count");
+        expect(existsSync(workspace.capture)).toBe(false);
+      }
+    },
+  );
+
+  test.each([
+    ["--test-threads", "24"],
+    ["--test-threads=24"],
+  ])("refuses Rust-harness thread bypass %j before Cargo runs", (...threadArgs) => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", ["test", "--lib", "--", ...threadArgs], workspace.env);
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("exceeds the 2-worker safety ceiling");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("noninteractive builds cannot raise their worker ceiling or inherit heavyweight fuzz", () => {
+    const blocked = fixture();
+    const raised = run("agent-cargo.sh", ["test", "--lib"], {
+      ...blocked.env,
+      SCRIPT_KIT_NONINTERACTIVE: "1",
+      SCRIPT_KIT_AGENT_MAX_JOBS: "8",
+    });
+
+    expect(raised.status).toBe(64);
+    expect(raised.stderr).toContain("noninteractive builds cannot exceed two workers");
+    expect(existsSync(blocked.capture)).toBe(false);
+
+    const isolated = fixture();
+    const bounded = run("agent-cargo.sh", ["test", "--lib"], {
+      ...isolated.env,
+      SCRIPT_KIT_NONINTERACTIVE: "1",
+      SCRIPT_KIT_SEARCH_FULL_STRESS: "1",
+      SCRIPT_KIT_STORAGE_FULL_STRESS: "1",
+    });
+
+    expect(bounded.status).toBe(0);
+    expect(readFileSync(isolated.capture, "utf8")).toContain("search_stress=0\n");
+    expect(readFileSync(isolated.capture, "utf8")).toContain("storage_stress=0\n");
+  });
+
+  test("explicit lower worker limits remain valid and bound the Rust test harness", () => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", ["test", "--lib", "--jobs", "1"], {
+      ...workspace.env,
+      CARGO_BUILD_JOBS: "1",
+      RUST_TEST_THREADS: "1",
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(workspace.capture, "utf8")).toContain("jobs=1\n");
+    expect(readFileSync(workspace.capture, "utf8")).toContain("test_threads=1\n");
+  });
+
+  test("explicit interactive ceilings preserve deliberate larger compiler overrides", () => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", ["check", "--jobs=4"], {
+      ...workspace.env,
+      SCRIPT_KIT_NONINTERACTIVE: "0",
+      SCRIPT_KIT_AGENT_MAX_JOBS: "4",
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(workspace.capture, "utf8")).toContain("jobs=4\n");
+    expect(readFileSync(workspace.capture, "utf8")).toContain("test_threads=4\n");
   });
 
   test("exports a cheap correctness-profile binary from Cargo's actual debug directory", () => {
