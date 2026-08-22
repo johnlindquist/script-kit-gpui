@@ -257,8 +257,25 @@ export function assertNoninteractiveProtocolCommand(
   } = {},
 ): void {
   const environment = options.environment ?? process.env;
+  const parentNoninteractive = process.env.SCRIPT_KIT_NONINTERACTIVE === "1";
+  if (parentNoninteractive) {
+    if (
+      options.noninteractive === false ||
+      (
+        Object.prototype.hasOwnProperty.call(environment, "SCRIPT_KIT_NONINTERACTIVE") &&
+        environment.SCRIPT_KIT_NONINTERACTIVE !== "1"
+      )
+    ) {
+      throw new NoninteractiveSafetyError(
+        "configuration",
+        "protocol options cannot override immutable parent safety authority",
+      );
+    }
+    assertNoIncompatibleOptIns(process.env);
+  }
   const noninteractive =
-    options.noninteractive ?? environment.SCRIPT_KIT_NONINTERACTIVE === "1";
+    parentNoninteractive ||
+    (options.noninteractive ?? environment.SCRIPT_KIT_NONINTERACTIVE === "1");
   if (!noninteractive) return;
   assertNoIncompatibleOptIns(environment);
   const ownsIsolatedCiSandbox =

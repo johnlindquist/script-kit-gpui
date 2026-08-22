@@ -229,6 +229,46 @@ describe("capture-free hidden target resolution", () => {
     expect(receipt.transactionValidation.valid).toBe(true);
   });
 
+  test("an explicit interactive override cannot escape parent hidden-target authority", async () => {
+    const previousNoninteractive = process.env.SCRIPT_KIT_NONINTERACTIVE;
+    process.env.SCRIPT_KIT_NONINTERACTIVE = "1";
+    const commands: string[] = [];
+    try {
+      const receipt = await resolveTargetReceipt(
+        {
+          session: fixtureSession(),
+          target: { type: "main" },
+          strict: true,
+          expectedSurfaceKind: "ScriptList",
+          timeoutMs: 250,
+        },
+        {
+          noninteractive: false,
+          rpcFn: async (_session, payload) => {
+            commands.push(String(payload.type));
+            if (payload.type === "listAutomationWindows") {
+              return { response: { windows: [hiddenWindow()] } };
+            }
+            if (payload.type === "getState") {
+              return { response: hiddenState() };
+            }
+            throw new Error(`unsafe visible-target inspection attempted: ${String(payload.type)}`);
+          },
+        },
+      );
+
+      expect(commands).toEqual([
+        "listAutomationWindows",
+        "getState",
+        "listAutomationWindows",
+      ]);
+      expect(receipt.inspectionMode).toBe("capture-free-hidden-state");
+    } finally {
+      if (previousNoninteractive === undefined) delete process.env.SCRIPT_KIT_NONINTERACTIVE;
+      else process.env.SCRIPT_KIT_NONINTERACTIVE = previousNoninteractive;
+    }
+  });
+
   test("missing canonical generations remain blocked rather than invented", async () => {
     const receipt = await resolveTargetReceipt(
       {

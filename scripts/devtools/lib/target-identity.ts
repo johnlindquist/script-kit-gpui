@@ -660,7 +660,7 @@ export async function resolveTargetReceipt(
   const tool = opts.tool ?? "targets";
   const invokeRpc = opts.rpcFn ?? rpc;
   const noninteractive =
-    opts.noninteractive ?? process.env.SCRIPT_KIT_NONINTERACTIVE === "1";
+    process.env.SCRIPT_KIT_NONINTERACTIVE === "1" || opts.noninteractive === true;
   const target = args.target ?? { type: "focused" };
   if (noninteractive) {
     assertNoninteractiveProtocolCommand(

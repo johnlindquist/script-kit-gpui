@@ -147,6 +147,38 @@ describe("noninteractive DevTools operator safety", () => {
     }
   });
 
+  test("protocol options cannot disable immutable parent noninteractive authority", () => {
+    for (const overrides of [
+      { noninteractive: false },
+      { environment: { ...environment, SCRIPT_KIT_NONINTERACTIVE: "0" } },
+      {
+        noninteractive: false,
+        environment: { ...environment, SCRIPT_KIT_NONINTERACTIVE: "0" },
+      },
+    ]) {
+      expect(() =>
+        assertNoninteractiveProtocolCommand({ type: "captureScreenshot" }, overrides),
+      ).toThrow("immutable parent safety authority");
+    }
+  });
+
+  test.each([
+    "SCRIPT_KIT_ALLOW_NATIVE_INPUT",
+    "SCRIPT_KIT_ALLOW_SCREEN_CAPTURE",
+  ])("replacement protocol environments cannot hide inherited %s authority", (unsafeSetting) => {
+    withParentAuthority({ [unsafeSetting]: "1" }, () => {
+      expect(() =>
+        assertNoninteractiveProtocolCommand(
+          { type: "getState" },
+          {
+            noninteractive: true,
+            environment,
+          },
+        ),
+      ).toThrow(`${unsafeSetting}=1 contradicts noninteractive execution`);
+    });
+  });
+
   test("window reveal, focus, input, pixel capture, live AI, and actions fail closed", () => {
     for (const commandType of [
       "show",

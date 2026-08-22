@@ -108,6 +108,7 @@ require_clean_source_identity() {
     scripts/devtools/performance-contract.test.ts
     scripts/devtools/lib/client.ts
     scripts/devtools/lib/operator-safety.ts
+    scripts/devtools/lib/target-identity.ts
     scripts/devtools/lib/privacy.ts
     scripts/devtools/lib/evidence-class.ts
     scripts/devtools/lib/task-proof-policy.ts
