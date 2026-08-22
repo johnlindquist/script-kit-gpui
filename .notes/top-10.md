@@ -1070,9 +1070,21 @@ offline receipts until their real producers are run again.
     client, central policy, target resolver, and status announcer—are
     tracked and included in the canonical release-source inventory. Real
     failing-then-passing mutations cover each previously omitted owner.
+    The independent SDK/custom-script runner now forcibly clears inherited
+    screen-takeover, visible-probe, native-input, screen-capture, live-AI,
+    application-launch, and notification permissions in every test child.
+    Its noninteractive worker pool defaults to two while preserving an
+    intentional caller override; malformed concurrency and timeout settings
+    fail before spawning a child or entering a busy scheduler loop. Both
+    explicit script selection and automatic discovery resolve canonical file
+    owners, so a harmless-looking symlink cannot bypass the system-input
+    exclusion. All three SDK safety owners, including the actual negative
+    fixture, are mandatory release sources. The isolated SDK safety suite
+    passes **19 cases and 57 assertions**; the actual two-worker SDK runner
+    separately passes **215 cases, zero failures, and zero skips**.
     The source-current full nonintrusive release lane then executed
-    **713 passing tests, zero failures, and 2,773 assertions across 37 files
-    in 10.11s**, without the previous repository scan or load spike. The
+    **726 passing tests, zero failures, and 2,813 assertions across 37 files
+    in 10.03s**, without the previous repository scan or load spike. The
     focused build/proof-contract lane separately passed **62 tests and 320
     assertions in 0.77s**. None touches the operator's computer.
 
