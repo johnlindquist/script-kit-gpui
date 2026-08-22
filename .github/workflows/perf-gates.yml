@@ -10,6 +10,7 @@ on:
       - "scripts/agentic/agent-cargo.sh"
       - "scripts/agentic/root-search-frame-stability.ts"
       - "scripts/agentic/root-typing-lag-benchmark.ts"
+      - "scripts/agentic/quick-ai-latency-bench.ts"
       - "scripts/devtools/**"
       - "src/app_impl/filter_*.rs"
       - "src/app_impl/filtering_cache.rs"
@@ -36,6 +37,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  SCRIPT_KIT_NONINTERACTIVE: "1"
+  SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0"
+  SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0"
+  SCRIPT_KIT_ALLOW_LIVE_AI: "0"
+  SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0"
+  SCRIPT_KIT_REQUIRE_CLEAN_SOURCE: "1"
 
 jobs:
   root-frame-identity:
@@ -64,18 +71,31 @@ jobs:
             --target=bun \
             --outdir="$RUNNER_TEMP/root-frame-gate-syntax"
 
+      - name: Verify nonintrusive performance-probe contracts
+        run: |
+          bun scripts/agentic/root-typing-lag-benchmark.ts --describe-contract
+          bun scripts/agentic/root-search-frame-stability.ts --describe-contract
+          bun scripts/agentic/quick-ai-latency-bench.ts --describe-contract
+          bun test --timeout 30000 \
+            scripts/agentic/root-typing-lag-benchmark.test.ts \
+            scripts/agentic/root-search-frame-stability.test.ts \
+            scripts/devtools/performance-contract.test.ts \
+            scripts/agentic/quick-ai-latency-bench.test.ts \
+            scripts/agentic/ai-phase-trace-report.test.ts
+
       - name: Build stable root frame gate artifact
         env:
           SCRIPT_KIT_AGENT_ARTIFACT_NAME: root-frame-gate
         run: ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui
 
-      - name: Run semantic frame-identity gate
+      - name: Run hidden-window semantic frame-identity gate
         run: |
-          bun scripts/agentic/root-search-frame-stability.ts \
+          SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=1 \
+            bun scripts/agentic/root-search-frame-stability.ts \
             --binary target-agent/artifacts/root-frame-gate/script-kit-gpui \
             --receipt .test-output/perf-gates/root-search-frame-stability.json
 
-      - name: Upload semantic frame-identity receipt
+      - name: Upload hidden semantic frame-identity receipt
         if: always()
         uses: actions/upload-artifact@v4
         with:

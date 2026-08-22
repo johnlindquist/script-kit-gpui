@@ -11,6 +11,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  SCRIPT_KIT_NONINTERACTIVE: "1"
+  SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0"
+  SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0"
+  SCRIPT_KIT_ALLOW_LIVE_AI: "0"
+  SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0"
+  SCRIPT_KIT_REQUIRE_CLEAN_SOURCE: "1"
 
 permissions:
   contents: write
@@ -79,8 +85,8 @@ jobs:
       - name: Validate clippy
         run: bash scripts/verify.sh --skip-bundle --only clippy
 
-  validate-test-compile:
-    name: Validate release test compile
+  validate-tests:
+    name: Execute release Rust behavior
     runs-on: macos-14
     needs: validate-version
     env:
@@ -101,8 +107,91 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
-      - name: Validate test compile
-        run: bash scripts/verify.sh --skip-bundle --only test-compile
+      - name: Execute application Rust tests
+        env:
+          SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-rust-evidence/rust-tests.json
+          SCRIPT_KIT_VERIFY_TEST_LOG: ${{ runner.temp }}/rust-tests.log
+        run: bash scripts/verify.sh --skip-bundle --only test
+      - name: Execute named nonintrusive integration behavior suites
+        env:
+          SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-rust-evidence/integration-tests.json
+          SCRIPT_KIT_VERIFY_TEST_LOG: ${{ runner.temp }}/integration-tests.log
+        run: bash scripts/verify.sh --skip-bundle --only integration-tests
+      - name: Execute app-independent domain tests
+        env:
+          SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-rust-evidence/domain-tests.json
+          SCRIPT_KIT_VERIFY_TEST_LOG: ${{ runner.temp }}/domain-tests.log
+        run: bash scripts/verify.sh --skip-bundle --only domain-tests
+      - name: Prove fresh-install seeding in an isolated temporary fixture
+        env:
+          SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-rust-evidence/first-run-fixtures.json
+          SCRIPT_KIT_VERIFY_TEST_LOG: ${{ runner.temp }}/first-run-fixtures.log
+        run: bash scripts/verify.sh --skip-bundle --only first-run-fixtures
+      - name: Prove denied permissions remain truthful without accessing devices
+        env:
+          SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-rust-evidence/permissions-fixtures.json
+          SCRIPT_KIT_VERIFY_TEST_LOG: ${{ runner.temp }}/permissions-fixtures.log
+        run: bash scripts/verify.sh --skip-bundle --only permissions-fixtures
+      - name: Prove mock AI failure offers recovery without starting a provider
+        env:
+          SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-rust-evidence/mock-ai-fixtures.json
+          SCRIPT_KIT_VERIFY_TEST_LOG: ${{ runner.temp }}/mock-ai-fixtures.log
+        run: bash scripts/verify.sh --skip-bundle --only mock-ai-fixtures
+      - name: Prove diagnostic secret and user-path redaction with mock data
+        env:
+          SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-rust-evidence/privacy-fixtures.json
+          SCRIPT_KIT_VERIFY_TEST_LOG: ${{ runner.temp }}/privacy-fixtures.log
+        run: bash scripts/verify.sh --skip-bundle --only privacy-fixtures
+      - name: Upload executed Rust behavior receipts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-rust-evidence
+          path: ${{ runner.temp }}/release-rust-evidence/*.json
+          if-no-files-found: error
+
+  validate-proof-contracts:
+    name: Validate headless proof and consistency contracts
+    runs-on: macos-14
+    needs: validate-version
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - name: Execute safe proof-contract behavior
+        env:
+          SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-proof-evidence/proof-contracts.json
+          SCRIPT_KIT_VERIFY_TEST_LOG: ${{ runner.temp }}/proof-contracts.log
+        run: bash scripts/verify.sh --skip-bundle --only proof-contracts
+      - name: Validate tracked static consistency catalog
+        env:
+          SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-proof-evidence/consistency-catalog.json
+        run: bash scripts/verify.sh --skip-bundle --only consistency-catalog
+      - name: Build the exact non-GUI design token exporter
+        run: >-
+          env CARGO_BUILD_JOBS=2 ./scripts/agentic/agent-cargo.sh
+          build --jobs 2 --locked --bin export_design_tokens
+      - name: Prove generated design JSON and CSS match the authoritative exporter
+        run: |
+          bun scripts/devtools/generated-byte-compare.ts \
+            --binary target-agent/pools/agent-debug/debug/export_design_tokens \
+            --source-sha "$GITHUB_SHA" \
+            --out .artifacts/consistency/GOV-005/generated-byte-compare.json
+          cp .artifacts/consistency/GOV-005/generated-byte-compare.json \
+            "$RUNNER_TEMP/release-proof-evidence/generated-design-contracts-proof.json"
+          bun scripts/release-evidence.ts gate \
+            --gate generated-design-contracts \
+            --class UNIT_BEHAVIOR \
+            --source-sha "$GITHUB_SHA" \
+            --result "$RUNNER_TEMP/release-proof-evidence/generated-design-contracts-proof.json" \
+            --output "$RUNNER_TEMP/release-proof-evidence/generated-design-contracts.json"
+      - name: Upload headless proof and static-inventory receipts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-proof-evidence
+          path: ${{ runner.temp }}/release-proof-evidence/*.json
+          if-no-files-found: error
 
   validate-sdk-types:
     name: Validate release SDK types
@@ -114,7 +203,7 @@ jobs:
         with:
           bun-version: 1.2.21
       - name: Install JS dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
       - name: Validate SDK types
         run: bash scripts/verify.sh --skip-bundle --only sdk-types
 
@@ -128,9 +217,18 @@ jobs:
         with:
           bun-version: 1.2.21
       - name: Install JS dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
       - name: Validate SDK tests
+        env:
+          SCRIPT_KIT_SDK_TEST_RECEIPT: ${{ runner.temp }}/sdk-tests-summary.json
+          SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-sdk-evidence/sdk-tests.json
         run: bash scripts/verify.sh --skip-bundle --only sdk-tests
+      - name: Upload complete SDK behavior receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-sdk-evidence
+          path: ${{ runner.temp }}/release-sdk-evidence/sdk-tests.json
+          if-no-files-found: error
 
   validate-release-gates:
     name: Validate release gates
@@ -141,7 +239,8 @@ jobs:
       - validate-fmt
       - validate-check
       - validate-clippy
-      - validate-test-compile
+      - validate-tests
+      - validate-proof-contracts
       - validate-sdk-types
       - validate-sdk-tests
     steps:
@@ -151,7 +250,8 @@ jobs:
           test "${{ needs['validate-fmt'].result }}" = "success"
           test "${{ needs['validate-check'].result }}" = "success"
           test "${{ needs['validate-clippy'].result }}" = "success"
-          test "${{ needs['validate-test-compile'].result }}" = "success"
+          test "${{ needs['validate-tests'].result }}" = "success"
+          test "${{ needs['validate-proof-contracts'].result }}" = "success"
           test "${{ needs['validate-sdk-types'].result }}" = "success"
           test "${{ needs['validate-sdk-tests'].result }}" = "success"
 
@@ -261,6 +361,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+
+      - name: Download executed Rust gate evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: release-rust-evidence
+          path: ${{ runner.temp }}/release-evidence
+
+      - name: Download DevTools and static-catalog gate evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: release-proof-evidence
+          path: ${{ runner.temp }}/release-evidence
+
+      - name: Download complete SDK behavior gate evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: release-sdk-evidence
+          path: ${{ runner.temp }}/release-evidence
+
       - name: Download unsigned app bundle
         uses: actions/download-artifact@v4
         with:
@@ -360,7 +482,8 @@ jobs:
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait
+            --wait \
+            --output-format json > "$RUNNER_TEMP/notarization-result.json"
 
       - name: Staple notarization ticket
         run: |
@@ -371,6 +494,41 @@ jobs:
 
       - name: Verify post-staple Gatekeeper acceptance
         run: spctl --assess --verbose=4 --type execute "target/release/bundle/osx/Script Kit.app"
+
+      - name: Attest exact signing, accepted notarization, stapling, and Gatekeeper identities
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ROOT="target/release/bundle/osx"
+          ATTESTATION="$RUNNER_TEMP/distribution-security-attestation.json"
+          bun scripts/release-evidence.ts attest-signing \
+            --app "$ROOT/Script Kit.app" \
+            --notarization "$RUNNER_TEMP/notarization-result.json" \
+            --notarized-archive "$ROOT/Script-Kit-macos.zip" \
+            --source-sha "$GITHUB_SHA" \
+            --team-id "$APPLE_TEAM_ID" \
+            --output "$ATTESTATION"
+          bun scripts/release-evidence.ts gate \
+            --gate packaged-signing \
+            --class PACKAGED_IDENTITY \
+            --source-sha "$GITHUB_SHA" \
+            --result "$ATTESTATION" \
+            --output "$RUNNER_TEMP/release-evidence/packaged-signing.json"
+
+      - name: Prove the exact signed packaged binary without showing a window
+        run: |
+          APP_PATH="target/release/bundle/osx/Script Kit.app"
+          RECEIPT=".test-output/release/packaged-root-frame.json"
+          SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=1 \
+            bun scripts/agentic/root-search-frame-stability.ts \
+            --binary "$APP_PATH/Contents/MacOS/script-kit-gpui" \
+            --receipt "$RECEIPT"
+          bun scripts/release-evidence.ts gate \
+            --gate packaged-root-frame \
+            --class RUNTIME_HIDDEN \
+            --source-sha "$GITHUB_SHA" \
+            --result "$RECEIPT" \
+            --output "$RUNNER_TEMP/release-evidence/packaged-root-frame.json"
 
       - name: Create final release zip
         run: |
@@ -384,28 +542,85 @@ jobs:
           /usr/bin/ditto -x -k "target/release/bundle/osx/Script-Kit-macos.zip" "$TMP_DIR"
           bash scripts/verify-macos-bundle.sh "$TMP_DIR/Script Kit.app"
 
+      - name: Block publication on unmeasured exact packaged journeys
+        run: |
+          ROOT="target/release/bundle/osx"
+          bun scripts/release-evidence.ts packaged-readiness \
+            --app "$ROOT/Script Kit.app" \
+            --evidence-dir "$RUNNER_TEMP/release-evidence" \
+            --source-sha "$GITHUB_SHA" \
+            --output "$ROOT/release-scorecard.json"
+
+      - name: Upload blocked packaged release scorecard
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blocked-macos-release-scorecard
+          path: target/release/bundle/osx/release-scorecard.json
+          if-no-files-found: warn
+
       - name: Generate release manifest
         run: |
-          cd target/release/bundle/osx
-          ZIP="Script-Kit-macos.zip"
-          SHA="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
-          SIZE="$(stat -f %z "$ZIP")"
-          VERSION="$(grep -E '^version[[:space:]]*=' "$GITHUB_WORKSPACE/Cargo.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
-          cat > release-manifest.json <<MANIFEST
-          {
-            "version": "$VERSION",
-            "tag": "$GITHUB_REF_NAME",
-            "artifacts": [
-              {
-                "name": "$ZIP",
-                "platform": "macos",
-                "sha256": "$SHA",
-                "size_bytes": $SIZE
-              }
-            ]
-          }
-          MANIFEST
-          cat release-manifest.json
+          ROOT="target/release/bundle/osx"
+          cp "$RUNNER_TEMP/release-evidence/generated-design-contracts-proof.json" \
+            "$ROOT/generated-design-contracts-proof.json"
+          bun scripts/release-evidence.ts manifest \
+            --zip "$ROOT/Script-Kit-macos.zip" \
+            --app "$ROOT/Script Kit.app" \
+            --contracts docs/ai/contracts/surface-contracts.json \
+            --design-tokens design/mockups/generated/tokens.json \
+            --design-css design/mockups/generated/tokens.css \
+            --design-proof "$ROOT/generated-design-contracts-proof.json" \
+            --source-sha "$GITHUB_SHA" \
+            --version "${GITHUB_REF_NAME#v}" \
+            --tag "$GITHUB_REF_NAME" \
+            --evidence "$RUNNER_TEMP/release-evidence/rust-tests.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/integration-tests.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/domain-tests.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/first-run-fixtures.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/permissions-fixtures.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/mock-ai-fixtures.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/privacy-fixtures.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/proof-contracts.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/generated-design-contracts.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/consistency-catalog.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/sdk-tests.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/packaged-signing.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/packaged-root-frame.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/packaged-first-install.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/packaged-permissions.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/packaged-migration.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/packaged-mock-ai.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/packaged-direct-matrix.json" \
+            --evidence "$RUNNER_TEMP/release-evidence/packaged-ratified-performance.json" \
+            --output "$ROOT/release-manifest.json"
+
+      - name: Fail closed on stale, wrong-binary, missing, or unsafe release evidence
+        run: |
+          ROOT="target/release/bundle/osx"
+          bun scripts/release-evidence.ts verify \
+            --manifest "$ROOT/release-manifest.json" \
+            --zip "$ROOT/Script-Kit-macos.zip" \
+            --app "$ROOT/Script Kit.app" \
+            --design-tokens design/mockups/generated/tokens.json \
+            --design-css design/mockups/generated/tokens.css \
+            --design-proof "$ROOT/generated-design-contracts-proof.json" \
+            --source-sha "$GITHUB_SHA" \
+            --tag "$GITHUB_REF_NAME"
+
+      - name: Generate honest packaged release scorecard
+        run: |
+          ROOT="target/release/bundle/osx"
+          bun scripts/release-evidence.ts scorecard \
+            --manifest "$ROOT/release-manifest.json" \
+            --zip "$ROOT/Script-Kit-macos.zip" \
+            --app "$ROOT/Script Kit.app" \
+            --design-tokens design/mockups/generated/tokens.json \
+            --design-css design/mockups/generated/tokens.css \
+            --design-proof "$ROOT/generated-design-contracts-proof.json" \
+            --source-sha "$GITHUB_SHA" \
+            --tag "$GITHUB_REF_NAME" \
+            --output "$ROOT/release-scorecard.json"
 
       - name: Cleanup keychain
         if: always()
@@ -421,6 +636,8 @@ jobs:
           path: |
             target/release/bundle/osx/Script-Kit-macos.zip
             target/release/bundle/osx/release-manifest.json
+            target/release/bundle/osx/release-scorecard.json
+            target/release/bundle/osx/generated-design-contracts-proof.json
 
   release:
     name: Create Release
@@ -436,11 +653,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: macos-build
           path: artifacts
+
+      - name: Verify exact archived artifact and all mandatory release evidence
+        run: |
+          bun scripts/release-evidence.ts verify \
+            --manifest artifacts/release-manifest.json \
+            --zip artifacts/Script-Kit-macos.zip \
+            --design-tokens design/mockups/generated/tokens.json \
+            --design-css design/mockups/generated/tokens.css \
+            --design-proof artifacts/generated-design-contracts-proof.json \
+            --source-sha "$GITHUB_SHA" \
+            --tag "$GITHUB_REF_NAME"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -448,6 +680,8 @@ jobs:
           files: |
             artifacts/Script-Kit-macos.zip
             artifacts/release-manifest.json
+            artifacts/release-scorecard.json
+            artifacts/generated-design-contracts-proof.json
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, '-') }}

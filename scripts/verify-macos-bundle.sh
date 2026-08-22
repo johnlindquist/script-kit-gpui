@@ -13,6 +13,15 @@ BUNDLED_SCRIPTS_DIR="${RESOURCES_DIR}/scripts"
 BUNDLED_MIGRATE_DIR="${BUNDLED_SCRIPTS_DIR}/migrate"
 EXPECTED_BIN="${MACOS_DIR}/script-kit-gpui"
 EXPECTED_PI_BIN="${MACOS_DIR}/pi"
+INFO_PLIST="${APP_PATH}/Contents/Info.plist"
+
+reject_symbolic_link() {
+  local path="$1"
+  if [[ -L "${path}" ]]; then
+    echo "bundle_verify symbolic_link_disallowed path=${path}" >&2
+    exit 1
+  fi
+}
 
 echo "bundle_verify begin app=${APP_PATH}"
 
@@ -20,8 +29,60 @@ test -d "${APP_PATH}"
 test -d "${MACOS_DIR}"
 test -d "${RESOURCES_DIR}"
 test -d "${ASSETS_DIR}"
+reject_symbolic_link "${APP_PATH}"
+reject_symbolic_link "${APP_PATH}/Contents"
+reject_symbolic_link "${MACOS_DIR}"
+reject_symbolic_link "${RESOURCES_DIR}"
+reject_symbolic_link "${ASSETS_DIR}"
+reject_symbolic_link "${BUNDLED_SCRIPTS_DIR}"
+reject_symbolic_link "${BUNDLED_MIGRATE_DIR}"
+reject_symbolic_link "${SOURCE_ASSETS_DIR}"
+reject_symbolic_link "${SOURCE_SCRIPTS_DIR}"
+reject_symbolic_link "${SOURCE_MIGRATE_DIR}"
+reject_symbolic_link "${EXPECTED_BIN}"
+reject_symbolic_link "${EXPECTED_PI_BIN}"
+reject_symbolic_link "${INFO_PLIST}"
 test -x "${EXPECTED_BIN}"
 test -x "${EXPECTED_PI_BIN}"
+test -f "${INFO_PLIST}"
+
+if [[ ! -x /usr/libexec/PlistBuddy ]]; then
+  echo "bundle_verify missing_plist_reader=/usr/libexec/PlistBuddy" >&2
+  exit 1
+fi
+
+expected_bundle_id="$(grep -E '^identifier[[:space:]]*=' "${REPO_ROOT}/Cargo.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+expected_bundle_version="$(grep -E '^version[[:space:]]*=' "${REPO_ROOT}/Cargo.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+actual_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${INFO_PLIST}")"
+actual_bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${INFO_PLIST}")"
+actual_bundle_executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${INFO_PLIST}")"
+
+if [[ "${actual_bundle_id}" != "${expected_bundle_id}" ]]; then
+  echo "bundle_verify bundle_identifier_mismatch expected=${expected_bundle_id} actual=${actual_bundle_id}" >&2
+  exit 1
+fi
+if [[ "${actual_bundle_version}" != "${expected_bundle_version}" ]]; then
+  echo "bundle_verify bundle_version_mismatch expected=${expected_bundle_version} actual=${actual_bundle_version}" >&2
+  exit 1
+fi
+if [[ "${actual_bundle_executable}" != "script-kit-gpui" ]]; then
+  echo "bundle_verify bundle_executable_mismatch expected=script-kit-gpui actual=${actual_bundle_executable}" >&2
+  exit 1
+fi
+
+app_sha256="$(shasum -a 256 "${EXPECTED_BIN}" | awk '{print $1}')"
+pi_sha256="$(shasum -a 256 "${EXPECTED_PI_BIN}" | awk '{print $1}')"
+
+if [[ -n "${SCRIPT_KIT_EXPECTED_APP_SHA256:-}" && "${app_sha256}" != "${SCRIPT_KIT_EXPECTED_APP_SHA256}" ]]; then
+  echo "bundle_verify app_identity_mismatch expected=${SCRIPT_KIT_EXPECTED_APP_SHA256} actual=${app_sha256}" >&2
+  exit 1
+fi
+if [[ -n "${SCRIPT_KIT_EXPECTED_PI_SHA256:-}" && "${pi_sha256}" != "${SCRIPT_KIT_EXPECTED_PI_SHA256}" ]]; then
+  echo "bundle_verify pi_identity_mismatch expected=${SCRIPT_KIT_EXPECTED_PI_SHA256} actual=${pi_sha256}" >&2
+  exit 1
+fi
+
+echo "bundle_verify identity bundle_id=${actual_bundle_id} version=${actual_bundle_version} app_sha256=${app_sha256} pi_sha256=${pi_sha256}"
 
 echo "bundle_verify macos_dir_listing"
 find "${MACOS_DIR}" -maxdepth 1 -type f -print | sort
@@ -79,6 +140,7 @@ required_resources=(
 )
 
 for resource in "${required_resources[@]}"; do
+  reject_symbolic_link "${resource}"
   if [[ ! -f "${resource}" ]]; then
     echo "bundle_verify missing_resource=${resource}" >&2
     exit 1
@@ -89,6 +151,8 @@ verify_file_parity() {
   local src_file="$1"
   local dst_file="$2"
 
+  reject_symbolic_link "${src_file}"
+  reject_symbolic_link "${dst_file}"
   if [[ ! -f "${src_file}" ]]; then
     echo "bundle_verify missing_source_resource=${src_file}" >&2
     exit 1
@@ -108,6 +172,8 @@ verify_resource_family_parity() {
   local dst_dir="$2"
   local pattern="$3"
 
+  reject_symbolic_link "${src_dir}"
+  reject_symbolic_link "${dst_dir}"
   test -d "${src_dir}"
   test -d "${dst_dir}"
 
@@ -125,6 +191,11 @@ verify_resource_family_parity() {
   done < <(find "${dst_dir}" -maxdepth 1 -type f -name "${pattern}" | sort)
 }
 
+for asset in Info.plist.ext icon.icns icon.png icon@2x.png logo.svg; do
+  verify_file_parity "${SOURCE_ASSETS_DIR}/${asset}" "${ASSETS_DIR}/${asset}"
+done
+verify_file_parity "${SOURCE_ASSETS_DIR}/icon.icns" "${RESOURCES_DIR}/icon.icns"
+
 verify_file_parity "${SOURCE_SCRIPTS_DIR}/kit-sdk.ts" "${BUNDLED_SCRIPTS_DIR}/kit-sdk.ts"
 verify_resource_family_parity "${SOURCE_MIGRATE_DIR}" "${BUNDLED_MIGRATE_DIR}" "*.ts"
 verify_resource_family_parity "${SOURCE_MIGRATE_DIR}" "${BUNDLED_MIGRATE_DIR}" "*.json"
@@ -141,6 +212,8 @@ verify_asset_family() {
   local src_count
   local dst_count
 
+  reject_symbolic_link "${src_dir}"
+  reject_symbolic_link "${dst_dir}"
   test -d "${src_dir}"
   test -d "${dst_dir}"
 
@@ -159,6 +232,7 @@ verify_asset_family() {
       echo "bundle_verify missing_bundled_asset=${dst_file}" >&2
       exit 1
     fi
+    verify_file_parity "${src_file}" "${dst_file}"
   done < <(find "${src_dir}" -maxdepth 1 -type f -name "${pattern}" | sort)
 }
 

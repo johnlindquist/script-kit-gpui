@@ -12,6 +12,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  SCRIPT_KIT_NONINTERACTIVE: "1"
+  SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0"
+  SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0"
+  SCRIPT_KIT_ALLOW_LIVE_AI: "0"
+  SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0"
+  SCRIPT_KIT_REQUIRE_CLEAN_SOURCE: "1"
 
 jobs:
   # Cheap policy gate that runs on every PR, including the default fast path.
@@ -39,6 +45,36 @@ jobs:
         run: python3 -B -m unittest tests/file_size_ratchet_test.py
       - name: Reject new or growing critical Rust files
         run: python3 -B tests/file_size_ratchet.py --base "$BASE_SHA"
+
+  # Behavior coverage is mandatory even when a PR uses the fast compile lane.
+  # These suites operate on domain logic, synthetic SDK fixtures, and pure
+  # DevTools contracts; none may reveal a window or drive system input.
+  behavior-contracts:
+    name: Nonintrusive Behavior Contracts
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "macos-debug"
+          save-if: false
+      - name: Install JavaScript dependencies
+        run: bun install --frozen-lockfile
+      - name: Execute app-independent domain behavior
+        run: bash scripts/verify.sh --skip-bundle --only domain-tests
+      - name: Execute AI, SDK, surface, receipt, and release behavior contracts
+        run: bash scripts/verify.sh --skip-bundle --only proof-contracts
+      - name: Validate tracked consistency catalog without claiming runtime proof
+        run: bash scripts/verify.sh --skip-bundle --only consistency-catalog
+      - name: Validate SDK types
+        run: bash scripts/verify.sh --skip-bundle --only sdk-types
+      - name: Execute synthetic SDK behavior without system input
+        run: bash scripts/verify.sh --skip-bundle --only sdk-tests
 
   # ═══════════════════════════════════════════════════════════════════
   # FAST CI (default for PRs) - Target: <1 minute
@@ -163,13 +199,22 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
-      # Actually RUN the suite (was previously --no-run / compile-only, which let
-      # real failures through). RUST_TEST_THREADS=1 above sidesteps the Obj-C
-      # teardown races that made parallel runs abort.
-      - name: Run tests
-        run: cargo test --locked
-      - name: Run domain tests
-        run: cargo test --locked -p sk-clipboard -p sk-protocol
+      # Execute only reviewed nonintrusive targets. Blanket `cargo test` also
+      # discovers legacy integration harnesses whose GUI/input policy is unknown.
+      - name: Run application library behavior
+        run: bash scripts/verify.sh --skip-bundle --only test
+      - name: Run reviewed protocol, AI, migration, search, and sizing integrations
+        run: bash scripts/verify.sh --skip-bundle --only integration-tests
+      - name: Run isolated fresh-install fixture
+        run: bash scripts/verify.sh --skip-bundle --only first-run-fixtures
+      - name: Run mocked denied-permission fixture without requesting permissions
+        run: bash scripts/verify.sh --skip-bundle --only permissions-fixtures
+      - name: Run pure actionable AI-recovery fixture without providers or network
+        run: bash scripts/verify.sh --skip-bundle --only mock-ai-fixtures
+      - name: Run mock secret and user-path privacy fixture
+        run: bash scripts/verify.sh --skip-bundle --only privacy-fixtures
+      - name: Run domain behavior
+        run: bash scripts/verify.sh --skip-bundle --only domain-tests
 
   typescript-tests:
     name: TypeScript SDK Tests
@@ -192,7 +237,7 @@ jobs:
         with:
           bun-version: 1.2.21
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
       - name: Check SDK types
         run: bun run scripts/check-sdk-types.ts
       - name: Build binary
@@ -306,6 +351,7 @@ jobs:
     runs-on: macos-14
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs:
+      - behavior-contracts
       - fmt
       - check
       - clippy
