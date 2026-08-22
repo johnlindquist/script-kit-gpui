@@ -1002,15 +1002,31 @@ offline receipts until their real producers are run again.
    cover Unicode normalization, empty/unknown prefixes, every category, and
    impossible-source short-circuiting. All **21 structured-query behaviors**
    pass without GPUI. Six actual app tag/author/cron/tool/category/ranking
-   regressions pass from the newly rebuilt application harness, now down to
-   **15,131 cases**. Bounded governance fingerprints the canonical parser,
-   compatibility adapter, and real unified-search category consumer. The
-   expanded protocol domain executes **135 passing cases** without GPUI,
-   Metal, Whisper, or ONNX. The complete domain inventory is now **159
-   cases**: nine Clipboard, 135 Protocol, and 15 Storage behaviors. The
-   shipping binary compiled against the moved search owner in **35.58s**,
+   regressions pass from the rebuilt application harness. The shared
+   byte-counted Unicode query gate, saturating tier/bonus ranking, private
+   script/scriptlet display paths, and byte/character highlight conversions
+   then moved into `crates/sk-protocol/src/search_primitives.rs`. Invalid
+   UTF-8 boundaries, duplicate/out-of-order indices, impossible spans, and
+   `usize::MAX` offsets now fail closed rather than panicking, overflowing,
+   or inventing highlights; valid range conversion no longer allocates a
+   full offset table for every script-body match. All **21 pure primitive
+   regressions** pass, including four moved application cases and 17 new
+   Unicode/ranking/path/hostile-boundary behaviors. The existing adversarial
+   sentence matcher moved beside its real domain owner; its default corpus
+   keeps every hostile Unicode/RTL/ZWJ/metadata/highlight class, finishes in
+   **0.03s**, and restores the former 100,000-character stress payload only
+   with explicit `SCRIPT_KIT_SEARCH_FULL_STRESS=1`. The application harness
+   is now down to **15,126 cases**; eight actual script/scriptlet filename,
+   Unicode name/description, structured-filter, and ranking integrations pass
+   from that exact harness. Bounded governance fingerprints the parser,
+   compatibility adapters, real unified-search consumer, and all five real
+   Clipboard/Dictation/Notes/Agent Chat/AI Vault query-gate consumers. The
+   expanded protocol domain executes **157 passing cases** without GPUI,
+   Metal, Whisper, or ONNX. The complete domain inventory is now **181
+   cases**: nine Clipboard, 157 Protocol, and 15 Storage behaviors. The
+   shipping binary compiled against the moved search owners in **23.12s**,
    and the strict zero-warning application-library release lint passed in
-   **28.79s**, each using exactly two workers and preserving the disk floor.
+   **22.11s**, each using exactly two workers and preserving the disk floor.
 2. **Separate test optimization from interactive rendering.** Keep every
    existing frame-sensitive dev dependency at `-O2`; explicitly compile
    correctness-test dependencies and vendored GPUI crates at `-O0`. Release
@@ -1114,8 +1130,8 @@ offline receipts until their real producers are run again.
     passes **19 cases and 57 assertions**; the actual two-worker SDK runner
     separately passes **215 cases, zero failures, and zero skips**.
     The source-current full nonintrusive release lane then executed
-    **737 passing tests, zero failures, and 2,849 assertions across 37 files
-    in 11.65s**, without the previous repository scan or load spike. The
+    **746 passing tests, zero failures, and 2,882 assertions across 37 files
+    in 11.38s**, without the previous repository scan or load spike. The
     focused build/proof-contract lane separately passed **62 tests and 320
     assertions in 0.77s**. None touches the operator's computer.
 
@@ -1875,6 +1891,16 @@ misleading highlights.
 ### Primary ownership
 
 - `src/scripts/types.rs`, `src/scripts/grouping.rs`, and `src/scripts/search/`
+- `crates/sk-protocol/src/ascii_search.rs` for allocation-conscious ASCII
+  folding, exact/fuzzy matches, word boundaries, and highlight positions;
+  `src/scripts/search/ascii.rs` preserves every existing app import
+- `crates/sk-protocol/src/query_prefix.rs` for structured launcher prefixes
+  and deterministic command-category routing;
+  `src/scripts/search/prefix_filters.rs` retains app-owned metadata filters
+- `crates/sk-protocol/src/search_primitives.rs` for the shared Unicode query
+  threshold, overflow-safe ranking, private display paths, and fail-closed
+  allocation-free highlight spans;
+  `src/scripts/search/match_contract.rs` and `paths.rs` remain app adapters
 - `crates/sk-protocol/src/search_contract.rs` for the pure source-owned
   worker, query-generation coordinator, and stale-completion lifecycle;
   `src/scripts/root_search_contract.rs` preserves app-service adapters and
@@ -1882,6 +1908,8 @@ misleading highlights.
 - `crates/sk-protocol/src/sentence_search.rs` for pure Unicode-aware
   natural-language matching, proximity, evidence, and truthful highlights;
   `src/scripts/search/sentence.rs` preserves its existing compatibility path
+- `crates/sk-protocol/src/filter_coalescer.rs` for the actual testable
+  latest-query scheduler; `src/filter_coalescer.rs` preserves binary imports
 - `src/main_sections/root_search_store.rs`
 - `src/app_impl/filtering_cache.rs` and filter-input handlers
 - `src/clipboard_history/cache.rs`, `src/dictation/history.rs`, and
@@ -1909,7 +1937,9 @@ misleading highlights.
    cancellation, exact-query, and stale-worker regressions execute directly
    in the protocol crate. The full pure sentence matcher and 19 Unicode,
    stopword, exact-word, live-prefix, ranking, and highlight regressions also
-   execute in that same **77-case GPUI-free crate**.
+   execute in that same **157-case GPUI-free crate**, together with the
+   canonical ASCII/fuzzy, structured-query, Unicode/highlight, bounded
+   adversarial-matching, and formerly unreachable scheduler regressions.
    `src/scripts/root_search_contract.rs` and `src/scripts/search/sentence.rs`
    retain the app-dependent Notes/Todos/Brain adapters and compatibility
    re-exports. The GPUI-bearing `RootSearchStore` remains binary-owned; its
