@@ -6,7 +6,7 @@
 // pre-placed fixture-helper stub, with real python3/shasum/awk/seq. These
 // assertions freeze the legacy contract the in-flight alpha arc depends on;
 // the additive v2 study harness gets NEW commands and must not reinterpret
-// this one. Run from the repo root: bun test scripts/agentic/glass-entry-abba.test.ts
+// this one. Run from the repo root: bun test ./scripts/agentic/glass-entry-abba.test.ts
 
 import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";

@@ -12,8 +12,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # sccache cannot cache incrementally compiled Rust crates; CI runners are
+  # ephemeral, so prefer portable compiler-cache hits over local incrementals.
+  CARGO_INCREMENTAL: "0"
   SCRIPT_KIT_NONINTERACTIVE: "1"
   SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0"
+  SCRIPT_KIT_ALLOW_NATIVE_INPUT: "0"
+  SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: "0"
   SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0"
   SCRIPT_KIT_ALLOW_LIVE_AI: "0"
   SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0"
@@ -118,7 +123,7 @@ jobs:
 
   # ═══════════════════════════════════════════════════════════════════
   # FULL CI (main branch or 'full-ci' label)
-  # Uses sccache for incremental compilation benefits
+  # Uses sccache with incremental compilation disabled for cacheable crates.
   # ═══════════════════════════════════════════════════════════════════
 
   fmt:

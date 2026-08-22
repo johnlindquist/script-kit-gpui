@@ -2,7 +2,7 @@
 // Pins the exact concentric-radius failure the user suspects (Oracle session
 // `tahoe-apple-guideline-metrics`): a child rounded panel inset 16pt inside a
 // parent with radius 22 implies a parent radius of 16 + 16 = 32, so the
-// observed 22 is out of band by 10pt. Run: bun test scripts/devtools/apple-guideline-constants.test.ts
+// observed 22 is out of band by 10pt. Run: bun test ./scripts/devtools/apple-guideline-constants.test.ts
 
 import { expect, test } from "bun:test";
 import {

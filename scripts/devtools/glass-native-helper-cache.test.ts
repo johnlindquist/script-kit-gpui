@@ -1,7 +1,7 @@
 // WP4 (glass-smoke-harness-max-info): the native helper cache must compile
 // once per (source, compiler, flags) identity, refuse poisoned binaries, and
 // treat role mismatches as INVALID_SETUP — never silently recompile or reuse.
-// Run from the repo root: bun test scripts/devtools/glass-native-helper-cache.test.ts
+// Run from the repo root: bun test ./scripts/devtools/glass-native-helper-cache.test.ts
 
 import { describe, expect, test } from "bun:test";
 import {

@@ -222,9 +222,9 @@ locked values.
 Minimum anti-drift check:
 
 ```bash
-bun test scripts/devtools/glass-entry-motion-contract.test.ts \
-  scripts/devtools/glass-lifecycle-filmstrip.test.ts \
-  scripts/devtools/rapid-toggle-stress.test.ts
+bun test ./scripts/devtools/glass-entry-motion-contract.test.ts \
+  ./scripts/devtools/glass-lifecycle-filmstrip.test.ts \
+  ./scripts/devtools/rapid-toggle-stress.test.ts
 ./scripts/agentic/agent-cargo.sh test --lib \
   platform::secondary_window_config_tests::glass_motion_fixture_matches_the_measured_production_calibration
 ```
@@ -254,6 +254,14 @@ Launcher-sourced Agent Chat opens stage the currently selected launcher row as a
 
 # Agent Cargo Wrapper
 
+Every explicit `bun test` file or directory MUST start with `./`, `../`, or
+`/`. An unrooted argument such as `bun test scripts/devtools/example.test.ts`
+enters Bun's repository-wide filter mode instead of executing the named path
+directly. On Bun 1.3.14/macOS, that scan can exceed Darwin's 10,240-descriptor
+limit, spike system load, and silently lose child-process stdout/stderr; the
+resulting empty or failing evidence is invalid. Use
+`bun test ./scripts/devtools/example.test.ts` instead.
+
 `./dev.sh` runs `cargo watch` on the shared `target/` dir continuously. Bare `cargo build/test/check/clippy` from an AI agent contends on `target/.cargo-lock` and stalls for minutes ("Blocking waiting for file lock on build directory").
 
 All agent-driven cargo invocations MUST go through `./scripts/agentic/agent-cargo.sh`, which defaults to the bounded shared `CARGO_TARGET_DIR=target-agent/pools/agent-debug` pool with a visible lock. Examples:
@@ -261,10 +269,17 @@ All agent-driven cargo invocations MUST go through `./scripts/agentic/agent-carg
 - `./scripts/agentic/agent-cargo.sh test --lib notes_editor::spine`
 - `./scripts/agentic/agent-cargo.sh check --lib`
 - `./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui`
+- `./scripts/agentic/agent-cargo.sh test -p sk-storage` for app-independent private persistence; this never compiles GPUI, Metal, Whisper, or ONNX.
+- `./scripts/agentic/reuse-rust-test-binary.sh <reviewed-filter> [additional-filter...]` to rerun an already-built, source-current application test harness without Cargo or relinking. The runner fails closed on stale inputs and forces noninteractive/no-input/no-capture operation.
+- `SCRIPT_KIT_AGENT_TIMINGS=1 ./scripts/agentic/agent-cargo.sh test --lib --no-run` to save Cargo's critical-path HTML and the adjacent machine-readable `cargo-timing-summary.json`.
 
 Use `SCRIPT_KIT_CARGO_TARGET_POOL=<name>` for an intentional shared pool, and set `SCRIPT_KIT_AGENT_TARGET_MODE=exclusive` only when a task truly needs a per-agent cache under `target-agent/agents/<agent-id>`. Do not run bare `cargo` against this repo while `./dev.sh` may be running.
 
-Disk policy: the wrapper enforces a total `target-agent` budget at lock acquisition (`SCRIPT_KIT_AGENT_TARGET_BUDGET_GB`, default 40) plus a free-disk floor (`SCRIPT_KIT_AGENT_MIN_FREE_GB`, default 25), evicting least-recently-used unlocked pools before building. Extra pools are therefore ephemeral by design — do NOT mint a pool per parallel task. When a task needs a stable binary path, export an APFS clone instead: `SCRIPT_KIT_AGENT_ARTIFACT_NAME=<task> ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui` produces `target-agent/artifacts/<task>/script-kit-gpui` (~0 bytes, replaced atomically on rebuild). Dev builds use `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and non-default pools disable incremental; both respect pre-set env overrides.
+Builds default to **two jobs** (`CARGO_BUILD_JOBS` remains an explicit override). Disk policy enforces a total `target-agent` budget at lock acquisition (`SCRIPT_KIT_AGENT_TARGET_BUDGET_GB`, default 40) plus a fail-closed free-disk floor (`SCRIPT_KIT_AGENT_MIN_FREE_GB`, default 25); low-disk builds require deliberate `SCRIPT_KIT_AGENT_ALLOW_LOW_DISK=1`. The default `agent-debug` pool, live/incomplete ownership locks, compiler/shader caches, and exported artifacts are protected. Cleanup may claim and remove only individual unlocked non-pinned pools; it must never kill active builders, delete parent directories, or launch an unattended cleanup agent. Extra pools are ephemeral by design — do NOT mint a pool per parallel task.
+
+The wrapper automatically uses a healthy installed `sccache`, a repository-owned Unix socket/compiler cache, and the shared writable Metal module cache under `target-agent/shared`. Auto mode reports an unusable sandbox honestly; `SCRIPT_KIT_AGENT_USE_SCCACHE=1` fails before Cargo if caching cannot run. Do not globally force `CARGO_INCREMENTAL=1`: it prevents sccache from executing rustc. Dev UI dependencies intentionally stay optimized, correctness-test dependencies are unoptimized, and local docs-only Git commits do not invalidate the app harness; release/CI Git provenance remains exact.
+
+When a task needs a stable binary path, export an APFS clone instead: `SCRIPT_KIT_AGENT_ARTIFACT_NAME=<task> ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui` produces `target-agent/artifacts/<task>/script-kit-gpui` (~0 bytes, replaced atomically on rebuild). Dev builds use `CARGO_PROFILE_DEV_DEBUG=line-tables-only` and non-default pools disable incremental; both respect pre-set env overrides.
 
 # AI Reliability Rules
 

@@ -16,6 +16,8 @@ describe("catalog-bound offline consistency task proofs", () => {
         expect(environment.SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH).toBe("0");
         expect(environment.SCRIPT_KIT_ALLOW_VISIBLE_PROBES).toBe("0");
         expect(environment.SCRIPT_KIT_ALLOW_LIVE_AI).toBe("0");
+        expect(environment.SCRIPT_KIT_ALLOW_NATIVE_INPUT).toBe("0");
+        expect(environment.SCRIPT_KIT_ALLOW_SCREEN_CAPTURE).toBe("0");
         return {
           output:
             `${files.map((path) => `${path}:`).join("\n")}\n` +
@@ -172,7 +174,11 @@ describe("catalog-bound offline consistency task proofs", () => {
         exitCode: 0,
       }),
     });
-    expect(candidate.testCommand).toEqual(["bun", "test", ...suites]);
+    expect(candidate.testCommand).toEqual([
+      "bun",
+      "test",
+      ...suites.map((path) => `./${path}`),
+    ]);
     expect(candidate.testRun.suiteFiles).toEqual(["scripts/devtools/layout.test.ts"]);
     expect(candidate.testRun.executedSuiteFiles).toEqual(suites);
     expect(Object.keys(candidate.sourceFingerprints)).toEqual(suites);
@@ -181,6 +187,7 @@ describe("catalog-bound offline consistency task proofs", () => {
     ).toBe(0);
 
     for (const forged of [
+      { ...candidate, testCommand: ["bun", "test", ...suites] },
       { ...candidate, testCommand: ["bun", "test", suites[0]] },
       {
         ...candidate,
@@ -278,7 +285,7 @@ describe("catalog-bound offline consistency task proofs", () => {
         suiteFiles: legacySuite,
         executedSuiteFiles: legacySuite,
       },
-      testCommand: ["bun", "test", ...legacySuite],
+      testCommand: ["bun", "test", ...legacySuite.map((path) => `./${path}`)],
     };
     expect(
       prepareValidatedReceipt(

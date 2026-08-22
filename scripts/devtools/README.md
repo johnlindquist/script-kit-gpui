@@ -80,7 +80,7 @@ happens in-process via `lib/target-identity.ts` (no subprocess hop).
 ## Tests
 
 ```bash
-cd scripts/devtools && bun test __tests__/
+cd scripts/devtools && bun test ./__tests__/
 ```
 
 ## Gotchas

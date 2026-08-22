@@ -41,6 +41,8 @@ done
 
 for unsafe_setting in \
   SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER \
+  SCRIPT_KIT_ALLOW_NATIVE_INPUT \
+  SCRIPT_KIT_ALLOW_SCREEN_CAPTURE \
   SCRIPT_KIT_ALLOW_VISIBLE_PROBES \
   SCRIPT_KIT_ALLOW_LIVE_AI \
   SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH; do
@@ -52,6 +54,8 @@ done
 
 export SCRIPT_KIT_NONINTERACTIVE=1
 export SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER=0
+export SCRIPT_KIT_ALLOW_NATIVE_INPUT=0
+export SCRIPT_KIT_ALLOW_SCREEN_CAPTURE=0
 export SCRIPT_KIT_ALLOW_VISIBLE_PROBES=0
 export SCRIPT_KIT_ALLOW_LIVE_AI=0
 export SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH=0
@@ -128,6 +132,9 @@ require_clean_source_identity() {
     scripts/devtools/glass-entry-motion-contract.test.ts
     scripts/devtools/glass-lifecycle-filmstrip.test.ts
     scripts/devtools/rapid-toggle-stress.test.ts
+    scripts/agentic/cargo-build-policy.test.ts
+    scripts/agentic/cargo-timings-summary.ts
+    scripts/agentic/cargo-timings-summary.test.ts
     scripts/agentic/quick-ai-latency-bench.test.ts
     scripts/agentic/ai-phase-trace-report.test.ts
     scripts/agentic/root-typing-lag-benchmark.test.ts
@@ -351,7 +358,7 @@ run_phase() {
       run_step "test-compile" "$CARGO_CMD" test --no-run --locked
       ;;
     domain-tests)
-      run_step "domain-tests" "$CARGO_CMD" test --locked -p sk-clipboard -p sk-protocol
+      run_step "domain-tests" "$CARGO_CMD" test --locked -p sk-clipboard -p sk-protocol -p sk-storage
       ;;
     integration-tests)
       run_step "integration-tests" "$CARGO_CMD" test --locked \
@@ -384,41 +391,43 @@ run_phase() {
       run_step "generated-surface-contracts" bun scripts/generate-surface-contracts.ts --check
       run_step_quiet "consistency-family-fixtures" bun scripts/devtools/family-fixtures.ts
       run_step "proof-contracts" bun test --timeout 30000 \
-        scripts/release-evidence.test.ts \
-        scripts/devtools/consistency.test.ts \
-        scripts/devtools/surface.test.ts \
-        scripts/devtools/surfaces-bindings.test.ts \
-        scripts/devtools/actions-projection.test.ts \
-        scripts/devtools/elements.test.ts \
-        scripts/devtools/focus.test.ts \
-        scripts/devtools/layout.test.ts \
-        scripts/devtools/privacy.test.ts \
-        scripts/devtools/operator-safety.test.ts \
-        scripts/devtools/target-identity.test.ts \
-        scripts/devtools/__tests__/client-lib.test.ts \
-        scripts/devtools/receipt-output.test.ts \
-        scripts/devtools/receipt-schema.test.ts \
-        scripts/devtools/coverage.test.ts \
-        scripts/devtools/runtime-coverage.test.ts \
-        scripts/devtools/performance-contract.test.ts \
-        scripts/devtools/facade-ledger.test.ts \
-        scripts/devtools/facade-migrations.test.ts \
-        scripts/devtools/protected-sources.test.ts \
-        scripts/devtools/state-ownership.test.ts \
-        scripts/devtools/alpha-byte-contract.test.ts \
-        scripts/devtools/generated-byte-compare.test.ts \
-        scripts/devtools/design-conflicts.test.ts \
-        scripts/devtools/safe-task-proofs.test.ts \
-        scripts/devtools/family-fixtures.test.ts \
-        scripts/devtools/glass-entry-motion-contract.test.ts \
-        scripts/devtools/glass-lifecycle-filmstrip.test.ts \
-        scripts/devtools/rapid-toggle-stress.test.ts \
-        scripts/agentic/quick-ai-latency-bench.test.ts \
-        scripts/agentic/ai-phase-trace-report.test.ts \
-        scripts/agentic/root-typing-lag-benchmark.test.ts \
-        scripts/agentic/root-search-frame-stability.test.ts \
-        scripts/migrate/__tests__/classify.test.ts \
-        tests/sdk/runner-safety.test.ts
+        ./scripts/release-evidence.test.ts \
+        ./scripts/devtools/consistency.test.ts \
+        ./scripts/devtools/surface.test.ts \
+        ./scripts/devtools/surfaces-bindings.test.ts \
+        ./scripts/devtools/actions-projection.test.ts \
+        ./scripts/devtools/elements.test.ts \
+        ./scripts/devtools/focus.test.ts \
+        ./scripts/devtools/layout.test.ts \
+        ./scripts/devtools/privacy.test.ts \
+        ./scripts/devtools/operator-safety.test.ts \
+        ./scripts/devtools/target-identity.test.ts \
+        ./scripts/devtools/__tests__/client-lib.test.ts \
+        ./scripts/devtools/receipt-output.test.ts \
+        ./scripts/devtools/receipt-schema.test.ts \
+        ./scripts/devtools/coverage.test.ts \
+        ./scripts/devtools/runtime-coverage.test.ts \
+        ./scripts/devtools/performance-contract.test.ts \
+        ./scripts/devtools/facade-ledger.test.ts \
+        ./scripts/devtools/facade-migrations.test.ts \
+        ./scripts/devtools/protected-sources.test.ts \
+        ./scripts/devtools/state-ownership.test.ts \
+        ./scripts/devtools/alpha-byte-contract.test.ts \
+        ./scripts/devtools/generated-byte-compare.test.ts \
+        ./scripts/devtools/design-conflicts.test.ts \
+        ./scripts/devtools/safe-task-proofs.test.ts \
+        ./scripts/devtools/family-fixtures.test.ts \
+        ./scripts/devtools/glass-entry-motion-contract.test.ts \
+        ./scripts/devtools/glass-lifecycle-filmstrip.test.ts \
+        ./scripts/devtools/rapid-toggle-stress.test.ts \
+        ./scripts/agentic/cargo-build-policy.test.ts \
+        ./scripts/agentic/cargo-timings-summary.test.ts \
+        ./scripts/agentic/quick-ai-latency-bench.test.ts \
+        ./scripts/agentic/ai-phase-trace-report.test.ts \
+        ./scripts/agentic/root-typing-lag-benchmark.test.ts \
+        ./scripts/agentic/root-search-frame-stability.test.ts \
+        ./scripts/migrate/__tests__/classify.test.ts \
+        ./tests/sdk/runner-safety.test.ts
       ;;
     consistency-catalog)
       run_step "consistency-catalog" bun scripts/devtools/consistency.ts \

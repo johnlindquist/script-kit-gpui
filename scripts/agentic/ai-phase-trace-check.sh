@@ -61,7 +61,7 @@ step "shared phase trace unit tests"      rust_test ai::phase_trace
 step "Pi transport wiring proof"          rust_test pi_transport_emits_the_phase_trace
 step "Flows transport wiring proof"       rust_test flows::codex_client
 step "Quick AI not regressed"             rust_test quick_ai
-step "analyzer unit tests"                bash -c 'timeout 300 bun test scripts/agentic/ai-phase-trace-report.test.ts'
+step "analyzer unit tests"                bash -c 'timeout 300 bun test ./scripts/agentic/ai-phase-trace-report.test.ts'
 
 if [[ $PROBE -eq 1 ]]; then
   step "live probe (real turns)" bash -c \

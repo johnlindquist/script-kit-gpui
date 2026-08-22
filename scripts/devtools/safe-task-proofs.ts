@@ -305,11 +305,14 @@ export function runSafeTaskProof(
     SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0",
     SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0",
     SCRIPT_KIT_ALLOW_LIVE_AI: "0",
+    SCRIPT_KIT_ALLOW_NATIVE_INPUT: "0",
+    SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: "0",
   };
+  const rootedTestFiles = executedTestFiles.map((path) => `./${path}`);
   const testResult = options.runTests
     ? options.runTests(executedTestFiles, environment)
     : (() => {
-        const result = Bun.spawnSync([process.execPath, "test", ...executedTestFiles], {
+        const result = Bun.spawnSync([process.execPath, "test", ...rootedTestFiles], {
           cwd: process.cwd(),
           env: environment,
           stdout: "pipe",
@@ -377,7 +380,7 @@ export function runSafeTaskProof(
       title: entry.title,
       sectionSha256: entry.sectionSha256,
     },
-    testCommand: ["bun", "test", ...executedTestFiles],
+    testCommand: ["bun", "test", ...rootedTestFiles],
     testRun: observed,
     productionSources: [...(spec.productionSources ?? [])],
     sourceFingerprints: Object.fromEntries(
@@ -412,13 +415,18 @@ export function runAllSafeTaskProofs() {
     SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0",
     SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0",
     SCRIPT_KIT_ALLOW_LIVE_AI: "0",
+    SCRIPT_KIT_ALLOW_NATIVE_INPUT: "0",
+    SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: "0",
   };
-  const result = Bun.spawnSync([process.execPath, "test", ...suites], {
+  const result = Bun.spawnSync(
+    [process.execPath, "test", ...suites.map((path) => `./${path}`)],
+    {
     cwd: process.cwd(),
     env: environment,
     stdout: "pipe",
     stderr: "pipe",
-  });
+    },
+  );
   const shared = {
     output: `${result.stdout.toString()}\n${result.stderr.toString()}`,
     exitCode: result.exitCode,

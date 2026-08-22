@@ -39,6 +39,8 @@ env:
   CARGO_TERM_COLOR: always
   SCRIPT_KIT_NONINTERACTIVE: "1"
   SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0"
+  SCRIPT_KIT_ALLOW_NATIVE_INPUT: "0"
+  SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: "0"
   SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0"
   SCRIPT_KIT_ALLOW_LIVE_AI: "0"
   SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0"
@@ -77,11 +79,11 @@ jobs:
           bun scripts/agentic/root-search-frame-stability.ts --describe-contract
           bun scripts/agentic/quick-ai-latency-bench.ts --describe-contract
           bun test --timeout 30000 \
-            scripts/agentic/root-typing-lag-benchmark.test.ts \
-            scripts/agentic/root-search-frame-stability.test.ts \
-            scripts/devtools/performance-contract.test.ts \
-            scripts/agentic/quick-ai-latency-bench.test.ts \
-            scripts/agentic/ai-phase-trace-report.test.ts
+            ./scripts/agentic/root-typing-lag-benchmark.test.ts \
+            ./scripts/agentic/root-search-frame-stability.test.ts \
+            ./scripts/devtools/performance-contract.test.ts \
+            ./scripts/agentic/quick-ai-latency-bench.test.ts \
+            ./scripts/agentic/ai-phase-trace-report.test.ts
 
       - name: Build stable root frame gate artifact
         env:

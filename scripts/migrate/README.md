@@ -78,7 +78,7 @@ run (SK_PATH is sandboxed, nothing else is). Use `--no-exec` to skip them.
 ## Tests
 
 ```bash
-bun test scripts/migrate/__tests__/   # from the repo root
+bun test ./scripts/migrate/__tests__/   # from the repo root
 ```
 
 Includes live integration coverage: real tsc runs, real `bun --preload`

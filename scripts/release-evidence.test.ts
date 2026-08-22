@@ -1466,7 +1466,10 @@ describe("fail-closed release evidence", () => {
     });
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.stderr.toString()).toContain("6 UNMEASURED");
+    expect(
+      result.stderr.toString(),
+      `blocked publication exited ${result.exitCode} without an inspectable failure`,
+    ).toContain("6 UNMEASURED");
     const scorecard = JSON.parse(readFileSync(scorecardPath, "utf8"));
     expect(scorecard.status).toBe("blocked");
     expect(scorecard.missingJourneys).toEqual([...REQUIRED_PACKAGED_JOURNEYS]);
@@ -2256,6 +2259,8 @@ describe("nonintrusive executed Rust verification", () => {
 
   test.each([
     "SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER",
+    "SCRIPT_KIT_ALLOW_NATIVE_INPUT",
+    "SCRIPT_KIT_ALLOW_SCREEN_CAPTURE",
     "SCRIPT_KIT_ALLOW_VISIBLE_PROBES",
     "SCRIPT_KIT_ALLOW_LIVE_AI",
     "SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH",
@@ -2329,6 +2334,8 @@ describe("nonintrusive CI release ownership and publication graph", () => {
       expect(definition.env.SCRIPT_KIT_NONINTERACTIVE).toBe("1");
       for (const unsafeFlag of [
         "SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER",
+        "SCRIPT_KIT_ALLOW_NATIVE_INPUT",
+        "SCRIPT_KIT_ALLOW_SCREEN_CAPTURE",
         "SCRIPT_KIT_ALLOW_VISIBLE_PROBES",
         "SCRIPT_KIT_ALLOW_LIVE_AI",
         "SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH",

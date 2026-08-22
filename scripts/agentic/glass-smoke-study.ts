@@ -12,7 +12,7 @@
  * For N builds the ladder needs 13 × N capture runs before early stopping
  * versus 26 × (N − 1) for repeated legacy pair sessions.
  *
- * Verification (WP7): `bun test scripts/agentic/glass-smoke-study.test.ts`
+ * Verification (WP7): `bun test ./scripts/agentic/glass-smoke-study.test.ts`
  * plus a `--dry-run` schedule against the example manifest.
  */
 

@@ -611,7 +611,7 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
           testCommand[0] !== "bun" ||
           testCommand[1] !== "test" ||
           testCommand.length !== executedSuiteFiles.length + 2 ||
-          executedSuiteFiles.some((path, index) => testCommand[index + 2] !== path) ||
+          executedSuiteFiles.some((path, index) => testCommand[index + 2] !== `./${path}`) ||
           !/^[a-f0-9]{64}$/.test(String(testRun.outputSha256 ?? ""))
         ) {
           errors.push("offline task proof requires executed passing nonempty behavior tests");
