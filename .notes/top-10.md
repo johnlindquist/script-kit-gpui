@@ -1067,13 +1067,23 @@ offline receipts until their real producers are run again.
    reserve unless an explicit low-disk override was provided. Executable
    negative tests prove the compiler is never invoked when the floor cannot
    be met.
-8. **Bound CPU and capture actual timing receipts.** Agent Cargo defaults to
-   two workers while preserving an intentional caller override. Every run
-   records cache state, pool, worker count, exit status, elapsed seconds, and
-   before/after free space. `SCRIPT_KIT_AGENT_TIMINGS=1` emits Cargo's real
-   critical-path HTML plus a fail-closed machine-readable summary of actual
-   hot units, duplicate compilations, bounded concurrency, and specific next
-   actions instead of relying on impressions about slow crates.
+8. **Bound both compiler CPU and actual Rust-test CPU.** Agent Cargo defaults
+   to two compiler workers **and two Rust harness threads**. It validates
+   inherited `CARGO_BUILD_JOBS` / `RUST_TEST_THREADS`, both `--jobs` / `-j`
+   forms, and direct `--test-threads` arguments against one explicit ceiling
+   before it creates a build pool or starts Cargo. Zero, negative,
+   fractional, nonnumeric, and over-limit values fail closed; noninteractive
+   work cannot raise its ceiling above two. A deliberate interactive higher
+   limit must explicitly raise `SCRIPT_KIT_AGENT_MAX_JOBS`. Noninteractive
+   child tests forcibly receive `SCRIPT_KIT_SEARCH_FULL_STRESS=0` and
+   `SCRIPT_KIT_STORAGE_FULL_STRESS=0` even when a parent accidentally enabled
+   an expensive corpus. Every real receipt records both compiler and harness
+   worker counts, cache state, pool, exit status, elapsed seconds, and
+   before/after free space. The fake-Cargo behavior suite passes **32 cases
+   and 142 assertions** without building Rust or opening the application.
+   `SCRIPT_KIT_AGENT_TIMINGS=1` emits Cargo's real critical-path HTML plus a
+   fail-closed machine-readable summary of actual hot units, duplicate
+   compilations, bounded concurrency, and specific next actions.
 9. **Reuse only current reviewed test binaries.** The dedicated harness
    runner refuses missing executables and binaries older than source,
    workspace crates, vendored code, Cargo configuration, or lockfiles. It
@@ -1091,6 +1101,10 @@ offline receipts until their real producers are run again.
     optimized-vs-test profiles, and CI safety flags. The release verifier now
     also refuses native-input/screen-capture overrides and includes the
     storage domain plus build-policy tests in its normal verification lanes.
+    Publication additionally refuses a missing/untracked
+    `agent-cargo.sh`, `cargo-cache-locks.sh`, or
+    `cargo-build-policy.test.ts`; a green-looking proof receipt that omits
+    the directly executed build-resource suite is rejected as incomplete.
     Every real explicit Bun test invocation now roots its paths with `./`,
     including both shared offline-proof launchers and the actual recorded
     receipt command; the receipt validator rejects any unrooted command
@@ -1130,8 +1144,8 @@ offline receipts until their real producers are run again.
     passes **19 cases and 57 assertions**; the actual two-worker SDK runner
     separately passes **215 cases, zero failures, and zero skips**.
     The source-current full nonintrusive release lane then executed
-    **746 passing tests, zero failures, and 2,882 assertions across 37 files
-    in 11.38s**, without the previous repository scan or load spike. The
+    **763 passing tests, zero failures, and 2,965 assertions across 37 files
+    in 16.39s**, without the previous repository scan or load spike. The
     focused build/proof-contract lane separately passed **62 tests and 320
     assertions in 0.77s**. None touches the operator's computer.
 
