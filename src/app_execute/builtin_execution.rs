@@ -2142,12 +2142,15 @@ impl ScriptListApp {
                         capture.window_title, capture.width, capture.height
                     );
 
+                    let safe_window_title =
+                        crate::logging::log_private_user_value(&capture.window_title);
                     tracing::info!(
                         category = "AI",
                         event = "ai_capture_completed",
                         source_action = "SendFocusedWindowToAi",
                         trace_id = %trace_id,
-                        window_title = %capture.window_title,
+                        window_title_bytes = safe_window_title.raw_bytes,
+                        window_title_sha256 = %safe_window_title.sha256,
                         width = capture.width,
                         height = capture.height,
                         size_bytes,
@@ -2679,9 +2682,11 @@ impl ScriptListApp {
         snapshot_pid: i32,
         cx: &mut Context<Self>,
     ) {
+        let safe_query = crate::logging::log_private_user_value(&raw_query_owned);
         tracing::info!(
             trace_id = %trace_id,
-            raw_query = %raw_query_owned,
+            raw_query_bytes = safe_query.raw_bytes,
+            raw_query_sha256 = %safe_query.sha256,
             "do_in_current_app.spawn_context_capture"
         );
 
@@ -2827,14 +2832,19 @@ impl ScriptListApp {
 
         match serde_json::to_string_pretty(&recipe) {
             Ok(json) => {
+                let safe_query = crate::logging::log_private_user_value(&recipe.effective_query);
+                let safe_script_name =
+                    crate::logging::log_private_user_value(&recipe.suggested_script_name);
                 tracing::info!(
                     category = "CURRENT_APP_RECIPE",
                     trace_id = %trace_id,
                     app_name = %recipe.prompt_receipt.app_name,
                     bundle_id = %recipe.prompt_receipt.bundle_id,
-                    effective_query = %recipe.effective_query,
+                    effective_query_bytes = safe_query.raw_bytes,
+                    effective_query_sha256 = %safe_query.sha256,
                     route = %recipe.trace.action,
-                    suggested_script_name = %recipe.suggested_script_name,
+                    suggested_script_name_bytes = safe_script_name.raw_bytes,
+                    suggested_script_name_sha256 = %safe_script_name.sha256,
                     included_selected_text = recipe.prompt_receipt.included_selected_text,
                     included_browser_url = recipe.prompt_receipt.included_browser_url,
                     json_bytes = json.len(),
@@ -3468,14 +3478,23 @@ impl ScriptListApp {
         let first_selectable =
             crate::list_item::GroupedListState::from_items(&grouped_items).first_selectable;
         self.selected_index = first_selectable;
+        let safe_cache_key = crate::logging::log_private_user_value(
+            self.main_menu_result_caches.grouped_cache_key(),
+        );
+        let safe_computed_filter =
+            crate::logging::log_private_user_value(&self.computed_filter_text);
+        let safe_filter = crate::logging::log_private_user_value(&self.filter_text);
         tracing::info!(
             event = "open_main_window",
             item_count = item_count,
             selected_index = self.selected_index,
             first_selectable = first_selectable,
-            grouped_cache_key = %self.main_menu_result_caches.grouped_cache_key(),
-            computed_filter = %self.computed_filter_text,
-            filter_text = %self.filter_text,
+            grouped_cache_key_bytes = safe_cache_key.raw_bytes,
+            grouped_cache_key_sha256 = %safe_cache_key.sha256,
+            computed_filter_bytes = safe_computed_filter.raw_bytes,
+            computed_filter_sha256 = %safe_computed_filter.sha256,
+            filter_text_bytes = safe_filter.raw_bytes,
+            filter_text_sha256 = %safe_filter.sha256,
             pending_filter_sync = self.pending_filter_sync,
             "open_main_window: items={}, selected={}",
             item_count,
@@ -5282,11 +5301,16 @@ impl ScriptListApp {
 
         match crate::platform::capture_script_kit_selfie(&state) {
             Ok(receipt) => {
+                let safe_image_path = crate::logging::log_private_user_value(&receipt.png_path);
+                let safe_receipt_path =
+                    crate::logging::log_private_user_value(&receipt.receipt_path);
                 tracing::info!(
                     category = "BUILTIN",
                     trace_id = %dctx.trace_id,
-                    image_path = %receipt.png_path,
-                    receipt_path = %receipt.receipt_path,
+                    image_path_bytes = safe_image_path.raw_bytes,
+                    image_path_sha256 = %safe_image_path.sha256,
+                    receipt_path_bytes = safe_receipt_path.raw_bytes,
+                    receipt_path_sha256 = %safe_receipt_path.sha256,
                     "script_kit_selfie.capture_saved"
                 );
                 self.show_hud(action.saved_hud(&receipt), Some(HUD_MEDIUM_MS), cx);
@@ -5338,10 +5362,14 @@ impl ScriptListApp {
             );
         }
 
+        let safe_raw_query = crate::logging::log_private_user_value(&raw_query_owned);
+        let safe_effective_query = crate::logging::log_private_user_value(&effective_query);
         tracing::info!(
             trace_id = %dctx.trace_id,
-            raw_query = %raw_query_owned,
-            effective_query = %effective_query,
+            raw_query_bytes = safe_raw_query.raw_bytes,
+            raw_query_sha256 = %safe_raw_query.sha256,
+            effective_query_bytes = safe_effective_query.raw_bytes,
+            effective_query_sha256 = %safe_effective_query.sha256,
             "turn_this_into_command.requested"
         );
 
@@ -5365,14 +5393,20 @@ impl ScriptListApp {
 
                 match serde_json::to_string_pretty(&recipe) {
                     Ok(json) => {
+                        let safe_query =
+                            crate::logging::log_private_user_value(&recipe.effective_query);
+                        let safe_script_name =
+                            crate::logging::log_private_user_value(&recipe.suggested_script_name);
                         tracing::info!(
                             category = "CURRENT_APP_RECIPE",
                             trace_id = %dctx.trace_id,
                             app_name = %recipe.prompt_receipt.app_name,
                             bundle_id = %recipe.prompt_receipt.bundle_id,
-                            effective_query = %recipe.effective_query,
+                            effective_query_bytes = safe_query.raw_bytes,
+                            effective_query_sha256 = %safe_query.sha256,
                             route = %recipe.trace.action,
-                            suggested_script_name = %recipe.suggested_script_name,
+                            suggested_script_name_bytes = safe_script_name.raw_bytes,
+                            suggested_script_name_sha256 = %safe_script_name.sha256,
                             candidate_count = recipe.trace.candidates.len(),
                             included_selected_text = recipe.prompt_receipt.included_selected_text,
                             included_browser_url = recipe.prompt_receipt.included_browser_url,
@@ -5442,30 +5476,28 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) -> crate::action_helpers::DispatchOutcome {
         let raw_query_owned = query_override.unwrap_or(&self.filter_text).to_string();
-        let raw_query_safe = crate::logging::log_user_value(&raw_query_owned);
-        let filter_text_safe = crate::logging::log_user_value(&self.filter_text);
+        let raw_query_safe = crate::logging::log_private_user_value(&raw_query_owned);
+        let filter_text_safe = crate::logging::log_private_user_value(&self.filter_text);
         tracing::info!(
             target: "script_kit::do_in_trace",
             event = "DO_IN_TRACE execution.entry",
             trace_id = %dctx.trace_id,
-            raw_query_preview = %raw_query_safe,
+            raw_query_sha256 = %raw_query_safe.sha256,
             raw_query_bytes = raw_query_safe.raw_bytes,
-            raw_query_safe_bytes = raw_query_safe.safe_bytes,
-            raw_query_truncated = raw_query_safe.truncated,
-            filter_text_preview = %filter_text_safe,
+            filter_text_sha256 = %filter_text_safe.sha256,
             filter_text_bytes = filter_text_safe.raw_bytes,
-            filter_text_safe_bytes = filter_text_safe.safe_bytes,
-            filter_text_truncated = filter_text_safe.truncated,
-            query_override = ?query_override,
-            current_view = ?self.current_view,
+            query_override_present = query_override.is_some(),
+            current_view = %self.app_view_name(),
             "DO_IN_TRACE execution.entry"
         );
         tracing::info!(
             trace_id = %dctx.trace_id,
-            raw_query = %raw_query_owned,
-            filter_text = %self.filter_text,
-            query_override = ?query_override,
-            "do_in_current_app.execution_entry — raw inputs"
+            raw_query_bytes = raw_query_safe.raw_bytes,
+            raw_query_sha256 = %raw_query_safe.sha256,
+            filter_text_bytes = filter_text_safe.raw_bytes,
+            filter_text_sha256 = %filter_text_safe.sha256,
+            query_override_present = query_override.is_some(),
+            "do_in_current_app.execution_entry"
         );
         let effective_query =
             crate::menu_bar::current_app_commands::effective_do_in_current_app_query_for_submission(
@@ -5474,22 +5506,21 @@ impl ScriptListApp {
             );
         let effective_query_for_router =
             (!effective_query.is_empty()).then_some(effective_query.as_str());
-        let effective_query_safe = crate::logging::log_user_value(&effective_query);
+        let effective_query_safe = crate::logging::log_private_user_value(&effective_query);
 
         tracing::info!(
             target: "script_kit::do_in_trace",
             event = "DO_IN_TRACE execution.normalized",
             trace_id = %dctx.trace_id,
-            query_preview = %effective_query_safe,
+            query_sha256 = %effective_query_safe.sha256,
             query_bytes = effective_query_safe.raw_bytes,
-            query_safe_bytes = effective_query_safe.safe_bytes,
-            query_truncated = effective_query_safe.truncated,
-            raw_query_preview = %raw_query_safe,
+            raw_query_sha256 = %raw_query_safe.sha256,
             "DO_IN_TRACE execution.normalized"
         );
         tracing::info!(
             trace_id = %dctx.trace_id,
-            query = %effective_query,
+            query_bytes = effective_query_safe.raw_bytes,
+            query_sha256 = %effective_query_safe.sha256,
             "do_in_current_app.requested"
         );
 
@@ -5512,8 +5543,8 @@ impl ScriptListApp {
                     app_name = %snapshot_receipt.app_name,
                     bundle_id = %snapshot_receipt.bundle_id,
                     leaf_entry_count = snapshot_receipt.leaf_entry_count,
-                    query_preview = %effective_query_safe,
-                    raw_query_preview = %raw_query_safe,
+                    query_sha256 = %effective_query_safe.sha256,
+                    raw_query_sha256 = %raw_query_safe.sha256,
                     filtered_entries = intent_receipt.filtered_entries,
                     exact_matches = intent_receipt.exact_matches,
                     resolved_action = intent_receipt.action,
@@ -5524,7 +5555,8 @@ impl ScriptListApp {
                     app_name = %snapshot_receipt.app_name,
                     bundle_id = %snapshot_receipt.bundle_id,
                     leaf_entry_count = snapshot_receipt.leaf_entry_count,
-                    query = %effective_query,
+                    query_bytes = effective_query_safe.raw_bytes,
+                    query_sha256 = %effective_query_safe.sha256,
                     filtered_entries = intent_receipt.filtered_entries,
                     exact_matches = intent_receipt.exact_matches,
                     resolved_action = intent_receipt.action,
@@ -5590,8 +5622,8 @@ impl ScriptListApp {
                             trace_id = %dctx.trace_id,
                             entry_index = entry_index,
                             entry_name = %entry.name,
-                            query_preview = %effective_query_safe,
-                            raw_query_preview = %raw_query_safe,
+                            query_sha256 = %effective_query_safe.sha256,
+                            raw_query_sha256 = %raw_query_safe.sha256,
                             "DO_IN_TRACE execution.execute_entry"
                         );
                         tracing::info!(
@@ -5607,13 +5639,14 @@ impl ScriptListApp {
                             target: "script_kit::do_in_trace",
                             event = "DO_IN_TRACE execution.generate_script",
                             trace_id = %dctx.trace_id,
-                            query_preview = %effective_query_safe,
-                            raw_query_preview = %raw_query_safe,
+                            query_sha256 = %effective_query_safe.sha256,
+                            raw_query_sha256 = %raw_query_safe.sha256,
                             "DO_IN_TRACE execution.generate_script"
                         );
                         tracing::info!(
                             trace_id = %dctx.trace_id,
-                            query = %effective_query,
+                            query_bytes = effective_query_safe.raw_bytes,
+                            query_sha256 = %effective_query_safe.sha256,
                             "do_in_current_app.action → GenerateScript — scheduling async context capture before recipe flow"
                         );
 
@@ -6926,12 +6959,24 @@ impl ScriptListApp {
     ) {
         let mut request = request;
         if request.history_entry_id.is_empty() {
-            let history_entry = crate::dictation::record_dictation_history(
+            match crate::dictation::record_dictation_history(
                 request.transcript.text(),
                 audio_duration,
                 target,
-            );
-            request.history_entry_id = history_entry.id;
+            ) {
+                Ok(history_entry) => request.history_entry_id = history_entry.id,
+                Err(error) => {
+                    tracing::warn!(
+                        category = "DICTATION",
+                        reason = ?error.kind(),
+                        "dictation_history_recovery_entry_not_saved"
+                    );
+                    self.show_error_toast(
+                        "Dictation History could not save this transcript. Copy it before closing.",
+                        cx,
+                    );
+                }
+            }
         }
         let work = crate::dictation::DictationRecoveryWork {
             request,
@@ -7150,18 +7195,33 @@ impl ScriptListApp {
                             .dictation
                             .save_history_enabled()
                         {
-                            let history_entry = crate::dictation::record_dictation_history(
+                            match crate::dictation::record_dictation_history(
                                 &transcript,
                                 audio_duration,
                                 target,
-                            );
-                            tracing::info!(
-                                category = "DICTATION",
-                                event = "dictation_history_recorded_before_delivery",
-                                entry_id = %history_entry.id,
-                                target_id = %history_entry.target_id,
-                            );
-                            history_entry.id
+                            ) {
+                                Ok(history_entry) => {
+                                    tracing::info!(
+                                        category = "DICTATION",
+                                        event = "dictation_history_recorded_before_delivery",
+                                        entry_id = %history_entry.id,
+                                        target_id = %history_entry.target_id,
+                                    );
+                                    history_entry.id
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        category = "DICTATION",
+                                        reason = ?error.kind(),
+                                        "dictation_history_entry_not_saved_before_delivery"
+                                    );
+                                    self.show_error_toast(
+                                        "Dictation History could not save this transcript. Your spoken text can still be delivered.",
+                                        cx,
+                                    );
+                                    String::new()
+                                }
+                            }
                         } else {
                             tracing::info!(
                                 category = "DICTATION",

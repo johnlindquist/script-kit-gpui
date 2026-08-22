@@ -34,6 +34,7 @@ pub(crate) struct RootDictationHistorySnapshot {
 
 static DICTATION_HISTORY_INDEX_CACHE: OnceLock<Mutex<Option<DictationHistoryIndexCache>>> =
     OnceLock::new();
+static DICTATION_HISTORY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static DICTATION_HISTORY_REFRESH_LIFECYCLE: OnceLock<
     Mutex<crate::scripts::root_search_contract::RootOwnedProviderRefreshLifecycle>,
 > = OnceLock::new();
@@ -339,34 +340,45 @@ fn save_history_entry_at(
     path: &std::path::Path,
     entry: &DictationHistoryEntry,
 ) -> std::io::Result<()> {
-    let mut json = serde_json::to_string(entry).map_err(std::io::Error::other)?;
-    json.push('\n');
-    crate::atomic_file::append_private_file(path, json.as_bytes())?;
+    let json = serde_json::to_string(entry).map_err(std::io::Error::other)?;
+    crate::atomic_file::append_private_jsonl_record(path, json.as_bytes())?;
     invalidate_history_cache();
     Ok(())
 }
 
-fn save_history_entry(entry: &DictationHistoryEntry) {
+fn with_history_write_lock<T>(
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let _guard = DICTATION_HISTORY_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    operation()
+}
+
+fn save_history_entry(entry: &DictationHistoryEntry) -> std::io::Result<()> {
     let path = history_path();
-    if let Err(error) = save_history_entry_at(&path, entry) {
+    with_history_write_lock(|| {
+        save_history_entry_at(&path, entry)?;
+        let mut entries = load_history_result_at(&path)?;
+        if entries.len() > HISTORY_COMPACT_LIMIT {
+            entries.truncate(HISTORY_COMPACT_LIMIT);
+            let rewritten: Vec<DictationHistoryEntry> = entries.iter().cloned().rev().collect();
+            write_history_at(&path, &rewritten)?;
+        }
+        entries.truncate(RESOURCE_ITEMS_LIMIT);
+        refresh_published_resource_from_entries(&entries);
+        Ok(())
+    })
+    .inspect_err(|error| {
         let safe_path = crate::logging::log_private_user_value(&path.display().to_string());
-        tracing::debug!(
+        tracing::warn!(
+            category = "DICTATION",
             path_bytes = safe_path.raw_bytes,
             path_sha256 = %safe_path.sha256,
             reason = ?error.kind(),
             "dictation_history_write_failed"
         );
-        return;
-    }
-
-    if load_history().len() > HISTORY_COMPACT_LIMIT {
-        let compacted: Vec<DictationHistoryEntry> = load_history()
-            .into_iter()
-            .take(HISTORY_COMPACT_LIMIT)
-            .collect();
-        let rewritten: Vec<DictationHistoryEntry> = compacted.into_iter().rev().collect();
-        let _ = write_history(&rewritten);
-    }
+    })
 }
 
 pub fn load_history_result() -> std::io::Result<Vec<DictationHistoryEntry>> {
@@ -396,7 +408,7 @@ fn load_history_result_at(path: &std::path::Path) -> std::io::Result<Vec<Dictati
     }
 
     let entries = if exists {
-        parse_history_entries(&crate::atomic_file::read_private_file(path)?)
+        parse_history_entries(&crate::atomic_file::read_private_file(path)?)?
     } else {
         Vec::new()
     };
@@ -447,14 +459,25 @@ fn migrate_history_entry(mut entry: DictationHistoryEntry) -> DictationHistoryEn
     entry
 }
 
-fn parse_history_entries(content: &str) -> Vec<DictationHistoryEntry> {
-    let mut entries: Vec<DictationHistoryEntry> = content
-        .lines()
-        .filter_map(|line| serde_json::from_str::<DictationHistoryEntry>(line).ok())
-        .map(migrate_history_entry)
-        .collect();
+fn parse_history_entries(content: &str) -> std::io::Result<Vec<DictationHistoryEntry>> {
+    let mut entries = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry = serde_json::from_str::<DictationHistoryEntry>(line).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Dictation History contains an invalid record at line {}",
+                    index + 1
+                ),
+            )
+        })?;
+        entries.push(migrate_history_entry(entry));
+    }
     entries.reverse();
-    entries
+    Ok(entries)
 }
 
 pub fn get_history_entry(id: &str) -> Option<DictationHistoryEntry> {
@@ -647,10 +670,14 @@ pub(crate) fn try_begin_root_dictation_history_refresh() -> Option<RootDictation
 }
 
 fn read_root_dictation_history_snapshot_at(path: &std::path::Path) -> RootDictationHistorySnapshot {
-    let signature = history_file_signature(path);
-    let entries = crate::atomic_file::read_private_file(path)
-        .map(|content| parse_history_entries(&content))
-        .unwrap_or_default();
+    let parsed = crate::atomic_file::read_private_file(path)
+        .and_then(|content| parse_history_entries(&content));
+    let signature = if parsed.is_ok() {
+        history_file_signature(path)
+    } else {
+        None
+    };
+    let entries = parsed.unwrap_or_default();
     RootDictationHistorySnapshot {
         cache: DictationHistoryIndexCache { signature, entries },
     }
@@ -859,7 +886,17 @@ fn refresh_published_resource_from_entries(entries: &[DictationHistoryEntry]) {
 }
 
 pub fn hydrate_dictation_resource_from_history() {
-    let entries = load_history();
+    let entries = match load_history_result() {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                category = "DICTATION",
+                reason = ?error.kind(),
+                "dictation_history_hydration_failed_preserving_existing_resource"
+            );
+            return;
+        }
+    };
     let latest: Vec<DictationHistoryEntry> =
         entries.into_iter().take(RESOURCE_ITEMS_LIMIT).collect();
     refresh_published_resource_from_entries(&latest);
@@ -869,14 +906,9 @@ pub fn record_dictation_history(
     transcript: &str,
     audio_duration: Duration,
     target: DictationTarget,
-) -> DictationHistoryEntry {
+) -> std::io::Result<DictationHistoryEntry> {
     let entry = build_history_entry(transcript, audio_duration, target);
-    save_history_entry(&entry);
-    let recent: Vec<DictationHistoryEntry> = load_history()
-        .into_iter()
-        .take(RESOURCE_ITEMS_LIMIT)
-        .collect();
-    refresh_published_resource_from_entries(&recent);
+    save_history_entry(&entry)?;
     tracing::info!(
         category = "DICTATION",
         event = "dictation_history_entry_saved",
@@ -885,21 +917,25 @@ pub fn record_dictation_history(
         transcript_len = entry.transcript.len(),
         audio_duration_ms = entry.audio_duration_ms,
     );
-    entry
+    Ok(entry)
 }
 
 pub fn delete_history_entry(entry_id: &str) -> anyhow::Result<()> {
     use anyhow::Context;
 
-    let entries: Vec<DictationHistoryEntry> = load_history()
-        .into_iter()
-        .filter(|entry| entry.id != entry_id)
-        .collect();
-    let rewritten: Vec<DictationHistoryEntry> = entries.iter().cloned().rev().collect();
-    write_history(&rewritten).with_context(|| format!("rewrite {}", history_path().display()))?;
-    let recent: Vec<DictationHistoryEntry> =
-        entries.into_iter().take(RESOURCE_ITEMS_LIMIT).collect();
-    refresh_published_resource_from_entries(&recent);
+    with_history_write_lock(|| {
+        let entries: Vec<DictationHistoryEntry> = load_history_result()?
+            .into_iter()
+            .filter(|entry| entry.id != entry_id)
+            .collect();
+        let rewritten: Vec<DictationHistoryEntry> = entries.iter().cloned().rev().collect();
+        write_history(&rewritten)?;
+        let recent: Vec<DictationHistoryEntry> =
+            entries.into_iter().take(RESOURCE_ITEMS_LIMIT).collect();
+        refresh_published_resource_from_entries(&recent);
+        Ok(())
+    })
+    .context("rewrite private Dictation History")?;
     tracing::info!(
         category = "DICTATION",
         event = "dictation_history_entry_deleted",
@@ -1010,6 +1046,181 @@ mod tests {
         )];
         apply_dictation_history_row_identities(&mut reordered, &[second.clone()]);
         assert_eq!(reordered[0].semantic_id, second.semantic_id());
+    }
+
+    #[test]
+    fn dictation_history_integrity_repairs_legacy_jsonl_record_boundaries() {
+        let directory = tempfile::tempdir().expect("isolated legacy JSONL fixture");
+        let path = directory.path().join("dictation-history.jsonl");
+        let first = build_history_entry(
+            "first private transcript without a terminal newline",
+            Duration::from_secs(1),
+            DictationTarget::NotesEditor,
+        );
+        let second = build_history_entry(
+            "second private transcript must remain independently readable",
+            Duration::from_secs(2),
+            DictationTarget::AiChatComposer,
+        );
+        let legacy = serde_json::to_string(&first).expect("serialize legacy private transcript");
+        crate::atomic_file::write_private_atomic(&path, legacy.as_bytes())
+            .expect("seed legacy transcript without newline");
+
+        save_history_entry_at(&path, &second).expect("repair private JSONL boundary");
+
+        let entries = load_history_result_at(&path).expect("both private records remain valid");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, second.id);
+        assert_eq!(entries[1].id, first.id);
+        let stored = crate::atomic_file::read_private_file(&path).expect("read private JSONL");
+        assert_eq!(stored.lines().count(), 2);
+        assert!(stored.ends_with('\n'));
+    }
+
+    #[test]
+    fn dictation_history_integrity_refuses_to_delete_or_leak_malformed_private_history() {
+        let _env = TestEnv::new();
+        let retained = record_dictation_history(
+            "retained private spoken transcript",
+            Duration::from_secs(1),
+            DictationTarget::NotesEditor,
+        )
+        .expect("persist valid private transcript");
+        let path = history_path();
+        let canary = "private-malformed-spoken-transcript-never-expose";
+        let valid = crate::atomic_file::read_private_file(&path).expect("read valid history");
+        let corrupted = format!("{valid}{{\"transcript\":\"{canary}\"");
+        crate::atomic_file::write_private_atomic(&path, corrupted.as_bytes())
+            .expect("seed malformed private history");
+        invalidate_history_cache();
+
+        let read_error = load_history_result().expect_err("malformed history fails closed");
+        assert_eq!(read_error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!read_error.to_string().contains(canary));
+        let deletion_error = delete_history_entry(&retained.id)
+            .expect_err("deleting one row must never erase an unreadable history file");
+        assert!(!deletion_error.to_string().contains(canary));
+        assert_eq!(
+            crate::atomic_file::read_private_file(&path).expect("preserve corrupted private bytes"),
+            corrupted
+        );
+        assert!(crate::mcp_resources::has_provider_json_resource(
+            crate::mcp_resources::ProviderJsonResourceKind::Dictation
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dictation_history_integrity_never_reports_or_publishes_an_unsaved_transcript() {
+        use std::os::unix::fs::symlink;
+
+        let env = TestEnv::new();
+        let foreign = env.tempdir.path().join("protected-foreign-transcript.txt");
+        let original = "another owner's spoken transcript remains untouched";
+        std::fs::write(&foreign, original).expect("seed foreign private transcript");
+        symlink(&foreign, history_path()).expect("plant hostile history symlink");
+
+        let error = record_dictation_history(
+            "new spoken words that cannot safely persist",
+            Duration::from_secs(1),
+            DictationTarget::NotesEditor,
+        )
+        .expect_err("a failed private write must not fabricate a saved history entry");
+
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), original);
+        assert!(!crate::mcp_resources::has_provider_json_resource(
+            crate::mcp_resources::ProviderJsonResourceKind::Dictation
+        ));
+    }
+
+    #[test]
+    fn dictation_history_integrity_rejects_malformed_root_search_snapshots() {
+        let directory = tempfile::tempdir().expect("isolated root Dictation History snapshot");
+        let path = directory.path().join("dictation-history.jsonl");
+        crate::atomic_file::write_private_atomic(&path, b"private malformed transcript\n")
+            .expect("seed malformed private root snapshot");
+
+        let snapshot = read_root_dictation_history_snapshot_at(&path);
+
+        assert!(snapshot.cache.entries.is_empty());
+        assert!(snapshot.cache.signature.is_none());
+        assert!(!root_dictation_history_snapshot_is_current_at(
+            &snapshot, &path
+        ));
+    }
+
+    #[test]
+    fn dictation_history_integrity_hydration_preserves_the_last_valid_provider_payload() {
+        let _env = TestEnv::new();
+        record_dictation_history(
+            "last valid provider-backed private transcript",
+            Duration::from_secs(1),
+            DictationTarget::NotesEditor,
+        )
+        .expect("publish valid private history payload");
+        let kind = crate::mcp_resources::ProviderJsonResourceKind::Dictation;
+        let before = crate::mcp_resources::read_provider_json_items(kind);
+        assert_eq!(before.len(), 1);
+        crate::atomic_file::write_private_atomic(&history_path(), b"malformed private history\n")
+            .expect("seed unreadable private history");
+        invalidate_history_cache();
+
+        hydrate_dictation_resource_from_history();
+
+        let after = crate::mcp_resources::read_provider_json_items(kind);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].title, before[0].title);
+    }
+
+    #[test]
+    fn dictation_history_integrity_serializes_concurrent_saves_and_deletion() {
+        use std::sync::{Arc, Barrier};
+
+        let _env = TestEnv::new();
+        let removed = record_dictation_history(
+            "only this private transcript should be removed",
+            Duration::from_secs(1),
+            DictationTarget::NotesEditor,
+        )
+        .expect("persist initial transcript");
+        let start = Arc::new(Barrier::new(7));
+        let workers = (0..6)
+            .map(|index| {
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    record_dictation_history(
+                        &format!("concurrent private transcript {index}"),
+                        Duration::from_secs(1),
+                        DictationTarget::AiChatComposer,
+                    )
+                    .expect("persist concurrent transcript")
+                    .id
+                })
+            })
+            .collect::<Vec<_>>();
+
+        start.wait();
+        delete_history_entry(&removed.id).expect("delete only the selected private transcript");
+        let recorded = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("join isolated history worker"))
+            .collect::<Vec<_>>();
+        let entries = load_history_result().expect("read complete concurrent private history");
+
+        assert_eq!(entries.len(), recorded.len());
+        assert!(!entries.iter().any(|entry| entry.id == removed.id));
+        assert!(recorded
+            .iter()
+            .all(|id| entries.iter().any(|entry| &entry.id == id)));
+        assert_eq!(
+            crate::mcp_resources::read_provider_json_items(
+                crate::mcp_resources::ProviderJsonResourceKind::Dictation
+            )
+            .len(),
+            recorded.len()
+        );
     }
 
     #[cfg(unix)]
@@ -1168,12 +1379,14 @@ mod tests {
             "first transcript",
             Duration::from_secs(1),
             DictationTarget::NotesEditor,
-        );
+        )
+        .expect("persist first private transcript");
         let second = record_dictation_history(
             "second transcript",
             Duration::from_secs(2),
             DictationTarget::AiChatComposer,
-        );
+        )
+        .expect("persist second private transcript");
 
         let loaded = load_history();
         assert_eq!(loaded.len(), 2);
@@ -1188,12 +1401,14 @@ mod tests {
             "draft reply to the oauth ticket",
             Duration::from_secs(2),
             DictationTarget::AiChatComposer,
-        );
+        )
+        .expect("persist Agent Chat transcript");
         record_dictation_history(
             "quick note for the meeting",
             Duration::from_secs(1),
             DictationTarget::NotesEditor,
-        );
+        )
+        .expect("persist Notes transcript");
 
         let ai_hits = search_history("oauth agent", 10);
         assert_eq!(ai_hits.len(), 1);
@@ -1220,12 +1435,14 @@ mod tests {
             "Somewhat shared themes and other generated reports",
             Duration::from_secs(3),
             DictationTarget::NotesEditor,
-        );
+        )
+        .expect("persist unrelated transcript");
         record_dictation_history(
             "So what are the next steps for the launcher",
             Duration::from_secs(2),
             DictationTarget::AiChatComposer,
-        );
+        )
+        .expect("persist matching transcript");
 
         let hits = search_history("what are the", 10);
         assert_eq!(hits.len(), 1, "mid-word fragments must not qualify");
@@ -1248,7 +1465,8 @@ mod tests {
             &transcript,
             Duration::from_secs(4),
             DictationTarget::NotesEditor,
-        );
+        )
+        .expect("persist beyond-preview transcript");
 
         let hits = search_history("oauth redirect ticket", 10);
         assert_eq!(hits.len(), 1);
@@ -1269,7 +1487,8 @@ mod tests {
             "completely unrelated content",
             Duration::from_secs(2),
             DictationTarget::NotesEditor,
-        );
+        )
+        .expect("persist unrelated transcript");
 
         // "at" appears in every formatted timestamp ("Jul 11 at 4:50 pm");
         // it must not qualify the row.
@@ -1287,12 +1506,14 @@ mod tests {
             "keep me",
             Duration::from_secs(1),
             DictationTarget::MainWindowPrompt,
-        );
+        )
+        .expect("persist retained transcript");
         let drop = record_dictation_history(
             "drop me",
             Duration::from_secs(1),
             DictationTarget::ExternalApp,
-        );
+        )
+        .expect("persist deleted transcript");
 
         delete_history_entry(&drop.id).expect("delete");
         let loaded = load_history();
@@ -1340,7 +1561,7 @@ mod tests {
     fn legacy_targets_migrate_to_canonical_ids_without_guessing_unknown_labels() {
         let legacy = r#"{"id":"legacy-ai","timestamp":"2026-07-01T00:00:00Z","transcript":"one","preview":"one","target":"AI Chat","audio_duration_ms":1000}
 {"id":"legacy-unknown","timestamp":"2026-07-02T00:00:00Z","transcript":"two","preview":"two","target":"Studio Console","audio_duration_ms":1000}"#;
-        let entries = parse_history_entries(legacy);
+        let entries = parse_history_entries(legacy).expect("valid legacy history");
         let unknown = entries
             .iter()
             .find(|entry| entry.id == "legacy-unknown")
@@ -1412,7 +1633,8 @@ mod tests {
             "provider-backed dictation",
             Duration::from_secs(3),
             DictationTarget::AiChatComposer,
-        );
+        )
+        .expect("persist provider-backed transcript");
 
         assert!(
             crate::mcp_resources::has_provider_json_resource(
