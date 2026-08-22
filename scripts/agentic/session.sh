@@ -29,6 +29,37 @@
 
 set -euo pipefail
 
+PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+
+# Direct shell callers must cross the same fail-closed boundary as Driver and
+# DevTools clients. Validate before creating the session registry, resolving a
+# binary, touching an existing FIFO, or inspecting a user-owned process.
+if [[ "${SCRIPT_KIT_NONINTERACTIVE:-0}" == "1" ]]; then
+  SCRIPT_KIT_SESSION_GUARD_ROOT="$PROJECT_ROOT" bun -e '
+    const root = process.env.SCRIPT_KIT_SESSION_GUARD_ROOT;
+    process.chdir(root);
+    const { assertNoninteractiveSessionCommand } = await import(
+      `${root}/scripts/devtools/lib/operator-safety.ts`
+    );
+    try {
+      assertNoninteractiveSessionCommand([
+        "bash",
+        `${root}/scripts/agentic/session.sh`,
+        ...process.argv.slice(1),
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stdout.write(`${JSON.stringify({
+        schemaVersion: 1,
+        status: "error",
+        error: { code: "noninteractive_safety_refused", message },
+      })}\n`);
+      process.stderr.write(`${message}\n`);
+      process.exit(78);
+    }
+  ' "$@"
+fi
+
 SCHEMA_VERSION=1
 SESSION_DIR_RAW="${SCRIPT_KIT_SESSION_DIR:-/tmp/sk-agentic-sessions}"
 canonical_session_dir() {
@@ -37,7 +68,6 @@ canonical_session_dir() {
   (cd "$dir" && pwd -P)
 }
 SESSION_DIR="$(canonical_session_dir "$SESSION_DIR_RAW")"
-PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # With no explicit override, pick the freshest of the dev.sh binary and the
 # agent-cargo pool binary so a just-built agent binary is never silently
 # shadowed by a stale target/debug one (and vice versa).

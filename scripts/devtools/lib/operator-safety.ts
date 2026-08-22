@@ -35,6 +35,8 @@ const ownedSandboxMutationTypes = new Set([
 const incompatibleOptIns = [
   "SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER",
   "SCRIPT_KIT_ALLOW_VISIBLE_PROBES",
+  "SCRIPT_KIT_ALLOW_NATIVE_INPUT",
+  "SCRIPT_KIT_ALLOW_SCREEN_CAPTURE",
   "SCRIPT_KIT_ALLOW_LIVE_AI",
 ] as const;
 const immutableLaunchAuthority = [

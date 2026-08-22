@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   assertNoninteractiveDriverLaunch,
   assertNoninteractiveProtocolCommand,
@@ -14,6 +17,8 @@ const environment = {
   SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0",
   SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0",
   SCRIPT_KIT_ALLOW_LIVE_AI: "0",
+  SCRIPT_KIT_ALLOW_NATIVE_INPUT: "0",
+  SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: "0",
 };
 
 function check(command: Record<string, unknown>): void {
@@ -47,6 +52,8 @@ function withParentAuthority(
     SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: "0",
     SCRIPT_KIT_ALLOW_VISIBLE_PROBES: "0",
     SCRIPT_KIT_ALLOW_LIVE_AI: "0",
+    SCRIPT_KIT_ALLOW_NATIVE_INPUT: "0",
+    SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: "0",
     SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0",
     CI: "false",
     ...overrides,
@@ -66,6 +73,27 @@ function withParentAuthority(
 }
 
 describe("noninteractive DevTools operator safety", () => {
+  const suiteAuthority = {
+    ...environment,
+    CI: "false",
+    SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0",
+  };
+  let originalAuthority: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    originalAuthority = Object.fromEntries(
+      Object.keys(suiteAuthority).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, suiteAuthority);
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(originalAuthority)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
   test("only reviewed hidden-root inspection and filter commands are allowed", () => {
     const ownedOnly = new Set(["setFilter", "setInput", "hide"]);
     for (const commandType of NONINTERACTIVE_SAFE_COMMAND_TYPES) {
@@ -295,11 +323,13 @@ describe("noninteractive DevTools operator safety", () => {
     ).not.toThrow();
   });
 
-  test("contradictory takeover, visible, or live-AI opt-ins fail closed", () => {
+  test("contradictory takeover, visible, input, capture, or live-AI opt-ins fail closed", () => {
     for (const unsafeSetting of [
       "SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER",
       "SCRIPT_KIT_ALLOW_VISIBLE_PROBES",
       "SCRIPT_KIT_ALLOW_LIVE_AI",
+      "SCRIPT_KIT_ALLOW_NATIVE_INPUT",
+      "SCRIPT_KIT_ALLOW_SCREEN_CAPTURE",
     ]) {
       expect(() =>
         assertNoninteractiveProtocolCommand(
@@ -311,6 +341,28 @@ describe("noninteractive DevTools operator safety", () => {
         )
       ).toThrow(`${unsafeSetting}=1 contradicts noninteractive execution`);
     }
+  });
+
+  test.each([
+    "SCRIPT_KIT_ALLOW_NATIVE_INPUT",
+    "SCRIPT_KIT_ALLOW_SCREEN_CAPTURE",
+  ])("rejects inherited %s before any launch or existing-session transport", (unsafeSetting) => {
+    withParentAuthority({ [unsafeSetting]: "1" }, () => {
+      expect(() =>
+        assertNoninteractiveProtocolCommand({ type: "getState" }),
+      ).toThrow(`${unsafeSetting}=1 contradicts noninteractive execution`);
+      expect(() =>
+        assertNoninteractiveDriverLaunch({ sandboxHome: true }),
+      ).toThrow(`${unsafeSetting}=1 contradicts noninteractive execution`);
+      expect(() =>
+        assertNoninteractiveSessionCommand([
+          "bash",
+          "scripts/agentic/session.sh",
+          "status",
+          "default",
+        ]),
+      ).toThrow(`${unsafeSetting}=1 contradicts noninteractive execution`);
+    });
   });
 
   test("the shared Driver transport rejects unsafe commands before writing them", () => {
@@ -373,6 +425,8 @@ describe("noninteractive DevTools operator safety", () => {
       "SCRIPT_KIT_ALLOW_VISIBLE_PROBES",
       "SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER",
       "SCRIPT_KIT_ALLOW_LIVE_AI",
+      "SCRIPT_KIT_ALLOW_NATIVE_INPUT",
+      "SCRIPT_KIT_ALLOW_SCREEN_CAPTURE",
     ] as const;
     const originals = Object.fromEntries(
       authorityKeys.map((key) => [key, process.env[key]]),
@@ -383,6 +437,8 @@ describe("noninteractive DevTools operator safety", () => {
       process.env.SCRIPT_KIT_ALLOW_VISIBLE_PROBES = "0";
       process.env.SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER = "0";
       process.env.SCRIPT_KIT_ALLOW_LIVE_AI = "0";
+      process.env.SCRIPT_KIT_ALLOW_NATIVE_INPUT = "0";
+      process.env.SCRIPT_KIT_ALLOW_SCREEN_CAPTURE = "0";
       process.env.CI = "false";
 
       expect(() =>
@@ -403,6 +459,17 @@ describe("noninteractive DevTools operator safety", () => {
           env: { SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "1" },
         }),
       ).toThrow("SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH cannot override immutable parent safety authority");
+      for (const unsafeSetting of [
+        "SCRIPT_KIT_ALLOW_NATIVE_INPUT",
+        "SCRIPT_KIT_ALLOW_SCREEN_CAPTURE",
+      ]) {
+        expect(() =>
+          assertNoninteractiveDriverLaunch({
+            sandboxHome: true,
+            env: { [unsafeSetting]: "1" },
+          }),
+        ).toThrow(`${unsafeSetting}=1 contradicts noninteractive execution`);
+      }
 
       process.env.CI = "true";
       process.env.SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH = "1";
@@ -597,6 +664,108 @@ describe("noninteractive DevTools operator safety", () => {
     `);
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toContain("refused captureScreenshot");
+  });
+
+  test.each([
+    ["start", ["start", "isolated-safety-probe"], "session lifecycle mutation is forbidden"],
+    ["stop", ["stop", "isolated-safety-probe"], "session lifecycle mutation is forbidden"],
+    [
+      "send",
+      ["send", "isolated-safety-probe", JSON.stringify({ type: "captureScreenshot" })],
+      "refused captureScreenshot",
+    ],
+    [
+      "rpc",
+      ["rpc", "isolated-safety-probe", JSON.stringify({ type: "hide" })],
+      "unowned existing session permits only side-effect-free read-only inspection",
+    ],
+  ])("direct session.sh %s refuses before creating a session or resolving a binary", (_name, args, reason) => {
+    const temporaryRoot = mkdtempSync(join(tmpdir(), "script-kit-session-guard-"));
+    const sessionRoot = join(temporaryRoot, "must-remain-absent");
+    try {
+      const result = Bun.spawnSync(["bash", "scripts/agentic/session.sh", ...args], {
+        cwd: new URL("../..", import.meta.url).pathname,
+        env: {
+          ...process.env,
+          ...environment,
+          CI: "false",
+          SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0",
+          SCRIPT_KIT_SESSION_DIR: sessionRoot,
+          SCRIPT_KIT_GPUI_BINARY: join(temporaryRoot, "never-resolve-or-launch"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(78);
+      expect(result.stderr.toString()).toContain(reason);
+      expect(existsSync(sessionRoot)).toBe(false);
+    } finally {
+      rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    "SCRIPT_KIT_ALLOW_NATIVE_INPUT",
+    "SCRIPT_KIT_ALLOW_SCREEN_CAPTURE",
+  ])("direct read-only session status rejects inherited %s before filesystem mutation", (unsafeSetting) => {
+    const temporaryRoot = mkdtempSync(join(tmpdir(), "script-kit-session-opt-in-"));
+    const sessionRoot = join(temporaryRoot, "must-remain-absent");
+    try {
+      const result = Bun.spawnSync([
+        "bash",
+        "scripts/agentic/session.sh",
+        "status",
+        "isolated-safety-probe",
+      ], {
+        cwd: new URL("../..", import.meta.url).pathname,
+        env: {
+          ...process.env,
+          ...environment,
+          [unsafeSetting]: "1",
+          SCRIPT_KIT_SESSION_DIR: sessionRoot,
+          SCRIPT_KIT_GPUI_BINARY: join(temporaryRoot, "never-resolve-or-launch"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(78);
+      expect(result.stderr.toString()).toContain(
+        `${unsafeSetting}=1 contradicts noninteractive execution`,
+      );
+      expect(existsSync(sessionRoot)).toBe(false);
+    } finally {
+      rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("direct session status preserves reviewed noninteractive read-only inspection", () => {
+    const temporaryRoot = mkdtempSync(join(tmpdir(), "script-kit-session-status-"));
+    try {
+      const result = Bun.spawnSync([
+        "bash",
+        "scripts/agentic/session.sh",
+        "status",
+        "isolated-safety-probe",
+      ], {
+        cwd: new URL("../..", import.meta.url).pathname,
+        env: {
+          ...process.env,
+          ...environment,
+          SCRIPT_KIT_SESSION_DIR: join(temporaryRoot, "sessions"),
+          SCRIPT_KIT_GPUI_BINARY: join(temporaryRoot, "never-resolve-or-launch"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(result.stdout.toString())).toMatchObject({
+        status: "not_found",
+        session: "isolated-safety-probe",
+        alive: false,
+      });
+    } finally {
+      rmSync(temporaryRoot, { recursive: true, force: true });
+    }
   });
 
   test("legacy --start and stop cannot create or disturb a user-owned GUI session", () => {
