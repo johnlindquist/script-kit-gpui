@@ -238,10 +238,23 @@ sanitize_id() {
   printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '-'
 }
 
-agent_id="$(sanitize_id "${SCRIPT_KIT_AGENT_ID:-${USER:-agent}-${PPID:-$$}}")"
+owned_cache_id() {
+  local raw="$1" label="$2" normalized
+  normalized="$(sanitize_id "$raw")"
+  if [[ -z "$normalized" || "$normalized" == "." || "$normalized" == ".." ]]; then
+    worker_failure "${label}=${raw} must name one owned cache child"
+  fi
+  printf '%s' "$normalized"
+}
+
+agent_id="$(owned_cache_id "${SCRIPT_KIT_AGENT_ID:-${USER:-agent}-${PPID:-$$}}" SCRIPT_KIT_AGENT_ID)"
 target_mode="${SCRIPT_KIT_AGENT_TARGET_MODE:-pool}"
-pool="$(sanitize_id "${SCRIPT_KIT_CARGO_TARGET_POOL:-agent-debug}")"
+pool="$(owned_cache_id "${SCRIPT_KIT_CARGO_TARGET_POOL:-agent-debug}" SCRIPT_KIT_CARGO_TARGET_POOL)"
 default_pool="agent-debug"
+validated_artifact_name=""
+if [[ -n "${SCRIPT_KIT_AGENT_ARTIFACT_NAME:-}" ]]; then
+  validated_artifact_name="$(owned_cache_id "$SCRIPT_KIT_AGENT_ARTIFACT_NAME" SCRIPT_KIT_AGENT_ARTIFACT_NAME)"
+fi
 
 case "$target_mode" in
   pool)
@@ -262,6 +275,24 @@ lock_root="${REPO_ROOT}/target-agent/.locks"
 lock_dir="${lock_root}/${lock_name}.lock"
 shared_cache_dir="${REPO_ROOT}/target-agent/shared"
 metal_module_cache="${SCRIPT_KIT_METAL_MODULE_CACHE_DIR:-${shared_cache_dir}/clang-modules}"
+
+for protected_cache_path in \
+  "${REPO_ROOT}/target-agent" \
+  "${REPO_ROOT}/target-agent/pools" \
+  "${REPO_ROOT}/target-agent/agents" \
+  "${REPO_ROOT}/target-agent/.locks" \
+  "${REPO_ROOT}/target-agent/shared" \
+  "${REPO_ROOT}/target-agent/artifacts" \
+  "$target_dir" \
+  "$metal_module_cache"; do
+  if [[ -L "$protected_cache_path" ]]; then
+    worker_failure "protected cache ownership cannot follow a symlink: ${protected_cache_path}"
+  fi
+done
+if [[ -n "$validated_artifact_name" && -L "${REPO_ROOT}/target-agent/artifacts/${validated_artifact_name}" ]]; then
+  worker_failure "protected cache ownership cannot follow a symlink: ${REPO_ROOT}/target-agent/artifacts/${validated_artifact_name}"
+fi
+
 mkdir -p "$target_dir" "$lock_root" "$metal_module_cache"
 
 export CARGO_TARGET_DIR="$target_dir"
@@ -434,7 +465,7 @@ release_lock() {
 export_artifacts() {
   local artifact_name profile_dir="debug" bins=() i=0 argc=$#
   local args=("$@")
-  artifact_name="$(sanitize_id "${SCRIPT_KIT_AGENT_ARTIFACT_NAME:-}")"
+  artifact_name="$validated_artifact_name"
   [[ -n "$artifact_name" ]] || return 0
   [[ "${args[0]:-}" == "build" ]] || return 0
 

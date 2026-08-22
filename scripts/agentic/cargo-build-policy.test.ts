@@ -336,6 +336,82 @@ describe("bounded Cargo builds", () => {
     expect(existsSync(workspace.capture)).toBe(false);
   });
 
+  test.each([".", ".."])(
+    "refuses traversal-like protected pool identifier %s before Cargo runs",
+    (poolName) => {
+      const workspace = fixture();
+      const result = run("agent-cargo.sh", ["check", "--lib"], {
+        ...workspace.env,
+        SCRIPT_KIT_CARGO_TARGET_POOL: poolName,
+      });
+
+      expect(result.status).toBe(64);
+      expect(result.stderr).toContain("must name one owned cache child");
+      expect(existsSync(workspace.capture)).toBe(false);
+    },
+  );
+
+  test.each([".", ".."])(
+    "refuses traversal-like exclusive agent identifier %s before Cargo runs",
+    (agentName) => {
+      const workspace = fixture();
+      const result = run("agent-cargo.sh", ["check", "--lib"], {
+        ...workspace.env,
+        SCRIPT_KIT_AGENT_TARGET_MODE: "exclusive",
+        SCRIPT_KIT_AGENT_ID: agentName,
+      });
+
+      expect(result.status).toBe(64);
+      expect(result.stderr).toContain("must name one owned cache child");
+      expect(existsSync(workspace.capture)).toBe(false);
+    },
+  );
+
+  test.each([".", ".."])(
+    "refuses traversal-like artifact export identifier %s before Cargo runs",
+    (artifactName) => {
+      const workspace = fixture();
+      const result = run("agent-cargo.sh", ["build", "--bin", "export_design_tokens"], {
+        ...workspace.env,
+        SCRIPT_KIT_AGENT_ARTIFACT_NAME: artifactName,
+      });
+
+      expect(result.status).toBe(64);
+      expect(result.stderr).toContain("must name one owned cache child");
+      expect(existsSync(workspace.capture)).toBe(false);
+    },
+  );
+
+  test("refuses a symlinked build pool before touching its external destination", () => {
+    const workspace = fixture();
+    const external = mkdtempSync(join(tmpdir(), "script-kit-external-pool-"));
+    symlinkSync(external, join(workspace.root, "target-agent", "pools", "escaped"));
+    const result = run("agent-cargo.sh", ["check", "--lib"], {
+      ...workspace.env,
+      SCRIPT_KIT_CARGO_TARGET_POOL: "escaped",
+    });
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("protected cache ownership cannot follow a symlink");
+    expect(existsSync(workspace.capture)).toBe(false);
+    expect(existsSync(join(external, ".last_used"))).toBe(false);
+  });
+
+  test("refuses a symlinked artifact export before Cargo can write outside its owner", () => {
+    const workspace = fixture();
+    const external = mkdtempSync(join(tmpdir(), "script-kit-external-artifact-"));
+    symlinkSync(external, join(workspace.root, "target-agent", "artifacts", "escaped"));
+    const result = run("agent-cargo.sh", ["build", "--bin", "export_design_tokens"], {
+      ...workspace.env,
+      SCRIPT_KIT_AGENT_ARTIFACT_NAME: "escaped",
+    });
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("protected cache ownership cannot follow a symlink");
+    expect(existsSync(workspace.capture)).toBe(false);
+    expect(existsSync(join(external, "export_design_tokens"))).toBe(false);
+  });
+
   test.each([
     ["--config", "build.jobs=48"],
     ["--config=build.jobs=48"],
