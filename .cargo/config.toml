@@ -16,7 +16,9 @@ rustflags = [
 ]
 
 [env]
-CARGO_INCREMENTAL = "1"
+# Do not force CARGO_INCREMENTAL=1 globally: sccache rejects that environment
+# before rustc can run. Profile settings retain fast local workspace rebuilds,
+# while normal external dependencies remain eligible for compiler caching.
 CARGO_PROFILE_DEV_INCREMENTAL = "true"
 CARGO_PROFILE_TEST_INCREMENTAL = "true"
 

@@ -98,7 +98,10 @@ mod macos_build {
 
     /// Locate the gpui crate directory relative to this crate.
     fn find_gpui_crate_dir() -> PathBuf {
-        gpui::GPUI_MANIFEST_DIR.into()
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+            .parent()
+            .expect("gpui_macos must remain next to its vendored gpui crate")
+            .join("gpui")
     }
 
     /// To enable runtime compilation, we need to "stitch" the shaders file with the generated header
@@ -124,10 +127,16 @@ mod macos_build {
     fn compile_metal_shaders(header_path: &Path) {
         use std::process::{self, Command};
         let shader_path = "./src/shaders.metal";
-        let air_output_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.air");
-        let metallib_output_path =
-            PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders.metallib");
+        let output_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let air_output_path = output_dir.join("shaders.air");
+        let metallib_output_path = output_dir.join("shaders.metallib");
+        let module_cache_path = env::var_os("SCRIPT_KIT_METAL_MODULE_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| output_dir.join("clang-module-cache"));
+        std::fs::create_dir_all(&module_cache_path)
+            .expect("Metal module cache must be writable inside the Cargo build workspace");
         println!("cargo:rerun-if-changed={}", shader_path);
+        println!("cargo:rerun-if-env-changed=SCRIPT_KIT_METAL_MODULE_CACHE_DIR");
 
         let output = Command::new("xcrun")
             .args([
@@ -144,6 +153,10 @@ mod macos_build {
                 "-o",
             ])
             .arg(&air_output_path)
+            .arg(format!(
+                "-fmodules-cache-path={}",
+                module_cache_path.display()
+            ))
             .output()
             .unwrap();
 

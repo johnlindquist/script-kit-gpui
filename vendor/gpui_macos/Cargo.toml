@@ -56,4 +56,3 @@ uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }
 
 [target.'cfg(target_os = "macos")'.build-dependencies]
 cbindgen = { version = "0.28.0", default-features = false }
-gpui = { path = "../gpui", default-features = false }

@@ -63,25 +63,40 @@ fn emit_git_rerun_triggers() {
     }
 }
 
+fn should_track_git_head(
+    profile: &str,
+    github_sha: Option<&str>,
+    override_value: Option<&str>,
+) -> bool {
+    profile == "release"
+        || github_sha.is_some_and(|sha| !sha.trim().is_empty())
+        || override_value == Some("1")
+}
+
 fn main() {
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
+    let github_sha = std::env::var("GITHUB_SHA").ok();
+
     // Expose the git commit hash as a compile-time env var (GIT_HASH).
     // Falls back to CI-provided SHA or "unknown" if git is unavailable.
     let git_hash = read_git_hash()
-        .or_else(|| {
-            std::env::var("GITHUB_SHA")
-                .ok()
-                .map(|sha| sha.chars().take(7).collect())
-        })
+        .or_else(|| github_sha.as_ref().map(|sha| sha.chars().take(7).collect()))
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=GIT_HASH={git_hash}");
 
     // Expose the build profile (debug/release) as a compile-time env var (BUILD_PROFILE).
-    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=BUILD_PROFILE={profile}");
 
-    // Track VCS state changes for commit hash propagation in regular repos and worktrees.
-    emit_git_rerun_triggers();
+    // A docs-only commit must not recompile/link the 67-second local app test
+    // harness. The embedded hash still identifies the commit the binary was
+    // actually built from. Exact packaged/CI provenance remains mandatory,
+    // and local operators can explicitly opt into eager HEAD tracking.
+    let track_override = std::env::var("SCRIPT_KIT_TRACK_GIT_HEAD").ok();
+    if should_track_git_head(&profile, github_sha.as_deref(), track_override.as_deref()) {
+        emit_git_rerun_triggers();
+    }
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    println!("cargo:rerun-if-env-changed=SCRIPT_KIT_TRACK_GIT_HEAD");
 
     // Trigger rebuild when SDK source changes (it's embedded via include_str!)
     println!("cargo:rerun-if-changed=scripts/kit-sdk.ts");
@@ -98,4 +113,23 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/fonts/JetBrainsMono-BoldItalic.ttf");
     println!("cargo:rerun-if-changed=assets/fonts/JetBrainsMono-Medium.ttf");
     println!("cargo:rerun-if-changed=assets/fonts/JetBrainsMono-SemiBold.ttf");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_track_git_head;
+
+    #[test]
+    fn local_debug_builds_do_not_recompile_after_docs_only_commits() {
+        assert!(!should_track_git_head("debug", None, None));
+        assert!(!should_track_git_head("debug", Some("  "), None));
+        assert!(!should_track_git_head("debug", None, Some("0")));
+    }
+
+    #[test]
+    fn release_ci_and_explicit_opt_in_preserve_exact_git_provenance() {
+        assert!(should_track_git_head("release", None, None));
+        assert!(should_track_git_head("debug", Some("abc1234"), None));
+        assert!(should_track_git_head("debug", None, Some("1")));
+    }
 }
