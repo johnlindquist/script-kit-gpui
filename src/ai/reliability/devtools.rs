@@ -4,7 +4,6 @@ use crate::protocol::{
     AiReliabilityTransitionSnapshot, AutomationWindowKind,
 };
 use parking_lot::Mutex;
-use sha2::{Digest, Sha256};
 use sk_protocol::ai_reliability::{
     AiFailure, AiFailureKind, AiOperationState, AiPhase, AiSelectionState, AiSurfaceIdentity,
     DiagnosticAvailability, PreservationReceipt, RecoveryRole,
@@ -334,8 +333,7 @@ fn surface_for_kind(kind: AutomationWindowKind) -> &'static str {
 }
 
 pub(crate) fn redacted_fingerprint(value: &str) -> String {
-    let bytes = Sha256::digest(value.as_bytes());
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    crate::logging::log_private_user_value(value).sha256
 }
 
 #[cfg(test)]

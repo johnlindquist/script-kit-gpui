@@ -14,7 +14,7 @@ import {
   startClock,
 } from "./lib/client.ts";
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
-import { diagnostic } from "./lib/privacy.ts";
+import { diagnostic, privateReceiptFingerprint } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
 function usage() {
@@ -29,11 +29,6 @@ function focusedNode(nodes: JsonObject[], focusedSemanticId: unknown) {
 function safeNode(node: JsonObject | null) {
   if (!node) return null;
   const content = String(node.text ?? node.value ?? "");
-  let hash = 2166136261;
-  for (const char of content) {
-    hash ^= char.charCodeAt(0);
-    hash = Math.imul(hash, 16777619);
-  }
   return {
     semanticId: node.semanticId ?? null,
     role: node.role ?? node.type ?? null,
@@ -45,7 +40,7 @@ function safeNode(node: JsonObject | null) {
       contentKind: "UserContent",
       redacted: true,
       length: content.length,
-      fingerprint: (hash >>> 0).toString(16).padStart(8, "0"),
+      fingerprint: privateReceiptFingerprint(content),
     },
   };
 }

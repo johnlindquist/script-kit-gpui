@@ -46,9 +46,10 @@ pub(crate) struct DayPageContextReturn {
 }
 
 fn day_page_context_round_trip_fingerprint(value: &str) -> String {
-    use sha2::{Digest, Sha256};
-
-    format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
+    format!(
+        "sha256:{}",
+        crate::logging::log_private_user_value(value).sha256
+    )
 }
 
 fn day_page_context_round_trip_receipt(

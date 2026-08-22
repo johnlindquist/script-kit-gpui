@@ -187,6 +187,27 @@ fn redactor_allowlists_json_masks_secrets_paths_and_bounds_output() {
 }
 
 #[test]
+fn private_ai_reliability_fingerprints_are_keyed_before_diagnostics_leave_the_vault() {
+    use sha2::{Digest as _, Sha256};
+
+    let raw = "private provider password and exact user question";
+    let public_sha = format!("{:x}", Sha256::digest(raw.as_bytes()));
+    let first = redact_diagnostic(raw);
+    let repeated = redact_diagnostic(raw);
+
+    assert_eq!(first.fingerprint.0, repeated.fingerprint.0);
+    assert_ne!(first.fingerprint.0, public_sha);
+    assert_eq!(
+        first.fingerprint.0,
+        crate::logging::log_private_user_value(raw).sha256
+    );
+    assert_eq!(
+        super::devtools::redacted_fingerprint(raw),
+        first.fingerprint.0
+    );
+}
+
+#[test]
 fn redactor_suppresses_unallowlisted_json_without_falling_back_to_private_payloads() {
     let private_payloads = [
         serde_json::json!({

@@ -1,5 +1,4 @@
 use parking_lot::Mutex;
-use sha2::{Digest, Sha256};
 use sk_protocol::ai_reliability::{
     DiagnosticAvailability, DiagnosticDescriptor, DiagnosticId, DiagnosticRedaction,
     DiagnosticVisibility, Fingerprint,
@@ -66,7 +65,7 @@ impl DiagnosticVault {
 }
 
 pub fn redact_diagnostic(raw: &str) -> RedactedDiagnostic {
-    let fingerprint = Fingerprint(hex_sha256(raw));
+    let fingerprint = Fingerprint(private_diagnostic_fingerprint(raw));
     let allowlisted = match serde_json::from_str::<serde_json::Value>(raw) {
         Ok(value) => allowlist_json(&value)
             .and_then(|value| serde_json::to_string(&value).ok())
@@ -193,15 +192,8 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
     (format!("{}…", &value[..end]), true)
 }
 
-fn hex_sha256(value: &str) -> String {
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let bytes = Sha256::digest(value.as_bytes());
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(char::from(HEX_DIGITS[(byte >> 4) as usize]));
-        output.push(char::from(HEX_DIGITS[(byte & 0x0f) as usize]));
-    }
-    output
+fn private_diagnostic_fingerprint(value: &str) -> String {
+    crate::logging::log_private_user_value(value).sha256
 }
 
 pub(crate) fn safe_parameters(

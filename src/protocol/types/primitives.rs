@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::protocol::generate_semantic_id_named;
 
@@ -134,7 +133,7 @@ pub struct Choice {
 }
 
 fn redacted_choice_semantic_id(index: usize, value: &str) -> String {
-    let digest = format!("{:x}", Sha256::digest(value.as_bytes()));
+    let digest = crate::logging::log_private_user_value(value).sha256;
     format!("choice:{index}:sha256-{}", &digest[..16])
 }
 

@@ -122,6 +122,11 @@ function fingerprint(value: string, key: Uint8Array): string {
   return createHmac("sha256", key).update(value).digest("hex");
 }
 
+/** Process-private equality token for tools consuming legacy cleartext state. */
+export function privateReceiptFingerprint(value: string): string {
+  return fingerprint(value, liveFingerprintKey);
+}
+
 function byteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }

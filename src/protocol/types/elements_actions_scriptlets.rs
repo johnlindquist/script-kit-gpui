@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
 
 use crate::protocol::{generate_semantic_id, generate_semantic_id_named};
 
@@ -163,7 +162,10 @@ impl RedactedElementContent {
             content_kind,
             char_length: value.chars().count(),
             byte_length: value.len(),
-            fingerprint: format!("sha256:{:x}", Sha256::digest(value.as_bytes())),
+            fingerprint: format!(
+                "sha256:{}",
+                crate::logging::log_private_user_value(value).sha256
+            ),
             raw_content_returned: false,
         }
     }
@@ -321,7 +323,7 @@ impl ElementInfo {
         selected: bool,
         content_kind: ElementContentKind,
     ) -> Self {
-        let digest = format!("{:x}", Sha256::digest(value.as_bytes()));
+        let digest = crate::logging::log_private_user_value(value).sha256;
         ElementInfo {
             semantic_id: format!("choice:{index}:sha256-{}", &digest[..16]),
             element_type: ElementType::Choice,

@@ -4,6 +4,7 @@ import {
   assertNoninteractiveProtocolCommand,
   assertNoninteractiveSessionCommand,
 } from "./lib/operator-safety.ts";
+import { privateReceiptFingerprint } from "./lib/privacy.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -152,12 +153,7 @@ async function getMainState(args: Args, label: string): Promise<JsonObject> {
 
 function fingerprintText(value: unknown): string | null {
   if (typeof value !== "string") return null;
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of new TextEncoder().encode(value)) {
-    hash ^= BigInt(byte);
-    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
-  }
-  return `fnv1a64:${hash.toString(16).padStart(16, "0")}`;
+  return `sha256:${privateReceiptFingerprint(value)}`;
 }
 
 function mainInputValue(state: JsonObject) {

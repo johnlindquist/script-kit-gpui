@@ -5815,6 +5815,30 @@ fn immutable_dictation_transcript_exposes_identity_not_text_in_debug() {
 }
 
 #[test]
+fn private_dictation_transcript_fingerprints_are_keyed_not_public_fnv_or_sha() {
+    use sha2::{Digest as _, Sha256};
+
+    let transcript = "private spoken health record and home address";
+    let public_sha = format!("sha256:{:x}", Sha256::digest(transcript.as_bytes()));
+    let first = crate::dictation::redacted_transcript_fingerprint(transcript);
+    let repeated = crate::dictation::redacted_transcript_fingerprint(transcript);
+    let changed = crate::dictation::redacted_transcript_fingerprint("different spoken words");
+
+    assert_eq!(first, repeated);
+    assert_ne!(first, changed);
+    assert_ne!(first, public_sha);
+    assert!(first.starts_with("sha256:"));
+    assert_eq!(first.len(), "sha256:".len() + 64);
+    assert_eq!(
+        first,
+        format!(
+            "sha256:{}",
+            crate::logging::log_private_user_value(transcript).sha256
+        )
+    );
+}
+
+#[test]
 fn frozen_destination_fingerprint_changes_with_each_identity_generation() {
     use crate::dictation::FrozenDictationDestination;
     let first = FrozenDictationDestination::MainWindowPrompt {

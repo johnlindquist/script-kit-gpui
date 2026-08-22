@@ -13,7 +13,7 @@ import {
   startClock,
 } from "./lib/client.ts";
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
-import { diagnostic } from "./lib/privacy.ts";
+import { diagnostic, privateReceiptFingerprint } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
 type Rect = { x: number; y: number; width: number; height: number };
@@ -63,13 +63,8 @@ function visibleRatio(bounds: Rect, clip: Rect) {
   return area > 0 ? (width * height) / area : 1;
 }
 
-function legacyFingerprint(value: string) {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+function privateTextFingerprint(value: string) {
+  return privateReceiptFingerprint(value);
 }
 
 /** Convert semantic descriptors without reconstructing or returning authored bytes. */
@@ -113,7 +108,7 @@ export function textRows(nodes: JsonObject[]) {
       lineCount: legacy.split(/\r\n|\r|\n/).length,
       selected: node.selected ?? null,
       focused: node.focused ?? null,
-      fingerprint: legacyFingerprint(legacy),
+      fingerprint: privateTextFingerprint(legacy),
     }];
   });
 }
@@ -298,9 +293,9 @@ async function main() {
         contentKind: "userContent",
         rawContentReturned: false,
         inputLength: inputValue.length,
-        inputFingerprint: legacyFingerprint(inputValue),
+        inputFingerprint: privateTextFingerprint(inputValue),
         selectedLength: selectedValue.length,
-        selectedFingerprint: legacyFingerprint(selectedValue),
+        selectedFingerprint: privateTextFingerprint(selectedValue),
         textNodeCount: rows.length,
         longestTextLength: rows.reduce((max, row) => Math.max(max, row.textLength), 0),
       },

@@ -799,17 +799,15 @@ pub fn last_wrong_target_refusal() -> Option<serde_json::Value> {
     LAST_WRONG_TARGET_REFUSAL.lock().clone()
 }
 
-/// Stable non-cryptographic fingerprint for correlating synthetic receipts.
-///
-/// This deliberately supports equality checks only; raw transcript text is not
-/// recoverable from the automation state.
+/// Process-keyed HMAC fingerprint for correlating private transcript receipts.
+/// Public FNV/SHA digests let observers guess spoken words one prefix at a
+/// time; the ephemeral shared privacy key preserves same-process equality
+/// without exposing an offline guessing oracle.
 pub fn redacted_transcript_fingerprint(transcript: &str) -> String {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in transcript.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("fnv1a64:{hash:016x}")
+    format!(
+        "sha256:{}",
+        crate::logging::log_private_user_value(transcript).sha256
+    )
 }
 
 /// Replace the active session's destination cycle. The current target is
@@ -1362,12 +1360,7 @@ fn microphone_status_label(status: &crate::dictation::DictationMicrophoneStatus)
 }
 
 fn automation_fingerprint(value: &str) -> String {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in value.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("fnv1a64:{hash:016x}")
+    redacted_transcript_fingerprint(value)
 }
 
 fn microphone_device_snapshot(

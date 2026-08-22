@@ -94,9 +94,10 @@ fn day_page_app_context_part_from_shared(
 }
 
 fn day_page_agent_chat_fingerprint(value: &str) -> String {
-    use sha2::{Digest, Sha256};
-
-    format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
+    format!(
+        "sha256:{}",
+        crate::logging::log_private_user_value(value).sha256
+    )
 }
 
 #[derive(Clone, Copy)]

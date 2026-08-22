@@ -322,6 +322,36 @@ fn redacted_choice_uses_fingerprinted_identity_and_returns_no_cleartext() {
 }
 
 #[test]
+fn private_element_fingerprints_are_process_keyed_and_not_public_guessing_oracles() {
+    use sha2::{Digest as _, Sha256};
+
+    let secret = "private account password and spoken phrase";
+    let public_sha = format!("{:x}", Sha256::digest(secret.as_bytes()));
+    let first = RedactedElementContent::new(ElementContentKind::UserContent, secret);
+    let repeated = RedactedElementContent::new(ElementContentKind::UserContent, secret);
+    let different = RedactedElementContent::new(ElementContentKind::UserContent, "other secret");
+
+    assert_eq!(first.fingerprint, repeated.fingerprint);
+    assert_ne!(first.fingerprint, different.fingerprint);
+    assert_ne!(first.fingerprint, format!("sha256:{public_sha}"));
+    assert_eq!(first.fingerprint.len(), "sha256:".len() + 64);
+
+    let element =
+        ElementInfo::redacted_choice(3, secret, secret, true, ElementContentKind::UserContent);
+    assert_ne!(
+        element.semantic_id,
+        format!("choice:3:sha256-{}", &public_sha[..16])
+    );
+
+    let choice = Choice::new(secret.to_string(), secret.to_string());
+    assert_ne!(
+        choice.generate_id(3),
+        format!("choice:3:sha256-{}", &public_sha[..16])
+    );
+    assert_eq!(choice.generate_id(3), element.semantic_id);
+}
+
+#[test]
 fn test_element_info_input_semantic_id_format() {
     let el = ElementInfo::input("filter", Some("search text"), false);
     assert_eq!(el.semantic_id, "input:filter");

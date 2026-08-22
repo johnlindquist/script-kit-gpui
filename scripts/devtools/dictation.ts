@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
-import { diagnostic } from "./lib/privacy.ts";
+import { diagnostic, privateReceiptFingerprint } from "./lib/privacy.ts";
 import { resolveTargetReceipt } from "./lib/target-identity.ts";
 import {
   assertNoninteractiveProtocolCommand,
@@ -228,12 +228,7 @@ function providerResource(includeEnvPayload: boolean) {
 }
 
 function fingerprint(value: string) {
-  let hash = 2166136261;
-  for (const char of value) {
-    hash ^= char.charCodeAt(0);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+  return privateReceiptFingerprint(value);
 }
 
 function stdinEvidence(stdinSource: string) {

@@ -9,7 +9,6 @@ use crate::protocol::types::batch_wait::{
     WaitDetailedCondition, TRANSACTION_TRACE_SCHEMA_VERSION,
 };
 use anyhow::{anyhow, Context, Result};
-use sha2::{Digest as _, Sha256};
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -186,7 +185,10 @@ pub(crate) fn restore_persisted_transaction_result(
 }
 
 pub(crate) fn transaction_content_fingerprint(value: &str) -> String {
-    format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
+    format!(
+        "sha256:{}",
+        crate::logging::log_private_user_value(value).sha256
+    )
 }
 
 fn is_content_fingerprint(value: &str) -> bool {
@@ -211,8 +213,8 @@ fn private_value(value: &str) -> String {
     }
 
     format!(
-        "{PRIVATE_VALUE_PREFIX}{:x} bytes:{}]",
-        Sha256::digest(value.as_bytes()),
+        "{PRIVATE_VALUE_PREFIX}{} bytes:{}]",
+        crate::logging::log_private_user_value(value).sha256,
         value.len()
     )
 }
@@ -807,6 +809,22 @@ mod tests {
                 .expect("wait fingerprint computes");
         assert!(is_content_fingerprint(&wait));
         assert!(!wait.contains("canary"));
+    }
+
+    #[test]
+    fn private_transaction_fingerprints_and_redacted_values_are_process_keyed() {
+        use sha2::{Digest as _, Sha256};
+
+        let secret = "private transaction selection and password";
+        let public_sha = format!("{:x}", Sha256::digest(secret.as_bytes()));
+        let fingerprint = transaction_content_fingerprint(secret);
+        let redacted = private_value(secret);
+
+        assert_eq!(fingerprint, transaction_content_fingerprint(secret));
+        assert_ne!(fingerprint, format!("sha256:{public_sha}"));
+        assert!(!redacted.contains(secret));
+        assert!(!redacted.contains(&public_sha));
+        assert!(redacted.contains(&crate::logging::log_private_user_value(secret).sha256));
     }
 
     #[test]

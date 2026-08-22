@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   assertNoCleartextCanaries,
   diagnostic,
   externalContent,
   filePath,
+  privateReceiptFingerprint,
   productStatic,
   sanitizeReceipt,
   secret,
@@ -25,6 +27,17 @@ afterEach(() => {
 });
 
 describe("recursive receipt privacy", () => {
+  test("legacy tool fingerprints use the same process-private HMAC instead of guessable public hashes", () => {
+    const secret = "private spoken account password";
+    const publicHash = createHash("sha256").update(secret).digest("hex");
+    const first = privateReceiptFingerprint(secret);
+
+    expect(first).toMatch(/^[a-f0-9]{64}$/);
+    expect(first).toBe(privateReceiptFingerprint(secret));
+    expect(first).not.toBe(publicHash);
+    expect(first).not.toBe(privateReceiptFingerprint("another private phrase"));
+  });
+
   test("explicit content kinds preserve product copy and redact private bytes", () => {
     const result = sanitizeReceipt({
       label: productStatic("Open Notes"),
