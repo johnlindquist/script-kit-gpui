@@ -323,6 +323,33 @@ describe("bounded Cargo builds", () => {
     expect(existsSync(workspace.capture)).toBe(false);
   });
 
+  test.each([
+    ["--target-dir", "target"],
+    ["--target-dir=target"],
+    ["--target-dir", "/tmp/foreign-agent-target"],
+  ])("refuses protected-pool target-directory escape %j before Cargo runs", (...targetArgs) => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", ["check", "--lib", ...targetArgs], workspace.env);
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("target directory is owned by the protected Cargo pool");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test.each([
+    ["--config", "build.jobs=48"],
+    ["--config=build.jobs=48"],
+    ["--config", 'build.target-dir="target"'],
+    ["--config", "/tmp/foreign-cargo-config.toml"],
+  ])("refuses command-line Cargo config policy bypass %j before Cargo runs", (...configArgs) => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", ["check", "--lib", ...configArgs], workspace.env);
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("command-line Cargo config cannot override protected build policy");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
   test("refuses inherited compiler and Rust-test worker bypasses before Cargo runs", () => {
     for (const [variable, value] of [
       ["CARGO_BUILD_JOBS", "48"],

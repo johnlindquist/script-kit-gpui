@@ -72,6 +72,12 @@ for (( worker_arg_index=0; worker_arg_index<${#requested_args[@]}; worker_arg_in
   worker_value=""
   worker_label=""
   case "$argument" in
+    --target-dir|--target-dir=*)
+      worker_failure "target directory is owned by the protected Cargo pool; do not override --target-dir"
+      ;;
+    --config|--config=*)
+      worker_failure "command-line Cargo config cannot override protected build policy"
+      ;;
     --jobs|-j|--test-threads)
       (( worker_arg_index + 1 < ${#requested_args[@]} )) \
         || worker_failure "${argument} requires a positive worker count"
