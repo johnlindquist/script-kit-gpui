@@ -8,7 +8,7 @@
 
 use super::{
     FieldClass, FieldVisibility, LongTextField, LongTextFieldId, LongTextMatchTier, LongTextMode,
-    QueryTermKind, RenderSlot, compile_long_text_query, match_long_text_query,
+    QueryTermKind, RenderSlot, compile_long_text_query, match_long_text, match_long_text_query,
 };
 
 fn title_field(text: &str) -> LongTextField<'_> {
@@ -313,5 +313,122 @@ fn single_token_keeps_interior_substring_recall_but_prefers_boundaries() {
     assert!(
         boundary_match.rank_score() > interior_match.rank_score(),
         "word-boundary match must rank above interior substring"
+    );
+}
+
+/// Hostile Unicode, byte offsets, metadata, and hidden excerpts must never
+/// panic or return impossible renderer highlight indices. The normal release
+/// lane stays bounded; the original heavyweight corpus is deliberate opt-in.
+#[test]
+fn adversarial_unicode_matching_never_panics_or_emits_invalid_highlights() {
+    let full_stress = std::env::var("SCRIPT_KIT_SEARCH_FULL_STRESS")
+        .ok()
+        .as_deref()
+        == Some("1");
+    let long_term_repetitions = if full_stress { 500 } else { 8 };
+    let huge_query_length = if full_stress { 100_000 } else { 256 };
+    let long_field_length = if full_stress { 4_000 } else { 96 };
+    let repeated_unicode_length = if full_stress { 3_000 } else { 64 };
+    let queries = vec![
+        String::new(),
+        " ".to_string(),
+        "\t\n".to_string(),
+        "é".to_string(),
+        "café".to_string(),
+        "\"café latte\"".to_string(),
+        "a\u{0301}".to_string(),
+        "a".to_string() + &"\u{0301}".repeat(50),
+        "👩‍👩‍👧‍👦".to_string(),
+        "\u{202E}reversed".to_string(),
+        "الله اكبر".to_string(),
+        "日本語 テスト".to_string(),
+        "\0null".to_string(),
+        "line1\nline2".to_string(),
+        "AaÉé ÄÖÜ".to_string(),
+        "é ".repeat(long_term_repetitions),
+        "\"".to_string(),
+        "\"unterminated phrase".to_string(),
+        "a".repeat(huge_query_length),
+        "(){}[]<>|&;".to_string(),
+    ];
+    let texts = vec![
+        String::new(),
+        "café".to_string(),
+        "a café at the end é".to_string(),
+        "prefix é café suffix".to_string(),
+        "日本語 café テスト reversed 👩‍👩‍👧‍👦".to_string(),
+        "a\u{0301}bc a\u{0301}bc".to_string(),
+        "\u{202E}café latte reversed\u{202C}".to_string(),
+        format!(
+            "{} café {}",
+            "x".repeat(long_field_length),
+            "y".repeat(long_field_length)
+        ),
+        "café\ncafé\ncafé".to_string(),
+        "the quick brown fox café jumps over the lazy é dog".to_string(),
+        "\0café\0latte\0".to_string(),
+        "é".repeat(repeated_unicode_length),
+        "AaÉé café ÄÖÜ latte".to_string(),
+    ];
+    let mut compiled_count = 0usize;
+    let mut match_count = 0usize;
+
+    for raw in &queries {
+        let Some(query) = compile_long_text_query(raw) else {
+            continue;
+        };
+        compiled_count += 1;
+
+        for title in &texts {
+            for hidden in &texts {
+                let fields = [
+                    title_field(title),
+                    preview_field(hidden),
+                    transcript_field(hidden),
+                    LongTextField {
+                        id: LongTextFieldId::Url,
+                        text: title,
+                        class: FieldClass::Metadata,
+                        visibility: FieldVisibility::Hidden,
+                        weight: 10,
+                    },
+                ];
+                let Some(matched) = match_long_text(&query, &fields) else {
+                    continue;
+                };
+                match_count += 1;
+                let evidence = &matched.evidence;
+                let title_chars = evidence.title_text.chars().count();
+                let subtitle_chars = evidence.subtitle_text.chars().count();
+                for &index in &evidence.title_indices {
+                    assert!(
+                        index < title_chars,
+                        "title index {index} exceeds {title_chars} characters for {raw:?}"
+                    );
+                }
+                for &index in &evidence.subtitle_indices {
+                    assert!(
+                        index < subtitle_chars,
+                        "subtitle index {index} exceeds {subtitle_chars} characters for {raw:?}"
+                    );
+                }
+                assert!(
+                    evidence
+                        .title_indices
+                        .windows(2)
+                        .all(|pair| pair[0] < pair[1]),
+                    "title indices must stay sorted and unique for {raw:?}"
+                );
+            }
+        }
+    }
+
+    assert!(
+        compiled_count >= 5,
+        "hostile query corpus was not exercised"
+    );
+    assert!(
+        match_count > 0,
+        "hostile fields produced no observable matches"
     );
 }

@@ -73,6 +73,22 @@ describe("catalog-bound offline consistency task proofs", () => {
       "src/scripts/search/unified.rs",
     );
     expect(ownership.productionSources).toContain(
+      "crates/sk-protocol/src/search_primitives.rs",
+    );
+    expect(ownership.productionSources).toContain(
+      "src/scripts/search/match_contract.rs",
+    );
+    expect(ownership.productionSources).toContain("src/scripts/search/paths.rs");
+    for (const provider of [
+      "src/clipboard_history/types.rs",
+      "src/dictation/history.rs",
+      "src/notes/storage.rs",
+      "src/ai/agent_chat/ui/history.rs",
+      "src/ai_vault.rs",
+    ]) {
+      expect(ownership.productionSources).toContain(provider);
+    }
+    expect(ownership.productionSources).toContain(
       "crates/sk-protocol/src/filter_coalescer.rs",
     );
     expect(ownership.productionSources).toContain("src/filter_coalescer.rs");

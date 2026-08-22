@@ -21,10 +21,12 @@ function passingSources(): StateOwnershipSource[] {
       "pub struct ParsedQuery; pub fn parse_query_prefix() {} pub fn builtin_passes_prefix_filter() {} pub fn app_passes_prefix_filter() {} pub fn window_passes_prefix_filter() {} pub fn flow_passes_prefix_filter() {} pub fn skill_passes_prefix_filter() {} pub fn should_search_scripts() {} pub fn should_search_scriptlets() {}",
     "crates/sk-protocol/src/search_contract.rs":
       "pub struct ProviderRequest; pub struct ProviderGenerationFence; pub struct RootOwnedProviderRefresh; pub struct RootOwnedProviderRefreshLifecycle; pub struct RootProviderCoordinator;",
+    "crates/sk-protocol/src/search_primitives.rs":
+      "pub fn query_meets_min_query_chars() {} pub fn score_from_tier() {} pub fn match_tier_from_score() {} pub fn char_indices_for_span() {} pub fn byte_range_for_char_indices() {} pub fn extract_filename() {} pub fn extract_scriptlet_display_path() {}",
     "crates/sk-protocol/src/sentence_search.rs":
       "pub struct LongTextQuery; pub struct LongTextMatchEvidence;",
     "crates/sk-protocol/src/lib.rs":
-      "pub mod ascii_search; pub mod command_contract; pub mod filter_coalescer; pub mod query_prefix; pub mod search_contract; pub mod sentence_search;",
+      "pub mod ascii_search; pub mod command_contract; pub mod filter_coalescer; pub mod query_prefix; pub mod search_contract; pub mod search_primitives; pub mod sentence_search;",
     "src/scripts/types.rs":
       "pub enum SearchResult {} pub struct MatchEvidence;",
     "src/scripts/command_contract.rs":
@@ -32,9 +34,13 @@ function passingSources(): StateOwnershipSource[] {
     "src/scripts/root_search_contract.rs":
       "pub(crate) use sk_protocol::search_contract::{RootProviderCoordinator, RootOwnedProviderRefresh, RootOwnedProviderRefreshLifecycle};",
     "src/scripts/search.rs":
-      "mod ascii; mod prefix_filters; pub(crate) use ascii::{contains_ignore_ascii_case, find_ignore_ascii_case, fuzzy_match_with_indices_ascii, is_fuzzy_match, is_word_boundary_match}; pub(crate) use prefix_filters::{parse_query_prefix, builtin_passes_prefix_filter, app_passes_prefix_filter, window_passes_prefix_filter, skill_passes_prefix_filter, should_search_scripts, should_search_scriptlets};",
+      "mod ascii; mod match_contract; mod paths; mod prefix_filters; pub(crate) use ascii::{contains_ignore_ascii_case, find_ignore_ascii_case, fuzzy_match_with_indices_ascii, is_fuzzy_match, is_word_boundary_match}; pub(crate) use match_contract::{query_meets_min_query_chars, score_from_tier, match_tier_from_score, byte_range_for_char_indices}; pub(crate) use paths::{extract_filename, extract_scriptlet_display_path}; pub(crate) use prefix_filters::{parse_query_prefix, builtin_passes_prefix_filter, app_passes_prefix_filter, window_passes_prefix_filter, skill_passes_prefix_filter, should_search_scripts, should_search_scriptlets};",
     "src/scripts/search/ascii.rs":
       "pub(crate) use sk_protocol::ascii_search::{contains_ignore_ascii_case, find_ignore_ascii_case, fuzzy_match_with_indices_ascii, is_fuzzy_match, is_word_boundary_match};",
+    "src/scripts/search/match_contract.rs":
+      "pub(crate) use sk_protocol::search_primitives::{query_meets_min_query_chars, score_from_tier, match_tier_from_score, char_indices_for_span, byte_range_for_char_indices};",
+    "src/scripts/search/paths.rs":
+      "pub(crate) use sk_protocol::search_primitives::{extract_filename, extract_scriptlet_display_path};",
     "src/scripts/search/prefix_filters.rs":
       "pub(crate) use sk_protocol::query_prefix::{ParsedQuery, parse_query_prefix, builtin_passes_prefix_filter, app_passes_prefix_filter, window_passes_prefix_filter, flow_passes_prefix_filter, skill_passes_prefix_filter, should_search_scripts, should_search_scriptlets};",
     "src/scripts/search/sentence.rs":
@@ -75,6 +81,16 @@ function passingSources(): StateOwnershipSource[] {
       "fn filter() { app.filter_coalescer.queue(value); app.filter_coalescer.take_latest(); app.filter_coalescer.reset(); }",
     "src/scripts/search/unified.rs":
       "fn search() { parse_query_prefix(query); builtin_passes_prefix_filter(parsed); app_passes_prefix_filter(parsed); window_passes_prefix_filter(parsed); flow_passes_prefix_filter(parsed); skill_passes_prefix_filter(parsed); should_search_scripts(parsed); should_search_scriptlets(parsed); }",
+    "src/clipboard_history/types.rs":
+      "fn accepts() { crate::scripts::search::query_meets_min_query_chars(query, minimum); }",
+    "src/dictation/history.rs":
+      "fn accepts() { crate::scripts::search::query_meets_min_query_chars(query, minimum); }",
+    "src/notes/storage.rs":
+      "fn accepts() { crate::scripts::search::query_meets_min_query_chars(query, minimum); }",
+    "src/ai/agent_chat/ui/history.rs":
+      "fn accepts() { crate::scripts::search::query_meets_min_query_chars(query, minimum); }",
+    "src/ai_vault.rs":
+      "fn accepts() { crate::scripts::search::query_meets_min_query_chars(query, minimum); }",
   };
   return REQUIRED_STATE_OWNERSHIP_PATHS.map((path) => ({
     path,
@@ -185,6 +201,45 @@ describe("GOV-001 canonical state ownership and sanctioned exceptions", () => {
     );
   });
 
+  test("all five private history providers consume the same app-independent Unicode query gate", () => {
+    const audit = auditStateOwnership(passingSources());
+
+    expect(audit.pass).toBe(true);
+    expect(audit.owners).toContainEqual(
+      expect.objectContaining({
+        id: "domain-search-primitives",
+        path: "crates/sk-protocol/src/search_primitives.rs",
+        symbols: expect.arrayContaining([
+          "query_meets_min_query_chars",
+          "byte_range_for_char_indices",
+          "extract_scriptlet_display_path",
+        ]),
+      }),
+    );
+    for (const id of [
+      "clipboard-shared-unicode-query-threshold",
+      "dictation-shared-unicode-query-threshold",
+      "notes-shared-unicode-query-threshold",
+      "agent-chat-shared-unicode-query-threshold",
+      "ai-vault-shared-unicode-query-threshold",
+    ]) {
+      expect(audit.consumers).toContainEqual(expect.objectContaining({ id, pass: true }));
+    }
+  });
+
+  test("refuses a search adapter that silently replaces safe highlight conversion", () => {
+    const audit = auditStateOwnership(
+      mutateSource("src/scripts/search/match_contract.rs", (source) =>
+        source.replace("byte_range_for_char_indices", "unsafe_local_highlights"),
+      ),
+    );
+
+    expect(audit.failures).toContain(
+      "search-match-adapter-missing-domain-owner:byte_range_for_char_indices",
+    );
+    expect(audit.pass).toBe(false);
+  });
+
   test("refuses a launcher prefix adapter that no longer imports the domain parser", () => {
     const audit = auditStateOwnership(
       mutateSource("src/scripts/search/prefix_filters.rs", (source) =>
@@ -284,7 +339,7 @@ describe("GOV-001 canonical state ownership and sanctioned exceptions", () => {
     expect(audit.failures).toContain(`duplicate-search-result-projection:${path}`);
   });
 
-  test.each(["command_contract", "query_prefix", "search_contract"])(
+  test.each(["command_contract", "query_prefix", "search_contract", "search_primitives"])(
     "rejects missing domain registry %s",
     (module) => {
       const audit = auditStateOwnership(

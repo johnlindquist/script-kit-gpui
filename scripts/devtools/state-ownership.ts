@@ -50,6 +50,19 @@ export const CANONICAL_STATE_OWNERS = [
     ],
   },
   {
+    id: "domain-search-primitives",
+    path: "crates/sk-protocol/src/search_primitives.rs",
+    symbols: [
+      "query_meets_min_query_chars",
+      "score_from_tier",
+      "match_tier_from_score",
+      "char_indices_for_span",
+      "byte_range_for_char_indices",
+      "extract_filename",
+      "extract_scriptlet_display_path",
+    ],
+  },
+  {
     id: "domain-sentence-search",
     path: "crates/sk-protocol/src/sentence_search.rs",
     symbols: ["LongTextQuery", "LongTextMatchEvidence"],
@@ -106,6 +119,8 @@ export const REQUIRED_STATE_REGISTRIES = [
   "src/scripts/root_search_contract.rs",
   "src/scripts/search.rs",
   "src/scripts/search/ascii.rs",
+  "src/scripts/search/match_contract.rs",
+  "src/scripts/search/paths.rs",
   "src/scripts/search/prefix_filters.rs",
   "src/scripts/search/sentence.rs",
   "src/filter_coalescer.rs",
@@ -124,6 +139,11 @@ export const REQUIRED_STATE_CONSUMERS = [
   "src/app_impl/filtering_cache.rs",
   "src/app_impl/filter_input_updates.rs",
   "src/scripts/search/unified.rs",
+  "src/clipboard_history/types.rs",
+  "src/dictation/history.rs",
+  "src/notes/storage.rs",
+  "src/ai/agent_chat/ui/history.rs",
+  "src/ai_vault.rs",
 ] as const;
 
 export const REQUIRED_STATE_OWNERSHIP_PATHS = [
@@ -300,6 +320,7 @@ export function auditStateOwnership(
     "filter_coalescer",
     "query_prefix",
     "search_contract",
+    "search_primitives",
     "sentence_search",
   ]) {
     if (!hasModule(domainRegistry, module)) {
@@ -359,6 +380,11 @@ export function auditStateOwnership(
   if (!hasModule(searchRegistry, "prefix_filters")) {
     failures.push("missing-launcher-query-prefix-module");
   }
+  for (const module of ["match_contract", "paths"]) {
+    if (!hasModule(searchRegistry, module)) {
+      failures.push(`missing-launcher-search-primitives-module:${module}`);
+    }
+  }
   const asciiAdapter = code("src/scripts/search/ascii.rs");
   for (const symbol of [
     "contains_ignore_ascii_case",
@@ -372,6 +398,33 @@ export function auditStateOwnership(
     }
     if (!hasGroupedSymbol(searchRegistry, "ascii", symbol)) {
       failures.push(`launcher-search-missing-canonical-ascii-import:${symbol}`);
+    }
+  }
+  const matchAdapter = code("src/scripts/search/match_contract.rs");
+  for (const symbol of [
+    "query_meets_min_query_chars",
+    "score_from_tier",
+    "match_tier_from_score",
+    "char_indices_for_span",
+    "byte_range_for_char_indices",
+  ]) {
+    if (!hasGroupedSymbol(matchAdapter, "sk_protocol::search_primitives", symbol)) {
+      failures.push(`search-match-adapter-missing-domain-owner:${symbol}`);
+    }
+    if (
+      symbol !== "char_indices_for_span" &&
+      !hasGroupedSymbol(searchRegistry, "match_contract", symbol)
+    ) {
+      failures.push(`launcher-search-missing-canonical-match-import:${symbol}`);
+    }
+  }
+  const pathsAdapter = code("src/scripts/search/paths.rs");
+  for (const symbol of ["extract_filename", "extract_scriptlet_display_path"]) {
+    if (!hasGroupedSymbol(pathsAdapter, "sk_protocol::search_primitives", symbol)) {
+      failures.push(`search-path-adapter-missing-domain-owner:${symbol}`);
+    }
+    if (!hasGroupedSymbol(searchRegistry, "paths", symbol)) {
+      failures.push(`launcher-search-missing-canonical-path-import:${symbol}`);
     }
   }
   const prefixAdapter = code("src/scripts/search/prefix_filters.rs");
@@ -435,6 +488,7 @@ export function auditStateOwnership(
     "crates/sk-protocol/src/filter_coalescer.rs",
     "crates/sk-protocol/src/query_prefix.rs",
     "crates/sk-protocol/src/search_contract.rs",
+    "crates/sk-protocol/src/search_primitives.rs",
     "crates/sk-protocol/src/sentence_search.rs",
   ]) {
     if (/\b(?:script_kit_gpui|crate\s*::\s*(?:scripts|components|main_sections))\b/.test(code(domainPath))) {
@@ -552,6 +606,19 @@ export function auditStateOwnership(
         /\bshould_search_scriptlets\s*\(/,
       ],
     },
+    ...[
+      ["clipboard-shared-unicode-query-threshold", "src/clipboard_history/types.rs"],
+      ["dictation-shared-unicode-query-threshold", "src/dictation/history.rs"],
+      ["notes-shared-unicode-query-threshold", "src/notes/storage.rs"],
+      ["agent-chat-shared-unicode-query-threshold", "src/ai/agent_chat/ui/history.rs"],
+      ["ai-vault-shared-unicode-query-threshold", "src/ai_vault.rs"],
+    ].map(([id, path]) => ({
+      id: id!,
+      path: path! as (typeof REQUIRED_STATE_CONSUMERS)[number],
+      patterns: [
+        /\bcrate\s*::\s*scripts\s*::\s*search\s*::\s*query_meets_min_query_chars\s*\(/,
+      ],
+    })),
   ];
   const consumers = consumerRequirements.map(({ id, path, patterns }) => {
     const pass = patterns.every((pattern) => pattern.test(code(path)));

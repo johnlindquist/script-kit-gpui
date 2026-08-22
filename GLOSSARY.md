@@ -20,6 +20,14 @@ This document defines the main user-facing UI surfaces and components in Script 
   [src/scripts/search/prefix_filters.rs](src/scripts/search/prefix_filters.rs)
   preserves every launcher import and retains application-owned script and
   scriptlet metadata matching.
+- **Cross-provider search thresholds, scores, paths, and highlights:**
+  [crates/sk-protocol/src/search_primitives.rs](crates/sk-protocol/src/search_primitives.rs)
+  owns Unicode-aware query thresholds, deterministic saturating rank scores,
+  private script/scriptlet display paths, and allocation-free, fail-closed
+  highlight boundaries. [src/scripts/search/match_contract.rs](src/scripts/search/match_contract.rs)
+  and [src/scripts/search/paths.rs](src/scripts/search/paths.rs) preserve
+  existing launcher, Notes, Clipboard, Dictation, Agent Chat, and AI Vault
+  imports as compatibility adapters.
 - **Search/provider ownership:**
   [crates/sk-protocol/src/search_contract.rs](crates/sk-protocol/src/search_contract.rs)
   owns deterministic search snapshots, exact provider generations, bounded

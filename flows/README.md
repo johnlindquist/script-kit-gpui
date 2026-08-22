@@ -19,6 +19,10 @@ Migrated from the retired imps/ fleet (codex-imps runtime) on 2026-07-04.
   parsing and app-independent built-in, app, window, flow, skill, script,
   and scriptlet category routing. `src/scripts/search/prefix_filters.rs`
   preserves the original imports and keeps script metadata in the app.
+- `crates/sk-protocol/src/search_primitives.rs` owns cross-provider Unicode
+  query thresholds, deterministic ranking scores, private display paths,
+  and allocation-free safe highlight spans. `src/scripts/search/match_contract.rs`
+  and `src/scripts/search/paths.rs` preserve all existing app imports.
 - `crates/sk-protocol/src/search_contract.rs` owns exact provider generations,
   bounded worker lifecycle tickets, and the pure root provider coordinator.
   `src/scripts/root_search_contract.rs` retains app-service adapters and

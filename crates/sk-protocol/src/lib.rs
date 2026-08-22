@@ -8,6 +8,7 @@ pub mod filter_coalescer;
 pub mod latency_contract;
 pub mod query_prefix;
 pub mod search_contract;
+pub mod search_primitives;
 mod semantic_id;
 pub mod sentence_search;
 

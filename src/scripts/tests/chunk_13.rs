@@ -325,37 +325,6 @@ fn test_fuzzy_search_scriptlets_match_indices() {
 }
 
 #[test]
-fn test_extract_filename() {
-    assert_eq!(
-        extract_filename(&PathBuf::from("/path/to/script.ts")),
-        "script.ts"
-    );
-    assert_eq!(
-        extract_filename(&PathBuf::from("relative/path.js")),
-        "path.js"
-    );
-    assert_eq!(extract_filename(&PathBuf::from("single.ts")), "single.ts");
-}
-
-#[test]
-fn test_extract_scriptlet_display_path() {
-    // With anchor
-    assert_eq!(
-        extract_scriptlet_display_path(&Some("/path/to/file.md#slug".to_string())),
-        Some("file.md#slug".to_string())
-    );
-
-    // Without anchor
-    assert_eq!(
-        extract_scriptlet_display_path(&Some("/path/to/file.md".to_string())),
-        Some("file.md".to_string())
-    );
-
-    // None input
-    assert_eq!(extract_scriptlet_display_path(&None), None);
-}
-
-#[test]
 fn test_fuzzy_search_scripts_empty_query_has_filename() {
     // Even with empty query, filename should be populated
     let scripts = wrap_scripts(vec![Script {
