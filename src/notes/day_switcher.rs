@@ -38,6 +38,13 @@ pub(crate) fn load_day_note_switcher_entries_result(
     days_dir: &Path,
 ) -> std::io::Result<Vec<DayNoteSwitcherEntry>> {
     let mut entries = Vec::new();
+    if !days_dir.exists() {
+        return Ok(entries);
+    }
+    if let Some(brain_root) = days_dir.parent() {
+        crate::atomic_file::ensure_private_directory(brain_root)?;
+    }
+    crate::atomic_file::ensure_private_directory(days_dir)?;
     let read_dir = match fs::read_dir(days_dir) {
         Ok(read_dir) => read_dir,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
@@ -56,7 +63,7 @@ pub(crate) fn load_day_note_switcher_entries_result(
         let Ok(date) = NaiveDate::parse_from_str(stem, "%Y-%m-%d") else {
             continue;
         };
-        let content = fs::read_to_string(&path)?;
+        let content = crate::atomic_file::read_private_file(&path)?;
         let updated_at = fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
             .map(DateTime::<Utc>::from)?;
@@ -109,6 +116,60 @@ fn day_note_preview(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn day_note_private_switcher_repairs_legacy_permissions_before_loading() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempfile::tempdir().expect("isolated day-note fixture");
+        let days = fixture.path().join("brain").join("days");
+        fs::create_dir_all(&days).unwrap();
+        fs::set_permissions(&days, fs::Permissions::from_mode(0o755)).unwrap();
+        let day = days.join("2026-08-22.md");
+        fs::write(&day, "private searchable day").unwrap();
+        fs::set_permissions(&day, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let entries =
+            load_day_note_switcher_entries_result(&days).expect("repair private day before search");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "private searchable day");
+        assert_eq!(
+            fs::metadata(days).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(day).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn day_note_private_switcher_refuses_hostile_directory_and_day_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().expect("isolated day-note symlink fixture");
+        let brain = fixture.path().join("brain");
+        fs::create_dir(&brain).unwrap();
+        let foreign_dir = fixture.path().join("foreign-days");
+        fs::create_dir(&foreign_dir).unwrap();
+        fs::write(foreign_dir.join("2026-08-22.md"), "foreign day").unwrap();
+        let planted_dir = brain.join("days");
+        symlink(&foreign_dir, &planted_dir).expect("plant hostile day directory");
+        assert!(load_day_note_switcher_entries_result(&planted_dir).is_err());
+
+        let owned_days = brain.join("safe-days");
+        fs::create_dir(&owned_days).unwrap();
+        let foreign_file = fixture.path().join("foreign.md");
+        fs::write(&foreign_file, "private foreign day text").unwrap();
+        symlink(&foreign_file, owned_days.join("2026-08-23.md")).expect("plant hostile day file");
+        assert!(load_day_note_switcher_entries_result(&owned_days).is_err());
+        assert_eq!(
+            fs::read_to_string(foreign_file).unwrap(),
+            "private foreign day text"
+        );
+    }
 
     #[test]
     fn day_note_switcher_infos_use_shared_note_action_ids() {

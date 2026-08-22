@@ -422,6 +422,12 @@ fn list_markdown_files(dir: &Path) -> Result<Vec<PathBuf>> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
+    if let Some(brain_root) = dir.parent() {
+        crate::atomic_file::ensure_private_directory(brain_root)
+            .with_context(|| format!("preparing private brain root {}", brain_root.display()))?;
+    }
+    crate::atomic_file::ensure_private_directory(dir)
+        .with_context(|| format!("preparing private brain dir {}", dir.display()))?;
     let mut files = Vec::new();
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry.context("reading dir entry")?;
@@ -430,6 +436,11 @@ fn list_markdown_files(dir: &Path) -> Result<Vec<PathBuf>> {
             continue;
         }
         if is_conflict_copy_path(&path) {
+            continue;
+        }
+        if !crate::atomic_file::inspect_private_file(&path)
+            .with_context(|| format!("inspecting private brain document {}", path.display()))?
+        {
             continue;
         }
         files.push(path);
@@ -614,7 +625,7 @@ pub(crate) fn sync_notes_with_substrate(substrate: &BrainSubstrate) -> Result<us
     let mut synced = 0usize;
     let mut live_ids = Vec::new();
     for path in list_markdown_files(&notes_dir)? {
-        let raw = match fs::read_to_string(&path) {
+        let raw = match crate::brain::substrate::io::read_private_document(&path) {
             Ok(raw) => raw,
             Err(error) => {
                 tracing::debug!(
@@ -663,7 +674,7 @@ pub(crate) fn sync_day_pages_with_substrate(substrate: &BrainSubstrate) -> Resul
     let mut synced = 0usize;
     let mut live_ids = Vec::new();
     for path in list_markdown_files(&days_dir)? {
-        let content = match fs::read_to_string(&path) {
+        let content = match crate::brain::substrate::io::read_private_document(&path) {
             Ok(content) => content,
             Err(error) => {
                 tracing::debug!(
@@ -701,7 +712,7 @@ pub(crate) fn sync_fragments_with_substrate(substrate: &BrainSubstrate) -> Resul
     let mut synced = 0usize;
     let mut live_ids = Vec::new();
     for path in list_markdown_files(&fragments_dir)? {
-        let raw = match fs::read_to_string(&path) {
+        let raw = match crate::brain::substrate::io::read_private_document(&path) {
             Ok(raw) => raw,
             Err(error) => {
                 tracing::debug!(
@@ -785,19 +796,19 @@ fn derive_capture_doc(path: &Path) -> Result<Option<DerivedDoc>> {
         .and_then(|name| name.to_str());
     match kind {
         Some("days") => {
-            let content = fs::read_to_string(path)
+            let content = crate::brain::substrate::io::read_private_document(path)
                 .with_context(|| format!("reading captured day page {}", path.display()))?;
             Ok(derive_day_page_doc(path, &content))
         }
         Some("fragments") => {
-            let raw = fs::read_to_string(path)
+            let raw = crate::brain::substrate::io::read_private_document(path)
                 .with_context(|| format!("reading captured fragment {}", path.display()))?;
             let (frontmatter, body) = BrainFrontmatter::parse(&raw)
                 .with_context(|| format!("parsing captured fragment {}", path.display()))?;
             Ok(derive_fragment_doc(path, &frontmatter, &body))
         }
         Some("notes") => {
-            let raw = fs::read_to_string(path)
+            let raw = crate::brain::substrate::io::read_private_document(path)
                 .with_context(|| format!("reading captured note {}", path.display()))?;
             let (frontmatter, body) = BrainFrontmatter::parse(&raw)
                 .with_context(|| format!("parsing captured note {}", path.display()))?;
@@ -1273,6 +1284,87 @@ pub(crate) fn extract_topics(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn brain_private_indexer_repairs_legacy_markdown_before_deriving_content() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempfile::tempdir().expect("isolated brain index fixture");
+        let brain = fixture.path().join("brain");
+        let days = brain.join("days");
+        fs::create_dir_all(&days).unwrap();
+        fs::set_permissions(&brain, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&days, fs::Permissions::from_mode(0o755)).unwrap();
+        let day = days.join("2026-08-22.md");
+        fs::write(&day, "09:42 private indexed capture").unwrap();
+        fs::set_permissions(&day, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let doc = derive_capture_doc(&day)
+            .expect("read canonical private day")
+            .expect("derive canonical day document");
+        assert_eq!(doc.source, DocSource::DayPage);
+        assert_eq!(
+            fs::metadata(brain).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(days).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(day).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brain_private_indexer_refuses_symlinked_document_owners_without_foreign_reads() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let fixture = tempfile::tempdir().expect("isolated brain index symlink fixture");
+        let brain = fixture.path().join("brain");
+        fs::create_dir(&brain).unwrap();
+        let foreign_dir = fixture.path().join("foreign-days");
+        fs::create_dir(&foreign_dir).unwrap();
+        fs::set_permissions(&foreign_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(foreign_dir.join("2026-08-22.md"), "foreign private day").unwrap();
+        let days = brain.join("days");
+        symlink(&foreign_dir, &days).expect("plant hostile Brain directory");
+
+        assert!(list_markdown_files(&days).is_err());
+        assert_eq!(
+            fs::metadata(&foreign_dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::read_to_string(foreign_dir.join("2026-08-22.md")).unwrap(),
+            "foreign private day"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brain_private_indexer_rejects_symlinked_markdown_before_sync_or_capture() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().expect("isolated brain file symlink fixture");
+        let days = fixture.path().join("brain").join("days");
+        fs::create_dir_all(&days).unwrap();
+        let foreign = fixture.path().join("foreign.md");
+        fs::write(&foreign, "foreign private text").unwrap();
+        let planted = days.join("2026-08-22.md");
+        symlink(&foreign, &planted).expect("plant hostile indexed file");
+
+        assert!(list_markdown_files(&days).is_err());
+        assert!(derive_capture_doc(&planted).is_err());
+        assert_eq!(fs::read_to_string(foreign).unwrap(), "foreign private text");
+        assert!(fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 
     #[test]
     fn pinned_clipboard_doc_is_deeplink_only() {

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
 
+use super::io::read_private_document_if_present;
 use super::paths::BrainPaths;
 
 /// Move `source` into `brain/trash/`, preserving the filename. On collision,
@@ -16,7 +17,7 @@ pub fn trash_file(paths: &BrainPaths, source: &Path) -> Result<PathBuf> {
             source.display()
         );
     }
-    if !source.exists() {
+    if read_private_document_if_present(source)?.is_none() {
         bail!("cannot trash missing file: {}", source.display());
     }
 
@@ -26,11 +27,15 @@ pub fn trash_file(paths: &BrainPaths, source: &Path) -> Result<PathBuf> {
         .with_context(|| format!("invalid trash source filename: {}", source.display()))?;
 
     let trash_dir = paths.trash_dir();
-    fs::create_dir_all(&trash_dir)
-        .with_context(|| format!("creating trash dir {}", trash_dir.display()))?;
+    crate::atomic_file::ensure_private_directory(paths.base())
+        .with_context(|| format!("preparing private brain root {}", paths.base().display()))?;
+    crate::atomic_file::ensure_private_directory(&trash_dir)
+        .with_context(|| format!("preparing private trash dir {}", trash_dir.display()))?;
 
     let mut destination = trash_dir.join(filename);
-    if destination.exists() {
+    if crate::atomic_file::inspect_private_file(&destination)
+        .with_context(|| format!("inspecting private trash target {}", destination.display()))?
+    {
         let stem = source
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -44,7 +49,22 @@ pub fn trash_file(paths: &BrainPaths, source: &Path) -> Result<PathBuf> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
-        destination = trash_dir.join(format!("{stem}-{ts}{extension}"));
+        let mut available = None;
+        for attempt in 1..=1024 {
+            let ordinal = if attempt == 1 {
+                String::new()
+            } else {
+                format!("-{attempt}")
+            };
+            let candidate = trash_dir.join(format!("{stem}-{ts}{ordinal}{extension}"));
+            if !crate::atomic_file::inspect_private_file(&candidate).with_context(|| {
+                format!("inspecting private trash target {}", candidate.display())
+            })? {
+                available = Some(candidate);
+                break;
+            }
+        }
+        destination = available.context("no unused private brain trash filename remained")?;
     }
 
     fs::rename(source, &destination).with_context(|| {
@@ -61,25 +81,26 @@ pub fn trash_file(paths: &BrainPaths, source: &Path) -> Result<PathBuf> {
 /// Move a file from `brain/trash/` back to `destination`.
 pub fn restore_file(paths: &BrainPaths, trashed: &Path, destination: &Path) -> Result<()> {
     let trash_dir = paths.trash_dir();
-    if !trashed.starts_with(&trash_dir) {
+    if !paths.contains(trashed) || trashed.parent() != Some(trash_dir.as_path()) {
         bail!(
             "restore source must live in trash dir: {}",
             trashed.display()
         );
     }
-    if !trashed.exists() {
+    if !paths.contains(destination) || destination.parent() == Some(trash_dir.as_path()) {
+        bail!(
+            "restore destination must live in an owned brain document directory: {}",
+            destination.display()
+        );
+    }
+    if read_private_document_if_present(trashed)?.is_none() {
         bail!("cannot restore missing trash entry: {}", trashed.display());
     }
-    if destination.exists() {
+    if read_private_document_if_present(destination)?.is_some() {
         bail!(
             "restore destination already exists: {}",
             destination.display()
         );
-    }
-
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating restore dir {}", parent.display()))?;
     }
 
     fs::rename(trashed, destination).with_context(|| {

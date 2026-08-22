@@ -599,6 +599,198 @@ mod tests {
         assert!(contents.starts_with("---\n"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn brain_private_markdown_creates_owner_only_roots_directories_and_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_fixture, substrate) = test_substrate();
+        let note = substrate.paths().note_file("private-note");
+        let day = substrate.paths().day_page(fixed_now().date_naive());
+        let fragment = substrate.paths().fragment_file("private-fragment");
+
+        io::atomic_write(&note, "private note body").expect("write private note");
+        io::atomic_append_line(&day, "09:42 private day capture").expect("write private day");
+        io::atomic_write(&fragment, "private clipboard fragment").expect("write private fragment");
+
+        for directory in [
+            substrate.paths().base().to_path_buf(),
+            substrate.paths().notes_dir(),
+            substrate.paths().days_dir(),
+            substrate.paths().fragments_dir(),
+        ] {
+            assert_eq!(
+                fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "private brain directory leaked access: {}",
+                directory.display()
+            );
+        }
+        for path in [&note, &day, &fragment] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "private brain document leaked access: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brain_private_markdown_repairs_legacy_permissions_before_reading() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_fixture, substrate) = test_substrate();
+        let notes_dir = substrate.paths().notes_dir();
+        fs::create_dir_all(&notes_dir).expect("legacy notes directory");
+        fs::set_permissions(substrate.paths().base(), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&notes_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = substrate.paths().note_file("legacy-private-note");
+        fs::write(&path, "legacy private note").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(
+            io::read_private_document(&path).expect("read repaired private note"),
+            "legacy private note"
+        );
+        assert_eq!(
+            fs::metadata(substrate.paths().base())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(notes_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brain_private_markdown_rejects_file_symlinks_without_exposing_foreign_data() {
+        use std::os::unix::fs::symlink;
+
+        let (fixture, substrate) = test_substrate();
+        fs::create_dir_all(substrate.paths().notes_dir()).unwrap();
+        let foreign = fixture.path().join("foreign-private-note.md");
+        fs::write(&foreign, "foreign private note must remain untouched").unwrap();
+        let planted = substrate.paths().note_file("planted");
+        symlink(&foreign, &planted).expect("plant hostile note symlink");
+
+        assert!(io::read_private_document(&planted).is_err());
+        assert!(io::atomic_write(&planted, "do not overwrite foreign note").is_err());
+        assert!(io::atomic_append_line(&planted, "do not append foreign note").is_err());
+        assert!(substrate.trash(&planted).is_err());
+        assert_eq!(
+            fs::read_to_string(&foreign).unwrap(),
+            "foreign private note must remain untouched"
+        );
+        assert!(fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brain_private_markdown_rejects_symlinked_document_directories() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let (fixture, substrate) = test_substrate();
+        fs::create_dir_all(substrate.paths().base()).unwrap();
+        let foreign = fixture.path().join("foreign-documents");
+        fs::create_dir(&foreign).unwrap();
+        fs::set_permissions(&foreign, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&foreign, substrate.paths().notes_dir()).expect("plant hostile notes directory");
+
+        let planted = substrate.paths().note_file("never-write-here");
+        assert!(io::atomic_write(&planted, "private note").is_err());
+        assert!(!foreign.join("never-write-here.md").exists());
+        assert_eq!(
+            fs::metadata(foreign).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn brain_private_paths_reject_traversal_unknown_roots_and_nested_documents() {
+        let (fixture, substrate) = test_substrate();
+        let paths = substrate.paths();
+        let note = paths.note_file("owned");
+
+        assert!(paths.contains(&note));
+        assert!(!paths.contains(paths.base()));
+        assert!(!paths.contains(&paths.base().join("outside").join("private.md")));
+        assert!(!paths.contains(&paths.notes_dir().join("nested").join("private.md")));
+        assert!(!paths.contains(&paths.notes_dir().join("..").join("..").join("foreign.md")));
+        assert!(!paths.contains(&fixture.path().join("foreign.md")));
+
+        let frontmatter = BrainFrontmatter::new(NoteId::new(), fixed_now(), fixed_now());
+        assert!(substrate
+            .write_document(
+                &paths.notes_dir().join("..").join("..").join("foreign.md"),
+                &frontmatter,
+                "must never escape",
+            )
+            .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brain_private_restore_rejects_external_destinations_and_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let (fixture, substrate) = test_substrate();
+        let note = substrate.paths().note_file("restore-private-note");
+        io::atomic_write(&note, "private restore payload").unwrap();
+        let trashed = substrate.trash(&note).expect("trash private note");
+
+        let outside = fixture.path().join("outside.md");
+        assert!(substrate.restore(&trashed, &outside).is_err());
+        assert!(!outside.exists());
+        assert!(trashed.exists());
+
+        let foreign = fixture.path().join("foreign.md");
+        fs::write(&foreign, "do not replace foreign content").unwrap();
+        symlink(&foreign, &note).expect("plant hostile restore target");
+        assert!(substrate.restore(&trashed, &note).is_err());
+        assert_eq!(
+            fs::read_to_string(foreign).unwrap(),
+            "do not replace foreign content"
+        );
+        assert!(trashed.exists());
+        assert!(fs::symlink_metadata(note).unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn brain_private_trash_preserves_repeated_same_name_documents() {
+        let (_fixture, substrate) = test_substrate();
+        let note = substrate.paths().note_file("collision");
+        let mut destinations = Vec::new();
+
+        for index in 0..4 {
+            let content = format!("private document version {index}");
+            io::atomic_write(&note, &content).unwrap();
+            let destination = substrate.trash(&note).expect("preserve trash version");
+            assert!(!destinations.contains(&destination));
+            destinations.push(destination);
+        }
+
+        for (index, destination) in destinations.iter().enumerate() {
+            assert_eq!(
+                io::read_private_document(destination).unwrap(),
+                format!("private document version {index}")
+            );
+        }
+    }
+
     #[test]
     fn trash_and_restore_round_trip() {
         let (_dir, substrate) = test_substrate();

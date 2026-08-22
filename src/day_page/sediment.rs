@@ -710,12 +710,18 @@ fn is_single_token_http_url(text: &str) -> bool {
 pub fn resolve_fragment_path(day_page_path: &Path, relative_link: &str) -> Option<PathBuf> {
     let brain_dir = day_page_path.parent()?.parent()?;
     let relative = relative_link.strip_prefix("../").unwrap_or(relative_link);
-    Some(brain_dir.join(relative))
+    let path = brain_dir.join(relative);
+    let brain_paths = crate::brain::substrate::BrainPaths::new(brain_dir);
+    (brain_paths.contains(&path) && path.parent() == Some(brain_paths.fragments_dir().as_path()))
+        .then_some(path)
 }
 
 /// Load provenance metadata from a fragment markdown file.
 pub fn load_fragment_provenance(fragment_path: &Path) -> Option<FragmentProvenance> {
-    let content = std::fs::read_to_string(fragment_path).ok()?;
+    if fragment_path.parent()?.file_name()?.to_str()? != "fragments" {
+        return None;
+    }
+    let content = crate::brain::substrate::io::read_private_document(fragment_path).ok()?;
     let (frontmatter, _) = BrainFrontmatter::parse(&content).ok()?;
     Some(FragmentProvenance {
         source_label: format_source_label(frontmatter.source.as_deref()),
@@ -1033,6 +1039,48 @@ mod tests {
             resolved,
             PathBuf::from("/tmp/brain/fragments/2026-06-11-0942-clipboard.md")
         );
+    }
+
+    #[test]
+    fn private_fragment_links_cannot_escape_the_owned_brain_fragment_directory() {
+        let day = PathBuf::from("/tmp/brain/days/2026-08-22.md");
+
+        for hostile in [
+            "../../foreign.md",
+            "../notes/private-note.md",
+            "../fragments/../../foreign.md",
+            "/tmp/foreign.md",
+            "../fragments/nested/private.md",
+        ] {
+            assert!(
+                resolve_fragment_path(&day, hostile).is_none(),
+                "hostile fragment link escaped: {hostile}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_fragment_provenance_refuses_hostile_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().expect("isolated fragment provenance fixture");
+        let fragments = fixture.path().join("brain").join("fragments");
+        std::fs::create_dir_all(&fragments).unwrap();
+        let foreign = fixture.path().join("foreign-private-fragment.md");
+        std::fs::write(&foreign, "foreign private fragment").unwrap();
+        let planted = fragments.join("planted.md");
+        symlink(&foreign, &planted).expect("plant hostile fragment link");
+
+        assert!(load_fragment_provenance(&planted).is_none());
+        assert_eq!(
+            std::fs::read_to_string(foreign).unwrap(),
+            "foreign private fragment"
+        );
+        assert!(std::fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]

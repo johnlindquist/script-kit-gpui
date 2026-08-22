@@ -4,7 +4,6 @@
 //! Best-effort only: failures are logged and never propagated to the chat turn.
 
 use std::collections::HashSet;
-use std::fs;
 use std::sync::{Mutex, OnceLock};
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -135,7 +134,7 @@ fn day_page_contains_provenance(
     if !path.exists() {
         return false;
     }
-    fs::read_to_string(path)
+    crate::brain::substrate::io::read_private_document(&path)
         .map(|contents| contents.contains(provenance))
         .unwrap_or(false)
 }
@@ -144,6 +143,7 @@ fn day_page_contains_provenance(
 mod tests {
     use super::*;
     use chrono::TimeZone as _;
+    use std::fs;
     use std::path::Path;
 
     fn test_substrate(base: &Path) -> BrainSubstrate {

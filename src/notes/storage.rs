@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::brain::substrate::{BrainFrontmatter, BrainSlugDir, BrainSubstrate};
+use crate::brain::substrate::{io as brain_io, BrainFrontmatter, BrainSlugDir, BrainSubstrate};
 use crate::scripts::root_search_contract::{
     RootOwnedProviderRefresh, RootOwnedProviderRefreshLifecycle,
 };
@@ -333,7 +333,7 @@ fn load_note_from_file(
     deleted_at: Option<DateTime<Utc>>,
     sort_order: i32,
 ) -> Result<(Note, String, String)> {
-    let raw = fs::read_to_string(path)
+    let raw = brain_io::read_private_document(path)
         .with_context(|| format!("reading note file {}", path.display()))?;
     let hash = content_hash(&raw);
     let (frontmatter, body) = substrate
@@ -427,11 +427,9 @@ fn write_conflict_copy_at(path: &Path, contents: &str, timestamp: &str) -> Resul
 }
 
 fn guard_external_edit_before_write(path: &Path, note_id: NoteId) -> Result<()> {
-    if !path.exists() {
+    let Some(disk) = brain_io::read_private_document_if_present(path)? else {
         return Ok(());
-    }
-    let disk = fs::read_to_string(path)
-        .with_context(|| format!("reading note file before write {}", path.display()))?;
+    };
     let disk_hash = content_hash(&disk);
     let known_hash = note_content_hashes()
         .lock()
@@ -710,14 +708,9 @@ fn write_canonical_note_file(
     slug: &str,
 ) -> Result<String> {
     let path = substrate.paths().note_file(slug);
-    let preserved_source = if path.exists() {
-        fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| substrate.parse_document(&raw).ok())
-            .and_then(|(frontmatter, _)| frontmatter.source)
-    } else {
-        None
-    };
+    let preserved_source = brain_io::read_private_document_if_present(&path)?
+        .and_then(|raw| substrate.parse_document(&raw).ok())
+        .and_then(|(frontmatter, _)| frontmatter.source);
 
     guard_external_edit_before_write(&path, note.id)?;
 
@@ -725,7 +718,7 @@ fn write_canonical_note_file(
     let body = note_body_for_file(&note.content);
     substrate.write_document(&path, &frontmatter, &body)?;
 
-    let raw = fs::read_to_string(&path)
+    let raw = brain_io::read_private_document(&path)
         .with_context(|| format!("reading note file after write {}", path.display()))?;
     Ok(content_hash(&raw))
 }
@@ -744,6 +737,8 @@ fn restore_canonical_note_file(substrate: &BrainSubstrate, slug: &str) -> Result
     if !trash_dir.exists() {
         return Ok(());
     }
+    crate::atomic_file::ensure_private_directory(&trash_dir)
+        .context("Failed to prepare private Notes trash directory")?;
 
     let suffix = format!("{slug}.md");
     for entry in fs::read_dir(&trash_dir)
@@ -770,6 +765,8 @@ fn delete_trashed_note_file(substrate: &BrainSubstrate, slug: &str) -> Result<()
     if !trash_dir.exists() {
         return Ok(());
     }
+    crate::atomic_file::ensure_private_directory(&trash_dir)
+        .context("Failed to prepare private Notes trash directory")?;
     let suffix = format!("{slug}.md");
     for entry in fs::read_dir(&trash_dir)
         .with_context(|| format!("reading trash dir {}", trash_dir.display()))?
@@ -798,11 +795,11 @@ fn reindex_external_note_file(path: &Path) -> Result<()> {
 
     let substrate = notes_substrate()?;
     let notes_dir = substrate.paths().notes_dir();
-    if !path.starts_with(&notes_dir) {
+    if !substrate.paths().contains(path) || path.parent() != Some(notes_dir.as_path()) {
         return Ok(());
     }
 
-    if !path.exists() {
+    let Some(raw) = brain_io::read_private_document_if_present(path)? else {
         if let Some(slug) = slug_from_path(path) {
             let db = get_db()?;
             let conn = db.lock().map_err(db_lock_err)?;
@@ -824,10 +821,7 @@ fn reindex_external_note_file(path: &Path) -> Result<()> {
             }
         }
         return Ok(());
-    }
-
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("reading external note edit {}", path.display()))?;
+    };
     let hash = content_hash(&raw);
     let (note, slug, _) = load_note_from_file(&substrate, path, None, 0)?;
 
@@ -867,7 +861,11 @@ fn start_notes_dir_watcher() {
         return;
     };
     let notes_dir = substrate.paths().notes_dir();
-    let _ = fs::create_dir_all(&notes_dir);
+    if let Err(error) = crate::atomic_file::ensure_private_directory(&notes_dir) {
+        warn!(%error, "Failed to prepare private notes watcher directory");
+        NOTES_DIR_WATCHER_STARTED.store(false, Ordering::SeqCst);
+        return;
+    }
 
     let spawn_result = std::thread::Builder::new()
         .name("notes-brain-watcher".to_string())
@@ -1187,8 +1185,12 @@ pub fn init_notes_db() -> Result<()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let substrate = notes_substrate()?;
-    let _ = fs::create_dir_all(substrate.paths().notes_dir());
-    let _ = fs::create_dir_all(substrate.paths().trash_dir());
+    crate::atomic_file::ensure_private_directory(substrate.paths().base())
+        .context("Failed to prepare private Notes brain directory")?;
+    crate::atomic_file::ensure_private_directory(&substrate.paths().notes_dir())
+        .context("Failed to prepare private Notes document directory")?;
+    crate::atomic_file::ensure_private_directory(&substrate.paths().trash_dir())
+        .context("Failed to prepare private Notes trash directory")?;
 
     if let Some(db) = NOTES_DB.get() {
         let conn = db.lock().map_err(db_lock_err)?;
@@ -2789,6 +2791,62 @@ mod tests {
             "FTS search failed, using LIKE fallback"
         );
         assert_eq!(events[2]["fields"]["message"], "root_notes_search_failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_note_private_reader_repairs_legacy_permissions_before_parsing() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempfile::tempdir().expect("isolated canonical note fixture");
+        let substrate = BrainSubstrate::new(fixture.path().join("brain"));
+        let path = substrate.paths().note_file("legacy-private-note");
+        let note_id = NoteId::new();
+        let now = Utc::now();
+        substrate
+            .write_document(
+                &path,
+                &BrainFrontmatter::new(note_id, now, now),
+                "# Private note\nSensitive body",
+            )
+            .expect("seed canonical note");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let (note, slug, _) = load_note_from_file(&substrate, &path, None, 0)
+            .expect("repair private note before reading");
+        assert_eq!(note.id, note_id);
+        assert_eq!(slug, "legacy-private-note");
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_note_private_owners_reject_hostile_symlinks_without_foreign_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().expect("isolated canonical note symlink fixture");
+        let substrate = BrainSubstrate::new(fixture.path().join("brain"));
+        fs::create_dir_all(substrate.paths().notes_dir()).unwrap();
+        let foreign = fixture.path().join("foreign-private-note.md");
+        fs::write(&foreign, "foreign note must never be parsed or replaced").unwrap();
+        let planted = substrate.paths().note_file("planted");
+        symlink(&foreign, &planted).expect("plant hostile canonical note symlink");
+
+        assert!(load_note_from_file(&substrate, &planted, None, 0).is_err());
+        assert!(guard_external_edit_before_write(&planted, NoteId::new()).is_err());
+        let replacement = Note::with_content("# Never replace\nPrivate body");
+        assert!(write_canonical_note_file(&substrate, &replacement, "planted").is_err());
+        assert_eq!(
+            fs::read_to_string(&foreign).unwrap(),
+            "foreign note must never be parsed or replaced"
+        );
+        assert!(fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]

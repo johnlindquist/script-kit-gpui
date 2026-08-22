@@ -3,7 +3,7 @@
 //! Every filesystem path under the brain substrate must be derived from
 //! [`BrainPaths`] so no other module constructs these locations directly.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use chrono::NaiveDate;
 
@@ -59,6 +59,19 @@ impl BrainPaths {
     /// Returns true when `path` is inside this brain tree (days, fragments,
     /// notes, or trash).
     pub fn contains(&self, path: &Path) -> bool {
-        path.starts_with(&self.base)
+        let Ok(relative) = path.strip_prefix(&self.base) else {
+            return false;
+        };
+        let mut components = relative.components();
+        let Some(Component::Normal(directory)) = components.next() else {
+            return false;
+        };
+        if !matches!(
+            directory.to_str(),
+            Some("days" | "fragments" | "notes" | "trash")
+        ) {
+            return false;
+        }
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
     }
 }

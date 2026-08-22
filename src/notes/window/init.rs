@@ -330,7 +330,7 @@ impl NotesApp {
             let base = day.base_disk_content.clone();
 
             let written = io::with_brain_write_lock(|| -> anyhow::Result<(String, bool)> {
-                let disk_now = std::fs::read_to_string(&path).unwrap_or_default();
+                let disk_now = io::read_private_document_if_present(&path)?.unwrap_or_default();
                 if disk_now == base {
                     io::atomic_write(&path, &editor_content)?;
                     return Ok((editor_content.clone(), false));

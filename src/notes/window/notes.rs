@@ -436,7 +436,7 @@ impl NotesApp {
         }
 
         let path = storage::notes_brain_days_dir().join(format!("{date}.md"));
-        let content = match std::fs::read_to_string(&path) {
+        let content = match crate::brain::substrate::io::read_private_document(&path) {
             Ok(content) => content,
             Err(error) => {
                 let safe_path = crate::logging::log_private_user_value(&path.display().to_string());

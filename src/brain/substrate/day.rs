@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use chrono_tz::Tz;
 
-use super::io::{atomic_write, with_brain_write_lock};
+use super::io::{atomic_write, read_private_document, with_brain_write_lock};
 use super::paths::BrainPaths;
 use super::trash::trash_file;
 use super::FragmentReference;
@@ -170,7 +170,7 @@ fn remove_fragment_reference_for_source(
     }
 
     let original =
-        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        read_private_document(&path).with_context(|| format!("reading {}", path.display()))?;
     let mut lines: Vec<&str> = original.lines().collect();
     let mut changed = false;
     let mut index = 0;
@@ -225,6 +225,12 @@ fn trash_fragment_for_source(paths: &BrainPaths, source_uri: &str) -> Result<()>
     if !fragments_dir.exists() {
         return Ok(());
     }
+    crate::atomic_file::ensure_private_directory(&fragments_dir).with_context(|| {
+        format!(
+            "preparing private fragments dir {}",
+            fragments_dir.display()
+        )
+    })?;
 
     for entry in fs::read_dir(&fragments_dir)
         .with_context(|| format!("reading fragments dir {}", fragments_dir.display()))?
@@ -317,18 +323,18 @@ fn is_timestamp(value: &str) -> bool {
         && value.chars().all(|ch| ch.is_ascii_digit() || ch == ':')
 }
 
-fn fragment_has_source(fragment_path: &PathBuf, source_uri: &str) -> bool {
-    fs::read_to_string(fragment_path)
+fn fragment_has_source(fragment_path: &Path, source_uri: &str) -> bool {
+    read_private_document(fragment_path)
         .ok()
         .is_some_and(|content| content.contains(&format!("source: {source_uri}")))
 }
 
-fn filter_day_page_lines(path: &PathBuf, keep: impl Fn(&str) -> bool) -> Result<()> {
+fn filter_day_page_lines(path: &Path, keep: impl Fn(&str) -> bool) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
     let original =
-        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        read_private_document(path).with_context(|| format!("reading {}", path.display()))?;
     let kept: Vec<&str> = original.lines().filter(|line| keep(line)).collect();
     if kept.len() == original.lines().count() {
         return Ok(());

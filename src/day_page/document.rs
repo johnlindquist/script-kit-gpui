@@ -177,16 +177,11 @@ impl DayPageDocumentSession {
         // appender created first. `atomic_write` intentionally does not take the
         // lock, so calling it here does not re-enter the non-reentrant mutex.
         let content = io::with_brain_write_lock(|| -> Result<String> {
-            if !path.exists() {
-                let parent = path
-                    .parent()
-                    .with_context(|| format!("day page path has no parent: {}", path.display()))?;
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("creating days dir {}", parent.display()))?;
+            if io::read_private_document_if_present(&path)?.is_none() {
                 io::atomic_write(&path, "")
                     .with_context(|| format!("creating day page {}", path.display()))?;
             }
-            fs::read_to_string(&path)
+            io::read_private_document(&path)
                 .with_context(|| format!("reading day page {}", path.display()))
         })?;
         let mtime = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
@@ -212,6 +207,15 @@ impl DayPageDocumentSession {
 
     /// Bind the editor to a fragment file opened from today's day page.
     pub fn bind_fragment(&mut self, fragment_path: PathBuf, now: DateTime<Utc>) -> Result<String> {
+        let fragments_dir = self.substrate.paths().fragments_dir();
+        if !self.substrate.paths().contains(&fragment_path)
+            || fragment_path.parent() != Some(fragments_dir.as_path())
+        {
+            anyhow::bail!(
+                "fragment must belong to the private brain fragments directory: {}",
+                fragment_path.display()
+            );
+        }
         let day_path = self
             .path
             .clone()
@@ -224,7 +228,7 @@ impl DayPageDocumentSession {
             self.save(now)?;
         }
 
-        let content = fs::read_to_string(&fragment_path)
+        let content = io::read_private_document(&fragment_path)
             .with_context(|| format!("reading fragment {}", fragment_path.display()))?;
         let mtime = fs::metadata(&fragment_path)
             .and_then(|meta| meta.modified())
@@ -343,7 +347,7 @@ impl DayPageDocumentSession {
             self.save(now)?;
         }
 
-        let content = fs::read_to_string(&return_day_path)
+        let content = io::read_private_document(&return_day_path)
             .with_context(|| format!("reading day page {}", return_day_path.display()))?;
         let mtime = fs::metadata(&return_day_path)
             .and_then(|meta| meta.modified())
@@ -427,7 +431,7 @@ impl DayPageDocumentSession {
         // blindly overwriting, so a capture that landed during the autosave
         // debounce is never silently lost.
         let written = io::with_brain_write_lock(|| -> Result<Written> {
-            let disk_now = fs::read_to_string(&path).unwrap_or_default();
+            let disk_now = io::read_private_document_if_present(&path)?.unwrap_or_default();
 
             if disk_now == self.base_disk_content {
                 io::atomic_write(&path, content)
@@ -574,7 +578,7 @@ impl DayPageDocumentSession {
             return Ok(None);
         }
 
-        let content = fs::read_to_string(&path)
+        let content = io::read_private_document(&path)
             .with_context(|| format!("re-reading day page {}", path.display()))?;
         self.disk_content = content.clone();
         self.base_disk_content = content.clone();
@@ -700,6 +704,49 @@ mod tests {
         assert_eq!(content, "");
         assert!(session.path().expect("path").exists());
         assert_eq!(session.bound_date(), Some(now.date_naive()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn day_page_private_bind_rejects_symlinked_day_files_without_reading_foreign_text() {
+        use std::os::unix::fs::symlink;
+
+        let (fixture, mut session) = test_session();
+        let now = utc("2026-06-11T09:42:00Z");
+        let foreign = fixture.path().join("foreign-day.md");
+        fs::write(&foreign, "foreign private day data").unwrap();
+        let planted = session.substrate().paths().day_page(now.date_naive());
+        fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        symlink(&foreign, &planted).expect("plant hostile day-page symlink");
+
+        assert!(session.bind_today(now).is_err());
+        assert_eq!(
+            fs::read_to_string(foreign).unwrap(),
+            "foreign private day data"
+        );
+        assert!(fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(session.path().is_none());
+    }
+
+    #[test]
+    fn day_page_private_fragment_binding_refuses_paths_outside_owned_fragments() {
+        let (fixture, mut session) = test_session();
+        let now = utc("2026-06-11T09:42:00Z");
+        session.bind_today(now).expect("bind owned day page");
+        let original = session.path().cloned();
+        let foreign = fixture.path().join("foreign-fragment.md");
+        fs::write(&foreign, "foreign private fragment").unwrap();
+
+        assert!(session.bind_fragment(foreign.clone(), now).is_err());
+        assert_eq!(session.path(), original.as_ref());
+        assert!(!session.is_viewing_fragment());
+        assert_eq!(
+            fs::read_to_string(foreign).unwrap(),
+            "foreign private fragment"
+        );
     }
 
     #[test]
