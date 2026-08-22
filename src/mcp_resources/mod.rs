@@ -4178,11 +4178,26 @@ pub fn read_provider_json_items(kind: ProviderJsonResourceKind) -> Vec<ProviderJ
             let title = item
                 .get("title")
                 .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())?;
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    if kind != ProviderJsonResourceKind::Dictation {
+                        return None;
+                    }
+                    ["preview", "text"].into_iter().find_map(|field| {
+                        item.get(field)
+                            .and_then(|value| value.as_str())
+                            .filter(|value| !value.is_empty())
+                    })
+                })?;
             let subtitle = item
                 .get("subtitle")
                 .or_else(|| item.get("app"))
                 .or_else(|| item.get("source"))
+                .or_else(|| {
+                    (kind == ProviderJsonResourceKind::Dictation)
+                        .then(|| item.get("target"))
+                        .flatten()
+                })
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             Some(ProviderJsonItem {
@@ -6980,6 +6995,48 @@ mod tests {
         assert_eq!(value["source"], "slot");
         assert_eq!(value["items"].as_array().expect("items array").len(), 1);
 
+        clear_provider_json_slots();
+    }
+
+    #[test]
+    fn dictation_provider_history_projects_real_preview_and_target_into_searchable_items() {
+        let _guard = provider_json_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        clear_provider_json_slots();
+        publish_dictation_json(
+            r#"{"schemaVersion":1,"type":"dictation","ok":true,"available":true,"items":[{"preview":"private spoken preview","text":"complete private spoken transcript","target":"Notes"},{"text":"legacy private transcript","target":"Agent Chat"}]}"#,
+        );
+
+        let items = read_provider_json_items(ProviderJsonResourceKind::Dictation);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "private spoken preview");
+        assert_eq!(items[0].subtitle.as_deref(), Some("Notes"));
+        assert_eq!(items[1].title, "legacy private transcript");
+        assert_eq!(items[1].subtitle.as_deref(), Some("Agent Chat"));
+        clear_provider_json_slots();
+    }
+
+    #[test]
+    fn dictation_provider_history_keeps_calendar_titles_strict_and_rejects_empty_transcripts() {
+        let _guard = provider_json_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        clear_provider_json_slots();
+        publish_dictation_json(
+            r#"{"schemaVersion":1,"type":"dictation","ok":true,"available":true,"items":[{"preview":"","text":"recoverable private transcript"},{"preview":"","text":""}]}"#,
+        );
+        publish_calendar_json(
+            r#"{"schemaVersion":1,"type":"calendar","ok":true,"available":true,"items":[{"text":"calendar text is not an event title"}]}"#,
+        );
+
+        let dictation = read_provider_json_items(ProviderJsonResourceKind::Dictation);
+        let calendar = read_provider_json_items(ProviderJsonResourceKind::Calendar);
+
+        assert_eq!(dictation.len(), 1);
+        assert_eq!(dictation[0].title, "recoverable private transcript");
+        assert!(calendar.is_empty());
         clear_provider_json_slots();
     }
 
