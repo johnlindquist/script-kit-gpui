@@ -231,6 +231,84 @@ fn append_private_jsonl_record_with_durability(
     Ok(())
 }
 
+/// Create one durable owner-only file without ever replacing an existing
+/// destination. `O_EXCL` and `O_NOFOLLOW` make collision handling safe across
+/// threads/processes and refuse planted symbolic links before private writes.
+pub(crate) fn write_private_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    let result = make_opened_private_file_owner_only(&file)
+        .and_then(|()| file.write_all(bytes))
+        .and_then(|()| file.sync_data());
+    if result.is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+/// Persist a private export without overwriting an earlier same-name export.
+/// Existing user-owned destinations such as Desktop/Downloads retain their
+/// permissions; newly created export directories start owner-only.
+pub(crate) fn write_private_unique_named_file(
+    directory: &Path,
+    stem: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> std::io::Result<std::path::PathBuf> {
+    let mut stem_components = Path::new(stem).components();
+    if !matches!(
+        (stem_components.next(), stem_components.next()),
+        (Some(std::path::Component::Normal(component)), None)
+            if component == std::ffi::OsStr::new(stem)
+    ) || extension.is_empty()
+        || !extension
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "private export requires safe filename components",
+        ));
+    }
+
+    match std::fs::symlink_metadata(directory) {
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => {}
+        Ok(_) => return Err(unsafe_private_directory_target()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ensure_private_directory(directory)?;
+        }
+        Err(error) => return Err(error),
+    }
+
+    for suffix in 0..10_000 {
+        let filename = if suffix == 0 {
+            format!("{stem}.{extension}")
+        } else {
+            format!("{stem}-{suffix}.{extension}")
+        };
+        let path = directory.join(filename);
+        match write_private_exclusive(&path, bytes) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                inspect_private_file(&path)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "too many private exports share the requested filename",
+    ))
+}
+
 /// Atomically replace sensitive content via a unique, exclusive `0600`
 /// sibling. Existing symlinks are rejected instead of silently replaced; no
 /// private bytes are ever written through a caller-reopenable path.
@@ -273,10 +351,170 @@ mod tests {
     use super::{
         append_private_file, append_private_jsonl_record, append_private_observability_record,
         ensure_private_directory, inspect_private_file, read_private_file, write_atomic,
-        write_private_atomic,
+        write_private_atomic, write_private_exclusive, write_private_unique_named_file,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_exclusive_file_is_owner_only_and_never_replaces_existing_bytes() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempfile::tempdir().expect("isolated exclusive private file");
+        let path = fixture.path().join("private-user-document");
+        write_private_exclusive(&path, b"first private document")
+            .expect("create exclusive private document");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let error = write_private_exclusive(&path, b"never replace private work")
+            .expect_err("exclusive writes never replace an existing private owner");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(path).unwrap(), b"first private document");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_exclusive_file_refuses_hostile_destination_links_without_following_them() {
+        let fixture = tempfile::tempdir().expect("isolated hostile exclusive private file");
+        let foreign = fixture.path().join("another-owners-document");
+        std::fs::write(&foreign, b"preserve unrelated private content")
+            .expect("seed unrelated private owner");
+        let planted = fixture.path().join("private-user-document");
+        std::os::unix::fs::symlink(&foreign, &planted).expect("plant hostile private file link");
+
+        assert!(write_private_exclusive(&planted, b"never follow hostile links").is_err());
+        assert_eq!(
+            std::fs::read(foreign).unwrap(),
+            b"preserve unrelated private content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_unique_file_creates_owner_only_exports_without_mutating_existing_destinations() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("isolated private export root");
+        let created = root.path().join("new-private-exports");
+        let image = write_private_unique_named_file(
+            &created,
+            "webcam-photo-20260822-120000",
+            "png",
+            b"synthetic private image; no camera access",
+        )
+        .expect("persist owner-only synthetic webcam bytes");
+        assert_eq!(
+            std::fs::metadata(&created).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&image).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let existing = root.path().join("existing-user-downloads");
+        std::fs::create_dir(&existing).expect("seed existing user export directory");
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755))
+            .expect("seed existing user-chosen directory policy");
+        write_private_unique_named_file(
+            &existing,
+            "agent-chat-export-private-session",
+            "md",
+            b"private conversation export",
+        )
+        .expect("persist private markdown without changing Downloads policy");
+        assert_eq!(
+            std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn private_unique_file_preserves_every_same_name_image_and_conversation_export() {
+        let root = tempfile::tempdir().expect("isolated same-second private exports");
+        let first = write_private_unique_named_file(
+            root.path(),
+            "webcam-photo-20260822-120000",
+            "png",
+            b"first synthetic private photo",
+        )
+        .expect("persist first synthetic photo");
+        let second = write_private_unique_named_file(
+            root.path(),
+            "webcam-photo-20260822-120000",
+            "png",
+            b"second synthetic private photo",
+        )
+        .expect("preserve earlier same-second synthetic photo");
+
+        assert_ne!(first, second);
+        assert_eq!(
+            std::fs::read(first).unwrap(),
+            b"first synthetic private photo"
+        );
+        assert_eq!(
+            std::fs::read(second).unwrap(),
+            b"second synthetic private photo"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_unique_file_refuses_hostile_directory_and_destination_links() {
+        let root = tempfile::tempdir().expect("isolated hostile private export root");
+        let external = root.path().join("another-owner");
+        std::fs::create_dir(&external).expect("seed unrelated export directory");
+        let hostile_directory = root.path().join("hostile-exports");
+        std::os::unix::fs::symlink(&external, &hostile_directory)
+            .expect("plant hostile export directory link");
+        assert!(write_private_unique_named_file(
+            &hostile_directory,
+            "private-export",
+            "md",
+            b"never follow a hostile directory",
+        )
+        .is_err());
+
+        let owned_directory = root.path().join("private-exports");
+        ensure_private_directory(&owned_directory).expect("prepare private export directory");
+        let foreign = root.path().join("foreign-private-document");
+        std::fs::write(&foreign, "preserve another owner's private work")
+            .expect("seed unrelated private file");
+        std::os::unix::fs::symlink(&foreign, owned_directory.join("private-export.md"))
+            .expect("plant hostile export destination");
+        assert!(write_private_unique_named_file(
+            &owned_directory,
+            "private-export",
+            "md",
+            b"never follow a hostile destination",
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read_to_string(foreign).unwrap(),
+            "preserve another owner's private work"
+        );
+    }
+
+    #[test]
+    fn private_unique_file_rejects_escaping_names_and_unsafe_extensions() {
+        let root = tempfile::tempdir().expect("isolated private export component root");
+        for (stem, extension) in [
+            ("../foreign-private-owner", "png"),
+            ("/absolute-private-owner", "png"),
+            ("private-owner", "../../foreign"),
+            ("private-owner", ""),
+            ("", "png"),
+        ] {
+            assert!(
+                write_private_unique_named_file(root.path(), stem, extension, b"private").is_err()
+            );
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
 
     #[cfg(unix)]
     #[test]

@@ -17,6 +17,30 @@ impl ScriptListApp {
         }
     }
 
+    fn save_private_webcam_photo_at(
+        directory: &std::path::Path,
+        timestamp: &str,
+        png_data: &[u8],
+    ) -> std::io::Result<std::path::PathBuf> {
+        if timestamp.is_empty()
+            || !timestamp
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '-')
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Webcam photo timestamp must be a safe filename component",
+            ));
+        }
+
+        crate::atomic_file::write_private_unique_named_file(
+            directory,
+            &format!("webcam-photo-{timestamp}"),
+            "png",
+            png_data,
+        )
+    }
+
     #[cfg(target_os = "macos")]
     pub(crate) fn encode_webcam_frame_to_png(
         pixel_buffer: &core_video::pixel_buffer::CVPixelBuffer,
@@ -157,24 +181,16 @@ impl ScriptListApp {
         };
 
         let save_dir = Self::webcam_photo_directory();
-        if let Err(e) = std::fs::create_dir_all(&save_dir) {
-            tracing::error!(error = %e, "Failed to create webcam photo directory");
-            cx.notify();
-            self.show_error_toast(format!("Failed to create photo directory: {}", e), cx);
-            return false;
-        }
+        let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
 
-        let filename = format!(
-            "webcam-photo-{}.png",
-            chrono::Local::now().format("%Y%m%d-%H%M%S")
-        );
-        let save_path = save_dir.join(filename);
-
-        match std::fs::write(&save_path, png_data) {
-            Ok(()) => {
+        match Self::save_private_webcam_photo_at(&save_dir, &timestamp, &png_data) {
+            Ok(save_path) => {
+                let safe_path =
+                    crate::logging::log_private_user_value(&save_path.display().to_string());
                 tracing::info!(
                     category = "ACTIONS",
-                    path = %save_path.display(),
+                    path_bytes = safe_path.raw_bytes,
+                    path_sha256 = %safe_path.sha256,
                     "Webcam photo saved"
                 );
                 cx.notify();
@@ -185,14 +201,24 @@ impl ScriptListApp {
                 );
                 let save_path_str = save_path.to_string_lossy().to_string();
                 if let Err(error) = crate::file_search::reveal_in_finder(&save_path_str) {
-                    tracing::warn!(path = %save_path.display(), error = %error, "Failed to reveal saved webcam photo");
+                    let safe_error = crate::logging::log_private_user_value(&error.to_string());
+                    tracing::warn!(
+                        path_bytes = safe_path.raw_bytes,
+                        path_sha256 = %safe_path.sha256,
+                        error_bytes = safe_error.raw_bytes,
+                        error_sha256 = %safe_error.sha256,
+                        "Failed to reveal saved webcam photo"
+                    );
                 }
                 true
             }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to save webcam photo");
+            Err(error) => {
+                tracing::error!(reason = ?error.kind(), "Failed to save private webcam photo");
                 cx.notify();
-                self.show_error_toast(format!("Failed to save photo: {}", e), cx);
+                self.show_error_toast(
+                    "Photo could not be saved safely. Check Desktop and try again.",
+                    cx,
+                );
                 false
             }
         }

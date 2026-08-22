@@ -5399,21 +5399,22 @@ text_style.text_inset_left,
             .ok_or_else(|| "Nothing to export yet".to_string())
             .and_then(|markdown| {
                 let dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
-                std::fs::create_dir_all(&dir)
-                    .map_err(|error| format!("Create export directory failed: {error}"))?;
-                let safe_session_id = session_id
-                    .chars()
-                    .map(|ch| {
-                        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-                            ch
-                        } else {
-                            '-'
-                        }
-                    })
-                    .collect::<String>();
-                let path = dir.join(format!("agent-chat-export-{safe_session_id}.md"));
-                std::fs::write(&path, markdown)
-                    .map_err(|error| format!("Write export failed: {error}"))?;
+                let path = super::export::persist_private_agent_chat_export(
+                    &dir,
+                    &session_id,
+                    &markdown,
+                )
+                .map_err(|error| {
+                    let safe_error = crate::logging::log_private_user_value(&error.to_string());
+                    tracing::warn!(
+                        target: "script_kit::agent_chat",
+                        event = "agent_chat_export_private_persistence_failed",
+                        error_bytes = safe_error.raw_bytes,
+                        error_sha256 = %safe_error.sha256,
+                    );
+                    "Could not save this conversation privately. Check Downloads and try again."
+                        .to_string()
+                })?;
                 if let Err(error) = crate::platform::reveal_in_finder(&path) {
                     let safe_path =
                         crate::logging::log_private_user_value(&path.display().to_string());
