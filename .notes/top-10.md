@@ -1006,6 +1006,12 @@ offline receipts until their real producers are run again.
     installed plugins bypassed the explicit reviewed test/run boundaries.
     `cargo doc --open` also retained an unguarded browser/focus side effect.
     Five fake-Cargo mutations reproduced these remaining command-owner gaps.
+19. The supposedly disposable build-policy suite never deleted its temporary
+    workspaces. A bounded inventory found **1,179 abandoned fake-Cargo
+    directories, 33 standalone `build.rs` test-harness directories of about
+    1 MiB each, and eight external-symlink fixtures**. Its final case really
+    invokes `rustc` for that tiny standalone policy harness, so describing the
+    entire suite as compiler-free would also misrepresent its evidence.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1148,7 +1154,13 @@ offline receipts until their real producers are run again.
    Direct, inline, and file-based `--config` overrides fail before pool
    creation because they can replace effective job counts and target
    ownership. The fake-Cargo behavior suite passes **91 cases and 366
-   assertions** without building Rust or opening the application.
+   assertions** without invoking Cargo or building the application. Its one
+   real `rustc` call compiles only an isolated **~1-MiB `build.rs` policy
+   harness**; every fake workspace, external fixture, and standalone harness
+   is deleted after its owning case. A complete 91-case rerun preserved the
+   measured preexisting temporary inventories at exactly **1,179 / 33 / 8**,
+   proving zero new fixture leakage without deleting unrelated historical
+   directories.
    `SCRIPT_KIT_AGENT_TIMINGS=1` emits Cargo's real critical-path HTML plus a
    fail-closed machine-readable summary of actual hot units, duplicate
    compilations, bounded concurrency, and specific next actions.
@@ -1246,7 +1258,8 @@ offline receipts until their real producers are run again.
     **seven direct release-owner/proof-gate cases / 20 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
-    suite and real compiler were deliberately not rerun while workstation
+    suite and actual application/Cargo compiler were deliberately not rerun
+    while workstation
     free space remained below the enforced **25-GiB** build floor. None of
     these checks touches the operator's computer.
 
