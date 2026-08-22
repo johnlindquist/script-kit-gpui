@@ -871,6 +871,24 @@ describe("Cargo cache ownership", () => {
 });
 
 describe("reviewed Rust harness reuse", () => {
+  function currentHarness(pool = "agent-debug") {
+    const workspace = fixture();
+    for (const source of ["src", "crates", "vendor", ".cargo"]) {
+      mkdirSync(join(workspace.root, source), { recursive: true });
+    }
+    writeFileSync(join(workspace.root, "Cargo.toml"), "[workspace]\n");
+    writeFileSync(join(workspace.root, "Cargo.lock"), "version = 4\n");
+    const deps = join(workspace.root, "target-agent", "pools", pool, "debug", "deps");
+    mkdirSync(deps, { recursive: true });
+    const binary = join(deps, "script_kit_gpui-current-fixture");
+    writeFileSync(
+      binary,
+      '#!/bin/bash\nprintf "%s:%s:%s:%s:%s:%s:%s\\n" "$1" "$SCRIPT_KIT_NONINTERACTIVE" "$SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER" "$SCRIPT_KIT_ALLOW_NATIVE_INPUT" "$SCRIPT_KIT_ALLOW_LIVE_AI" "${SCRIPT_KIT_SEARCH_FULL_STRESS:-}" "${SCRIPT_KIT_STORAGE_FULL_STRESS:-}" >> "$CARGO_POLICY_CAPTURE"\n',
+    );
+    chmodSync(binary, 0o755);
+    return { ...workspace, deps, binary };
+  }
+
   test("rejects stale binaries before executing any test", () => {
     const workspace = fixture();
     for (const source of ["src", "crates", "vendor", ".cargo"]) {
@@ -919,6 +937,91 @@ describe("reviewed Rust harness reuse", () => {
     expect(readFileSync(workspace.capture, "utf8")).toBe(
       "first_reviewed_group:1:0:0:0\nsecond_reviewed_group:1:0:0:0\n",
     );
+  });
+
+  test.each([
+    "--ignored",
+    "--include-ignored",
+    "--test-threads=24",
+    "",
+    "invalid filter",
+    "../escape",
+  ])("rejects unsafe cached-harness filter %s before executing any test", (filter) => {
+    const workspace = currentHarness();
+    const result = run("reuse-rust-test-binary.sh", [filter], workspace.env);
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("reviewed Rust test filters must be nonempty identifier selectors");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("validates every reviewed filter before the first cached harness executes", () => {
+    const workspace = currentHarness();
+    const result = run(
+      "reuse-rust-test-binary.sh",
+      ["first_reviewed_group", "--ignored"],
+      workspace.env,
+    );
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("reviewed Rust test filters must be nonempty identifier selectors");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("isolates heavyweight inherited stress corpora before cached test execution", () => {
+    const workspace = currentHarness();
+    const result = run("reuse-rust-test-binary.sh", ["reviewed::safe_case"], {
+      ...workspace.env,
+      SCRIPT_KIT_SEARCH_FULL_STRESS: "1",
+      SCRIPT_KIT_STORAGE_FULL_STRESS: "1",
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(workspace.capture, "utf8")).toBe("reviewed::safe_case:1:0:0:0:0:0\n");
+  });
+
+  test("rejects a parent-traversing cached pool before finding an external harness", () => {
+    const workspace = currentHarness();
+    const externalDeps = join(workspace.root, "target-agent", "debug", "deps");
+    mkdirSync(externalDeps, { recursive: true });
+    const externalBinary = join(externalDeps, "script_kit_gpui-external-fixture");
+    writeFileSync(
+      externalBinary,
+      '#!/bin/bash\nprintf "external-executed\\n" > "$CARGO_POLICY_CAPTURE"\n',
+    );
+    chmodSync(externalBinary, 0o755);
+
+    const result = run("reuse-rust-test-binary.sh", ["reviewed_case"], {
+      ...workspace.env,
+      SCRIPT_KIT_CARGO_TARGET_POOL: "..",
+    });
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("cached test pool must name one owned child");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("rejects a symlinked cached pool before running an external harness", () => {
+    const workspace = currentHarness();
+    const external = temporaryDirectory("script-kit-external-reuse-");
+    const externalDeps = join(external, "debug", "deps");
+    mkdirSync(externalDeps, { recursive: true });
+    const externalBinary = join(externalDeps, "script_kit_gpui-external-fixture");
+    writeFileSync(
+      externalBinary,
+      '#!/bin/bash\nprintf "external-executed\\n" > "$CARGO_POLICY_CAPTURE"\n',
+    );
+    chmodSync(externalBinary, 0o755);
+    symlinkSync(external, join(workspace.root, "target-agent", "pools", "escaped"));
+
+    const result = run("reuse-rust-test-binary.sh", ["reviewed_case"], {
+      ...workspace.env,
+      SCRIPT_KIT_CARGO_TARGET_POOL: "escaped",
+    });
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("cached test pool cannot follow a symlink");
+    expect(existsSync(workspace.capture)).toBe(false);
   });
 });
 

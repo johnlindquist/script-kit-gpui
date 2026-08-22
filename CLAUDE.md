@@ -270,7 +270,7 @@ All agent-driven cargo invocations MUST go through `./scripts/agentic/agent-carg
 - `./scripts/agentic/agent-cargo.sh check --lib`
 - `./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui`
 - `./scripts/agentic/agent-cargo.sh test -p sk-storage` for app-independent private persistence; this never compiles GPUI, Metal, Whisper, or ONNX.
-- `./scripts/agentic/reuse-rust-test-binary.sh <reviewed-filter> [additional-filter...]` to rerun an already-built, source-current application test harness without Cargo or relinking. The runner fails closed on stale inputs and forces noninteractive/no-input/no-capture operation.
+- `./scripts/agentic/reuse-rust-test-binary.sh <reviewed-filter> [additional-filter...]` to rerun an already-built, source-current application test harness without Cargo or relinking. The runner validates every identifier-only filter before executing anything, rejects option injection and symlinked/traversing pools, fails closed on stale inputs, forces noninteractive/no-input/no-capture operation, disables heavyweight stress corpora, and pins the harness to one thread.
 - `SCRIPT_KIT_AGENT_TIMINGS=1 ./scripts/agentic/agent-cargo.sh test --lib --no-run` to save Cargo's critical-path HTML and the adjacent machine-readable `cargo-timing-summary.json`.
 
 Use `SCRIPT_KIT_CARGO_TARGET_POOL=<name>` for an intentional shared pool, and set `SCRIPT_KIT_AGENT_TARGET_MODE=exclusive` only when a task truly needs a per-agent cache under `target-agent/agents/<agent-id>`. Do not run bare `cargo` against this repo while `./dev.sh` may be running.

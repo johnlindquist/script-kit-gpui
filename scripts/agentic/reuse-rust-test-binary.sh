@@ -6,12 +6,37 @@ set -euo pipefail
 
 REPO_ROOT="${SCRIPT_KIT_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 POOL="${SCRIPT_KIT_CARGO_TARGET_POOL:-agent-debug}"
-DEPS_DIR="${REPO_ROOT}/target-agent/pools/${POOL}/debug/deps"
 
 if [[ $# -eq 0 ]]; then
   echo "usage: scripts/agentic/reuse-rust-test-binary.sh <reviewed-test-filter> [additional-filter ...]" >&2
   exit 2
 fi
+
+if [[ ! "$POOL" =~ ^[a-zA-Z0-9._-]+$ || "$POOL" == "." || "$POOL" == ".." ]]; then
+  echo "RUST_TEST_REUSE error: cached test pool must name one owned child; got ${POOL}" >&2
+  exit 64
+fi
+
+POOL_DIR="${REPO_ROOT}/target-agent/pools/${POOL}"
+DEPS_DIR="${POOL_DIR}/debug/deps"
+for protected_pool_path in \
+  "${REPO_ROOT}/target-agent" \
+  "${REPO_ROOT}/target-agent/pools" \
+  "$POOL_DIR" \
+  "${POOL_DIR}/debug" \
+  "$DEPS_DIR"; do
+  if [[ -L "$protected_pool_path" ]]; then
+    echo "RUST_TEST_REUSE error: cached test pool cannot follow a symlink: ${protected_pool_path}" >&2
+    exit 64
+  fi
+done
+
+for reviewed_filter in "$@"; do
+  if [[ ! "$reviewed_filter" =~ ^[a-zA-Z_][a-zA-Z0-9_:]*$ ]]; then
+    echo "RUST_TEST_REUSE error: reviewed Rust test filters must be nonempty identifier selectors; got ${reviewed_filter}" >&2
+    exit 64
+  fi
+done
 
 if [[ ! -d "$DEPS_DIR" ]]; then
   echo "RUST_TEST_REUSE error: no cached test harness; first run ./scripts/agentic/agent-cargo.sh test --lib --no-run" >&2
@@ -59,10 +84,12 @@ export SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER=0
 export SCRIPT_KIT_ALLOW_LIVE_AI=0
 export SCRIPT_KIT_ALLOW_NATIVE_INPUT=0
 export SCRIPT_KIT_ALLOW_SCREEN_CAPTURE=0
+export SCRIPT_KIT_SEARCH_FULL_STRESS=0
+export SCRIPT_KIT_STORAGE_FULL_STRESS=0
+export RUST_TEST_THREADS=1
 
 echo "RUST_TEST_REUSE binary=${binary} filters=$# threads=1 noninteractive=1" >&2
 for filter in "$@"; do
-  [[ -n "$filter" ]] || { echo "RUST_TEST_REUSE error: empty test filters are forbidden" >&2; exit 2; }
   echo "RUST_TEST_REUSE filter=${filter}" >&2
   "$binary" "$filter" --test-threads=1
 done
