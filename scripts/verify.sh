@@ -137,6 +137,8 @@ require_clean_source_identity() {
     scripts/devtools/rapid-toggle-stress.test.ts
     scripts/devtools/test-status.ts
     scripts/agentic/session.sh
+    scripts/agentic/agent-cargo.sh
+    scripts/agentic/cargo-cache-locks.sh
     scripts/agentic/cargo-build-policy.test.ts
     scripts/agentic/cargo-timings-summary.ts
     scripts/agentic/cargo-timings-summary.test.ts

@@ -462,6 +462,7 @@ function makeFixture(): ReleaseFixture {
     "scripts/devtools/generated-byte-compare.test.ts:",
     "scripts/devtools/state-ownership.test.ts:",
     "scripts/migrate/__tests__/classify.test.ts:",
+    "scripts/agentic/cargo-build-policy.test.ts:",
     "scripts/agentic/quick-ai-latency-bench.test.ts:",
     "tests/sdk/runner-safety.test.ts:",
     " 355 pass",
@@ -916,6 +917,11 @@ describe("fail-closed release evidence", () => {
     expect(() => buildGateReceipt({
       gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
     })).toThrow("missing its required directly executed fixture suite: scripts/devtools/alpha-byte-contract.test.ts");
+
+    writeFileSync(resultPath, valid.replace("scripts/agentic/cargo-build-policy.test.ts:", ""));
+    expect(() => buildGateReceipt({
+      gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
+    })).toThrow("missing its required directly executed fixture suite: scripts/agentic/cargo-build-policy.test.ts");
   });
 
   test("signing attestation requires an accepted notarization and the exact signing team", () => {
@@ -2227,6 +2233,9 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/devtools/state-ownership.test.ts",
     "scripts/devtools/generated-byte-compare.test.ts",
     "scripts/agentic/session.sh",
+    "scripts/agentic/agent-cargo.sh",
+    "scripts/agentic/cargo-cache-locks.sh",
+    "scripts/agentic/cargo-build-policy.test.ts",
     "scripts/agentic/root-search-frame-stability.test.ts",
     "tests/sdk/capability-types.fixture.ts",
     "tests/sdk/fixtures/runner-negative-case.ts",

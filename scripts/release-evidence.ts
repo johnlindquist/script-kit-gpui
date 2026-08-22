@@ -110,6 +110,7 @@ const REQUIRED_PROOF_SUITES = [
   "scripts/devtools/generated-byte-compare.test.ts",
   "scripts/devtools/state-ownership.test.ts",
   "scripts/migrate/__tests__/classify.test.ts",
+  "scripts/agentic/cargo-build-policy.test.ts",
   "scripts/agentic/quick-ai-latency-bench.test.ts",
   "tests/sdk/runner-safety.test.ts",
 ] as const;
@@ -127,6 +128,12 @@ const REQUIRED_SDK_SAFETY_OWNERS = [
   "scripts/test-runner.ts",
   "tests/sdk/fixtures/runner-negative-case.ts",
   "tests/sdk/runner-safety.test.ts",
+] as const;
+
+const REQUIRED_BUILD_SAFETY_OWNERS = [
+  "scripts/agentic/agent-cargo.sh",
+  "scripts/agentic/cargo-cache-locks.sh",
+  "scripts/agentic/cargo-build-policy.test.ts",
 ] as const;
 
 const REQUIRED_FOCUSED_FIXTURES = {
@@ -1552,6 +1559,7 @@ function requiredCleanReleaseSourceOwners(repositoryRoot: string): string[] {
     REQUIRED_PROOF_SUITES.every((suite) => owners.includes(suite)) &&
     REQUIRED_OPERATOR_SAFETY_OWNERS.every((owner) => owners.includes(owner)) &&
     REQUIRED_SDK_SAFETY_OWNERS.every((owner) => owners.includes(owner)) &&
+    REQUIRED_BUILD_SAFETY_OWNERS.every((owner) => owners.includes(owner)) &&
     RELEASE_INTEGRATION_SUITES.every((suite) => owners.includes(`tests/${suite}.rs`)),
   "publishable release evidence has an invalid or incomplete canonical source-owner inventory");
   return owners;
