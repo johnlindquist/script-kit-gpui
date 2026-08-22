@@ -1,11 +1,19 @@
 use gpui::{div, InteractiveElement, IntoElement, ParentElement, Styled};
 
+#[allow(
+    dead_code,
+    reason = "separately compiled builtin renderers and paint measurement own this stable selector"
+)]
 pub(crate) const BUILTIN_LEADING_SEPARATOR_ID: &str = "builtin-leading-separator";
 
 /// Shared persistent first row for builtin list browsers.
 ///
 /// The row is always present. Transient status belongs in its label so status
 /// changes cannot add floating chrome or shift the list below it (OF-15).
+#[allow(
+    dead_code,
+    reason = "the separately compiled launcher calls this from seven builtin renderers"
+)]
 pub(crate) fn render_builtin_leading_separator(
     label: &str,
     status: Option<&str>,
@@ -21,6 +29,10 @@ pub(crate) fn render_builtin_leading_separator(
 }
 
 /// Semantic mirror of [`render_builtin_leading_separator`] for getElements.
+#[allow(
+    dead_code,
+    reason = "the separately compiled launcher projects this separator in app_layout/collect_elements.rs"
+)]
 pub(crate) fn builtin_leading_separator_element(
     surface: &str,
     label: &str,

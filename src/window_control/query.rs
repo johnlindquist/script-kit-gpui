@@ -4,7 +4,6 @@ use core_foundation::base::{CFTypeRef as CoreFoundationTypeRef, TCFType};
 use core_foundation::dictionary::CFDictionaryRef;
 use core_foundation::string::CFString;
 use macos_accessibility_client::accessibility;
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::PathBuf;

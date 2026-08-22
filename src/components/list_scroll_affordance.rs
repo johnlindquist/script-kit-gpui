@@ -9,24 +9,24 @@ use gpui::{div, linear_color_stop, linear_gradient, prelude::*, px, rgba, AnyEle
 use crate::designs::MainMenuListTokens;
 
 #[inline]
+#[allow(
+    dead_code,
+    reason = "the separately compiled root-list renderer computes its fixed boundary occlusion"
+)]
 pub(crate) fn top_occlusion_alpha(tokens: MainMenuListTokens, progress: f32) -> u32 {
     ((tokens.top_occlusion_peak_alpha as f32 * progress.clamp(0.0, 1.0)).round() as u32).min(0xFF)
 }
 
-/// Paint a fixed top-to-transparent occlusion plane over scrolled rows.
-///
-/// This element intentionally has no id, listeners, or occlusion behavior. It
-/// stops before the scrollbar so the overlay cannot steal pointer/wheel input.
-pub(crate) fn render_top_occlusion(
-    theme: &crate::theme::Theme,
-    tokens: MainMenuListTokens,
-    progress: f32,
-) -> AnyElement {
-    render_top_occlusion_at(theme, tokens, progress, px(0.0))
-}
-
+#[allow(
+    dead_code,
+    reason = "the separately compiled root-list renderer assigns this stable paint selector"
+)]
 pub(crate) const MAIN_LIST_TOP_OCCLUSION_ID: &str = "main-list-top-occlusion";
 
+#[allow(
+    dead_code,
+    reason = "the separately compiled launcher calls this from render_script_list/mod.rs"
+)]
 pub(crate) fn render_top_occlusion_at(
     theme: &crate::theme::Theme,
     tokens: MainMenuListTokens,

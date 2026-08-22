@@ -366,6 +366,72 @@ pub(crate) fn footer_rail_side_inset_px(floating_glass: bool, ordinary_side_inse
     }
 }
 
+/// Resolve the launcher's primary footer control from the same blocking facts
+/// used by keyboard dispatch and automation projection.
+#[allow(
+    dead_code,
+    reason = "the separately compiled application binary owns launcher-footer rendering"
+)]
+pub(crate) fn launcher_primary_footer_button(
+    label: String,
+    globally_blocked: bool,
+    command_reason: Option<&'static str>,
+) -> crate::footer_popup::FooterButtonConfig {
+    use crate::footer_popup::{FooterAction, FooterButtonConfig};
+
+    let button = FooterButtonConfig::new(FooterAction::Run, "↵", label);
+    if globally_blocked {
+        button.enabled(false)
+    } else if let Some(reason) = command_reason {
+        button.disabled_reason(reason)
+    } else {
+        button.enabled(true)
+    }
+}
+
+#[cfg(test)]
+mod launcher_primary_footer_button_tests {
+    use super::launcher_primary_footer_button;
+    use crate::footer_popup::FooterAction;
+
+    #[test]
+    fn unavailable_command_disables_footer_activation_and_keyboard_routing() {
+        let reason = "Resolve the permission request first.";
+        let button = launcher_primary_footer_button("Run".to_string(), false, Some(reason));
+
+        assert_eq!(button.action, FooterAction::Run);
+        assert!(!button.enabled);
+        assert!(!button.shortcut_routable);
+        assert_eq!(
+            button.disabled_reason.as_ref().map(ToString::to_string),
+            Some(reason.to_string())
+        );
+    }
+
+    #[test]
+    fn ready_command_enables_footer_activation_and_keyboard_routing() {
+        let button = launcher_primary_footer_button("Run".to_string(), false, None);
+
+        assert_eq!(button.action, FooterAction::Run);
+        assert!(button.enabled);
+        assert!(button.shortcut_routable);
+        assert_eq!(button.disabled_reason.as_deref(), None);
+    }
+
+    #[test]
+    fn global_confirmation_lock_takes_precedence_over_command_specific_reason() {
+        let button = launcher_primary_footer_button(
+            "Run".to_string(),
+            true,
+            Some("This reason cannot override the confirmation lock."),
+        );
+
+        assert!(!button.enabled);
+        assert!(!button.shortcut_routable);
+        assert_eq!(button.disabled_reason.as_deref(), None);
+    }
+}
+
 pub(crate) fn footer_rail_chrome(theme: &Theme) -> FooterRailChrome {
     let chrome = crate::theme::AppChromeColors::from_theme(theme);
     let row_states = resolved_footer_button_visual_colors(theme).row_states;
@@ -376,14 +442,8 @@ pub(crate) fn footer_rail_chrome(theme: &Theme) -> FooterRailChrome {
         item_gap_px: metrics.item_gap_px,
         surface_rgba: chrome.inline_dropdown_surface_rgba,
         divider_rgba: chrome.divider_rgba,
-        hover_rgba: row_states
-            .hover
-            .background_rgba
-            .expect("hovered main-menu rows always have a background"),
-        active_rgba: row_states
-            .active
-            .background_rgba
-            .expect("active main-menu rows always have a background"),
+        hover_rgba: row_states.hover.background_rgba.unwrap_or_default(),
+        active_rgba: row_states.active.background_rgba.unwrap_or_default(),
         button_radius_px: metrics.button_radius,
     }
 }
@@ -574,18 +634,8 @@ where
     } else {
         row_states.hover
     };
-    let hover_bg = rgba(
-        row_states
-            .hover
-            .background_rgba
-            .expect("hovered main-menu rows always have a background"),
-    );
-    let active_bg = rgba(
-        row_states
-            .active
-            .background_rgba
-            .expect("active main-menu rows always have a background"),
-    );
+    let hover_bg = rgba(row_states.hover.background_rgba.unwrap_or_default());
+    let active_bg = rgba(row_states.active.background_rgba.unwrap_or_default());
     let base_foreground = rgba(base_state.primary_foreground_rgba);
     let hover_foreground: gpui::Hsla = rgba(hover_state.primary_foreground_rgba).into();
     let mut marker = div()
@@ -1079,7 +1129,7 @@ pub(crate) fn themed_footer_button_hover_rgba(theme: &Theme) -> u32 {
         .row_states
         .hover
         .background_rgba
-        .expect("hovered main-menu rows always have a background")
+        .unwrap_or_default()
 }
 
 pub(crate) fn themed_footer_button_active_rgba(theme: &Theme) -> u32 {
@@ -1087,7 +1137,7 @@ pub(crate) fn themed_footer_button_active_rgba(theme: &Theme) -> u32 {
         .row_states
         .active
         .background_rgba
-        .expect("active main-menu rows always have a background")
+        .unwrap_or_default()
 }
 
 pub(crate) fn themed_footer_button_border_alpha(theme: &Theme, selected: bool) -> f32 {
@@ -1383,7 +1433,6 @@ fn render_footer_hint_content_flex_with_layout(
                 base: footer_text,
                 text: hover_text,
                 glyph: hover_glyph,
-                border_alpha: None,
             }),
         ),
     };
@@ -1416,17 +1465,6 @@ fn render_footer_hint_content_flex_with_layout(
     } else {
         row.child(labelcap).child(keycaps).into_any_element()
     }
-}
-
-pub(crate) fn render_footer_hint_button_like(
-    spec: FooterHintButtonSpec,
-    theme: &Theme,
-) -> AnyElement {
-    render_footer_hint_button_like_with_layout(
-        spec,
-        FooterHintButtonLayoutOverrides::default(),
-        theme,
-    )
 }
 
 pub(crate) fn render_footer_hint_button_like_with_layout(
@@ -1633,7 +1671,7 @@ fn render_footer_hint_content_impl(
     rest_text_alpha: Option<u32>,
     hover_text_alpha: Option<u32>,
     hover_glyph_alpha: Option<u32>,
-    hover_keycap_border_alpha: Option<u32>,
+    _hover_keycap_border_alpha: Option<u32>,
     shrinkable_label: bool,
     layout: FooterHintButtonLayoutOverrides,
     selected: bool,
@@ -1720,7 +1758,6 @@ fn render_footer_hint_content_impl(
                 base: footer_text,
                 text: hover_text,
                 glyph: hover_glyph,
-                border_alpha: hover_keycap_border_alpha,
             }),
         ),
     };
@@ -1772,13 +1809,11 @@ pub(crate) fn footer_shortcut_keycaps_measured_width_from_tokens<'a>(
 ) -> f32 {
     let metrics = current_main_menu_footer_metrics();
     let mut width = 0.0;
-    let mut count = 0usize;
-    for token in tokens {
+    for (count, token) in tokens.into_iter().enumerate() {
         if count > 0 {
             width += metrics.content_gap;
         }
         width += footer_keycap_measured_width_px(token, cx);
-        count += 1;
     }
     width
 }
@@ -1954,7 +1989,6 @@ pub(crate) struct FooterKeycapHoverStyle {
     base: gpui::Rgba,
     text: gpui::Hsla,
     glyph: gpui::Hsla,
-    border_alpha: Option<u32>,
 }
 
 pub(crate) fn render_footer_shortcut_keycaps(shortcut: String, theme: &Theme) -> AnyElement {
@@ -1988,7 +2022,6 @@ pub(crate) fn render_footer_shortcut_keycaps_for_state(
             base: gpui::rgba(base_state.primary_foreground_rgba),
             text: hover_foreground,
             glyph: hover_foreground,
-            border_alpha: None,
         }),
     )
 }
@@ -2034,7 +2067,6 @@ pub(crate) fn render_footer_row_shortcut_keycaps_from_tokens<'a>(
                 base: foreground,
                 text: foreground_hsla,
                 glyph: foreground_hsla,
-                border_alpha: None,
             }),
         ))
         .into_any_element()

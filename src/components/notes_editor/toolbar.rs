@@ -191,18 +191,6 @@ pub fn notes_editor_toolbar_action_title(id: &str) -> &'static str {
     }
 }
 
-/// Host-side adapter: run a toolbar action against a notes editor entity.
-pub fn run_toolbar_action(
-    notes_editor: gpui::Entity<NotesEditor>,
-    action: NotesEditorToolbarAction,
-    window: &mut Window,
-    cx: &mut gpui::App,
-) {
-    notes_editor.update(cx, |editor, cx| {
-        (action.run)(editor, window, cx);
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;

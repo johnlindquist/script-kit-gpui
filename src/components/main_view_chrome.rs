@@ -26,7 +26,6 @@ pub(crate) const MAIN_VIEW_CONTEXT_SELECTION_BUTTON_ID: &str = "main-view-contex
 pub(crate) const MAIN_VIEW_HEADER_ID: &str = "main-view-header";
 pub(crate) const MAIN_VIEW_CWD_UNAVAILABLE_LABEL: &str = "No cwd";
 pub(crate) const MAIN_VIEW_AGENT_MODEL_UNAVAILABLE_LABEL: &str = "Agent model unavailable";
-const DEFAULT_CONTEXT_EDGE_OUTSET_X: f32 = 8.0;
 #[allow(dead_code)]
 pub(crate) const MAIN_VIEW_HEADER_DIVIDER_ID: &str = "main-view-header-divider";
 #[allow(dead_code)]
@@ -49,6 +48,10 @@ pub(crate) enum SemanticChipAction {
     OpenDetails,
     RemoveContext,
     OpenSelector,
+    #[allow(
+        dead_code,
+        reason = "the separately compiled launcher constructs this action in ui_window and shortcut dispatch"
+    )]
     OpenSurface,
     SelectDestination,
 }
@@ -157,17 +160,21 @@ impl SemanticChipSpec {
         action: SemanticChipAction,
         shortcut_hint: &str,
     ) -> Self {
+        let semantic_id = semantic_id.into();
+        let label = label.into();
         Self::try_new(
-            semantic_id,
+            semantic_id.clone(),
             SemanticChipRole::Identity,
-            label,
+            label.clone(),
             crate::components::hint_strip::shortcut_tokens_from_hint(shortcut_hint),
             true,
             None,
             Some(action),
             None,
         )
-        .expect("valid enabled identity chip")
+        .unwrap_or_else(|reason| {
+            Self::inert_invalid(semantic_id, label, SemanticChipRole::Identity, reason)
+        })
     }
 
     pub(crate) fn disabled_identity(
@@ -175,17 +182,21 @@ impl SemanticChipSpec {
         label: impl Into<SharedString>,
         reason: impl Into<SharedString>,
     ) -> Self {
+        let semantic_id = semantic_id.into();
+        let label = label.into();
         Self::try_new(
-            semantic_id,
+            semantic_id.clone(),
             SemanticChipRole::Identity,
-            label,
+            label.clone(),
             Vec::new(),
             false,
             Some(reason.into()),
             None,
             None,
         )
-        .expect("valid disabled identity chip")
+        .unwrap_or_else(|reason| {
+            Self::inert_invalid(semantic_id, label, SemanticChipRole::Identity, reason)
+        })
     }
 
     pub(crate) fn context_attachment(
@@ -193,17 +204,26 @@ impl SemanticChipSpec {
         label: impl Into<SharedString>,
         removable: bool,
     ) -> Self {
+        let semantic_id = semantic_id.into();
+        let label = label.into();
         Self::try_new(
-            semantic_id,
+            semantic_id.clone(),
             SemanticChipRole::ContextAttachment,
-            label,
+            label.clone(),
             Vec::new(),
             true,
             None,
             Some(SemanticChipAction::OpenDetails),
             removable.then_some(SemanticChipAction::RemoveContext),
         )
-        .expect("valid context attachment chip")
+        .unwrap_or_else(|reason| {
+            Self::inert_invalid(
+                semantic_id,
+                label,
+                SemanticChipRole::ContextAttachment,
+                reason,
+            )
+        })
     }
 
     #[allow(dead_code)]
@@ -211,17 +231,57 @@ impl SemanticChipSpec {
         semantic_id: impl Into<SharedString>,
         label: impl Into<SharedString>,
     ) -> Self {
+        let semantic_id = semantic_id.into();
+        let label = label.into();
         Self::try_new(
-            semantic_id,
+            semantic_id.clone(),
             SemanticChipRole::DestinationSelector,
-            label,
+            label.clone(),
             Vec::new(),
             true,
             None,
             Some(SemanticChipAction::SelectDestination),
             None,
         )
-        .expect("valid destination selector chip")
+        .unwrap_or_else(|reason| {
+            Self::inert_invalid(
+                semantic_id,
+                label,
+                SemanticChipRole::DestinationSelector,
+                reason,
+            )
+        })
+    }
+
+    fn inert_invalid(
+        semantic_id: SharedString,
+        label: SharedString,
+        role: SemanticChipRole,
+        reason: &'static str,
+    ) -> Self {
+        let semantic_id = if semantic_id.trim().is_empty() {
+            match role {
+                SemanticChipRole::Identity => "invalid-identity-chip".into(),
+                SemanticChipRole::ContextAttachment => "invalid-context-chip".into(),
+                SemanticChipRole::DestinationSelector => "invalid-destination-chip".into(),
+            }
+        } else {
+            semantic_id
+        };
+        Self {
+            semantic_id,
+            role,
+            label: if label.trim().is_empty() {
+                "Unavailable".into()
+            } else {
+                label
+            },
+            shortcut_tokens: Vec::new(),
+            enabled: false,
+            disabled_reason: Some(reason.into()),
+            body_action: None,
+            trailing_action: None,
+        }
     }
 }
 
@@ -405,7 +465,7 @@ impl PromptSearchInputGeometry {
 
 enum PromptSearchInputContent {
     #[allow(dead_code)] // Constructed by binary-only include!-merged Arg/Mini renderers.
-    EntityBacked { input: Input },
+    EntityBacked { input: Box<Input> },
     ControllerOwned {
         semantic_id: &'static str,
         text: SharedString,
@@ -438,7 +498,9 @@ impl PromptSearchInputChrome {
     #[allow(dead_code)] // Called by binary-only include!-merged Arg/Mini renderers.
     pub(crate) fn entity_backed(input: Input) -> Self {
         Self {
-            content: PromptSearchInputContent::EntityBacked { input },
+            content: PromptSearchInputContent::EntityBacked {
+                input: Box::new(input),
+            },
             trailing: Vec::new(),
         }
     }
@@ -500,7 +562,7 @@ pub(crate) fn render_prompt_search_input(
     let colors = crate::theme::AppChromeColors::from_theme(theme);
 
     let body = match chrome.content {
-        PromptSearchInputContent::EntityBacked { input } => input
+        PromptSearchInputContent::EntityBacked { input } => (*input)
             .w_full()
             .h(px(geometry.height))
             .line_height(px(geometry.height))
@@ -776,6 +838,10 @@ pub(crate) fn render_main_view_shell() -> gpui::Stateful<gpui::Div> {
         .flex_col()
 }
 
+#[allow(
+    dead_code,
+    reason = "the separately compiled day-page renderer consumes the canonical launcher chrome"
+)]
 pub(crate) fn render_main_view_chrome(
     root: gpui::Stateful<gpui::Div>,
     theme: &crate::theme::Theme,
@@ -937,10 +1003,6 @@ fn render_main_view_chrome_with_options(
     root.into_any_element()
 }
 
-pub(crate) fn render_main_view_header(chrome: MainViewHeaderChrome) -> AnyElement {
-    render_main_view_header_with_context_outset(chrome, DEFAULT_CONTEXT_EDGE_OUTSET_X)
-}
-
 pub(crate) fn render_main_view_header_with_context_outset(
     chrome: MainViewHeaderChrome,
     context_edge_outset_x: f32,
@@ -986,21 +1048,20 @@ pub(crate) fn render_main_view_context_zone(
     cwd_label: Option<String>,
     agent_model_label: Option<String>,
 ) -> AnyElement {
-    let zone = MainViewContextZoneSpec::try_new(
-        SemanticChipSpec::disabled_identity(
+    let zone = MainViewContextZoneSpec {
+        leading_identity: SemanticChipSpec::disabled_identity(
             MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
             cwd_label.unwrap_or_else(|| MAIN_VIEW_CWD_UNAVAILABLE_LABEL.to_string()),
             "Context interaction is unavailable on this surface",
         ),
-        None,
-        SemanticChipSpec::disabled_identity(
+        context_attachment: None,
+        trailing_identity: SemanticChipSpec::disabled_identity(
             MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
             agent_model_label
                 .unwrap_or_else(|| MAIN_VIEW_AGENT_MODEL_UNAVAILABLE_LABEL.to_string()),
             "Identity interaction is unavailable on this surface",
         ),
-    )
-    .expect("valid inert main context zone");
+    };
     render_main_view_context_zone_required(theme, def, zone, Rc::new(|_, _, _| {}))
 }
 
@@ -1544,6 +1605,7 @@ pub(crate) struct MainViewInputHorizontalMetrics {
     pub(crate) text_inset_right: f32,
 }
 impl MainViewInputHorizontalMetrics {
+    #[cfg(test)]
     pub(crate) fn text_width_after_trailing(self, trailing_width: f32) -> f32 {
         (self.shell_width - self.text_inset_left - self.text_inset_right - trailing_width).max(1.0)
     }
@@ -1887,6 +1949,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn invalid_semantic_chip_constructors_become_inert_without_panicking() {
+        use super::{SemanticChipAction, SemanticChipSpec};
+
+        let chip =
+            SemanticChipSpec::enabled_identity("", "", SemanticChipAction::RemoveContext, "⇥");
+        assert_eq!(chip.semantic_id.as_ref(), "invalid-identity-chip");
+        assert_eq!(chip.label.as_ref(), "Unavailable");
+        assert!(!chip.enabled);
+        assert!(chip.disabled_reason.is_some());
+        assert!(chip.shortcut_tokens.is_empty());
+        assert!(chip.body_action.is_none());
+        assert!(chip.trailing_action.is_none());
     }
 
     #[test]

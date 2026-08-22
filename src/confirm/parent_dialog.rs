@@ -290,6 +290,10 @@ pub(crate) fn open_parent_confirm_dialog_with_lifecycle(
     );
 }
 
+#[allow(
+    dead_code,
+    reason = "the separately compiled application binary owns Agent Chat parent action dialogs"
+)]
 pub(crate) fn open_parent_action_dialog(
     window: &mut Window,
     cx: &mut App,
@@ -320,6 +324,10 @@ pub(crate) fn open_parent_action_dialog(
     );
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shared parent-dialog adapter preserves separately owned lifecycle, callbacks, and actions"
+)]
 fn open_parent_confirm_dialog_with_lifecycle_and_parent(
     window: &mut Window,
     cx: &mut App,

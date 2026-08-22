@@ -375,6 +375,10 @@ impl BoundaryAffordanceState {
         self.advance_generation()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the native scroll adapter preserves each independent phase and timing observation"
+    )]
     pub(crate) fn handle_scroll_lifecycle(
         &mut self,
         delta_y_px: f32,
@@ -408,6 +412,10 @@ impl BoundaryAffordanceState {
     /// before this entry point runs. The returned decision may schedule visual
     /// affordance work, but it can never request residual selection movement or
     /// leave momentum marked as owned by the affordance.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the production scroll observer preserves the native event adapter contract"
+    )]
     pub(crate) fn observe_scroll_lifecycle(
         &mut self,
         delta_y_px: f32,
@@ -436,6 +444,10 @@ impl BoundaryAffordanceState {
         decision
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the shared reducer must receive every independently observed native scroll field"
+    )]
     fn handle_scroll_lifecycle_inner(
         &mut self,
         delta_y_px: f32,
@@ -576,6 +588,10 @@ impl BoundaryAffordanceState {
 
     /// Consume one precise pixel-scroll event. Positive Y pulls outward at the
     /// top; negative Y pulls outward at the bottom.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the native touch adapter carries separate geometry, timing, eligibility, and motion state"
+    )]
     pub(crate) fn handle_precise_scroll(
         &mut self,
         delta_y_px: f32,
@@ -924,7 +940,10 @@ impl BoundaryAffordanceState {
             self.velocity_samples.pop_front();
         }
         while self.velocity_samples.len() > 2 {
-            let first = self.velocity_samples.front().copied().unwrap();
+            let Some(first) = self.velocity_samples.front().copied() else {
+                self.visual_velocity_px_per_second = 0.0;
+                return;
+            };
             let span = next
                 .native_timestamp_seconds
                 .zip(first.native_timestamp_seconds)
@@ -946,7 +965,10 @@ impl BoundaryAffordanceState {
             self.visual_velocity_px_per_second = 0.0;
             return;
         }
-        let first = self.velocity_samples.front().copied().unwrap();
+        let Some(first) = self.velocity_samples.front().copied() else {
+            self.visual_velocity_px_per_second = 0.0;
+            return;
+        };
         let times: Vec<f64> = self
             .velocity_samples
             .iter()

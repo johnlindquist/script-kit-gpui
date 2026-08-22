@@ -110,12 +110,7 @@ impl RenderOnce for UnifiedListItem {
             active: false,
             disabled: state.is_disabled,
         });
-        let hover_bg = rgba(
-            row_palette
-                .hovered
-                .background_rgba
-                .expect("hovered Unified rows always have a background"),
-        );
+        let hover_bg = rgba(row_palette.hovered.background_rgba.unwrap_or(TRANSPARENT));
         let bg_color = resolved_state
             .background_rgba
             .map(rgba)

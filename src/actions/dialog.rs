@@ -1860,10 +1860,20 @@ impl ActionsDialog {
 
     /// Handle Escape with back-stack semantics: pop a child route, or signal close.
     pub fn handle_escape(&mut self, cx: &mut Context<Self>) -> ActionsDialogEscapeOutcome {
-        let outcome = if self.pop_route(cx) {
-            ActionsDialogEscapeOutcome::PoppedRoute
-        } else {
-            ActionsDialogEscapeOutcome::CloseDialog
+        let decision = crate::window_orchestrator::interaction::plan_overlay_dismiss(
+            self.route_depth(),
+            crate::window_orchestrator::interaction::OverlayDismissTrigger::Escape,
+        );
+        let outcome = match decision {
+            crate::window_orchestrator::interaction::OverlayDismissDecision::PopRoute
+                if self.pop_route(cx) =>
+            {
+                ActionsDialogEscapeOutcome::PoppedRoute
+            }
+            crate::window_orchestrator::interaction::OverlayDismissDecision::PopRoute
+            | crate::window_orchestrator::interaction::OverlayDismissDecision::CloseOverlay => {
+                ActionsDialogEscapeOutcome::CloseDialog
+            }
         };
         tracing::info!(
             target: "script_kit::actions",

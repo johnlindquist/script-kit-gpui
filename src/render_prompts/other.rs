@@ -663,14 +663,31 @@ impl ScriptListApp {
         let border_color = rgba((self.theme.colors.ui.border << 8) | 0x40);
 
         let failed_count = report.failed_scripts.len();
-        let header_summary = format!(
-            "{} script{} failed · {} fatal · {} warning{}",
-            failed_count,
-            if failed_count == 1 { "" } else { "s" },
-            report.fatal_count,
-            report.warning_count,
-            if report.warning_count == 1 { "" } else { "s" },
-        );
+        let retained_count = report
+            .retained_issues
+            .iter()
+            .map(|issue| (&issue.path, issue.script_name.as_str()))
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let header_summary = if retained_count == 0 {
+            format!(
+                "{} script{} failed · {} fatal · {} warning{}",
+                failed_count,
+                if failed_count == 1 { "" } else { "s" },
+                report.fatal_count,
+                report.warning_count,
+                if report.warning_count == 1 { "" } else { "s" },
+            )
+        } else {
+            format!(
+                "{} excluded · {} retained · {} fatal · {} warning{}",
+                failed_count,
+                retained_count,
+                report.fatal_count,
+                report.warning_count,
+                if report.warning_count == 1 { "" } else { "s" },
+            )
+        };
 
         // Build the per-script blocks.
         let mut blocks: Vec<AnyElement> = Vec::new();
@@ -752,7 +769,60 @@ impl ScriptListApp {
             );
         }
 
-        let empty_state: Option<AnyElement> = if failed_count == 0 {
+        for issue in report.retained_issues.iter().chain(report.warnings.iter()) {
+            let detail = Self::script_issue_detail_line(issue);
+            let status = match issue.severity {
+                crate::scripts::ValidationSeverity::Fatal => "Blocked — retained in launcher",
+                crate::scripts::ValidationSeverity::Warning => "Warning — command remains visible",
+            };
+
+            blocks.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .p(px(design_spacing.padding_lg))
+                    .bg(panel_bg)
+                    .border_1()
+                    .border_color(border_color)
+                    .rounded(px(6.))
+                    .child(
+                        div()
+                            .text_color(accent_color)
+                            .text_size(px(14.))
+                            .child(issue.script_name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_color(muted_color)
+                            .text_size(px(11.))
+                            .child(issue.path.display().to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_color(muted_color)
+                            .text_size(px(11.))
+                            .child(status),
+                    )
+                    .child(
+                        div()
+                            .text_color(text_color)
+                            .text_size(px(13.))
+                            .child(issue.message.clone()),
+                    )
+                    .when(!detail.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .text_color(muted_color)
+                                .text_size(px(11.))
+                                .child(detail),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+
+        let empty_state: Option<AnyElement> = if blocks.is_empty() {
             Some(
                 div()
                     .text_color(muted_color)
@@ -842,79 +912,13 @@ impl ScriptListApp {
     }
 
     fn script_issue_detail_line(issue: &crate::scripts::ScriptValidationIssue) -> String {
-        let field = issue
-            .field
-            .map(|f| format!("[{:?}] ", f))
-            .unwrap_or_default();
-        let kind_detail = match &issue.kind {
-            crate::scripts::ScriptValidationKind::MetadataParse { detail }
-            | crate::scripts::ScriptValidationKind::SchemaParse { detail } => detail.clone(),
-            crate::scripts::ScriptValidationKind::InvalidValue { value, reason } => {
-                format!("value={value:?} — {reason}")
-            }
-            crate::scripts::ScriptValidationKind::DuplicateBinding { binding, value } => {
-                format!("{:?} duplicate: {:?}", binding, value)
-            }
-        };
-        if field.is_empty() && kind_detail.is_empty() {
-            String::new()
-        } else {
-            format!("{field}{kind_detail}").trim().to_string()
-        }
+        crate::scripts::format_script_validation_issue_detail(issue)
     }
 
     pub(crate) fn format_script_issues_diagnostics(
         report: &crate::scripts::ValidationReport,
     ) -> String {
-        let mut out = String::new();
-        out.push_str(&format!(
-            "Script Issues — {} failed · {} fatal · {} warning(s)\n",
-            report.failed_scripts.len(),
-            report.fatal_count,
-            report.warning_count,
-        ));
-        if report.failed_scripts.is_empty() {
-            out.push_str("No failing scripts in this report.\n");
-            return out;
-        }
-        for failed in report.failed_scripts.iter() {
-            out.push('\n');
-            out.push_str(&format!(
-                "## {}\n  path: {}\n",
-                failed.name,
-                failed.path.display()
-            ));
-            for issue in failed.fatal.iter() {
-                let field = issue
-                    .field
-                    .map(|f| format!("[{:?}] ", f))
-                    .unwrap_or_default();
-                out.push_str(&format!("  - {field}{}\n", issue.message));
-                let kind_detail = match &issue.kind {
-                    crate::scripts::ScriptValidationKind::MetadataParse { detail }
-                    | crate::scripts::ScriptValidationKind::SchemaParse { detail } => {
-                        detail.clone()
-                    }
-                    crate::scripts::ScriptValidationKind::InvalidValue { value, reason } => {
-                        format!("value={value:?} — {reason}")
-                    }
-                    crate::scripts::ScriptValidationKind::DuplicateBinding { binding, value } => {
-                        format!("{:?} duplicate: {:?}", binding, value)
-                    }
-                };
-                if !kind_detail.is_empty() {
-                    out.push_str(&format!("      kind: {kind_detail}\n"));
-                }
-                for related in issue.related.iter() {
-                    out.push_str(&format!(
-                        "      ↔ {} — {}\n",
-                        related.name,
-                        related.path.display()
-                    ));
-                }
-            }
-        }
-        out
+        crate::scripts::format_script_validation_diagnostics(report)
     }
 
     pub(crate) fn format_script_issues_agent_prompt(
@@ -1131,6 +1135,52 @@ impl ScriptListApp {
                 |d, footer| d.child(footer),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod script_issue_diagnostics_behavior_tests {
+    use crate::mcp_resources::SdkCapabilityDiagnosticCode;
+    use crate::scripts::{
+        MetadataField, ScriptValidationIssue, ScriptValidationKind, ValidationReport,
+        ValidationSeverity,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn retained_scriptlet_diagnostics_include_path_reason_and_repair_alternative() {
+        let issue = ScriptValidationIssue {
+            severity: ValidationSeverity::Fatal,
+            path: "/tmp/window-tools.md".into(),
+            script_name: "Move Browser".to_string(),
+            field: Some(MetadataField::Capability),
+            message: "The selected host does not support find().".to_string(),
+            kind: ScriptValidationKind::CapabilityUnavailable {
+                capability: "find".to_string(),
+                code: SdkCapabilityDiagnosticCode::UnsupportedCapability,
+                alternatives: vec!["getActiveApp".to_string()],
+            },
+            related: Vec::new(),
+        };
+        let report = ValidationReport {
+            schema_version: crate::scripts::validation::VALIDATION_SCHEMA_VERSION,
+            total_candidates: 1,
+            valid_count: 0,
+            fatal_count: 1,
+            warning_count: 0,
+            failed_scripts: Arc::from(Vec::new()),
+            warnings: Arc::from(Vec::new()),
+            retained_issues: Arc::from(vec![issue]),
+        };
+
+        let output = crate::ScriptListApp::format_script_issues_diagnostics(&report);
+        assert!(output.contains("0 excluded · 1 retained issue(s)"));
+        assert!(output.contains("Move Browser"));
+        assert!(output.contains("/tmp/window-tools.md"));
+        assert!(output.contains("blocked, retained in launcher"));
+        assert!(output.contains("find (UnsupportedCapability)"));
+        assert!(output.contains("try getActiveApp"));
+        assert!(!output.contains("No failing scripts"));
     }
 }
 

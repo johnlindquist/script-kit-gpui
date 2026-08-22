@@ -312,6 +312,10 @@ pub(crate) fn resize_to_file_search_window_sync(result_count: usize) {
 pub(crate) const MAIN_WINDOW_WIDTH: f32 = 750.0;
 /// Smallest physical main-window width whose GPUI layout and native footer
 /// share the same coordinate space without clipping.
+#[allow(
+    dead_code,
+    reason = "the separately compiled launcher applies this minimum in main_entry/app_run_setup.rs"
+)]
 pub(crate) const MAIN_WINDOW_MIN_WIDTH: f32 = 480.0;
 const FOCUSED_TEXT_MINI_INPUT_ONLY_HEIGHT: f32 = crate::panel::PROMPT_INPUT_FIELD_HEIGHT;
 const FOCUSED_TEXT_MINI_RESULT_HEIGHT: f32 = 150.0;
@@ -891,7 +895,6 @@ pub fn reset_resize_debounce() {
 ///
 /// # Platform
 /// This function only works on macOS. On other platforms, it's a no-op.
-#[cfg(target_os = "macos")]
 /// Physical NSWindow height for a logical main-window height.
 ///
 /// In floating-footer glass mode the footer strip lives OUTSIDE the window

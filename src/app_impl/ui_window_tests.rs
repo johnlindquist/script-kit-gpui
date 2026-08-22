@@ -1,9 +1,10 @@
 use super::{
     about_footer_buttons, create_ai_preset_footer_buttons, flow_session_footer_buttons,
     main_list_loading_left_info, main_window_footer_chrome_should_render,
-    main_window_result_action_label, micro_prompt_footer_buttons, notes_browse_footer_buttons,
-    paste_into_frontmost_app_label, script_template_catalog_footer_buttons,
-    sdk_reference_footer_buttons, term_prompt_footer_buttons,
+    main_window_result_action_label, main_window_run_footer_button, micro_prompt_footer_buttons,
+    notes_browse_footer_buttons, paste_into_frontmost_app_label,
+    script_template_catalog_footer_buttons, sdk_reference_footer_buttons,
+    term_prompt_footer_buttons,
 };
 use crate::footer_popup::FooterAction;
 use crate::scripts::{MatchIndices, Scriptlet, ScriptletMatch};
@@ -47,6 +48,35 @@ fn paste_into_frontmost_app_label_falls_back_to_active_app() {
         paste_into_frontmost_app_label(None),
         "Paste into Active App"
     );
+}
+
+#[test]
+fn blocked_launcher_command_disables_footer_execution_and_shortcut_truthfully() {
+    let blocked = main_window_run_footer_button(
+        "Run Scriptlet".to_string(),
+        false,
+        Some("Resolve the permission request first."),
+    );
+    assert_eq!(blocked.action, FooterAction::Run);
+    assert!(!blocked.enabled);
+    assert!(!blocked.shortcut_routable);
+    assert_eq!(
+        blocked.disabled_reason.as_deref(),
+        Some("Resolve the permission request first.")
+    );
+
+    let ready = main_window_run_footer_button("Run Scriptlet".to_string(), false, None);
+    assert!(ready.enabled);
+    assert!(ready.shortcut_routable);
+    assert!(ready.disabled_reason.is_none());
+
+    let globally_blocked = main_window_run_footer_button(
+        "Run Scriptlet".to_string(),
+        true,
+        Some("This reason cannot override the confirmation lock."),
+    );
+    assert!(!globally_blocked.enabled);
+    assert!(globally_blocked.disabled_reason.is_none());
 }
 
 /// Flow session native footer grammar (Oracle 2026-07-21 adjudication):

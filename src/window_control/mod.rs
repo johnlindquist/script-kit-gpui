@@ -52,8 +52,6 @@ mod types;
 mod undo;
 mod verification;
 
-use ffi::AXUIElementRef;
-
 fn snap_lock<'a, T>(
     lock: &'a std::sync::Mutex<T>,
     domain: &'static str,

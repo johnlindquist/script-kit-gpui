@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -117,44 +117,36 @@ fn spawn_worker(pid: i32) -> WorkerEntry {
     let _ = std::thread::Builder::new()
         .name(format!("window-ax-{pid}"))
         .spawn(move || {
-            loop {
-                match receiver.recv_timeout(WORKER_IDLE_TIMEOUT) {
-                    Ok(envelope) => {
-                        let queue_wait = envelope.enqueued_at.elapsed();
-                        // Cancellation check immediately after dequeue.
-                        if envelope.cancelled.load(Ordering::SeqCst) {
-                            let _ = envelope.reply.try_send(WorkerReply {
-                                before: None,
-                                after: None,
-                                attempts: Vec::new(),
-                                error: Some("window_engine:cancelled".to_string()),
-                                queue_wait,
-                            });
-                            continue;
-                        }
-                        let cancelled = Arc::clone(&envelope.cancelled);
-                        let command = envelope.command;
-                        let outcome =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                                run_command(command, &cancelled)
-                            }));
-                        let mut reply = match outcome {
-                            Ok(reply) => reply,
-                            Err(_) => WorkerReply {
-                                before: None,
-                                after: None,
-                                attempts: Vec::new(),
-                                error: Some("window_engine:worker_panicked".to_string()),
-                                queue_wait,
-                            },
-                        };
-                        reply.queue_wait = queue_wait;
-                        let _ = envelope.reply.try_send(reply);
-                    }
-                    Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
-                        break;
-                    }
+            while let Ok(envelope) = receiver.recv_timeout(WORKER_IDLE_TIMEOUT) {
+                let queue_wait = envelope.enqueued_at.elapsed();
+                // Cancellation check immediately after dequeue.
+                if envelope.cancelled.load(Ordering::SeqCst) {
+                    let _ = envelope.reply.try_send(WorkerReply {
+                        before: None,
+                        after: None,
+                        attempts: Vec::new(),
+                        error: Some("window_engine:cancelled".to_string()),
+                        queue_wait,
+                    });
+                    continue;
                 }
+                let cancelled = Arc::clone(&envelope.cancelled);
+                let command = envelope.command;
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    run_command(command, &cancelled)
+                }));
+                let mut reply = match outcome {
+                    Ok(reply) => reply,
+                    Err(_) => WorkerReply {
+                        before: None,
+                        after: None,
+                        attempts: Vec::new(),
+                        error: Some("window_engine:worker_panicked".to_string()),
+                        queue_wait,
+                    },
+                };
+                reply.queue_wait = queue_wait;
+                let _ = envelope.reply.try_send(reply);
             }
             worker_alive.store(false, Ordering::SeqCst);
         });
@@ -387,7 +379,7 @@ fn run_command(command: WorkerCommand, cancelled: &Arc<AtomicBool>) -> WorkerRep
                 // Immediate readback, then poll until the request's deadline.
                 let deadline = Instant::now() + verify_deadline(&operation.request);
                 let mut verified = false;
-                let mut observed = None;
+                let mut observed;
                 loop {
                     match observe(&operation) {
                         Ok(state) => {

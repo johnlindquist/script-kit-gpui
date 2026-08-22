@@ -76,7 +76,7 @@ impl FormFieldShellSpec {
         validation.validate()?;
         match (disabled, disabled_reason.as_ref()) {
             (true, Some(reason)) if reason.trim().is_empty() => {
-                return Err("disabled form fields require a non-empty reason")
+                return Err("disabled form fields require a non-empty reason");
             }
             (true, None) => return Err("disabled form fields require a reason"),
             (false, Some(_)) => return Err("enabled form fields cannot carry a disabled reason"),
@@ -107,9 +107,10 @@ impl FormFieldShellSpec {
         min_height: f32,
         max_height: Option<f32>,
     ) -> Self {
+        let semantic_id = semantic_id.into();
         Self::try_new(
-            semantic_id,
-            label,
+            semantic_id.clone(),
+            label.clone(),
             focused,
             false,
             None,
@@ -118,7 +119,46 @@ impl FormFieldShellSpec {
             min_height,
             max_height,
         )
-        .expect("neutral form field shell must be valid")
+        .unwrap_or_else(|reason| {
+            Self::unavailable(
+                semantic_id,
+                label,
+                multiline,
+                min_height,
+                max_height,
+                reason,
+            )
+        })
+    }
+
+    fn unavailable(
+        semantic_id: SharedString,
+        label: Option<SharedString>,
+        multiline: bool,
+        min_height: f32,
+        max_height: Option<f32>,
+        reason: &'static str,
+    ) -> Self {
+        let min_height = if min_height.is_finite() && min_height > 0.0 {
+            min_height
+        } else {
+            f32::EPSILON
+        };
+        Self {
+            semantic_id: if semantic_id.trim().is_empty() {
+                "invalid-form-field".into()
+            } else {
+                semantic_id
+            },
+            label: label.filter(|value| !value.trim().is_empty()),
+            focused: false,
+            disabled: true,
+            disabled_reason: Some(reason.into()),
+            validation: FormFieldValidation::Neutral,
+            multiline,
+            min_height,
+            max_height: max_height.filter(|value| value.is_finite() && *value >= min_height),
+        }
     }
 
     pub(crate) fn supporting_message(&self) -> Option<&SharedString> {
@@ -288,9 +328,11 @@ pub(crate) fn menu_syntax_form_field_shell_spec(
     } else {
         (metrics.menu_syntax_single_line_height_px(), None)
     };
+    let semantic_id: SharedString = format!("handler-form:{target}:{}", field.id).into();
+    let label: Option<SharedString> = Some(field.label.clone().into());
     let mut spec = FormFieldShellSpec::try_new(
-        format!("handler-form:{target}:{}", field.id),
-        Some(field.label.clone().into()),
+        semantic_id.clone(),
+        label.clone(),
         field.focused,
         false,
         None,
@@ -299,7 +341,16 @@ pub(crate) fn menu_syntax_form_field_shell_spec(
         min_height,
         max_height,
     )
-    .expect("menu-syntax form field shell must be valid");
+    .unwrap_or_else(|reason| {
+        FormFieldShellSpec::unavailable(
+            semantic_id,
+            label,
+            field.multiline,
+            min_height,
+            max_height,
+            reason,
+        )
+    });
     apply_form_field_shell_test_fixture(&mut spec);
     spec
 }
@@ -341,6 +392,18 @@ mod tests {
         assert_eq!(spec.validation.status_kind(), "neutral");
         assert!(spec.supporting_message().is_none());
         assert!(spec.editable());
+    }
+
+    #[test]
+    fn invalid_neutral_field_becomes_disabled_without_panicking() {
+        let field = FormFieldShellSpec::neutral("", Some(" ".into()), true, false, f32::NAN, None);
+        assert_eq!(field.semantic_id.as_ref(), "invalid-form-field");
+        assert!(field.disabled);
+        assert!(!field.focused);
+        assert!(field.disabled_reason.is_some());
+        assert!(field.label.is_none());
+        assert!(field.min_height.is_finite());
+        assert!(field.min_height > 0.0);
     }
 
     #[test]

@@ -870,11 +870,12 @@ pub fn coerce_selection(rows: &[GroupedListItem], ix: usize) -> Option<usize> {
 ///
 #[derive(Clone, Debug)]
 pub struct GroupedListState {
-    /// Set of indices that are headers (for O(1) lookup)
+    /// Set of indices that are inert chrome/status rows (for O(1) lookup).
+    /// The legacy `is_header` accessor retains its historical public name.
     header_indices: std::collections::HashSet<usize>,
     /// Total number of visual items (headers + entries)
     pub total_items: usize,
-    /// Index of first selectable item (skips leading header)
+    /// Index of the first selectable item, or zero when no item is selectable.
     pub first_selectable: usize,
 }
 impl GroupedListState {
@@ -907,15 +908,15 @@ impl GroupedListState {
         let mut header_indices = std::collections::HashSet::new();
 
         for (idx, item) in items.iter().enumerate() {
-            if matches!(
-                item,
-                GroupedListItem::SectionHeader(..) | GroupedListItem::ReservedSectionSlot
-            ) {
+            if !grouped_list_item_eligibility(item).selectable {
                 header_indices.insert(idx);
             }
         }
 
-        let first_selectable = if header_indices.contains(&0) { 1 } else { 0 };
+        let first_selectable = items
+            .iter()
+            .position(|item| grouped_list_item_eligibility(item).selectable)
+            .unwrap_or(0);
 
         Self {
             header_indices,
@@ -973,6 +974,85 @@ impl GroupedListState {
         self.header_indices.len()
     }
 }
+
+#[cfg(test)]
+mod grouped_list_state_tests {
+    use super::{GroupedListItem, GroupedListState, SourceChipStatusKind, SourceChipStatusRow};
+
+    fn loading_status() -> GroupedListItem {
+        GroupedListItem::Status(SourceChipStatusRow {
+            source: crate::menu_syntax::RootUnifiedSourceFilter::BrowserHistory,
+            source_name: "Browser History".to_owned(),
+            status_kind: SourceChipStatusKind::Loading,
+            label: "Loading browser history".to_owned(),
+            shown: 0,
+            loaded: 0,
+            total: None,
+        })
+    }
+
+    #[test]
+    fn first_selectable_skips_all_inert_prefix_rows() {
+        let rows = vec![
+            GroupedListItem::ReservedSectionSlot,
+            GroupedListItem::SectionHeader("Loading".to_owned(), None),
+            loading_status(),
+            GroupedListItem::SectionHeader("Commands".to_owned(), None),
+            GroupedListItem::Item(0),
+        ];
+        let state = GroupedListState::from_items(&rows);
+
+        assert_eq!(state.first_selectable, 4);
+        for index in 0..4 {
+            assert!(state.is_header(index), "row {index} is inert");
+        }
+        assert!(!state.is_header(4));
+    }
+
+    #[test]
+    fn navigation_skips_interleaved_status_and_headers() {
+        let rows = vec![
+            GroupedListItem::SectionHeader("First".to_owned(), None),
+            GroupedListItem::Item(0),
+            loading_status(),
+            GroupedListItem::SectionHeader("Second".to_owned(), None),
+            GroupedListItem::ReservedSectionSlot,
+            GroupedListItem::Item(1),
+            loading_status(),
+            GroupedListItem::Item(2),
+        ];
+        let state = GroupedListState::from_items(&rows);
+
+        assert_eq!(state.first_selectable, 1);
+        assert_eq!(state.next_selectable(1), Some(5));
+        assert_eq!(state.next_selectable(5), Some(7));
+        assert_eq!(state.next_selectable(7), None);
+        assert_eq!(state.prev_selectable(7), Some(5));
+        assert_eq!(state.prev_selectable(5), Some(1));
+        assert_eq!(state.prev_selectable(1), None);
+    }
+
+    #[test]
+    fn empty_and_inert_only_lists_preserve_zero_fallback() {
+        let empty = GroupedListState::from_items(&[]);
+        assert_eq!(empty.first_selectable, 0);
+        assert_eq!(empty.next_selectable(0), None);
+
+        let rows = vec![
+            GroupedListItem::ReservedSectionSlot,
+            GroupedListItem::SectionHeader("Loading".to_owned(), None),
+            loading_status(),
+        ];
+        let inert = GroupedListState::from_items(&rows);
+        assert_eq!(inert.first_selectable, 0);
+        assert_eq!(inert.next_selectable(0), None);
+        assert_eq!(inert.prev_selectable(2), None);
+
+        let grouped = GroupedListState::from_groups(&[("empty", 0), ("ready", 2)]);
+        assert_eq!(grouped.first_selectable, 1);
+    }
+}
+
 /// Pre-computed colors for ListItem rendering
 ///
 /// This struct holds the primitive color values needed for list item rendering,
@@ -1908,21 +1988,12 @@ impl RenderOnce for ListItem {
             row_states
                 .disabled_selected
                 .background_rgba
-                .expect("selected disabled main-menu rows always have a background")
+                .unwrap_or_default()
         } else {
-            row_states
-                .active
-                .background_rgba
-                .expect("active main-menu rows always have a background")
+            row_states.active.background_rgba.unwrap_or_default()
         })
         .into();
-        let hover_bg: Hsla = rgba(
-            row_states
-                .hover
-                .background_rgba
-                .expect("hovered main-menu rows always have a background"),
-        )
-        .into();
+        let hover_bg: Hsla = rgba(row_states.hover.background_rgba.unwrap_or_default()).into();
 
         // Icon element (if present) - displayed on the left
         // Supports both emoji strings and PNG image data

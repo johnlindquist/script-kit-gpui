@@ -306,6 +306,10 @@ impl NotesEntryReveal {
         true
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the locked Notes glass calibration records every measured native lifecycle field explicitly"
+    )]
     fn record_native_configuration(
         &mut self,
         window_number: i64,

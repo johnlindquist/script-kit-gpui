@@ -11,12 +11,20 @@ use crate::ui::chrome;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NonListDensity {
+    #[allow(
+        dead_code,
+        reason = "the separately compiled root-list renderer selects compact menu-syntax density"
+    )]
     Compact,
     Comfortable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NonListCompositionOwner {
+    #[allow(
+        dead_code,
+        reason = "the separately compiled root-list renderer owns menu-syntax rich composition"
+    )]
     MenuSyntax,
     About,
 }

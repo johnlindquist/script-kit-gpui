@@ -429,6 +429,10 @@ pub(crate) fn route_key_to_confirm_popup(key: &str, cx: &mut App) -> bool {
     consume_main_window_key_while_confirm_open(key, &gpui::Modifiers::default(), cx)
 }
 
+#[allow(
+    dead_code,
+    reason = "legacy confirm automation retains this compatibility result adapter"
+)]
 pub(crate) fn send_confirm_result(confirmed: bool) {
     send_parent_dialog_result(if confirmed {
         ParentDialogResult::Primary
@@ -450,6 +454,10 @@ pub(crate) fn send_parent_dialog_result(result: ParentDialogResult) {
 /// Close an action dialog after its owner has completed without treating the
 /// close as a user dismissal. This resolves the parent task but invokes none
 /// of the primary, secondary, or dismiss callbacks.
+#[allow(
+    dead_code,
+    reason = "the separately compiled application binary owns Agent Chat parent-dialog cleanup"
+)]
 pub(crate) fn close_parent_action_dialog_programmatically(cx: &mut App) {
     send_parent_dialog_result(ParentDialogResult::ProgrammaticClose);
     close_confirm_window(cx);

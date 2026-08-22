@@ -2,10 +2,10 @@
 //!
 //! `State + Event → (State, Vec<Command>)` — no side effects, no AppKit, no GPUI.
 
-// Wired up but not yet called from production code — Task #3 (dictation
-// migration) will connect these. Allow dead_code until then.
-#[allow(dead_code)]
+// Production calls dispatch through `app_impl/window_orchestrator_bridge.rs`;
+// keeping the reducer pure lets every transition be proved without a window.
 pub mod executor;
+pub mod interaction;
 
 #[cfg(test)]
 mod tests;

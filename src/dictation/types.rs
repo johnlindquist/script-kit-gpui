@@ -726,6 +726,10 @@ impl DictationTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the public dictation phase carries its typed recovery state directly across existing overlay, runtime, receipt, and test boundaries"
+)]
 pub enum DictationSessionPhase {
     Idle,
     Recording,

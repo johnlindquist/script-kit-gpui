@@ -11,6 +11,7 @@ pub(crate) struct InlineDropdownColors {
 }
 
 impl InlineDropdownColors {
+    #[cfg(test)]
     pub(crate) fn from_theme(theme: &crate::theme::Theme) -> Self {
         let chrome = crate::theme::AppChromeColors::from_theme(theme);
         Self {

@@ -62,12 +62,15 @@ pub(crate) use model::{Note, NoteCartItem, NoteCartItemPayload, NoteId};
 #[allow(unused_imports)]
 pub(crate) use storage::{
     count_active_notes_with_tag, delete_note_cart_item, delete_note_cart_items,
-    delete_note_permanently, get_all_notes, get_deleted_notes, get_note, get_note_aliases,
-    get_note_backlink_count, get_note_backlinks, get_note_outbound_link_count, get_note_tags,
-    init_notes_db, list_note_cart_items, list_note_cart_items_deduped, note_file_path,
-    notes_brain_days_dir, root_notes_query_is_eligible, save_note, save_note_cart_item,
-    search_notes, search_root_notes_meta, search_root_notes_meta_cached,
-    search_root_notes_meta_direct, NoteBacklinkSummary, RootNoteSearchHit, RootNotesSectionOptions,
+    delete_note_permanently, discard_root_notes_search_refresh, finish_root_notes_search_refresh,
+    get_all_notes, get_deleted_notes, get_note, get_note_aliases, get_note_backlink_count,
+    get_note_backlinks, get_note_outbound_link_count, get_note_tags, init_notes_db,
+    list_note_cart_items, list_note_cart_items_deduped, note_file_path, notes_brain_days_dir,
+    read_root_notes_search_snapshot, root_notes_query_is_eligible,
+    root_notes_search_cache_is_fresh, save_note, save_note_cart_item, search_notes,
+    search_root_notes_meta, search_root_notes_meta_cached, search_root_notes_meta_direct,
+    try_begin_root_notes_search_refresh, NoteBacklinkSummary, RootNoteSearchHit,
+    RootNotesSearchRefresh, RootNotesSearchSnapshot, RootNotesSectionOptions,
 };
 
 /// Tag that promotes a note to a standing agent instruction.

@@ -681,48 +681,9 @@ impl ScriptListApp {
                                     "STDIN",
                                     "SimulateKey: Escape - close menu-syntax picker, clear filter, go back, or hide",
                                 );
-                                if view.try_cancel_script_list_attachment_portal_escape(
-                                    "simulate_key",
-                                    ctx,
-                                ) {
-                                    return;
-                                }
-                                if view.menu_syntax_object_selector_owns_main_keyboard()
-                                    && view.apply_menu_syntax_object_selector_intent(
-                                        crate::menu_syntax::InlinePickerKeyIntent::Close,
-                                        window,
-                                        ctx,
-                                    )
+                                if view.apply_shared_launcher_escape("simulate_key", window, ctx)
+                                    == crate::window_orchestrator::interaction::LauncherEscapeDecision::DismissMain
                                 {
-                                    return;
-                                }
-                                if view.menu_syntax_trigger_picker_owns_main_keyboard() {
-                                    if view.menu_syntax_filter_only_escape_should_clear() {
-                                        view.clear_filter(window, ctx);
-                                        return;
-                                    }
-                                    if view.apply_menu_syntax_trigger_picker_intent(
-                                        crate::menu_syntax::InlinePickerKeyIntent::Close,
-                                        window,
-                                        ctx,
-                                    ) {
-                                        return;
-                                    }
-                                }
-                                if view.script_list_escape_should_clear_visible_filter(ctx) {
-                                    view.clear_filter(window, ctx);
-                                } else if view.opened_from_main_menu {
-                                    view.clear_hidden_script_list_filter_before_escape_close(
-                                        window, ctx,
-                                    );
-                                    // Mini main window or other opened-from-menu view:
-                                    // delegate to go_back_or_close which restores Full
-                                    // mode and resizes the window back to full width.
-                                    view.go_back_or_close(window, ctx);
-                                } else {
-                                    view.clear_hidden_script_list_filter_before_escape_close(
-                                        window, ctx,
-                                    );
                                     // Save window position for the current display BEFORE hiding
                                     if let Some((x, y, width, height)) =
                                         platform::get_main_window_bounds()
@@ -2026,7 +1987,7 @@ impl ScriptListApp {
                             "SimulateKey: Cmd+N - start new Agent Chat thread (retain current)",
                         );
                         entity_clone.update(ctx, |chat, cx| chat.start_new_thread(cx));
-                    } else if ({
+                    } else if {
                         // Spine projection in Agent Chat owns Up/Down for row selection
                         // and Escape to dismiss. These short-circuit before the
                         // legacy actions / cancel-streaming paths.
@@ -2060,7 +2021,7 @@ impl ScriptListApp {
                             );
                         }
                         spine_handled
-                    }) {
+                    } {
                         // Spine handled it; no further action.
                     } else if view.show_actions_popup && key_lower == "escape" {
                         logging::log(
@@ -2215,16 +2176,10 @@ impl ScriptListApp {
                     }
                 }
                 AppView::FlowSessionView { .. } => {
-                    if view.try_handle_flow_session_copy_shortcut(
-                        &key_lower,
-                        has_cmd,
-                        has_shift,
-                        ctx,
-                    ) {
-                        logging::log(
-                            "STDIN",
-                            "SimulateKey: Cmd+Shift+C - copy Flow response",
-                        );
+                    if view
+                        .try_handle_flow_session_copy_shortcut(&key_lower, has_cmd, has_shift, ctx)
+                    {
+                        logging::log("STDIN", "SimulateKey: Cmd+Shift+C - copy Flow response");
                     } else if has_cmd && has_shift && key_lower == "d" {
                         logging::log(
                             "STDIN",

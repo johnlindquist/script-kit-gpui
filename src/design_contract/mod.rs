@@ -188,6 +188,10 @@ impl BundleBuilder {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the exporter accepts the seven canonical fields of each persisted design-token record"
+    )]
     fn add(
         &mut self,
         id: &str,
@@ -1178,7 +1182,7 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         row_states
             .hover
             .background_rgba
-            .expect("main-menu hover rows have a fill"),
+            .ok_or_else(|| "main-menu hover rows must provide a background fill".to_string())?,
         &["resolved.mainMenu.row.hoverBackground"],
     );
     b.resolved_color(
@@ -1187,7 +1191,7 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         row_states
             .active
             .background_rgba
-            .expect("main-menu active rows have a fill"),
+            .ok_or_else(|| "main-menu active rows must provide a background fill".to_string())?,
         &["resolved.mainMenu.row.selectedBackground"],
     );
     b.resolved_color(
@@ -1262,8 +1266,7 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
     // no context header, footerless by contract.
     let actions_fixture_height = crate::actions::resolved_actions_popup_height(
         &popup,
-        5,
-        3,
+        (5, 3),
         false,
         false,
         false,
@@ -1465,7 +1468,7 @@ pub fn checked_in_design_bundle() -> Result<DesignTokenBundle, String> {
         ),
         (
             "actionsDialog.contract.footerVisible",
-            (crate::actions::constants::ACTIONS_DIALOG_EXPECT_FOOTER_HINT_COUNT > 0).to_string(),
+            (crate::actions::constants::ACTIONS_DIALOG_EXPECT_FOOTER_HINT_COUNT != 0).to_string(),
             "ACTIONS_DIALOG_EXPECT_FOOTER_HINT_COUNT",
         ),
     ] {
@@ -4918,7 +4921,13 @@ mod tests {
         let popup = crate::designs::base_actions_popup_theme();
         assert_eq!(
             crate::actions::resolved_actions_popup_height(
-                &popup, 5, 3, false, false, false, 400.0, 36.0
+                &popup,
+                (5, 3),
+                false,
+                false,
+                false,
+                400.0,
+                36.0
             ),
             300.0
         );

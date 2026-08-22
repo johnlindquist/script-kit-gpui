@@ -362,8 +362,19 @@ impl InfoGuidanceItem {
         action_id: &'static str,
         label: impl Into<SharedString>,
     ) -> Self {
-        Self::try_shortcut(raw, action_id, label)
-            .expect("InfoGuidanceItem::shortcut requires an executable keyboard cue")
+        let label = label.into();
+        Self::try_shortcut(raw, action_id, label.clone()).unwrap_or_else(|_| Self {
+            cue: InfoCue::Label {
+                text: raw.into(),
+                semantic_id: if action_id.trim().is_empty() {
+                    "invalid-guidance-cue"
+                } else {
+                    action_id
+                },
+            },
+            label,
+            detail: None,
+        })
     }
 
     pub(crate) fn trigger(
@@ -1595,6 +1606,15 @@ mod tests {
             InfoGuidanceItem::try_shortcut("⌘K", "", "Missing action"),
             Err(InfoCueValidationError::MissingActionId)
         );
+    }
+
+    #[test]
+    fn invalid_shortcut_constructor_becomes_inert_without_panicking() {
+        let item = InfoGuidanceItem::shortcut("/", "", "Invalid action");
+        assert_eq!(item.cue.kind(), "label");
+        assert_eq!(item.cue.semantic_id(), "invalid-guidance-cue");
+        assert!(item.cue.action_id().is_none());
+        assert!(item.cue.canonical_shortcut().is_none());
     }
 
     #[test]

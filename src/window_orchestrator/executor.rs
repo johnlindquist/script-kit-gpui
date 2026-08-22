@@ -5,11 +5,15 @@
 //! order because ordering matters for correctness (e.g., conceal main BEFORE
 //! opening the dictation overlay).
 
-use super::{FocusToken, SurfaceId, WindowCommand};
+use super::{SurfaceId, WindowCommand};
 
 /// Execute a batch of window commands in order.
 ///
 /// Must be called from the main thread (GPUI foreground executor).
+#[allow(
+    dead_code,
+    reason = "the separately compiled application binary owns the orchestrator bridge"
+)]
 pub(crate) fn execute_commands(commands: &[WindowCommand], cx: &mut gpui::App) {
     for command in commands {
         execute_single(command, cx);
@@ -187,23 +191,13 @@ fn execute_single(command: &WindowCommand, cx: &mut gpui::App) {
     }
 }
 
-/// Convert a `FocusToken` to the corresponding `FocusTarget` used by `ScriptListApp`.
-///
-/// Returns `None` for tokens that don't map to a main-window focus target
-/// (e.g., `NotesEditor`, `DetachedAiComposer`, `None`).
-pub(crate) fn focus_token_to_focus_target(token: &FocusToken) -> Option<&'static str> {
-    match token {
-        FocusToken::MainFilter => Some("MainFilter"),
-        FocusToken::PromptInput => Some("PromptInput"),
-        FocusToken::ChatComposer => Some("ChatComposer"),
-        FocusToken::TermInput => Some("TermInput"),
-        FocusToken::NotesEditor | FocusToken::DetachedAiComposer | FocusToken::None => None,
-    }
-}
-
 /// Convert from the dictation module's `DictationTarget` to the orchestrator's
 /// `DictationTarget`.  The two types are structurally identical but live in
 /// different modules to keep the orchestrator free of dictation-module dependencies.
+#[allow(
+    dead_code,
+    reason = "the separately compiled application binary owns built-in dictation target execution"
+)]
 pub(crate) fn to_orchestrator_target(
     target: &crate::dictation::DictationTarget,
 ) -> super::DictationTarget {

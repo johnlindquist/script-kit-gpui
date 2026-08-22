@@ -5,7 +5,7 @@ use crate::{
 };
 use gpui::{
     div, px, rgb, rgba, Animation, AnimationExt, Div, ElementId, Hsla, IntoElement, ParentElement,
-    Rgba, SharedString, Styled,
+    Styled,
 };
 use std::time::Duration;
 

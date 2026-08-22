@@ -446,7 +446,7 @@ pub(super) fn refresh_from_test_provider() -> Result<RegistrySnapshot> {
         if members.len() < 2 {
             continue;
         }
-        let primary = members
+        let Some(primary) = members
             .iter()
             .find(|id| {
                 live.iter()
@@ -458,7 +458,10 @@ pub(super) fn refresh_from_test_provider() -> Result<RegistrySnapshot> {
                     .find(|id| live.iter().any(|window| window.id == **id && window.main))
             })
             .copied()
-            .unwrap_or_else(|| *members.iter().min().expect("non-empty group"));
+            .or_else(|| members.iter().copied().min())
+        else {
+            continue;
+        };
         for id in members {
             tab_grouped.insert(*id, *id == primary);
         }

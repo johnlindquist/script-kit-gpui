@@ -6,6 +6,10 @@
 
 use gpui::{div, prelude::*, px, rgba, SharedString};
 
+#[allow(
+    dead_code,
+    reason = "the separately compiled day-page renderer mounts this shared back affordance"
+)]
 pub(crate) fn render_back_affordance(
     id: SharedString,
     label: SharedString,

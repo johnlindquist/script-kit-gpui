@@ -117,7 +117,7 @@ pub(super) fn tab_group_primary(members: &[(usize, &AxCorrelationRow)]) -> usize
         .iter()
         .map(|&(index, _)| index)
         .min()
-        .expect("tab group must have members")
+        .unwrap_or_default()
 }
 
 fn proven_tab_group(members: &[(usize, &AxCorrelationRow)]) -> bool {
@@ -436,6 +436,12 @@ mod tests {
         let plain_a = ax(5, "A", bounds);
         let plain_b = ax(5, "B", bounds);
         let members: Vec<(usize, &AxCorrelationRow)> = vec![(1, &plain_b), (0, &plain_a)];
+        assert_eq!(tab_group_primary(&members), 0);
+    }
+
+    #[test]
+    fn empty_tab_group_is_non_panicking_and_never_selects_a_native_window() {
+        let members: Vec<(usize, &AxCorrelationRow)> = Vec::new();
         assert_eq!(tab_group_primary(&members), 0);
     }
 

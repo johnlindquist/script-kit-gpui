@@ -1,5 +1,66 @@
 use super::*;
 
+enum NotesPrivateQueryEvent<'a> {
+    SearchStarted {
+        notes_before: usize,
+        has_unsaved_changes: bool,
+        search_was_focused: bool,
+        selection_before: Option<&'a str>,
+    },
+    ExternalRefreshStarted {
+        note_id: &'a NoteId,
+        has_unsaved_changes: bool,
+    },
+}
+
+fn emit_notes_private_query_event(query: &str, event: NotesPrivateQueryEvent<'_>) {
+    let safe_query = crate::logging::log_private_user_value(query);
+    match event {
+        NotesPrivateQueryEvent::SearchStarted {
+            notes_before,
+            has_unsaved_changes,
+            search_was_focused,
+            selection_before,
+        } => tracing::info!(
+            event = "notes_search_refresh_started",
+            query_bytes = safe_query.raw_bytes,
+            query_sha256 = %safe_query.sha256,
+            notes_before,
+            has_unsaved_changes,
+            search_was_focused,
+            selection_before = %selection_before.unwrap_or("none"),
+            "notes_search_refresh_started"
+        ),
+        NotesPrivateQueryEvent::ExternalRefreshStarted {
+            note_id,
+            has_unsaved_changes,
+        } => tracing::info!(
+            event = "notes_external_mcp_refresh_started",
+            note_id = %note_id,
+            query_bytes = safe_query.raw_bytes,
+            query_sha256 = %safe_query.sha256,
+            has_unsaved_changes,
+            "notes_external_mcp_refresh_started"
+        ),
+    }
+}
+
+fn confirmed_permanent_note_delete_target(
+    confirmed_note_id: Option<NoteId>,
+    confirmation_granted: bool,
+    deleted_notes: &[Note],
+) -> Option<NoteId> {
+    if !confirmation_granted {
+        return None;
+    }
+
+    let confirmed_note_id = confirmed_note_id?;
+    deleted_notes
+        .iter()
+        .find(|note| note.id == confirmed_note_id && note.is_deleted())
+        .map(|note| note.id)
+}
+
 impl NotesApp {
     /// Fetch notes matching a search query, or all notes if the query is blank.
     ///
@@ -21,9 +82,7 @@ impl NotesApp {
 
         storage::search_notes(query)
             .map(|notes| (notes, false))
-            .map_err(|error| {
-                anyhow::anyhow!("Failed to search notes for query {:?}: {error}", query)
-            })
+            .map_err(|error| anyhow::anyhow!("Failed to search notes: {error}"))
     }
 
     pub(super) fn on_search_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -36,22 +95,24 @@ impl NotesApp {
         let selection_before = self.selected_note_id.map(|id| id.as_str().to_string());
 
         self.search_query = query.clone();
+        let safe_query = crate::logging::log_private_user_value(&query);
 
-        tracing::info!(
-            event = "notes_search_refresh_started",
-            query = %query,
-            notes_before = self.notes.len(),
-            has_unsaved_changes = self.has_unsaved_changes,
-            search_was_focused,
-            selection_before = %selection_before.as_deref().unwrap_or("none"),
-            "notes_search_refresh_started"
+        emit_notes_private_query_event(
+            &query,
+            NotesPrivateQueryEvent::SearchStarted {
+                notes_before: self.notes.len(),
+                has_unsaved_changes: self.has_unsaved_changes,
+                search_was_focused,
+                selection_before: selection_before.as_deref(),
+            },
         );
 
         // Save before replacing self.notes so dirty edits are not lost
         if self.has_unsaved_changes && !self.save_current_note() {
             tracing::warn!(
                 event = "notes_search_refresh_blocked",
-                query = %query,
+                query_bytes = safe_query.raw_bytes,
+                query_sha256 = %safe_query.sha256,
                 reason = "save_current_note_failed",
                 "notes_search_refresh_blocked"
             );
@@ -61,10 +122,13 @@ impl NotesApp {
         let (refreshed_notes, used_full_list) = match self.refresh_notes_for_search_query(&query) {
             Ok(result) => result,
             Err(error) => {
+                let safe_error = crate::logging::log_private_user_value(&error.to_string());
                 tracing::error!(
                     event = "notes_search_refresh_failed",
-                    query = %query,
-                    error = %error,
+                    query_bytes = safe_query.raw_bytes,
+                    query_sha256 = %safe_query.sha256,
+                    error_bytes = safe_error.raw_bytes,
+                    error_sha256 = %safe_error.sha256,
                     "notes_search_refresh_failed"
                 );
                 return;
@@ -94,7 +158,8 @@ impl NotesApp {
 
             tracing::info!(
                 event = "notes_search_refresh_completed",
-                query = %query,
+                query_bytes = safe_query.raw_bytes,
+                query_sha256 = %safe_query.sha256,
                 used_full_list,
                 result_count = self.notes.len(),
                 selection_before = %selection_before.as_deref().unwrap_or("none"),
@@ -110,7 +175,8 @@ impl NotesApp {
 
         tracing::info!(
             event = "notes_search_refresh_completed",
-            query = %query,
+            query_bytes = safe_query.raw_bytes,
+            query_sha256 = %safe_query.sha256,
             used_full_list,
             result_count = self.notes.len(),
             selection_before = %selection_before.as_deref().unwrap_or("none"),
@@ -129,12 +195,12 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        tracing::info!(
-            event = "notes_external_mcp_refresh_started",
-            note_id = %changed_note_id,
-            search_query = %self.search_query,
-            has_unsaved_changes = self.has_unsaved_changes,
-            "notes_external_mcp_refresh_started"
+        emit_notes_private_query_event(
+            &self.search_query,
+            NotesPrivateQueryEvent::ExternalRefreshStarted {
+                note_id: &changed_note_id,
+                has_unsaved_changes: self.has_unsaved_changes,
+            },
         );
 
         if self.has_unsaved_changes && !self.save_current_note() {
@@ -191,7 +257,12 @@ impl NotesApp {
 
         // Save to storage
         if let Err(e) = storage::save_note(&note) {
-            tracing::error!(error = %e, "Failed to create note");
+            let safe_error = crate::logging::log_private_user_value(&e.to_string());
+            tracing::error!(
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
+                "Failed to create note"
+            );
             return;
         }
 
@@ -220,7 +291,12 @@ impl NotesApp {
         let id = note.id;
 
         storage::save_note(&note).map_err(|e| {
-            tracing::error!(error = %e, "Failed to create note with content");
+            let safe_error = crate::logging::log_private_user_value(&e.to_string());
+            tracing::error!(
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
+                "Failed to create note with content"
+            );
             anyhow::anyhow!("Failed to create note with content: {e}")
         })?;
 
@@ -248,7 +324,12 @@ impl NotesApp {
         let id = note.id;
 
         if let Err(e) = storage::save_note(&note) {
-            tracing::error!(error = %e, "Failed to create note from clipboard");
+            let safe_error = crate::logging::log_private_user_value(&e.to_string());
+            tracing::error!(
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
+                "Failed to create note from clipboard"
+            );
             return;
         }
 
@@ -358,12 +439,16 @@ impl NotesApp {
         let content = match std::fs::read_to_string(&path) {
             Ok(content) => content,
             Err(error) => {
+                let safe_path = crate::logging::log_private_user_value(&path.display().to_string());
+                let safe_error = crate::logging::log_private_user_value(&error.to_string());
                 tracing::error!(
                     target: "script_kit::notes",
                     event = "notes_day_note_read_failed",
                     date = %date,
-                    path = %path.display(),
-                    error = %error,
+                    path_bytes = safe_path.raw_bytes,
+                    path_sha256 = %safe_path.sha256,
+                    error_bytes = safe_error.raw_bytes,
+                    error_sha256 = %safe_error.sha256,
                 );
                 return;
             }
@@ -621,14 +706,19 @@ impl NotesApp {
                         "notes_delete_confirmed"
                     );
 
-                    if let Some(entity) = weak_notes.upgrade() {
-                        entity.update(cx, |this, cx| {
-                            if is_trash_view {
-                                this.permanently_delete_note(window, cx);
-                            } else {
-                                this.delete_note_by_id(confirm_note_id, window, cx);
-                            }
-                        });
+                    let Some(entity) = weak_notes.upgrade() else {
+                        return;
+                    };
+                    let deleted = entity.update(cx, |this, cx| {
+                        if is_trash_view {
+                            this.permanently_delete_note_by_id(confirm_note_id, window, cx)
+                        } else {
+                            this.delete_note_by_id(confirm_note_id, window, cx);
+                            true
+                        }
+                    });
+                    if !deleted {
+                        return;
                     }
 
                     let msg = if is_trash_view {
@@ -685,7 +775,12 @@ impl NotesApp {
             note.soft_delete();
 
             if let Err(e) = storage::save_note(&note) {
-                tracing::error!(error = %e, "Failed to delete note");
+                let safe_error = crate::logging::log_private_user_value(&e.to_string());
+                tracing::error!(
+                    error_bytes = safe_error.raw_bytes,
+                    error_sha256 = %safe_error.sha256,
+                    "Failed to delete note"
+                );
             }
 
             // Move to deleted notes
@@ -725,9 +820,37 @@ impl NotesApp {
             return;
         };
 
+        self.permanently_delete_note_by_id(id, window, cx);
+    }
+
+    /// Permanently delete only the exact, still-trashed note that was confirmed.
+    fn permanently_delete_note_by_id(
+        &mut self,
+        confirmed_note_id: NoteId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(id) = confirmed_permanent_note_delete_target(
+            Some(confirmed_note_id),
+            true,
+            &self.deleted_notes,
+        ) else {
+            tracing::warn!(
+                event = "notes_permanent_delete_target_rejected",
+                note_id = %confirmed_note_id,
+                "Confirmed note is missing from Trash or is no longer deleted"
+            );
+            return false;
+        };
+
         if let Err(e) = storage::delete_note_permanently(id) {
-            tracing::error!(error = %e, "Failed to permanently delete note");
-            return;
+            let safe_error = crate::logging::log_private_user_value(&e.to_string());
+            tracing::error!(
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
+                "Failed to permanently delete note"
+            );
+            return false;
         }
 
         self.deleted_notes.retain(|n| n.id != id);
@@ -746,6 +869,7 @@ impl NotesApp {
         self.request_focus_surface(self.primary_focus_surface(), window, cx);
         info!(note_id = %id, "Note permanently deleted");
         cx.notify();
+        true
     }
 
     /// Restore the selected note from trash
@@ -756,7 +880,12 @@ impl NotesApp {
                 note.restore();
 
                 if let Err(e) = storage::save_note(&note) {
-                    tracing::error!(error = %e, "Failed to restore note");
+                    let safe_error = crate::logging::log_private_user_value(&e.to_string());
+                    tracing::error!(
+                        error_bytes = safe_error.raw_bytes,
+                        error_sha256 = %safe_error.sha256,
+                        "Failed to restore note"
+                    );
                     self.deleted_notes.insert(idx, note);
                     return;
                 }
@@ -847,6 +976,148 @@ impl NotesApp {
 #[cfg(test)]
 mod notes_search_and_delete_regression_tests {
     use std::fs;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct NotesMemoryWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct NotesMemoryGuard<'a>(&'a Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for NotesMemoryGuard<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for NotesMemoryWriter {
+        type Writer = NotesMemoryGuard<'a>;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            NotesMemoryGuard(&self.0)
+        }
+    }
+
+    #[test]
+    fn production_notes_search_events_never_expose_private_query() {
+        let secret = "notes-canary-medical-record-93841 /vault/secret-note.txt";
+        let note_id = super::NoteId::new();
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(NotesMemoryWriter(buffer.clone()))
+            .event_format(crate::logging::JsonWithCorrelation)
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            super::emit_notes_private_query_event(
+                secret,
+                super::NotesPrivateQueryEvent::SearchStarted {
+                    notes_before: 3,
+                    has_unsaved_changes: false,
+                    search_was_focused: true,
+                    selection_before: None,
+                },
+            );
+            super::emit_notes_private_query_event(
+                secret,
+                super::NotesPrivateQueryEvent::ExternalRefreshStarted {
+                    note_id: &note_id,
+                    has_unsaved_changes: false,
+                },
+            );
+        });
+
+        let output = String::from_utf8(
+            buffer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        )
+        .expect("Notes tracing should emit valid JSON bytes");
+
+        assert!(output.contains("notes_search_refresh_started"));
+        assert!(output.contains("notes_external_mcp_refresh_started"));
+        assert!(output.contains(&crate::logging::log_private_user_value(secret).sha256));
+        assert!(output.contains(&secret.len().to_string()));
+        assert!(!output.contains(secret));
+        assert!(!output.contains("medical-record-93841"));
+        assert!(!output.contains("secret-note.txt"));
+    }
+
+    #[test]
+    fn confirmed_permanent_delete_keeps_original_target_after_selection_changes() {
+        let mut confirmed_note = super::Note::with_content("Originally confirmed note");
+        confirmed_note.soft_delete();
+        let confirmed_id = confirmed_note.id;
+
+        let mut newly_selected_note = super::Note::with_content("Different selected note");
+        newly_selected_note.soft_delete();
+        let changed_selection_id = newly_selected_note.id;
+
+        let target = super::confirmed_permanent_note_delete_target(
+            Some(confirmed_id),
+            true,
+            &[confirmed_note, newly_selected_note],
+        );
+
+        assert_eq!(target, Some(confirmed_id));
+        assert_ne!(target, Some(changed_selection_id));
+    }
+
+    #[test]
+    fn confirmed_permanent_delete_refuses_cancellation_and_missing_target() {
+        let mut trashed_note = super::Note::with_content("Still in Trash");
+        trashed_note.soft_delete();
+        let trashed_id = trashed_note.id;
+
+        assert_eq!(
+            super::confirmed_permanent_note_delete_target(
+                Some(trashed_id),
+                false,
+                std::slice::from_ref(&trashed_note),
+            ),
+            None
+        );
+        assert_eq!(
+            super::confirmed_permanent_note_delete_target(
+                None,
+                true,
+                std::slice::from_ref(&trashed_note),
+            ),
+            None
+        );
+        assert_eq!(
+            super::confirmed_permanent_note_delete_target(
+                Some(super::NoteId::new()),
+                true,
+                std::slice::from_ref(&trashed_note),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn confirmed_permanent_delete_refuses_restored_note() {
+        let restored_note = super::Note::with_content("Already restored");
+
+        assert_eq!(
+            super::confirmed_permanent_note_delete_target(
+                Some(restored_note.id),
+                true,
+                std::slice::from_ref(&restored_note),
+            ),
+            None
+        );
+    }
 
     fn extract_section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
         source

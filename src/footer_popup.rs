@@ -465,6 +465,18 @@ pub(crate) struct MainWindowFooterConfig {
     pub left_info: Option<FooterLeftInfo>,
 }
 
+/// Fail-closed authorization for an action on the *currently presented*
+/// footer. Native callbacks can outlive a surface transition, so the mere
+/// existence of a global action variant never grants dispatch authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FooterActionDispatchAuthorization<'a> {
+    PresentedButton,
+    PresentedLeftAffordance,
+    PresentedHeaderAffordance,
+    Disabled { reason: Option<&'a str> },
+    NotPresented,
+}
+
 impl MainWindowFooterConfig {
     pub(crate) fn new(surface: &'static str, mut buttons: Vec<FooterButtonConfig>) -> Self {
         let mut shortcut_counts = BTreeMap::<String, usize>::new();
@@ -570,6 +582,46 @@ impl MainWindowFooterConfig {
         self.buttons
             .iter()
             .find(|descriptor| descriptor.action == action)
+    }
+
+    /// Authorize only a live enabled button, an exact rendered left marker, or
+    /// a separately validated header cwd/model control. A disabled button
+    /// always wins over another possible affordance for the same action.
+    pub(crate) fn action_dispatch_authorization(
+        &self,
+        action: FooterAction,
+        live_header_affordance: bool,
+    ) -> FooterActionDispatchAuthorization<'_> {
+        if let Some(descriptor) = self.descriptor_for_action(action) {
+            return if descriptor.enabled && descriptor.disabled_reason.is_none() {
+                FooterActionDispatchAuthorization::PresentedButton
+            } else {
+                FooterActionDispatchAuthorization::Disabled {
+                    reason: descriptor
+                        .disabled_reason
+                        .as_deref()
+                        .map(|reason| &**reason),
+                }
+            };
+        }
+
+        if let Some(info) = self.left_info.as_ref() {
+            let exact_marker = info.action == Some(action);
+            let cwd_chip = action == FooterAction::Cwd && info.cwd_chip.is_some();
+            let model_chip = action == FooterAction::AgentModel
+                && info.profile_name.is_some()
+                && !info.model_name.trim().is_empty();
+            if exact_marker || cwd_chip || model_chip {
+                return FooterActionDispatchAuthorization::PresentedLeftAffordance;
+            }
+        }
+
+        if live_header_affordance && matches!(action, FooterAction::Cwd | FooterAction::AgentModel)
+        {
+            return FooterActionDispatchAuthorization::PresentedHeaderAffordance;
+        }
+
+        FooterActionDispatchAuthorization::NotPresented
     }
 
     pub(crate) fn has_canonical_shortcut_candidate(&self, canonical: &str) -> bool {
@@ -901,18 +953,8 @@ impl GpuiFooterOverlay {
             // fill as the trailing action buttons, with label/keycap/glyph
             // brightening through the shared footer-action-button group.
             let metrics = crate::components::footer_chrome::current_main_menu_footer_metrics();
-            let hover_bg = rgba(
-                row_states
-                    .hover
-                    .background_rgba
-                    .expect("main-menu hover row state always provides a background"),
-            );
-            let active_bg = rgba(
-                row_states
-                    .active
-                    .background_rgba
-                    .expect("main-menu active row state always provides a background"),
-            );
+            let hover_bg = rgba(row_states.hover.background_rgba.unwrap_or_default());
+            let active_bg = rgba(row_states.active.background_rgba.unwrap_or_default());
             row = row
                 .h(px(crate::components::footer_chrome::footer_button_height(
                     crate::components::footer_chrome::current_main_menu_footer_height(),
@@ -943,10 +985,7 @@ impl GpuiFooterOverlay {
         }
 
         if info.selected && interactive {
-            row =
-                row.bg(rgba(row_states.active.background_rgba.expect(
-                    "main-menu active row state always provides a background",
-                )));
+            row = row.bg(rgba(row_states.active.background_rgba.unwrap_or_default()));
         } else if info.selected {
             let accent = theme.colors.accent.selected;
             row = row.bg(rgba((accent << 8) | 0x18));
@@ -1079,18 +1118,8 @@ impl GpuiFooterOverlay {
         } else {
             SharedString::from("")
         };
-        let selected_bg = rgba(
-            row_states
-                .active
-                .background_rgba
-                .expect("main-menu active row state always provides a background"),
-        );
-        let hover_bg = rgba(
-            row_states
-                .hover
-                .background_rgba
-                .expect("main-menu hover row state always provides a background"),
-        );
+        let selected_bg = rgba(row_states.active.background_rgba.unwrap_or_default());
+        let hover_bg = rgba(row_states.hover.background_rgba.unwrap_or_default());
         let active_bg = selected_bg;
         let item_height = crate::components::footer_chrome::footer_button_height(
             crate::components::footer_chrome::current_main_menu_footer_height(),
@@ -2926,6 +2955,7 @@ unsafe fn float_footer_child_window(ns_window: id) -> id {
 /// - Any pixels left in the main window's strip (button text, keycaps) put
 ///   those rows back into the window-server shadow shape, which bridges them
 ///   into a rectangular rim around the strip.
+///
 /// Moving the whole footer out empties the strip completely: the main
 /// window's shadow hugs the container, and the footer's glass samples the
 /// desktop directly. The child has no shadow of its own.
@@ -5677,8 +5707,6 @@ unsafe fn refresh_footer_button_visual_states_with_theme(
     view: id,
     visual_theme: NativeFooterVisualTheme,
 ) {
-    use objc::{msg_send, sel, sel_impl};
-
     if view == nil {
         return;
     }
@@ -5993,10 +6021,10 @@ unsafe fn measure_native_footer_lanes(
     let count: usize = msg_send![subviews, count];
     let mut left_end = 0.0_f64;
     let mut trailing_start = bounds.size.width;
-    for index in 0..count.min(buttons.len()) {
+    for (index, button) in buttons.iter().enumerate().take(count) {
         let item: id = msg_send![subviews, objectAtIndex: index];
         let frame: NSRect = msg_send![item, frame];
-        if is_footer_left_pinned_button(&buttons[index]) {
+        if is_footer_left_pinned_button(button) {
             left_end = left_end.max(frame.origin.x + frame.size.width);
         } else {
             trailing_start = trailing_start.min(frame.origin.x);
@@ -7354,6 +7382,128 @@ mod footer_layout_tests {
     }
 
     #[test]
+    fn footer_dispatch_authorization_requires_enabled_current_button() {
+        let config = super::MainWindowFooterConfig::new(
+            "script_list",
+            vec![
+                FooterButtonConfig::new(FooterAction::Run, "↵", "Run"),
+                FooterButtonConfig::new(FooterAction::Ai, "⌘↵", "Agent")
+                    .disabled_reason("Resolve the permission request first."),
+            ],
+        );
+
+        assert_eq!(
+            config.action_dispatch_authorization(FooterAction::Run, false),
+            super::FooterActionDispatchAuthorization::PresentedButton
+        );
+        assert_eq!(
+            config.action_dispatch_authorization(FooterAction::Ai, true),
+            super::FooterActionDispatchAuthorization::Disabled {
+                reason: Some("Resolve the permission request first."),
+            }
+        );
+    }
+
+    #[test]
+    fn footer_dispatch_authorization_rejects_stale_invisible_sensitive_actions() {
+        let previous = super::MainWindowFooterConfig::new(
+            "previous_surface",
+            vec![
+                FooterButtonConfig::new(FooterAction::Run, "↵", "Run"),
+                FooterButtonConfig::new(FooterAction::Ai, "⌘↵", "Agent"),
+                FooterButtonConfig::new(FooterAction::Stop, "⌘.", "Stop"),
+            ],
+        );
+        let current = super::MainWindowFooterConfig::new(
+            "current_surface",
+            vec![FooterButtonConfig::new(FooterAction::Close, "Esc", "Back")],
+        );
+
+        for action in [FooterAction::Run, FooterAction::Ai, FooterAction::Stop] {
+            assert_eq!(
+                previous.action_dispatch_authorization(action, false),
+                super::FooterActionDispatchAuthorization::PresentedButton,
+                "old surface displayed {action:?}"
+            );
+            assert_eq!(
+                current.action_dispatch_authorization(action, false),
+                super::FooterActionDispatchAuthorization::NotPresented,
+                "a stale callback must not execute {action:?} on the new surface"
+            );
+        }
+    }
+
+    #[test]
+    fn footer_dispatch_authorization_preserves_only_exact_live_left_affordances() {
+        let mut config = super::MainWindowFooterConfig::new("script_list", Vec::new());
+        config.left_info = Some(super::FooterLeftInfo {
+            model_name: "Discover tips".to_owned(),
+            action: Some(FooterAction::Tips),
+            ..Default::default()
+        });
+        assert_eq!(
+            config.action_dispatch_authorization(FooterAction::Tips, false),
+            super::FooterActionDispatchAuthorization::PresentedLeftAffordance
+        );
+        assert_eq!(
+            config.action_dispatch_authorization(FooterAction::Ai, false),
+            super::FooterActionDispatchAuthorization::NotPresented
+        );
+
+        config.left_info = Some(super::FooterLeftInfo {
+            model_name: "Selected model".to_owned(),
+            profile_name: Some("Selected agent".to_owned()),
+            cwd_chip: Some(super::FooterCwdChip {
+                label: "Project".to_owned(),
+                icon_token: "folder".to_owned(),
+                key: None,
+                tooltip: None,
+            }),
+            ..Default::default()
+        });
+        for action in [FooterAction::Cwd, FooterAction::AgentModel] {
+            assert_eq!(
+                config.action_dispatch_authorization(action, false),
+                super::FooterActionDispatchAuthorization::PresentedLeftAffordance
+            );
+        }
+        assert_eq!(
+            config.action_dispatch_authorization(FooterAction::Tips, false),
+            super::FooterActionDispatchAuthorization::NotPresented
+        );
+
+        config.left_info.as_mut().unwrap().model_name.clear();
+        assert_eq!(
+            config.action_dispatch_authorization(FooterAction::AgentModel, false),
+            super::FooterActionDispatchAuthorization::NotPresented
+        );
+    }
+
+    #[test]
+    fn footer_dispatch_authorization_limits_header_override_to_live_context_chips() {
+        let config = super::MainWindowFooterConfig::new("script_list", Vec::new());
+
+        for action in [FooterAction::Cwd, FooterAction::AgentModel] {
+            assert_eq!(
+                config.action_dispatch_authorization(action, false),
+                super::FooterActionDispatchAuthorization::NotPresented
+            );
+            assert_eq!(
+                config.action_dispatch_authorization(action, true),
+                super::FooterActionDispatchAuthorization::PresentedHeaderAffordance
+            );
+        }
+
+        for action in [FooterAction::Run, FooterAction::Ai, FooterAction::Stop] {
+            assert_eq!(
+                config.action_dispatch_authorization(action, true),
+                super::FooterActionDispatchAuthorization::NotPresented,
+                "header authorization must never grant invisible {action:?}"
+            );
+        }
+    }
+
+    #[test]
     fn duplicate_footer_shortcuts_are_retained_for_diagnostics_but_not_routable() {
         let config = super::MainWindowFooterConfig::new(
             "test",
@@ -8496,9 +8646,10 @@ fn native_footer_visual_event_changed(
     color_signature: usize,
     keycap_hex: u32,
 ) -> bool {
-    static LAST_REPORTED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, (usize, usize, u32)>>,
-    > = std::sync::OnceLock::new();
+    type FooterVisualStateSignature = (usize, usize, u32);
+    type FooterVisualStateCache = std::collections::HashMap<String, FooterVisualStateSignature>;
+    static LAST_REPORTED: std::sync::OnceLock<std::sync::Mutex<FooterVisualStateCache>> =
+        std::sync::OnceLock::new();
     let reported =
         LAST_REPORTED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let Ok(mut reported) = reported.lock() else {
@@ -8583,7 +8734,6 @@ extern "C" fn footer_button_mouse_entered(
             return;
         }
         let is_actions: cocoa::base::BOOL = *this.get_ivar::<cocoa::base::BOOL>("_isActionsButton");
-        let selected: cocoa::base::BOOL = *this.get_ivar::<cocoa::base::BOOL>("_selected");
         if let Some(object) = (this as *const _ as id).as_mut() {
             object.set_ivar::<cocoa::base::BOOL>("_hovered", YES);
         }

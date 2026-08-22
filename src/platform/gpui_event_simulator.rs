@@ -343,10 +343,8 @@ fn apply_simulated_event(
         } => {
             window.dispatch_event(
                 gpui::PlatformInput::ScrollWheel(simulated_scroll_wheel_to_gpui(
-                    *x,
-                    *y,
-                    *delta_x,
-                    *delta_y,
+                    (*x, *y),
+                    (*delta_x, *delta_y),
                     *phase,
                     *direct_phase,
                     *momentum_phase,
@@ -359,15 +357,15 @@ fn apply_simulated_event(
 }
 
 fn simulated_scroll_wheel_to_gpui(
-    x: f64,
-    y: f64,
-    delta_x: f64,
-    delta_y: f64,
+    position: (f64, f64),
+    delta: (f64, f64),
     touch_phase: crate::protocol::SimulatedTouchPhase,
     direct_phase: Option<crate::protocol::SimulatedScrollPhase>,
     momentum_phase: Option<crate::protocol::SimulatedScrollPhase>,
     timestamp_seconds: Option<f64>,
 ) -> gpui::ScrollWheelEvent {
+    let (x, y) = position;
+    let (delta_x, delta_y) = delta;
     let touch_phase = simulated_touch_phase_to_gpui(touch_phase);
     gpui::ScrollWheelEvent {
         position: gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
@@ -419,10 +417,8 @@ mod simulated_scroll_wheel_tests {
         ];
         for phase in phases {
             let event = simulated_scroll_wheel_to_gpui(
-                11.0,
-                22.0,
-                -1.25,
-                3.5,
+                (11.0, 22.0),
+                (-1.25, 3.5),
                 SimulatedTouchPhase::Moved,
                 Some(phase),
                 Some(phase),
@@ -446,10 +442,8 @@ mod simulated_scroll_wheel_tests {
     #[test]
     fn derives_direct_phase_from_touch_phase_and_rejects_non_finite_timestamp() {
         let event = simulated_scroll_wheel_to_gpui(
-            0.0,
-            0.0,
-            0.0,
-            0.0,
+            (0.0, 0.0),
+            (0.0, 0.0),
             SimulatedTouchPhase::Started,
             None,
             None,

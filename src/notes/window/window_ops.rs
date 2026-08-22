@@ -1027,11 +1027,15 @@ fn open_notes_window_with_close_behavior(
                         // through the superseded exit must NOT vanish and
                         // replay the 90ms body reveal. Restart only when the
                         // reveal never completed.
-                        let disposition = notes_app.update(cx, |app, _cx| {
-                            app.entry_reveal
-                                .exit_supersede_disposition(true)
-                                .expect("native exit was cancelled")
-                        });
+                        let disposition = notes_app
+                            .update(cx, |app, _cx| {
+                                app.entry_reveal.exit_supersede_disposition(true)
+                            })
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "Notes exit supersede did not provide a reveal disposition"
+                                )
+                            })?;
                         match disposition {
                             NotesExitRevealDisposition::PreserveVisible => {
                                 // The window stayed visible at its user-chosen

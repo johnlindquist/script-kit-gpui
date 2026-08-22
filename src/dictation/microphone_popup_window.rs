@@ -497,6 +497,10 @@ pub(crate) fn dismiss_dictation_microphone_popup_from_parent(
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "the separately compiled application binary consumes this popup state in its prompt handler"
+)]
 pub(crate) fn is_dictation_microphone_popup_window_open() -> bool {
     DICTATION_MICROPHONE_POPUP_WINDOW
         .get()
@@ -583,6 +587,10 @@ pub(crate) struct DictationMicrophonePopupWindow {
 }
 
 impl DictationMicrophonePopupWindow {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each independently owned parent, lifecycle, generation, and focus fact must remain explicit"
+    )]
     fn new(
         snapshot: DictationMicrophonePopupSnapshot,
         source_view: WeakEntity<DictationOverlay>,

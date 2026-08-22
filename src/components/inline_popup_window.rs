@@ -13,9 +13,13 @@
 //! existing call sites and source-text audit tests continue to compile without
 //! edits.
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, Mutex,
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use gpui::{
@@ -302,7 +306,7 @@ pub fn inline_popup_focus_pair_is_active(
             })
             .ok()
             .unwrap_or(false);
-        return child_key || parent_key;
+        child_key || parent_key
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -427,6 +431,18 @@ pub fn configure_inline_popup_window<T: 'static>(
     Ok(())
 }
 
+type InlinePopupAttachCallback =
+    Rc<RefCell<Option<Box<dyn FnOnce(InlinePopupAttachResult, &mut App)>>>>;
+
+struct InlinePopupAttachAttempt {
+    parent_window_handle: AnyWindowHandle,
+    parent_automation_id: String,
+    generation: InlinePopupGeneration,
+    lifecycle: InlinePopupLifecycleHandle,
+    attempt_count: u8,
+    callback: InlinePopupAttachCallback,
+}
+
 /// Configure an interactive popup through a generation-scoped hidden
 /// attach handshake. The result callback is the only point where consumers
 /// may publish target identity or treat the popup as open.
@@ -443,21 +459,21 @@ pub fn configure_inline_popup_window_lifecycle<T: 'static>(
         anyhow::bail!("inline popup lifecycle rejected attach start");
     }
 
-    type ResultCallback = Box<dyn FnOnce(InlinePopupAttachResult, &mut App)>;
-    let callback: Arc<Mutex<Option<ResultCallback>>> =
-        Arc::new(Mutex::new(Some(Box::new(on_result))));
+    let callback: InlinePopupAttachCallback = Rc::new(RefCell::new(Some(Box::new(on_result))));
     handle
         .update(cx, move |_popup, window, cx| {
             window.defer(cx, move |window, cx| {
                 run_inline_popup_attach_attempt(
                     window,
                     cx,
-                    parent_window_handle,
-                    parent_automation_id,
-                    generation,
-                    lifecycle,
-                    1,
-                    callback,
+                    InlinePopupAttachAttempt {
+                        parent_window_handle,
+                        parent_automation_id,
+                        generation,
+                        lifecycle,
+                        attempt_count: 1,
+                        callback,
+                    },
                 );
             });
         })
@@ -469,13 +485,16 @@ pub fn configure_inline_popup_window_lifecycle<T: 'static>(
 fn run_inline_popup_attach_attempt(
     window: &mut Window,
     cx: &mut App,
-    parent_window_handle: AnyWindowHandle,
-    parent_automation_id: String,
-    generation: InlinePopupGeneration,
-    lifecycle: InlinePopupLifecycleHandle,
-    attempt_count: u8,
-    callback: Arc<Mutex<Option<Box<dyn FnOnce(InlinePopupAttachResult, &mut App)>>>>,
+    attempt: InlinePopupAttachAttempt,
 ) {
+    let InlinePopupAttachAttempt {
+        parent_window_handle,
+        parent_automation_id,
+        generation,
+        lifecycle,
+        attempt_count,
+        callback,
+    } = attempt;
     if InlinePopupLifecycle::snapshot(&lifecycle).1 != InlinePopupPhase::AttachPending {
         finish_inline_popup_attach(
             InlinePopupAttachResult::Failed {
@@ -521,12 +540,14 @@ fn run_inline_popup_attach_attempt(
             run_inline_popup_attach_attempt(
                 window,
                 cx,
-                parent_window_handle,
-                parent_automation_id,
-                generation,
-                lifecycle,
-                attempt_count + 1,
-                callback,
+                InlinePopupAttachAttempt {
+                    parent_window_handle,
+                    parent_automation_id,
+                    generation,
+                    lifecycle,
+                    attempt_count: attempt_count + 1,
+                    callback,
+                },
             );
         });
         return;
@@ -550,13 +571,10 @@ fn run_inline_popup_attach_attempt(
 
 fn finish_inline_popup_attach(
     result: InlinePopupAttachResult,
-    callback: Arc<Mutex<Option<Box<dyn FnOnce(InlinePopupAttachResult, &mut App)>>>>,
+    callback: InlinePopupAttachCallback,
     cx: &mut App,
 ) {
-    let callback = callback
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .take();
+    let callback = callback.borrow_mut().take();
     if let Some(callback) = callback {
         callback(result, cx);
     }
@@ -588,13 +606,13 @@ fn checked_attach_configure_and_show(
             return InlinePopupAttachResult::Failed {
                 generation,
                 failure: InlinePopupAttachFailure::ParentNativeWindowMissing,
-            }
+            };
         }
         Err(_) => {
             return InlinePopupAttachResult::Failed {
                 generation,
                 failure: InlinePopupAttachFailure::ParentWindowGone,
-            }
+            };
         }
     };
 

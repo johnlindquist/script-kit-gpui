@@ -747,6 +747,10 @@ pub fn glass_exit_remove_delay() -> std::time::Duration {
     std::time::Duration::from_millis(GLASS_EXIT_REMOVE_DELAY_MS)
 }
 
+#[allow(
+    dead_code,
+    reason = "the calibrated native-glass compatibility delay is retained without changing its locked timing"
+)]
 pub(crate) fn glass_entry_settle_delay() -> std::time::Duration {
     let tail = crate::theme::get_cached_theme()
         .get_opacity()
@@ -1848,7 +1852,6 @@ unsafe fn remove_tahoe_window_backdrop(window: id, window_name: &str) {
     }
 }
 
-#[cfg(target_os = "macos")]
 /// Resolve the backdrop's corner radius for one owning surface.
 ///
 /// Detached-footer windows expose the backdrop's corners mid-window, where
@@ -2033,7 +2036,6 @@ unsafe fn tahoe_pin_glass_backdrop_backmost(content_view: id, glass_view: id) {
 /// Per-window two-phase bounce settle targets. Multiple HUDs and secondary
 /// windows can materialize concurrently, so a single global slot would let one
 /// window steal another's rebound target.
-#[cfg(target_os = "macos")]
 /// Everything the delayed visible tail needs at T=88ms. Stored per-window
 /// (same non-retaining pointer-key pattern as the settle targets; the
 /// cancellation path clears these before window teardown).
@@ -2056,8 +2058,11 @@ static GLASS_MORPH_TAIL_TARGETS: std::sync::LazyLock<
 
 /// GPUI content roots hidden during the onset: (view ptr, original alpha).
 #[cfg(target_os = "macos")]
+type GlassEntryContentTargetMap = std::collections::HashMap<usize, Vec<(usize, f64)>>;
+
+#[cfg(target_os = "macos")]
 static GLASS_ENTRY_CONTENT_TARGETS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<usize, Vec<(usize, f64)>>>,
+    std::sync::Mutex<GlassEntryContentTargetMap>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// T=53ms: fade the held GPUI content roots to their original alpha over
@@ -3072,7 +3077,6 @@ unsafe fn animate_tahoe_glass_fade_appearance(window: id, log_target: &str, wind
     );
 }
 
-#[cfg(target_os = "macos")]
 /// Child-attached popup enter: detach from the parent NSWindow, run the
 /// frame morph in GROW-IN direction, and reattach after it settles.
 /// Layer-transform morphs are impossible here — AppKit neutralizes
@@ -3212,6 +3216,10 @@ unsafe fn animate_tahoe_glass_window_frame_appearance(
 }
 
 #[cfg(target_os = "macos")]
+#[allow(
+    dead_code,
+    reason = "the native secondary-window compatibility entry retains its locked glass motion profile"
+)]
 unsafe fn animate_tahoe_glass_secondary_appearance(
     window: id,
     log_target: &str,
@@ -4243,6 +4251,10 @@ pub(crate) unsafe fn apply_native_glass_style_with_reason(
 /// `glass_view` must be a valid NSGlassEffectView (or nil-checked upstream)
 /// on the main thread.
 #[cfg(target_os = "macos")]
+#[allow(
+    dead_code,
+    reason = "the legacy native glass-tint adapter is retained for callers without a surface role"
+)]
 pub(crate) unsafe fn apply_theme_glass_tint(glass_view: id) -> bool {
     let theme = crate::theme::get_cached_theme();
     apply_native_glass_style_with_reason(
@@ -4622,6 +4634,11 @@ unsafe fn configure_attached_popup_window(
     let _: () = msg_send![window, orderFrontRegardless];
 }
 
+/// Configure the Actions popup without activating its parent application.
+///
+/// # Safety
+/// `window` must be a valid, live `NSWindow` pointer, and this function must
+/// be called on the AppKit main thread while the window remains owned.
 #[cfg(target_os = "macos")]
 pub unsafe fn configure_actions_popup_window(window: id, is_dark: bool) {
     configure_attached_popup_window(
@@ -4692,6 +4709,10 @@ pub fn configure_confirm_popup_window(_window: *mut std::ffi::c_void, _is_dark: 
 }
 
 /// Configure the child-attached shortcut recorder with its own morph receipt.
+///
+/// # Safety
+/// `window` must be a valid, live `NSWindow` pointer, and this function must
+/// be called on the AppKit main thread while the window remains owned.
 #[cfg(target_os = "macos")]
 pub unsafe fn configure_shortcut_recorder_popup_window(window: id, is_dark: bool) {
     configure_attached_popup_window(
@@ -5954,6 +5975,10 @@ pub(crate) fn apply_window_resize_policy(
 /// resolved (e.g. glass composition unavailable) — callers treat that as
 /// "no native backdrop to partition", not an error.
 #[cfg(target_os = "macos")]
+#[allow(
+    dead_code,
+    reason = "the independently compiled main-window binary owns native footer/backdrop partitioning"
+)]
 pub(crate) fn set_gpui_window_backdrop_bottom_inset(
     window: &gpui::Window,
     window_name: &'static str,

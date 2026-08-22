@@ -11,7 +11,12 @@ impl NotesApp {
 
         // Initialize storage
         if let Err(e) = storage::init_notes_db() {
-            tracing::error!(error = %e, "Failed to initialize notes database");
+            let safe_error = crate::logging::log_private_user_value(&e.to_string());
+            tracing::error!(
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
+                "Failed to initialize notes database"
+            );
         }
 
         // Auto-prune trash entries older than 30 days
@@ -23,7 +28,12 @@ impl NotesApp {
                 );
             }
             Err(e) => {
-                tracing::error!(error = %e, "Failed to auto-prune trash");
+                let safe_error = crate::logging::log_private_user_value(&e.to_string());
+                tracing::error!(
+                    error_bytes = safe_error.raw_bytes,
+                    error_sha256 = %safe_error.sha256,
+                    "Failed to auto-prune trash"
+                );
             }
             _ => {}
         }
@@ -36,7 +46,12 @@ impl NotesApp {
         if notes.is_empty() && deleted_notes.is_empty() {
             let welcome = Note::with_content(Self::welcome_note_content());
             if let Err(e) = storage::save_note(&welcome) {
-                tracing::error!(error = %e, "Failed to create welcome note");
+                let safe_error = crate::logging::log_private_user_value(&e.to_string());
+                tracing::error!(
+                    error_bytes = safe_error.raw_bytes,
+                    error_sha256 = %safe_error.sha256,
+                    "Failed to create welcome note"
+                );
             } else {
                 notes.push(welcome);
                 info!("Created welcome note for first launch");
@@ -349,10 +364,15 @@ impl NotesApp {
                     return true;
                 }
                 Err(e) => {
+                    let safe_error = crate::logging::log_private_user_value(&e.to_string());
+                    let safe_path =
+                        crate::logging::log_private_user_value(&path.display().to_string());
                     tracing::error!(
-                        error = %e,
+                        error_bytes = safe_error.raw_bytes,
+                        error_sha256 = %safe_error.sha256,
                         date = %day.date,
-                        path = %path.display(),
+                        path_bytes = safe_path.raw_bytes,
+                        path_sha256 = %safe_path.sha256,
                         "Failed to save day note from Notes window"
                     );
                     return false;
@@ -365,9 +385,11 @@ impl NotesApp {
         };
 
         let Some(note) = self.notes.iter().find(|n| n.id == id) else {
+            let safe_query = crate::logging::log_private_user_value(&self.search_query);
             tracing::warn!(
                 note_id = %id,
-                search_query = %self.search_query,
+                search_query_bytes = safe_query.raw_bytes,
+                search_query_sha256 = %safe_query.sha256,
                 notes_len = self.notes.len(),
                 "Skipping note save because the selected note is not present in the current notes list"
             );
@@ -375,7 +397,13 @@ impl NotesApp {
         };
 
         if let Err(e) = storage::save_note(note) {
-            tracing::error!(error = %e, note_id = %id, "Failed to save note");
+            let safe_error = crate::logging::log_private_user_value(&e.to_string());
+            tracing::error!(
+                error_bytes = safe_error.raw_bytes,
+                error_sha256 = %safe_error.sha256,
+                note_id = %id,
+                "Failed to save note"
+            );
             return false;
         }
 
@@ -455,7 +483,12 @@ impl NotesApp {
 
             // Save to storage
             if let Err(e) = storage::save_note(&note) {
-                tracing::error!(error = %e, "Failed to create auto-generated note");
+                let safe_error = crate::logging::log_private_user_value(&e.to_string());
+                tracing::error!(
+                    error_bytes = safe_error.raw_bytes,
+                    error_sha256 = %safe_error.sha256,
+                    "Failed to create auto-generated note"
+                );
                 return;
             }
 
@@ -691,9 +724,12 @@ impl NotesApp {
                         Err(error) => {
                             // Silent fallback: no model / cancelled / backend
                             // unavailable all keep the deterministic behavior.
+                            let safe_error =
+                                crate::logging::log_private_user_value(&format!("{error:#}"));
                             tracing::debug!(
                                 target: "script_kit::ghost_text",
-                                error = %format!("{error:#}"),
+                                error_bytes = safe_error.raw_bytes,
+                                error_sha256 = %safe_error.sha256,
                                 "notes ghost llm generation failed; keeping deterministic ghost"
                             );
                             return;

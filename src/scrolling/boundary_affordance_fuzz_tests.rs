@@ -208,14 +208,14 @@ mod tests {
                     }
                     6 => {
                         // Stale AND current generations; hostile elapsed values.
-                        let gen = if rng.next() % 2 == 0 {
+                        let sampled_generation = if rng.next() % 2 == 0 {
                             generation
                         } else {
                             generation.wrapping_sub(3)
                         };
                         let elapsed = Duration::from_millis((rng.next() % 100_000) as u64);
-                        let _ = state.apply_settle_sample(gen, elapsed, tuning);
-                        let _ = state.finish_settle_if_current(gen);
+                        let _ = state.apply_settle_sample(sampled_generation, elapsed, tuning);
+                        let _ = state.finish_settle_if_current(sampled_generation);
                     }
                     _ => {
                         let _ = state.idle_watchdog_status(generation, now, tuning);

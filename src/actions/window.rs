@@ -802,7 +802,22 @@ impl ActionsWindow {
                 true
             }
             Some(ActionsWindowKeyIntent::Dismiss) => {
-                self.request_close(window, cx, "cmd_k_toggle", true);
+                let route_depth = self.dialog.read(cx).route_depth();
+                match crate::window_orchestrator::interaction::plan_overlay_dismiss(
+                    route_depth,
+                    crate::window_orchestrator::interaction::OverlayDismissTrigger::ActionsToggle,
+                ) {
+                    crate::window_orchestrator::interaction::OverlayDismissDecision::CloseOverlay => {
+                        self.request_close(window, cx, "cmd_k_toggle", true);
+                    }
+                    crate::window_orchestrator::interaction::OverlayDismissDecision::PopRoute => {
+                        tracing::warn!(
+                            target: "script_kit::actions",
+                            route_depth,
+                            "actions toggle unexpectedly requested route navigation"
+                        );
+                    }
+                }
                 true
             }
             Some(ActionsWindowKeyIntent::Backspace) => {
@@ -1232,7 +1247,7 @@ mod tests {
 
         let row_height = tokens.list.row_height;
         let height =
-            resolved_actions_popup_height(&tokens, 20, 4, false, true, false, 400.0, row_height);
+            resolved_actions_popup_height(&tokens, (20, 4), false, true, false, 400.0, row_height);
 
         assert_eq!(height, 242.0);
     }
@@ -1254,8 +1269,7 @@ pub(super) fn actions_window_dynamic_height(
     let tokens = crate::designs::current_actions_popup_theme();
     resolved_actions_popup_height(
         &tokens,
-        num_actions,
-        section_header_count,
+        (num_actions, section_header_count),
         hide_search,
         has_header,
         show_footer,
@@ -1270,14 +1284,14 @@ pub(super) fn actions_window_dynamic_height(
 /// token definition.
 pub(crate) fn resolved_actions_popup_height(
     tokens: &crate::designs::ActionsPopupThemeDef,
-    num_actions: usize,
-    section_header_count: usize,
+    row_counts: (usize, usize),
     hide_search: bool,
     has_header: bool,
     show_footer: bool,
     max_height: f32,
     row_height: f32,
 ) -> f32 {
+    let (num_actions, section_header_count) = row_counts;
     const POPUP_FOOTER_HEIGHT: f32 = 32.0;
     let search_box_height = if hide_search {
         0.0
@@ -1870,7 +1884,7 @@ pub fn open_actions_window(
         Err(error) => {
             dialog_entity.update(cx, |dialog, _cx| dialog.release_fixed_shell());
             set_actions_window_parent_kind(None);
-            return Err(error.into());
+            return Err(error);
         }
     };
 
@@ -2109,6 +2123,10 @@ pub fn route_key_to_detached_actions_window(
 /// automation IDs must cross the same availability guard as Enter, click, and
 /// displayed shortcuts; bypassing the dialog would execute disabled rows and
 /// close the popup before their explanation can be read.
+#[allow(
+    dead_code,
+    reason = "direct Actions automation is dispatched by the separately compiled application binary"
+)]
 pub(crate) fn activate_detached_actions_window_action(
     action_id: String,
     cx: &mut gpui::App,

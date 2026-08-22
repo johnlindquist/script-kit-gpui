@@ -270,12 +270,9 @@ fn semantic_chip_action_element(
 ) -> ElementInfo {
     let action = action.map(|action| conversation_semantic_action(chip.role, action));
     let semantic_id = if trailing {
-        format!(
-            "{}:{}",
-            chip.semantic_id,
-            action
-                .expect("trailing semantic actions are present")
-                .as_str()
+        action.map_or_else(
+            || format!("{}:unavailable", chip.semantic_id),
+            |action| format!("{}:{}", chip.semantic_id, action.as_str()),
         )
     } else {
         chip.semantic_id.to_string()
@@ -334,32 +331,36 @@ pub(crate) fn collect_semantic_chip_elements(
 pub(crate) fn collect_conversation_command_elements<Handler>(
     commands: &[crate::components::conversation_actions::BoundConversationCommand<Handler>],
 ) -> Vec<ElementInfo> {
-    use crate::components::conversation_actions::ConfirmPolicy;
-
     commands
         .iter()
-        .map(|command| ElementInfo {
-            semantic_id: command.descriptor.semantic_action_id.to_string(),
-            element_type: ElementType::Button,
-            text: Some(command.descriptor.label.to_string()),
-            value: command.descriptor.shortcut.map(str::to_string),
-            content: None,
-            selected: Some(false),
-            focused: Some(false),
-            index: None,
-            role: Some("conversationCommand".to_string()),
-            kind: Some(command.descriptor.semantic_action_id.to_string()),
-            source: Some("ConversationCommandDescriptor".to_string()),
-            source_name: None,
-            selectable: Some(command.descriptor.availability.is_enabled()),
-            status_kind: (command.descriptor.confirmation == ConfirmPolicy::Required)
-                .then(|| "confirmationRequired".to_string()),
-            action_disabled: command
-                .descriptor
-                .availability
-                .disabled_reason()
-                .map(str::to_string),
-            style: None,
+        .map(|command| {
+            let action = command.descriptor.command_action();
+            ElementInfo {
+                semantic_id: action.id.clone(),
+                element_type: ElementType::Button,
+                text: Some(action.title),
+                value: action.shortcut,
+                content: None,
+                selected: Some(false),
+                focused: Some(false),
+                index: None,
+                role: Some("conversationCommand".to_string()),
+                kind: Some(action.id),
+                source: Some("ConversationCommandDescriptor".to_string()),
+                source_name: None,
+                selectable: Some(action.availability.is_executable()),
+                status_kind: action
+                    .requires_confirmation
+                    .then(|| "confirmationRequired".to_string()),
+                // Preserve the host's exact reviewed copy; the shared action
+                // owns availability while the typed host reason owns wording.
+                action_disabled: command
+                    .descriptor
+                    .availability
+                    .disabled_reason()
+                    .map(str::to_string),
+                style: None,
+            }
         })
         .collect()
 }
@@ -605,11 +606,17 @@ fn collect_dictation_snapshot(resolved: &AutomationWindowInfo) -> SurfaceElement
     );
     let mut elements = vec![panel, signal, target_badge];
     for descriptor in crate::dictation::DictationTarget::quick_chip_descriptors() {
+        let Some(label) = descriptor.quick_chip_label else {
+            tracing::warn!(
+                target: "script_kit::automation",
+                destination = descriptor.stable_id,
+                "skipping_dictation_destination_without_quick_chip_label"
+            );
+            continue;
+        };
         let mut spec = crate::components::main_view_chrome::SemanticChipSpec::destination_selector(
             format!("dictation-destination:{}", descriptor.stable_id),
-            descriptor
-                .quick_chip_label
-                .expect("quick chip descriptor must provide a label"),
+            label,
         );
         if !interactive {
             spec.enabled = false;

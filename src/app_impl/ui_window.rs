@@ -94,20 +94,15 @@ fn notes_browse_footer_buttons(
 ) -> Vec<crate::footer_popup::FooterButtonConfig> {
     use crate::footer_popup::{FooterAction, FooterButtonConfig};
 
-    let close_label = if destination
-        == crate::notes::search_model::NoteSearchDestination::AttachNote
-    {
-        "Cancel"
-    } else {
-        "Back"
-    };
+    let close_label =
+        if destination == crate::notes::search_model::NoteSearchDestination::AttachNote {
+            "Cancel"
+        } else {
+            "Back"
+        };
     vec![
-        FooterButtonConfig::new(
-            FooterAction::Run,
-            "↵",
-            destination.primary_verb(),
-        )
-        .enabled(enabled && has_selection),
+        FooterButtonConfig::new(FooterAction::Run, "↵", destination.primary_verb())
+            .enabled(enabled && has_selection),
         FooterButtonConfig::new(FooterAction::Close, "Esc", close_label).enabled(enabled),
     ]
 }
@@ -149,9 +144,8 @@ pub(crate) fn flow_session_footer_buttons(
             .selected(actions_open)
             .enabled(enabled),
     );
-    buttons.push(
-        FooterButtonConfig::new(FooterAction::Close, "Esc", "Background").enabled(enabled),
-    );
+    buttons
+        .push(FooterButtonConfig::new(FooterAction::Close, "Esc", "Background").enabled(enabled));
     buttons
 }
 
@@ -219,8 +213,28 @@ fn main_window_result_action_label(
         {
             paste_into_frontmost_app_label(frontmost_app_name)
         }
-        _ => result.get_default_action_text().to_string(),
+        _ => result
+            .command_descriptor()
+            .ok()
+            .and_then(|descriptor| {
+                descriptor
+                    .primary_action()
+                    .map(|action| action.title.clone())
+            })
+            .unwrap_or_else(|| result.get_default_action_text().to_string()),
     }
+}
+
+fn main_window_run_footer_button(
+    run_label: String,
+    footer_disabled: bool,
+    command_block_reason: Option<&'static str>,
+) -> crate::footer_popup::FooterButtonConfig {
+    crate::components::footer_chrome::launcher_primary_footer_button(
+        run_label,
+        footer_disabled,
+        command_block_reason,
+    )
 }
 
 fn has_selected_clipboard_entry(app: &ScriptListApp) -> bool {
@@ -418,14 +432,9 @@ impl ScriptListApp {
         true
     }
 
-    fn activate_selected_note_search_result_from_footer(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn activate_selected_note_search_result_from_footer(&mut self, cx: &mut Context<Self>) -> bool {
         let selected_row = match &self.current_view {
-            AppView::NotesBrowseView { search } => {
-                Self::notes_browse_selected_visible_row(search)
-            }
+            AppView::NotesBrowseView { search } => Self::notes_browse_selected_visible_row(search),
             _ => None,
         };
         let Some(row) = selected_row else {
@@ -501,20 +510,59 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
         source: &'static str,
     ) {
-        if let Some(config) = self.main_window_footer_config_with_cx(Some(&*cx)) {
-            if let Some(descriptor) = config.descriptor_for_action(action) {
-                if !descriptor.enabled {
-                    tracing::info!(
-                        target: "script_kit::footer_popup",
-                        event = "main_window_footer_action_blocked",
-                        source,
-                        action = ?action,
-                        descriptor_id = %descriptor.id,
-                        disabled_reason = ?descriptor.disabled_reason,
-                        "Ignored disabled main-window footer action"
-                    );
-                    return;
-                }
+        let Some(config) = self.main_window_footer_config_with_cx(Some(&*cx)) else {
+            tracing::info!(
+                target: "script_kit::footer_popup",
+                event = "main_window_footer_action_blocked",
+                source,
+                action = ?action,
+                reason = "no_current_footer",
+                "Ignored footer action without a live host surface"
+            );
+            return;
+        };
+
+        let live_header_affordance = source == "main_view_context_click"
+            && match action {
+                crate::footer_popup::FooterAction::Cwd => self.main_view_context_chip_has_action(
+                    crate::components::main_view_chrome::MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+                    crate::components::main_view_chrome::SemanticChipAction::OpenSelector,
+                ),
+                crate::footer_popup::FooterAction::AgentModel => self
+                    .main_view_context_chip_has_action(
+                        crate::components::main_view_chrome::MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
+                        crate::components::main_view_chrome::SemanticChipAction::OpenSelector,
+                    ),
+                _ => false,
+            };
+
+        match config.action_dispatch_authorization(action, live_header_affordance) {
+            crate::footer_popup::FooterActionDispatchAuthorization::PresentedButton
+            | crate::footer_popup::FooterActionDispatchAuthorization::PresentedLeftAffordance
+            | crate::footer_popup::FooterActionDispatchAuthorization::PresentedHeaderAffordance => {
+            }
+            crate::footer_popup::FooterActionDispatchAuthorization::Disabled { reason } => {
+                tracing::info!(
+                    target: "script_kit::footer_popup",
+                    event = "main_window_footer_action_blocked",
+                    source,
+                    action = ?action,
+                    disabled_reason = ?reason,
+                    "Ignored disabled main-window footer action"
+                );
+                return;
+            }
+            crate::footer_popup::FooterActionDispatchAuthorization::NotPresented => {
+                tracing::info!(
+                    target: "script_kit::footer_popup",
+                    event = "main_window_footer_action_blocked",
+                    source,
+                    action = ?action,
+                    surface = config.surface,
+                    reason = "action_not_presented",
+                    "Ignored stale or invisible main-window footer action"
+                );
+                return;
             }
         }
 
@@ -1066,9 +1114,11 @@ impl ScriptListApp {
 
         let mut buttons = Vec::new();
 
-        buttons.push(
-            FooterButtonConfig::new(FooterAction::Run, "↵", run_label).enabled(!footer_disabled),
-        );
+        buttons.push(main_window_run_footer_button(
+            run_label,
+            footer_disabled,
+            self.main_window_selected_command_block_reason(),
+        ));
 
         if self.current_view_supports_shared_actions() {
             let chip = FooterButtonConfig::new(FooterAction::Actions, "⌘K", "Actions")
@@ -1102,6 +1152,23 @@ impl ScriptListApp {
 
     fn main_window_footer_buttons_blocked(&self) -> bool {
         crate::confirm::is_confirm_window_open()
+    }
+
+    fn main_window_selected_command_block_reason(&self) -> Option<&'static str> {
+        if !matches!(self.current_view, AppView::ScriptList) {
+            return None;
+        }
+
+        let selected_index = crate::list_item::coerce_selection(
+            self.main_menu_result_caches.grouped_items(),
+            self.selected_index,
+        )?;
+        let result_index = self
+            .main_menu_result_caches
+            .flat_result_index_for_grouped_item(selected_index)?;
+        self.main_menu_result_caches
+            .search_result_for_flat_index(result_index)?
+            .command_execution_block_reason()
     }
 
     /// Views whose actions are all per-entry have a dead ⌘K toggle when no
@@ -1336,7 +1403,8 @@ impl ScriptListApp {
             let actions_open = self.show_actions_popup || crate::actions::is_actions_window_open();
             let enabled = !footer_disabled;
             let working = self
-                .conversations.flow_sessions
+                .conversations
+                .flow_sessions
                 .iter()
                 .find(|(meta, _)| meta.id == session_id)
                 .is_some_and(|(meta, _)| meta.active_turn.is_some());
@@ -1371,12 +1439,8 @@ impl ScriptListApp {
             let mut buttons = Vec::new();
             if let Some(descriptor) = descriptor {
                 buttons.push(
-                    FooterButtonConfig::new(
-                        FooterAction::Run,
-                        "↵",
-                        descriptor.primary.label(),
-                    )
-                    .enabled(enabled),
+                    FooterButtonConfig::new(FooterAction::Run, "↵", descriptor.primary.label())
+                        .enabled(enabled),
                 );
                 if let Some(secondary) = descriptor.secondary {
                     buttons.push(
@@ -2121,10 +2185,7 @@ impl ScriptListApp {
                 .as_deref()
                 == Some("selection"))
         .then_some("Fixture selected text");
-        let text = self
-            .shown_selection_hint_text
-            .as_deref()
-            .or(fixture_text)?;
+        let text = self.shown_selection_hint_text.as_deref().or(fixture_text)?;
         Some(
             crate::components::main_view_chrome::SemanticChipSpec::context_attachment(
                 crate::components::main_view_chrome::MAIN_VIEW_CONTEXT_SELECTION_BUTTON_ID,
@@ -2208,10 +2269,13 @@ impl ScriptListApp {
             });
         let flow_session_identity = match &self.current_view {
             AppView::FlowSessionView { session_id } => self
-                .conversations.flow_sessions
+                .conversations
+                .flow_sessions
                 .iter()
                 .find(|(meta, _)| meta.id == *session_id)
-                .map(|(meta, _)| crate::flows::session::FlowSessionIdentitySnapshot::from_meta(meta)),
+                .map(|(meta, _)| {
+                    crate::flows::session::FlowSessionIdentitySnapshot::from_meta(meta)
+                }),
             _ => None,
         };
         if let Some(identity) = &flow_session_identity {
@@ -2229,13 +2293,20 @@ impl ScriptListApp {
                 .as_deref()
                 .map(|model| format!(" · {model}"))
                 .unwrap_or_default();
-            let rethread = identity.needs_rethread.then_some(" · reconnecting").unwrap_or("");
+            let rethread = identity
+                .needs_rethread
+                .then_some(" · reconnecting")
+                .unwrap_or("");
             format!(
                 "{} · {}{} · {}{}",
                 identity.friendly_name,
                 identity.engine,
                 model,
-                if identity.read_only { "Archived" } else { "Active" },
+                if identity.read_only {
+                    "Archived"
+                } else {
+                    "Active"
+                },
                 rethread,
             )
         });
@@ -2243,8 +2314,8 @@ impl ScriptListApp {
             .then(|| flow_session_label.or_else(|| self.agent_model_footer_label()))
             .flatten();
         let agent_model_available = agent_model.is_some();
-        let agent_model_label = agent_model
-            .unwrap_or_else(|| MAIN_VIEW_AGENT_MODEL_UNAVAILABLE_LABEL.to_string());
+        let agent_model_label =
+            agent_model.unwrap_or_else(|| MAIN_VIEW_AGENT_MODEL_UNAVAILABLE_LABEL.to_string());
 
         let leading_identity = if fixture_unavailable {
             SemanticChipSpec::disabled_identity(
@@ -2254,20 +2325,20 @@ impl ScriptListApp {
             )
         } else {
             match self.main_header_tab_chip_action() {
-            MainViewTabChipAction::QuickAi => SemanticChipSpec::enabled_identity(
-                MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID,
-                MAIN_VIEW_QUICK_AI_CHIP_LABEL,
-                SemanticChipAction::OpenSurface,
-                "⇥",
-            ),
-            MainViewTabChipAction::ChangeCwd if cwd_available => {
-                SemanticChipSpec::enabled_identity(
-                    MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
-                    cwd_label,
-                    SemanticChipAction::OpenSelector,
+                MainViewTabChipAction::QuickAi => SemanticChipSpec::enabled_identity(
+                    MAIN_VIEW_CONTEXT_QUICK_AI_BUTTON_ID,
+                    MAIN_VIEW_QUICK_AI_CHIP_LABEL,
+                    SemanticChipAction::OpenSurface,
                     "⇥",
-                )
-            }
+                ),
+                MainViewTabChipAction::ChangeCwd if cwd_available => {
+                    SemanticChipSpec::enabled_identity(
+                        MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
+                        cwd_label,
+                        SemanticChipAction::OpenSelector,
+                        "⇥",
+                    )
+                }
                 MainViewTabChipAction::ChangeCwd | MainViewTabChipAction::Inactive => {
                     SemanticChipSpec::disabled_identity(
                         MAIN_VIEW_CONTEXT_CWD_BUTTON_ID,
@@ -2281,8 +2352,7 @@ impl ScriptListApp {
                 }
             }
         };
-        let trailing_identity = if self.main_header_shift_tab_key_active()
-            && agent_model_available
+        let trailing_identity = if self.main_header_shift_tab_key_active() && agent_model_available
         {
             SemanticChipSpec::enabled_identity(
                 MAIN_VIEW_CONTEXT_MODEL_BUTTON_ID,
@@ -2370,7 +2440,10 @@ impl ScriptListApp {
                             let query = this.filter_text.clone();
                             this.open_quick_ai_from_launcher(query, window, cx);
                         }
-                        (MAIN_VIEW_CONTEXT_SELECTION_BUTTON_ID, SemanticChipAction::OpenDetails) => {
+                        (
+                            MAIN_VIEW_CONTEXT_SELECTION_BUTTON_ID,
+                            SemanticChipAction::OpenDetails,
+                        ) => {
                             tracing::info!(
                                 target: "script_kit::selection_hint",
                                 event = "selection_context_details_opened",
@@ -2610,7 +2683,7 @@ impl ScriptListApp {
                 Some((ViewType::MainWindow, filtered_count))
             }
             AppView::FlowUxView { filter, .. } => {
-                let mut cwd = self.flow_ux_cwd();
+                let cwd = self.flow_ux_cwd();
                 let roster = crate::flows::catalog::flow_catalog().roster_for(&cwd);
                 let count = crate::flows::catalog::filter_flows(&roster.flows, filter).len();
                 Some((ViewType::MainWindow, count))

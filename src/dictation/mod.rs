@@ -56,6 +56,11 @@ pub use history::{
     DICTATION_HISTORY_ENTRY_VERSION, DICTATION_HISTORY_LEGACY_UNKNOWN_TARGET_ID,
     DICTATION_HISTORY_PAGE_SIZE,
 };
+pub(crate) use history::{
+    discard_root_dictation_history_refresh, finish_root_dictation_history_refresh,
+    read_root_dictation_history_snapshot, root_dictation_history_cache_is_fresh,
+    try_begin_root_dictation_history_refresh, RootDictationHistorySnapshot,
+};
 // The batch_select_* automation hooks are consumed by the binary crate
 // (prompt_handler), which compiles this module separately — the library
 // build alone cannot see those uses.

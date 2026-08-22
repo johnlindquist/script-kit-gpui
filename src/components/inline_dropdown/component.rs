@@ -32,16 +32,6 @@ impl InlineDropdown {
         self
     }
 
-    pub(crate) fn empty_state_opt(mut self, empty_state: Option<InlineDropdownEmptyState>) -> Self {
-        self.empty_state = empty_state;
-        self
-    }
-
-    pub(crate) fn synopsis(mut self, synopsis: Option<InlineDropdownSynopsis>) -> Self {
-        self.synopsis = synopsis;
-        self
-    }
-
     pub(crate) fn vertical_padding(mut self, vertical_padding: f32) -> Self {
         self.vertical_padding = vertical_padding;
         self
@@ -68,6 +58,7 @@ pub(crate) fn inline_dropdown_clamp_selected_index(
 }
 
 /// Move selection up (wrapping from top to bottom).
+#[cfg(test)]
 pub(crate) fn inline_dropdown_select_prev(selected_index: usize, item_count: usize) -> usize {
     if item_count == 0 {
         0
@@ -79,6 +70,7 @@ pub(crate) fn inline_dropdown_select_prev(selected_index: usize, item_count: usi
 }
 
 /// Move selection down (wrapping from bottom to top).
+#[cfg(test)]
 pub(crate) fn inline_dropdown_select_next(selected_index: usize, item_count: usize) -> usize {
     if item_count == 0 {
         0

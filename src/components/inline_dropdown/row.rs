@@ -184,20 +184,10 @@ pub(crate) fn render_soft_compact_picker_row(
         disabled: false,
     });
     let foreground: Hsla = gpui::rgba(row_colors.primary_foreground_rgba).into();
-    let selected_row_bg: Hsla = gpui::rgba(
-        row_palette
-            .selected
-            .background_rgba
-            .expect("selected compact rows always have a background"),
-    )
-    .into();
-    let hover_row_bg: Hsla = gpui::rgba(
-        row_palette
-            .hovered
-            .background_rgba
-            .expect("hovered compact rows always have a background"),
-    )
-    .into();
+    let selected_row_bg: Hsla =
+        gpui::rgba(row_palette.selected.background_rgba.unwrap_or_default()).into();
+    let hover_row_bg: Hsla =
+        gpui::rgba(row_palette.hovered.background_rgba.unwrap_or_default()).into();
 
     div()
         .id(id)
@@ -267,20 +257,10 @@ fn render_dense_monoline_picker_row_full(
         disabled: false,
     });
     let label_foreground: Hsla = gpui::rgba(row_colors.primary_foreground_rgba).into();
-    let selected_row_bg: Hsla = gpui::rgba(
-        row_palette
-            .selected
-            .background_rgba
-            .expect("selected dense rows always have a background"),
-    )
-    .into();
-    let hover_row_bg: Hsla = gpui::rgba(
-        row_palette
-            .hovered
-            .background_rgba
-            .expect("hovered dense rows always have a background"),
-    )
-    .into();
+    let selected_row_bg: Hsla =
+        gpui::rgba(row_palette.selected.background_rgba.unwrap_or_default()).into();
+    let hover_row_bg: Hsla =
+        gpui::rgba(row_palette.hovered.background_rgba.unwrap_or_default()).into();
 
     let mut left = div().flex().items_center().gap(px(6.0));
 

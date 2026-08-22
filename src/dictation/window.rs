@@ -465,6 +465,10 @@ pub fn set_overlay_recovery_callback(
     *OVERLAY_RECOVERY_CALLBACK.lock() = Some(Arc::new(callback));
 }
 
+#[allow(
+    dead_code,
+    reason = "the separately compiled application binary checks recovery readiness before opening dictation"
+)]
 pub(crate) fn overlay_recovery_callback_installed() -> bool {
     OVERLAY_RECOVERY_CALLBACK.lock().is_some()
 }
@@ -606,6 +610,10 @@ static ENTER_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 // ---------------------------------------------------------------------------
 
 /// Single-word action label for stopping/submitting the current recording.
+#[allow(
+    dead_code,
+    reason = "the locked dictation footer source contract retains this compatibility action label"
+)]
 const ACTION_STOP_LABEL: &str = "Stop";
 /// Opens the microphone picker; the live session keeps its opened mic.
 const ACTION_MIC_LABEL: &str = "Select Mic";
@@ -1920,14 +1928,10 @@ impl DictationOverlay {
             let target = descriptor.target;
             let is_active = self.state.target == target;
             let tooltip_label = chip_tooltip_label(target);
-            let mut chip = destination_chip_base(
-                descriptor
-                    .quick_chip_label
-                    .expect("quick chip descriptor must provide a label"),
-                descriptor.icon,
-                is_active,
-                !interactive,
-            );
+            let Some(label) = descriptor.quick_chip_label else {
+                continue;
+            };
+            let mut chip = destination_chip_base(label, descriptor.icon, is_active, !interactive);
             if interactive {
                 if !is_active {
                     chip = chip.hover(move |style| style.bg(hover_bg));
@@ -3861,6 +3865,10 @@ pub fn open_dictation_overlay(
     Ok(handle)
 }
 
+#[allow(
+    dead_code,
+    reason = "the separately compiled application binary owns the isolated dictation popup fixture command"
+)]
 pub(crate) fn open_dictation_microphone_popup_fixture(cx: &mut App) -> anyhow::Result<()> {
     if !dictation_overlay_fixture_mode() {
         anyhow::bail!("Dictation microphone fixture requires an active overlay fixture");

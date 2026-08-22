@@ -67,6 +67,10 @@ static DICTATION_RETURN_ORIGIN: Mutex<Option<crate::dictation::DictationReturnOr
     Mutex::new(None);
 
 #[derive(Debug, Clone)]
+#[allow(
+    dead_code,
+    reason = "the launcher binary preserves this work when external dictation delivery fails"
+)]
 pub(crate) struct DictationRecoveryWork {
     pub request: crate::dictation::DictationDeliveryRequest,
     pub audio_duration: Duration,
@@ -253,6 +257,10 @@ pub fn dictation_stop_target() -> Option<DictationTarget> {
 /// the session. `false -> true` queues a restart after stop; the next request
 /// flips it back to `false`. Keeping this pure makes the last-intent rule
 /// independently testable without a microphone.
+#[allow(
+    dead_code,
+    reason = "the launcher binary owns post-stop dictation shortcut replay"
+)]
 pub(crate) fn toggled_post_stop_restart(pending: bool) -> bool {
     !pending
 }
@@ -291,20 +299,36 @@ pub fn current_dictation_phase() -> Option<DictationSessionPhase> {
     SESSION.lock().as_ref().map(|s| s.overlay_phase.clone())
 }
 
+#[allow(
+    dead_code,
+    reason = "the launcher binary snapshots focus before opening the dictation overlay"
+)]
 pub(crate) fn replace_dictation_return_origin(origin: crate::dictation::DictationReturnOrigin) {
     *DICTATION_RETURN_ORIGIN.lock() = Some(origin);
     bump_dictation_state_generation();
 }
 
+#[allow(
+    dead_code,
+    reason = "the launcher binary restores the frozen dictation destination"
+)]
 pub(crate) fn dictation_return_origin() -> Option<crate::dictation::DictationReturnOrigin> {
     DICTATION_RETURN_ORIGIN.lock().clone()
 }
 
+#[allow(
+    dead_code,
+    reason = "the launcher binary clears dictation handoff state after delivery"
+)]
 pub(crate) fn clear_dictation_return_origin() {
     DICTATION_RETURN_ORIGIN.lock().take();
     bump_dictation_state_generation();
 }
 
+#[allow(
+    dead_code,
+    reason = "the launcher binary converts failed dictation delivery into recoverable UI state"
+)]
 pub(crate) fn dictation_pipeline_failure_state(
     operation_id: u64,
     target: crate::dictation::DictationTarget,
@@ -331,6 +355,10 @@ pub(crate) fn dictation_pipeline_failure_state(
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "the launcher binary preserves dictation work instead of dropping failed transcripts"
+)]
 pub(crate) fn preserve_dictation_recovery_work(
     work: DictationRecoveryWork,
     failure: crate::ai::reliability::AppFailureRecord,
@@ -376,15 +404,27 @@ pub(crate) fn preserve_dictation_recovery_work(
     state
 }
 
+#[allow(
+    dead_code,
+    reason = "the launcher binary reads preserved transcript work when retrying delivery"
+)]
 pub(crate) fn dictation_recovery_work() -> Option<DictationRecoveryWork> {
     DICTATION_RECOVERY_WORK.lock().clone()
 }
 
+#[allow(
+    dead_code,
+    reason = "the launcher binary updates preserved transcript work during retry"
+)]
 pub(crate) fn replace_dictation_recovery_work(work: DictationRecoveryWork) {
     *DICTATION_RECOVERY_WORK.lock() = Some(work);
     bump_dictation_state_generation();
 }
 
+#[allow(
+    dead_code,
+    reason = "the launcher binary clears preserved transcript work after a terminal outcome"
+)]
 pub(crate) fn clear_dictation_recovery_work() {
     DICTATION_RECOVERY_WORK.lock().take();
     bump_dictation_state_generation();
@@ -624,6 +664,10 @@ pub fn pending_dictation_device_label() -> Option<String> {
 ///
 /// Agent-facing DevTools use this to prove target routing and delivery
 /// generation without reading transcript contents from logs or UI text.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the redacted delivery receipt must preserve all independently verified routing facts"
+)]
 pub fn record_delivery_receipt(
     delivery_id: u64,
     session_generation: u64,

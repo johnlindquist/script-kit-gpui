@@ -17,9 +17,11 @@
 ///
 /// Uses Objective-C message sending internally.
 #[cfg(target_os = "macos")]
-static LAST_MAIN_WINDOW_VIBRANCY_SIGNATURE: std::sync::Mutex<
-    Option<(usize, bool, crate::theme::VibrancyMaterial, u32, u32)>,
-> = std::sync::Mutex::new(None);
+type MainWindowVibrancySignature = (usize, bool, crate::theme::VibrancyMaterial, u32, u32);
+
+#[cfg(target_os = "macos")]
+static LAST_MAIN_WINDOW_VIBRANCY_SIGNATURE: std::sync::Mutex<Option<MainWindowVibrancySignature>> =
+    std::sync::Mutex::new(None);
 
 #[cfg(target_os = "macos")]
 pub fn configure_window_vibrancy_material_for_appearance(
@@ -97,8 +99,7 @@ pub fn configure_window_vibrancy_material_for_appearance(
         // ║ Glass mode: near-clear instead — the semi-opaque base renders UNDER the   ║
         // ║ NSGlassEffectView backdrop and dims the whole material.                   ║
         // ╚════════════════════════════════════════════════════════════════════════════╝
-        let glass_mode = tahoe_native_glass_composition_available()
-            && theme.is_vibrancy_enabled();
+        let glass_mode = tahoe_native_glass_composition_available() && theme.is_vibrancy_enabled();
         let window_bg_color: id = if glass_mode {
             // Near-clear (NOT clearColor): the 0.0001-alpha base makes the
             // window-server shape the full rect, so the container's shadow is

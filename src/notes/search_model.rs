@@ -305,6 +305,10 @@ pub(crate) struct NoteSearchDocument {
     pub(crate) pinned: bool,
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "the shared notes-to-Agent-Chat context boundary preserves the complete unboxed AppFailureRecord for recovery"
+)]
 pub(crate) fn load_note_search_document(
     id: NoteSearchDocumentId,
     days_dir: &Path,
@@ -382,7 +386,7 @@ pub(crate) fn load_note_search_state(
         }
         Err(failure) => NoteSearchState::Failed {
             generation,
-            failure,
+            failure: *failure,
             prior_snapshot,
         },
     }
@@ -390,10 +394,11 @@ pub(crate) fn load_note_search_state(
 
 pub(crate) fn load_note_search_corpus(
     days_dir: &Path,
-) -> Result<Vec<NoteSearchRow>, AppFailureRecord> {
-    let notes = super::get_all_notes().map_err(|error| search_failure(&error.to_string()))?;
+) -> Result<Vec<NoteSearchRow>, Box<AppFailureRecord>> {
+    let notes =
+        super::get_all_notes().map_err(|error| Box::new(search_failure(&error.to_string())))?;
     let days = super::day_switcher::load_day_note_switcher_entries_result(days_dir)
-        .map_err(|error| search_failure(&error.to_string()))?;
+        .map_err(|error| Box::new(search_failure(&error.to_string())))?;
 
     let mut rows = notes.into_iter().map(note_search_row).collect::<Vec<_>>();
     rows.extend(days.into_iter().map(|entry| NoteSearchRow {
