@@ -1022,6 +1022,11 @@ offline receipts until their real producers are run again.
    accepts explicit reviewed filters only and disables app launch, visible
    probes, screen takeover/capture, native input, and live AI before running
    each group single-threaded. It cannot claim a stale build is current.
+   APFS artifact export also recognizes that Cargo's built-in `test`
+   correctness profile places named binaries in `debug/`; non-GUI proof
+   tools can reuse cheap correctness-profile dependencies without losing a
+   stable, source-identifiable artifact. A disposable real-binary behavior
+   test rejects the former incorrect `target/test/` lookup.
 10. **Lock the contract into real behavior and release gates.** Dedicated
     low-cost Bun cases operate disposable fake pools, live/incomplete leases,
     missing/unusable sccache, disk starvation, stale/current harnesses,
@@ -1057,6 +1062,9 @@ domain lane** rebuilt in **0.41s** and passed every case without a GUI.
 The required strict application-library release gate also passed on this
 source with **zero warnings** via the bounded two-worker agent wrapper;
 its first populated Clippy metadata cache completed in **74s**.
+The actual shipping application binary separately passed a two-worker
+compile check; its eight existing binary-only unused-import warnings remain
+explicitly distinguished from the zero-warning required library gate.
 
 ### Remaining architecture, without overstating completion
 
