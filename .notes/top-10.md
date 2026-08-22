@@ -961,6 +961,14 @@ offline receipts until their real producers are run again.
     `check :: cargo check --locked` instead of entering the protected pool.
     Explicit test executables and hosted runners also needed an independent
     top-level resource boundary rather than relying on the wrapper alone.
+13. The repository's canonical `scripts/agent-check.sh` inherited dangerous
+    screen/input/capture/live-AI/app-launch permissions unchanged, accepted
+    interactive mode, compiled every target with Clippy, and ended with
+    blanket `cargo test`. The latter discovers legacy integration harnesses
+    whose GUI/input behavior has never been reviewed. Disposable fake Cargo
+    proved all dangerous settings reached a child and only three unrestricted
+    commands ran; a separate release mutation proved deleting this actual
+    safety owner did not prevent publication.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1090,7 +1098,7 @@ offline receipts until their real producers are run again.
    before launching even an explicitly overridden Cargo executable. Every
    real receipt records both compiler and harness worker counts, cache
    state, pool, exit status, elapsed seconds, and before/after free space.
-   The fake-Cargo behavior suite passes **38 cases and 173 assertions**
+   The fake-Cargo behavior suite passes **40 cases and 199 assertions**
    without building Rust or opening the application.
    `SCRIPT_KIT_AGENT_TIMINGS=1` emits Cargo's real critical-path HTML plus a
    fail-closed machine-readable summary of actual hot units, duplicate
@@ -1118,9 +1126,16 @@ offline receipts until their real producers are run again.
     the verifier first enforces both worker ceilings and clears both stress
     corpora. The verifier also refuses native-input/screen-capture overrides
     and includes the storage domain plus build-policy tests in its normal
-    verification lanes.
+    verification lanes. The actual agent-facing `scripts/agent-check.sh`
+    separately refuses all six dangerous inherited permissions, forces
+    noninteractive/no-stress children, scopes related filters and the full
+    app pass to reviewed `--lib` targets, uses the actual locked
+    warning-free release Clippy command, and explicitly runs all three safe
+    domain crates. It never executes blanket `cargo test` or
+    `clippy --all-targets`; a disposable fake-rg/fake-Cargo test proves all
+    five exact child commands and every inherited safety setting.
     Publication additionally refuses a missing/untracked
-    `agent-cargo.sh`, `cargo-cache-locks.sh`, or
+    `agent-check.sh`, `agent-cargo.sh`, `cargo-cache-locks.sh`, or
     `cargo-build-policy.test.ts`; a green-looking proof receipt that omits
     the directly executed build-resource suite is rejected as incomplete.
     Every real explicit Bun test invocation now roots its paths with `./`,
@@ -1166,8 +1181,8 @@ offline receipts until their real producers are run again.
     across 37 files in 16.39s**, without the previous repository scan or load
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
-    separately passes all **38 fake-Cargo cases / 173 assertions** plus
-    **four direct release-owner/proof-gate cases / 13 assertions**. The full
+    separately passes all **40 fake-Cargo cases / 199 assertions** plus
+    **five direct release-owner/proof-gate cases / 16 assertions**. The full
     suite and real compiler were deliberately not rerun while workstation
     free space remained below the enforced **25-GiB** build floor. None of
     these checks touches the operator's computer.
