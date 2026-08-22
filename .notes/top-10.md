@@ -1040,10 +1040,10 @@ offline receipts until their real producers are run again.
     child-output regression proves subprocess evidence is observable, and
     both extra native-input/screen-capture opt-ins are forcibly disabled.
     The source-current full nonintrusive release lane then executed
-    **690 passing tests, zero failures, and 2,704 assertions across 37 files
-    in 9.69s**, without the previous repository scan or load spike. The
-    focused build/proof-contract lane separately passed **61 tests and 317
-    assertions in 0.74s**. None touches the operator's computer.
+    **691 passing tests, zero failures, and 2,707 assertions across 37 files
+    in 9.71s**, without the previous repository scan or load spike. The
+    focused build/proof-contract lane separately passed **62 tests and 320
+    assertions in 0.77s**. None touches the operator's computer.
 
 The measured post-deduplication build contained **985 total units instead of
 1,233**, rebuilt only **119 units instead of 1,228**, retained exactly two
@@ -1065,6 +1065,15 @@ its first populated Clippy metadata cache completed in **74s**.
 The actual shipping application binary separately passed a two-worker
 compile check; its eight existing binary-only unused-import warnings remain
 explicitly distinguished from the zero-warning required library gate.
+The previously deleted standalone design-token exporter was then rebuilt in
+the existing cheap test profile: Cargo observed **984 total units but only two
+dirty units**, rebuilt and linked the actual non-GUI exporter in **45.86s**,
+and APFS-cloned it into the protected stable artifact directory. Running the
+real binary reproduced both checked-in generated outputs byte for byte; the
+fresh, exact-source consistency auditor reported **15 accepted / 60 missing,
+zero invalid or failed receipts, zero auditor errors, and passing privacy,
+protected-source, and generated-byte gates**. The 60 remaining obligations
+are real-runtime interactions and were not misrepresented as offline proof.
 
 ### Remaining architecture, without overstating completion
 
