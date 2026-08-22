@@ -1012,6 +1012,14 @@ offline receipts until their real producers are run again.
     1 MiB each, and eight external-symlink fixtures**. Its final case really
     invokes `rustc` for that tiny standalone policy harness, so describing the
     entire suite as compiler-free would also misrepresent its evidence.
+20. The fast cached application-harness runner forwarded arbitrary filter
+    strings directly to libtest. `--ignored` therefore enabled every actual
+    screen/input/clipboard/provider test; a later dangerous filter could run
+    after an earlier group had already mutated state. The runner also followed
+    traversal/symlinked pools to execute foreign binaries and inherited full
+    search/storage stress corpora. Ten fake-binary cases reproduced every
+    route, while a release mutation proved its owning script was absent from
+    mandatory release provenance.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1153,11 +1161,11 @@ offline receipts until their real producers are run again.
    state, pool, exit status, elapsed seconds, and before/after free space.
    Direct, inline, and file-based `--config` overrides fail before pool
    creation because they can replace effective job counts and target
-   ownership. The fake-Cargo behavior suite passes **91 cases and 366
+   ownership. The fake-Cargo behavior suite passes **101 cases and 395
    assertions** without invoking Cargo or building the application. Its one
    real `rustc` call compiles only an isolated **~1-MiB `build.rs` policy
    harness**; every fake workspace, external fixture, and standalone harness
-   is deleted after its owning case. A complete 91-case rerun preserved the
+   is deleted after its owning case. A complete suite rerun preserved the
    measured preexisting temporary inventories at exactly **1,179 / 33 / 8**,
    proving zero new fixture leakage without deleting unrelated historical
    directories.
@@ -1167,9 +1175,14 @@ offline receipts until their real producers are run again.
 9. **Reuse only current reviewed test binaries.** The dedicated harness
    runner refuses missing executables and binaries older than source,
    workspace crates, vendored code, Cargo configuration, or lockfiles. It
-   accepts explicit reviewed filters only and disables app launch, visible
-   probes, screen takeover/capture, native input, and live AI before running
-   each group single-threaded. It cannot claim a stale build is current.
+   validates **every** explicit identifier-only reviewed filter before the
+   first process starts; `--ignored`, `--include-ignored`, thread overrides,
+   empty/whitespace filters, and traversal-like values fail closed. Pool
+   traversal and symlinked cache roots cannot select an external executable.
+   It disables app launch, visible probes, screen takeover/capture, native
+   input, live AI, and both heavyweight stress corpora before running each
+   group single-threaded. It cannot claim a stale build is current, and its
+   exact shell owner is required by standalone release provenance.
    APFS artifact export also recognizes that Cargo's built-in `test`
    correctness profile places named binaries in `debug/`; non-GUI proof
    tools can reuse cheap correctness-profile dependencies without losing a
@@ -1208,8 +1221,9 @@ offline receipts until their real producers are run again.
     `clippy --all-targets`; a disposable fake-rg/fake-Cargo test proves all
     five exact child commands and every inherited safety setting.
     Publication additionally refuses a missing/untracked
-    `agent-check.sh`, `agent-cargo.sh`, `cargo-cache-locks.sh`, or
-    `cargo-build-policy.test.ts`; a green-looking proof receipt that omits
+    `agent-check.sh`, `agent-cargo.sh`, `cargo-cache-locks.sh`,
+    `reuse-rust-test-binary.sh`, or `cargo-build-policy.test.ts`; a
+    green-looking proof receipt that omits
     the directly executed build-resource suite is rejected as incomplete.
     Every real explicit Bun test invocation now roots its paths with `./`,
     including both shared offline-proof launchers and the actual recorded
@@ -1254,8 +1268,8 @@ offline receipts until their real producers are run again.
     across 37 files in 16.39s**, without the previous repository scan or load
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
-    separately passes all **91 fake-Cargo cases / 366 assertions** plus
-    **seven direct release-owner/proof-gate cases / 20 assertions**. The
+    separately passes all **101 fake-Cargo cases / 395 assertions** plus
+    **eight direct release-owner/proof-gate cases / 23 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
     suite and actual application/Cargo compiler were deliberately not rerun
