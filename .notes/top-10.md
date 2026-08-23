@@ -1167,6 +1167,20 @@ offline receipts until their real producers are run again.
     helper keys, deterministic window fixtures, browser help, and a complete
     mocked-storage smoke-study `--dry-run` remain behavior-proven; every
     owner is independently mandatory release provenance.
+35. The consistency program's own **15 runtime workflow producers** had no
+    coherent entry contract: only the three rich-clipboard owners were
+    guarded. Most remaining probes touched native processes, credentials,
+    temporary databases, shared homes, or nested scenarios before their
+    later Driver check. Critically, `SAFE-001` first deleted its existing
+    authoritative `receipt.json`; a disposable real-file regression proved
+    the exact evidence disappeared before the first native binary hash.
+    Flow history also created shared state before validating launch and
+    observed `NSPasteboard` through AppleScript; Notes Today delegated
+    multiple unreviewed child scripts directly. All 15 workflow entrypoints
+    now fail before evidence deletion, fixture mutation, clipboard access,
+    live credentials, native subprocesses, or runtime launches. A complete
+    per-owner matrix plus exact byte-for-byte receipt preservation passes;
+    all twelve previously omitted producers are mandatory release sources.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1417,8 +1431,8 @@ offline receipts until their real producers are run again.
     explicit `noninteractive: false` options nor replacement environments
     can weaken the real parent's authority; target resolution stays on its
     capture-free hidden-state path even when callers request an interactive
-    override. The standalone operator-safety suite passes **153 cases and
-    578 assertions**, including pure canonical-inspector ownership, immutable
+    override. The standalone operator-safety suite passes **169 cases and
+    629 assertions**, including pure canonical-inspector ownership, immutable
     subprocess policy, Notes/matrix/scenario cleanup, mocked native-spawn
     cases, default/render/fallback screenshot refusal, exact session lifecycle,
     independent consumer/Actions child-authority refusal, and eight
@@ -1426,7 +1440,8 @@ offline receipts until their real producers are run again.
     agentic commands, truthful optional-scenario refusal, central dispatch,
     direct profiler isolation, rich-pasteboard archive refusal, browser
     capture, AppKit/native-helper isolation, preserved input-monitor files,
-    and safe smoke-study dry runs; the separate
+    safe smoke-study dry runs, all fifteen consistency workflow owners, and
+    preservation of the exact preexisting SAFE-001 receipt; the separate
     direct native-input suite passes **43 cases and 89
     assertions** without touching a keyboard, pointer, window, or screen;
     the separate hidden-target identity suite passes
@@ -1435,7 +1450,7 @@ offline receipts until their real producers are run again.
     glass/native-input/window-fixture lane passes **167 cases and 458
     assertions**; three pure helper-key cases and ten pure smoke-study
     scheduling/manifest cases also pass without Swift compilation or capture.
-    Release evidence now fail-closes unless all fifty-one actual safety
+    Release evidence now fail-closes unless all sixty-three actual safety
     owners—the direct
     session shell, shared
     identity helper, isolated startup, DevTools bootstrap, readiness waiter,
@@ -1446,6 +1461,7 @@ offline receipts until their real producers are run again.
     target thread, scenario runner, automation-window owner, dedicated
     screenshot verifier, native window owner, native-input owner and behavior
     suite, activation owner, all four pre-Driver clipboard/archive probes,
+    all fifteen consistency workflow producers,
     root-search visual proof, Notes glass fallback, browser fidelity capture,
     native AppKit fixture, Swift helper cache, global input monitor, glass
     contrast, live smoke study, central agentic/DevTools dispatchers,
@@ -1471,7 +1487,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **fifty-four direct release-owner/proof-gate cases / 162 assertions** and
+    **sixty-six direct release-owner/proof-gate cases / 198 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
