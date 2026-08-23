@@ -707,6 +707,198 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
       "Fresh, canonical-section-bound offline behavior proof for explicitly safe infrastructure tasks only.",
   }),
   schema({
+    primitiveId: "mockups.story.browserGeometry",
+    tool: "script-kit-mockups.story-browser-geometry",
+    commands: ["story.browser-geometry"],
+    requiredPaths: [
+      "taskId",
+      "taskIds",
+      "catalogBinding.taskId",
+      "catalogBinding.title",
+      "catalogBinding.sectionSha256",
+      "evidenceClass",
+      "provesRuntimeBehavior",
+      "evidenceBoundary",
+      "repository.gitCommit",
+      "browser.dependency",
+      "browser.headed",
+      "browser.observedVisible",
+      "browser.sessionId",
+      "target.visible",
+      "viewport.width",
+      "viewport.height",
+      "viewport.devicePixelRatio",
+      "stories",
+      "fixture.path",
+      "fixture.sha256",
+      "fixtures",
+      "assets",
+      "assetFingerprint",
+      "evidence.rendered.boundary",
+      "evidence.rendered.toleranceCssPx",
+      "negativeControls",
+      "cleanup.closed",
+      "cleanup.browserClosed",
+      "cleanup.serverClosed",
+      "cleanup.survivors",
+    ],
+    identityPolicy: "none",
+    privacyPolicy: "metadata-only",
+    requiredEvidenceLayers: ["rendered"],
+    forbidMissingPrimitivesOnPass: true,
+    predicates: [{
+      id: "headed-browser-geometry-must-observe-both-source-current-stories",
+      validate(receipt, disposition) {
+        if (disposition !== "EVALUABLE_PASS") return [];
+        const errors: string[] = [];
+        const browser = asObject(receipt.browser);
+        const viewport = asObject(receipt.viewport);
+        const repository = asObject(receipt.repository);
+        const binding = asObject(receipt.catalogBinding);
+        const expectedStories = [
+          "10-conversation-three-modes",
+          "11-launcher-flows-and-scripts",
+        ];
+        const dependencies = ["playwright", "@playwright/test", "puppeteer", "puppeteer-core"];
+        if (
+          receipt.taskId !== "PF-012" ||
+          binding.taskId !== "PF-012" ||
+          !stringArray(receipt.taskIds).includes("PF-012") ||
+          !/^[a-f0-9]{64}$/.test(String(binding.sectionSha256 ?? "")) ||
+          receipt.evidenceClass !== "RUNTIME_VISIBLE" ||
+          receipt.provesRuntimeBehavior !== true ||
+          receipt.evidenceBoundary !== "HTML_BROWSER_ONLY"
+        ) {
+          errors.push("browser geometry must be canonical PF-012 visible HTML-only runtime proof");
+        }
+        if (
+          repository.gitCommit !== gitCommit() ||
+          !/^[a-f0-9]{40}$/.test(String(repository.gitCommit ?? ""))
+        ) {
+          errors.push("browser geometry requires the exact current source commit");
+        }
+        if (
+          !dependencies.includes(String(browser.dependency ?? "")) ||
+          browser.headed !== true ||
+          browser.observedVisible !== true ||
+          asObject(receipt.target).visible !== true ||
+          typeof browser.sessionId !== "string" ||
+          browser.sessionId.length < 8
+        ) {
+          errors.push("browser geometry requires an actually observed approved headed browser");
+        }
+        if (viewport.width !== 1280 || viewport.height !== 720 || viewport.devicePixelRatio !== 1) {
+          errors.push("browser geometry requires the exact 1280x720 CSS viewport at DPR 1");
+        }
+
+        const stories = Array.isArray(receipt.stories) ? receipt.stories.map(asObject) : [];
+        const observedStories = stories.map((story) => String(story.id ?? "")).sort();
+        if (
+          observedStories.length !== expectedStories.length ||
+          observedStories.some((story, index) => story !== [...expectedStories].sort()[index]) ||
+          stories.some((story) => {
+            const observation = asObject(story.observation);
+            const observedBrowser = asObject(observation.browser);
+            const fonts = asObject(observation.fonts);
+            const autoplay = asObject(observation.autoplay);
+            const comparisons = Array.isArray(story.comparisons)
+              ? story.comparisons.map(asObject)
+              : [];
+            return story.pass !== true ||
+              observation.sourceCommit !== repository.gitCommit ||
+              asObject(observation.story).id !== story.id ||
+              observedBrowser.sessionId !== browser.sessionId ||
+              observedBrowser.observedVisible !== true ||
+              fonts.awaited !== true ||
+              fonts.pass !== true ||
+              fonts.topLevelStatus !== "loaded" ||
+              fonts.surfaceStatus !== "loaded" ||
+              autoplay.overrideInstalled !== true ||
+              autoplay.remainedStopped !== true ||
+              autoplay.clockBeforeFramesMs !== 0 ||
+              autoplay.clockAfterFramesMs !== 0 ||
+              comparisons.length !== 2 ||
+              comparisons.some((comparison) =>
+                comparison.pass !== true || comparison.toleranceCssPx !== 0
+              );
+          })
+        ) {
+          errors.push("browser geometry requires both exact settled, font-ready, zero-tolerance stories");
+        }
+
+        const fixture = asObject(receipt.fixture);
+        const fixtures = Array.isArray(receipt.fixtures) ? receipt.fixtures.map(asObject) : [];
+        const requiredFixturePaths = expectedStories.map((story) =>
+          `design/mockups/stories/${story}/story.js`
+        ).sort();
+        if (
+          fixture.path !== "design/mockups/stories/stories.json" ||
+          fileFingerprint(resolve(process.cwd(), String(fixture.path ?? ""))) !== fixture.sha256 ||
+          fixtures.length !== requiredFixturePaths.length ||
+          fixtures.map((entry) => String(entry.path ?? "")).sort()
+            .some((path, index) => path !== requiredFixturePaths[index]) ||
+          fixtures.some((entry) =>
+            fileFingerprint(resolve(process.cwd(), String(entry.path ?? ""))) !== entry.sha256
+          )
+        ) {
+          errors.push("browser geometry requires both exact current story fixture fingerprints");
+        }
+
+        const assets = Array.isArray(receipt.assets) ? receipt.assets.map(asObject) : [];
+        const assetBytes = assets
+          .map((asset) => `${asset.path}\n${asset.sha256}\n${asset.sizeBytes}`)
+          .join("\n");
+        if (
+          assets.length === 0 ||
+          assets.some((asset) =>
+            typeof asset.path !== "string" ||
+            asset.path.split("/").includes("..") ||
+            !/^[a-f0-9]{64}$/.test(String(asset.sha256 ?? "")) ||
+            typeof asset.sizeBytes !== "number" ||
+            asset.sizeBytes < 1
+          ) ||
+          sha256(assetBytes) !== receipt.assetFingerprint
+        ) {
+          errors.push("browser geometry requires fingerprinted assets actually served by the loopback observer");
+        }
+
+        const controls = Array.isArray(receipt.negativeControls)
+          ? receipt.negativeControls.map(asObject)
+          : [];
+        const expectedControls = expectedStories.flatMap((story) => [
+          "one-pixel-offset",
+          "missing-selector",
+          "wrong-chapter",
+          "unresolved-fonts",
+          "stale-source",
+          "invalid-tolerance",
+        ].map((control) => `${story}:${control}`)).sort();
+        if (
+          controls.length !== expectedControls.length ||
+          controls.map((control) => String(control.id ?? "")).sort()
+            .some((id, index) => id !== expectedControls[index]) ||
+          controls.some((control) => control.pass !== true)
+        ) {
+          errors.push("browser geometry requires all executed adversarial controls for both stories");
+        }
+
+        const cleanup = asObject(receipt.cleanup);
+        if (
+          cleanup.closed !== true ||
+          cleanup.browserClosed !== true ||
+          cleanup.serverClosed !== true ||
+          !Array.isArray(cleanup.survivors) ||
+          cleanup.survivors.length > 0
+        ) {
+          errors.push("browser geometry requires closed browser/server ownership with no survivors");
+        }
+        return errors;
+      },
+    }],
+    description:
+      "Prove both source-bound mockup stories in one observed headed browser without treating synthetic rectangles as runtime evidence.",
+  }),
+  schema({
     primitiveId: "devtools.consistency.family-fixtures",
     tool: "script-kit-devtools.family-fixtures",
     commands: ["family-fixtures.verify"],
@@ -1450,6 +1642,8 @@ const producerFileByTool: Record<string, string> = {
   "script-kit-devtools.family-fixtures": "family-fixtures.ts",
   "script-kit-devtools.safe-task-proofs": "safe-task-proofs.ts",
   "script-kit-devtools.glass-observers": "glass-observers.ts",
+  "script-kit-mockups.story-browser-geometry":
+    "../agentic/cons-proof-gov/story-geometry-proof.mjs",
 };
 
 function sha256(value: string | Uint8Array): string {

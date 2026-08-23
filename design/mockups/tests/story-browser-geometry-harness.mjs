@@ -26,6 +26,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   statSync,
   writeFileSync,
@@ -66,7 +67,7 @@ export const BROWSER_CONTRACT = {
 // resolves first" outside this declared order.
 // ---------------------------------------------------------------------------
 
-const BROWSER_DEPENDENCY_LADDER = [
+export const BROWSER_DEPENDENCY_LADDER = [
   "playwright",
   "@playwright/test",
   "puppeteer",
@@ -202,9 +203,8 @@ export async function startLoopbackServer(root = MOCKUPS_ROOT) {
   const served = new Map();
   const server = http.createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    const relPath = decodeURIComponent(url.pathname).replace(/^\/+/, "");
-    const filePath = normalize(join(root, relPath));
-    if (!filePath.startsWith(normalize(root)) || !existsSync(filePath)
+    const filePath = resolveLoopbackAssetPath(root, url.pathname);
+    if (!filePath || !existsSync(filePath)
       || statSync(filePath).isDirectory()) {
       response.writeHead(404).end("not found");
       return;
@@ -233,6 +233,25 @@ export async function startLoopbackServer(root = MOCKUPS_ROOT) {
     close: () =>
       new Promise((resolve) => server.close(() => resolve(undefined))),
   };
+}
+
+export function resolveLoopbackAssetPath(root, pathname) {
+  let relPath;
+  try {
+    relPath = decodeURIComponent(pathname).replace(/^\/+/, "");
+  } catch {
+    return null;
+  }
+  if (relPath.includes("\0")) return null;
+  const normalizedRoot = normalize(root);
+  const filePath = normalize(join(normalizedRoot, relPath));
+  const lexical = relative(normalizedRoot, filePath);
+  if (!lexical || lexical === ".." || lexical.startsWith("../")) return null;
+  if (existsSync(filePath)) {
+    const physical = relative(realpathSync(normalizedRoot), realpathSync(filePath));
+    if (!physical || physical === ".." || physical.startsWith("../")) return null;
+  }
+  return filePath;
 }
 
 export function fingerprintServedAssets(assets) {
@@ -432,14 +451,62 @@ export async function seekAndCapture(page, { surfaceId, chapterId, seekMs, selec
 export function evaluateRectEquals(expected, actual, toleranceCssPx) {
   const deltas = {};
   const failures = [];
-  for (const selector of Object.keys(expected)) {
+  const expectedRects = expected && typeof expected === "object" && !Array.isArray(expected)
+    ? expected
+    : null;
+  const actualRects = actual && typeof actual === "object" && !Array.isArray(actual)
+    ? actual
+    : null;
+  if (!Number.isFinite(toleranceCssPx) || toleranceCssPx < 0) {
+    failures.push({ selector: null, field: "tolerance", reason: "invalid-tolerance" });
+  }
+  if (!expectedRects || !actualRects) {
+    failures.push({ selector: null, field: "rects", reason: "invalid-rectangle-map" });
+    return { toleranceCssPx, deltas, failures, pass: false };
+  }
+  const expectedSelectors = Object.keys(expectedRects).sort();
+  const actualSelectors = Object.keys(actualRects).sort();
+  if (expectedSelectors.length === 0) {
+    failures.push({ selector: null, field: "selectors", reason: "empty-selector-set" });
+  }
+  for (const selector of expectedSelectors.filter((entry) => !actualSelectors.includes(entry))) {
+    failures.push({ selector, field: "selectors", reason: "missing-selector" });
+  }
+  for (const selector of actualSelectors.filter((entry) => !expectedSelectors.includes(entry))) {
+    failures.push({ selector, field: "selectors", reason: "unexpected-selector" });
+  }
+  for (const selector of expectedSelectors) {
     deltas[selector] = {};
     for (const field of RECT_FIELDS) {
-      const delta = Number(actual?.[selector]?.[field])
-        - Number(expected?.[selector]?.[field]);
+      const expectedValue = expectedRects?.[selector]?.[field];
+      const actualValue = actualRects?.[selector]?.[field];
+      if (
+        typeof expectedValue !== "number" ||
+        typeof actualValue !== "number" ||
+        !Number.isFinite(expectedValue) ||
+        !Number.isFinite(actualValue)
+      ) {
+        deltas[selector][field] = null;
+        failures.push({ selector, field, reason: "invalid-rectangle-coordinate" });
+        continue;
+      }
+      const delta = actualValue - expectedValue;
       deltas[selector][field] = delta;
       if (!Number.isFinite(delta) || Math.abs(delta) > toleranceCssPx) {
         failures.push({ selector, field, delta, toleranceCssPx });
+      }
+    }
+    for (const [kind, rect] of [["baseline", expectedRects[selector]], ["observed", actualRects[selector]]]) {
+      if (!rect || typeof rect !== "object") continue;
+      if (
+        rect.width < 0 ||
+        rect.height < 0 ||
+        rect.x !== rect.left ||
+        rect.y !== rect.top ||
+        rect.right !== rect.left + rect.width ||
+        rect.bottom !== rect.top + rect.height
+      ) {
+        failures.push({ selector, field: "geometry", reason: `${kind}-rectangle-inconsistent` });
       }
     }
   }
