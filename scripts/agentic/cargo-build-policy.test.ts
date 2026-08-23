@@ -1064,6 +1064,7 @@ describe("Cargo cache ownership", () => {
 describe("reviewed Rust harness reuse", () => {
   function currentHarness(pool = "agent-debug") {
     const workspace = fixture();
+    installFakeGit(workspace);
     for (const source of ["src", "crates", "vendor", ".cargo"]) {
       mkdirSync(join(workspace.root, source), { recursive: true });
     }
@@ -1082,6 +1083,7 @@ describe("reviewed Rust harness reuse", () => {
 
   test("rejects stale binaries before executing any test", () => {
     const workspace = fixture();
+    installFakeGit(workspace);
     for (const source of ["src", "crates", "vendor", ".cargo"]) {
       mkdirSync(join(workspace.root, source), { recursive: true });
     }
@@ -1104,6 +1106,7 @@ describe("reviewed Rust harness reuse", () => {
 
   test("executes current reviewed filters serially with every takeover permission disabled", () => {
     const workspace = fixture();
+    installFakeGit(workspace);
     for (const source of ["src", "crates", "vendor", ".cargo"]) {
       mkdirSync(join(workspace.root, source), { recursive: true });
     }
@@ -1128,6 +1131,32 @@ describe("reviewed Rust harness reuse", () => {
     expect(readFileSync(workspace.capture, "utf8")).toBe(
       "first_reviewed_group:1:0:0:0\nsecond_reviewed_group:1:0:0:0\n",
     );
+  });
+
+  test("backdated dirty Rust source cannot masquerade as a current cached harness", () => {
+    const workspace = currentHarness();
+    const source = join(workspace.root, "src", "backdated.rs");
+    writeFileSync(source, "// modified compiled source\n");
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(source, old, old);
+    const result = run("reuse-rust-test-binary.sh", ["reviewed_case"], {
+      ...workspace.env,
+      CARGO_POLICY_GIT_DIRTY: "1",
+    });
+    expect(result.status).toBe(65);
+    expect(result.stderr).toContain("uncommitted reviewed compiler inputs");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("cached harness refuses a symlinked compiler-input owner before execution", () => {
+    const workspace = currentHarness();
+    const external = temporaryDirectory("script-kit-external-rust-input-");
+    rmSync(join(workspace.root, "src"), { recursive: true, force: true });
+    symlinkSync(external, join(workspace.root, "src"));
+    const result = run("reuse-rust-test-binary.sh", ["reviewed_case"], workspace.env);
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("reviewed compiler inputs cannot follow a symlink");
+    expect(existsSync(workspace.capture)).toBe(false);
   });
 
   test.each([

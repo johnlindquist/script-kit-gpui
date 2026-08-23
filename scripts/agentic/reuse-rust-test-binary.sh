@@ -55,22 +55,44 @@ if [[ -z "$binary" ]]; then
   exit 66
 fi
 
-source_inputs=(
-  "${REPO_ROOT}/src" \
-  "${REPO_ROOT}/crates" \
-  "${REPO_ROOT}/vendor" \
-  "${REPO_ROOT}/.cargo" \
-  "${REPO_ROOT}/Cargo.toml" \
-  "${REPO_ROOT}/Cargo.lock"
-)
-for embedded_input in \
-  "${REPO_ROOT}/build.rs" \
-  "${REPO_ROOT}/rust-toolchain.toml" \
-  "${REPO_ROOT}/scripts/kit-sdk.ts" \
-  "${REPO_ROOT}/kit-init" \
-  "${REPO_ROOT}/assets"; do
-  [[ -e "$embedded_input" ]] && source_inputs+=("$embedded_input")
-done
+compiler_input_owner="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/compiler-input-paths.txt"
+if [[ ! -f "$compiler_input_owner" || -L "$compiler_input_owner" ]]; then
+  echo "RUST_TEST_REUSE error: canonical reviewed compiler-input owner is unavailable" >&2
+  exit 64
+fi
+source_inputs=()
+reviewed_input_paths=()
+while IFS= read -r reviewed_input || [[ -n "$reviewed_input" ]]; do
+  if [[ -z "$reviewed_input" || "$reviewed_input" == /* || "$reviewed_input" == *".."* ]]; then
+    echo "RUST_TEST_REUSE error: reviewed compiler-input owner contains an invalid relative path" >&2
+    exit 64
+  fi
+  reviewed_input_paths+=("$reviewed_input")
+  absolute_input="${REPO_ROOT}/${reviewed_input}"
+  if [[ -L "$absolute_input" ]]; then
+    echo "RUST_TEST_REUSE error: reviewed compiler inputs cannot follow a symlink: ${absolute_input}" >&2
+    exit 64
+  fi
+  [[ -e "$absolute_input" ]] && source_inputs+=("$absolute_input")
+done < "$compiler_input_owner"
+if (( ${#source_inputs[@]} == 0 )); then
+  echo "RUST_TEST_REUSE error: cached harness has no independently reviewed compiler inputs" >&2
+  exit 65
+fi
+source_head="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+if [[ ! "$source_head" =~ ^[a-f0-9]{40}$ ]]; then
+  echo "RUST_TEST_REUSE error: cached harness requires an independently observed source commit" >&2
+  exit 65
+fi
+source_changes="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- \
+  "${reviewed_input_paths[@]}" 2>/dev/null)" || {
+  echo "RUST_TEST_REUSE error: cached harness cannot observe its reviewed compiler inputs" >&2
+  exit 65
+}
+if [[ -n "$source_changes" ]]; then
+  echo "RUST_TEST_REUSE error: cached harness cannot prove uncommitted reviewed compiler inputs; rebuild from a clean source" >&2
+  exit 65
+fi
 stale_source="$(find "${source_inputs[@]}" -type f -newer "$binary" -print -quit 2>/dev/null)"
 if [[ -n "$stale_source" ]]; then
   echo "RUST_TEST_REUSE error: cached harness is older than ${stale_source}; rebuild before claiming behavior proof" >&2
