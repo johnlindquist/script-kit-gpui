@@ -11,9 +11,13 @@
 
 import {
   chmodSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readlinkSync,
   rmSync,
@@ -74,6 +78,7 @@ function mcpUsage() {
     "  SCRIPT_KIT_MCP_SERVER_JSON  Path to server.json",
     "  SCRIPT_KIT_MCP_ENDPOINT     Base URL or /rpc endpoint",
     "  SCRIPT_KIT_MCP_TOKEN        Bearer token",
+    "  SCRIPT_KIT_MCP_TIMEOUT_MS   Request timeout, at most 120000ms",
   ].join("\n");
 }
 
@@ -108,10 +113,33 @@ function loadDiscovery(): DiscoveryInfo | null {
   if (!existsSync(path)) {
     return null;
   }
+  let descriptor: number | undefined;
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as DiscoveryInfo;
+    const owner = lstatSync(path);
+    if (!owner.isFile() || owner.isSymbolicLink()) {
+      fail(`Script Kit MCP requires a private regular discovery file: ${path}`);
+    }
+    descriptor = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== owner.dev || opened.ino !== owner.ino) {
+      fail(`Script Kit MCP requires a private regular discovery file: ${path}`);
+    }
+    if (process.platform !== "win32" && (opened.mode & 0o077) !== 0) {
+      fail(`Script Kit MCP discovery requires owner-only permissions: ${path}`);
+    }
+    if (typeof process.getuid === "function" && opened.uid !== process.getuid()) {
+      fail(`Script Kit MCP discovery must belong to the current user: ${path}`);
+    }
+    const discovery = JSON.parse(readFileSync(descriptor, "utf8")) as DiscoveryInfo;
+    if (!discovery || typeof discovery !== "object") {
+      fail(`Script Kit MCP discovery must contain a private endpoint and token: ${path}`);
+    }
+    return discovery;
   } catch (error) {
+    if (error instanceof CliFailure) throw error;
     fail(`Failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
@@ -120,26 +148,73 @@ function envValue(name: string): string | undefined {
   return value && value.trim() !== "" ? value : undefined;
 }
 
+function reviewedLocalEndpoint(endpointOrBase: string): string {
+  let endpoint: URL;
+  try {
+    endpoint = new URL(endpointOrBase);
+  } catch {
+    fail("A local Script Kit MCP endpoint must be a valid loopback HTTP /rpc URL.");
+  }
+  const loopback = endpoint.hostname === "localhost"
+    || endpoint.hostname === "127.0.0.1"
+    || endpoint.hostname === "[::1]";
+  if (
+    !loopback ||
+    !["http:", "https:"].includes(endpoint.protocol) ||
+    endpoint.username ||
+    endpoint.password ||
+    endpoint.search ||
+    endpoint.hash ||
+    !["/", "/rpc"].includes(endpoint.pathname)
+  ) {
+    fail("A local Script Kit MCP endpoint must be a loopback HTTP /rpc URL without credentials, query, or fragment.");
+  }
+  endpoint.pathname = "/rpc";
+  return endpoint.toString();
+}
+
 function resolveEndpointAndToken(): { endpoint: string; token: string } {
-  const discovery = loadDiscovery();
-  const token = envValue("SCRIPT_KIT_MCP_TOKEN") ?? discovery?.token;
-  const endpointOrBase = envValue("SCRIPT_KIT_MCP_ENDPOINT") ?? discovery?.url;
+  const endpointOverride = envValue("SCRIPT_KIT_MCP_ENDPOINT");
+  const tokenOverride = envValue("SCRIPT_KIT_MCP_TOKEN");
+  // Validate an explicit destination before opening local bearer-token state.
+  const reviewedOverride = endpointOverride ? reviewedLocalEndpoint(endpointOverride) : undefined;
+  const discovery = reviewedOverride && tokenOverride ? null : loadDiscovery();
+  const token = tokenOverride ?? discovery?.token;
+  const endpointOrBase = reviewedOverride ?? discovery?.url;
 
   if (!endpointOrBase) {
     fail(
       `Missing MCP endpoint. Set SCRIPT_KIT_MCP_ENDPOINT or start Script Kit so ${discoveryPath()} exists.`,
     );
   }
-  if (!token) {
+  if (typeof token !== "string" || !token.trim() || /[\r\n]/.test(token)) {
     fail(
       `Missing MCP token. Set SCRIPT_KIT_MCP_TOKEN or start Script Kit so ${discoveryPath()} contains a token.`,
     );
   }
 
-  const endpoint = endpointOrBase.endsWith("/rpc")
-    ? endpointOrBase
-    : `${endpointOrBase.replace(/\/$/, "")}/rpc`;
+  if (typeof endpointOrBase !== "string") {
+    fail("A local Script Kit MCP endpoint must be a valid loopback HTTP /rpc URL.");
+  }
+  const endpoint = reviewedOverride ?? reviewedLocalEndpoint(endpointOrBase);
   return { endpoint, token };
+}
+
+function mcpRequestTimeoutMs(): number {
+  const configured = process.env.SCRIPT_KIT_MCP_TIMEOUT_MS;
+  if (configured === undefined || configured === "") return 30_000;
+  const timeout = Number(configured);
+  if (!/^[1-9][0-9]*$/.test(configured) || !Number.isSafeInteger(timeout) || timeout > 120_000) {
+    fail("SCRIPT_KIT_MCP_TIMEOUT_MS must be a positive whole duration no greater than 120000ms.");
+  }
+  return timeout;
+}
+
+function safeMcpDiagnostic(message: string, token: string): string {
+  return message
+    .split(token).join("[REDACTED]")
+    .replace(/\bBearer\s+[^\s,;"'}]+/gi, "Bearer [REDACTED]")
+    .slice(0, 512);
 }
 
 function defaultCommandTarget(): string {
@@ -192,30 +267,78 @@ function installCommand(targetArg: string | undefined): CliResult {
 
 export async function rpc(method: string, params: unknown): Promise<unknown> {
   const { endpoint, token } = resolveEndpointAndToken();
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: `script-kit-mcp-cli-${Date.now()}`,
-      method,
-      params,
-    }),
-  });
+  const timeoutMs = mcpRequestTimeoutMs();
+  const requestId = `script-kit-mcp-cli-${crypto.randomUUID()}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  let text: string;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      redirect: "error",
+      signal: controller.signal,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: requestId,
+        method,
+        params,
+      }),
+    });
+    text = await response.text();
+  } catch (error) {
+    if (controller.signal.aborted) {
+      fail(`Script Kit MCP ${method} timed out after ${timeoutMs}ms.`);
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    fail(`Script Kit MCP ${method} request failed: ${safeMcpDiagnostic(detail, token)}`);
+  } finally {
+    clearTimeout(timer);
+  }
 
-  const text = await response.text();
   let payload: unknown;
   try {
     payload = text ? JSON.parse(text) : null;
   } catch {
-    fail(`MCP server returned non-JSON HTTP ${response.status}: ${text}`);
+    fail(`MCP server returned non-JSON HTTP ${response.status}.`);
   }
 
   if (!response.ok) {
-    fail(`MCP server returned HTTP ${response.status}: ${JSON.stringify(payload)}`);
+    fail(`MCP server returned HTTP ${response.status}.`);
+  }
+
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    Array.isArray(payload) ||
+    (payload as Record<string, unknown>).jsonrpc !== "2.0" ||
+    (payload as Record<string, unknown>).id !== requestId
+  ) {
+    fail(`Script Kit MCP ${method} returned an invalid JSON-RPC response.`);
+  }
+  const envelope = payload as Record<string, unknown>;
+  const hasResult = Object.hasOwn(envelope, "result");
+  const hasError = Object.hasOwn(envelope, "error");
+  if (hasResult === hasError) {
+    fail(`Script Kit MCP ${method} returned an invalid JSON-RPC response.`);
+  }
+  if (hasError) {
+    const error = envelope.error;
+    if (
+      !error ||
+      typeof error !== "object" ||
+      !Number.isSafeInteger((error as Record<string, unknown>).code) ||
+      typeof (error as Record<string, unknown>).message !== "string" ||
+      !(error as Record<string, unknown>).message
+    ) {
+      fail(`Script Kit MCP ${method} returned an invalid JSON-RPC response.`);
+    }
+    const typedError = error as { code: number; message: string };
+    fail(`Script Kit MCP ${method} failed (${typedError.code}): ${safeMcpDiagnostic(typedError.message, token)}`);
   }
 
   return payload;

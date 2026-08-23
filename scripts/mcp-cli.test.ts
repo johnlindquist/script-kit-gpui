@@ -1,20 +1,31 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMcpCli } from "./mcp-cli";
 
-let server: ReturnType<typeof Bun.serve> | null = null;
+const originalFetch = globalThis.fetch;
+let server: { url: URL; stop: (force?: boolean) => void } | null = null;
 
 afterEach(() => {
   server?.stop(true);
   server = null;
+  globalThis.fetch = originalFetch;
 });
 
 function startMockMcp(handler: (body: any) => any) {
-  server = Bun.serve({
-    port: 0,
-    fetch: async (request) => {
+  const previousFetch = globalThis.fetch;
+  const url = new URL("http://127.0.0.1:43129/");
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
       if (new URL(request.url).pathname !== "/rpc") {
         return new Response("not found", { status: 404 });
       }
@@ -23,8 +34,13 @@ function startMockMcp(handler: (body: any) => any) {
       }
       const body = await request.json();
       return Response.json(handler(body));
+  }) as typeof fetch;
+  server = {
+    url,
+    stop() {
+      globalThis.fetch = previousFetch;
     },
-  });
+  };
   return server;
 }
 
@@ -58,6 +74,7 @@ function discoveryEnv(baseUrl: string) {
       version: "test",
       capabilities: { tools: true },
     }),
+    { mode: 0o600 },
   );
   return {
     dir,
@@ -166,6 +183,184 @@ describe("mcp-cli", () => {
     expect(typeof result).toBe("object");
     expect((result as any).data.result.contents[0].uri).toBe("kit://trigger-builtins");
   });
+
+  it.each([
+    "https://malicious.example/rpc",
+    "http://127.0.0.1.malicious.example/rpc",
+    "http://user:secret@127.0.0.1:43129/rpc",
+    "ftp://127.0.0.1:43129/rpc",
+    "http://127.0.0.1:43129/not-script-kit",
+    "http://127.0.0.1:43129/rpc?forward=malicious",
+    "http://127.0.0.1:43129/rpc#credentials",
+  ])("refuses unsafe MCP endpoint %s before sending the local bearer token", async (endpoint) => {
+    let requestCount = 0;
+    globalThis.fetch = (async () => {
+      requestCount += 1;
+      return Response.json({ jsonrpc: "2.0", id: "forged", result: {} });
+    }) as typeof fetch;
+
+    await expect(runCli(["tools"], {
+      SCRIPT_KIT_MCP_ENDPOINT: endpoint,
+      SCRIPT_KIT_MCP_TOKEN: "private-local-bearer-token",
+    })).rejects.toThrow("local Script Kit MCP endpoint");
+    expect(requestCount).toBe(0);
+  });
+
+  it("refuses a remote endpoint supplied by private server discovery", async () => {
+    const { dir, env } = discoveryEnv("https://malicious.example");
+    let requestCount = 0;
+    globalThis.fetch = (async () => {
+      requestCount += 1;
+      return Response.json({ jsonrpc: "2.0", id: "forged", result: {} });
+    }) as typeof fetch;
+    try {
+      await expect(runCli(["tools"], env)).rejects.toThrow("local Script Kit MCP endpoint");
+      expect(requestCount).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses symlinked bearer-token discovery before reading its external owner", async () => {
+    const { dir } = discoveryEnv("http://127.0.0.1:43129");
+    const alias = join(dir, "aliased-server.json");
+    symlinkSync(join(dir, "server.json"), alias);
+    try {
+      await expect(runCli(["tools"], {
+        SCRIPT_KIT_MCP_SERVER_JSON: alias,
+      })).rejects.toThrow("private regular discovery file");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses bearer-token discovery readable by other users", async () => {
+    const { dir, env } = discoveryEnv("http://127.0.0.1:43129");
+    chmodSync(join(dir, "server.json"), 0o644);
+    try {
+      await expect(runCli(["tools"], env)).rejects.toThrow("owner-only permissions");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports JSON-RPC failures as failures instead of successful MCP calls", async () => {
+    const mock = startMockMcp((body) => ({
+      jsonrpc: "2.0",
+      id: body.id,
+      error: { code: -32601, message: "tool is unavailable" },
+    }));
+    await expect(runCli(["tools"], {
+      SCRIPT_KIT_MCP_ENDPOINT: mock.url.origin,
+      SCRIPT_KIT_MCP_TOKEN: "test-token",
+    })).rejects.toThrow("tool is unavailable");
+  });
+
+  it.each(["localhost", "[::1]"])(
+    "preserves supported loopback MCP endpoint %s",
+    async (host) => {
+      startMockMcp((body) => ({ jsonrpc: "2.0", id: body.id, result: { tools: [] } }));
+      const result = await runCli(["tools"], {
+        SCRIPT_KIT_MCP_ENDPOINT: `http://${host}:43129`,
+        SCRIPT_KIT_MCP_TOKEN: "test-token",
+      });
+      expect(typeof result).toBe("object");
+      expect((result as any).success).toBe(true);
+    },
+  );
+
+  it("never follows a redirect with the private local bearer token", async () => {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.redirect).toBe("error");
+      const body = await new Request(input, init).json() as { id: string };
+      return Response.json({ jsonrpc: "2.0", id: body.id, result: {} });
+    }) as typeof fetch;
+    const result = await runCli(["tools"], {
+      SCRIPT_KIT_MCP_ENDPOINT: "http://127.0.0.1:43129/rpc",
+      SCRIPT_KIT_MCP_TOKEN: "private-local-bearer-token",
+    });
+    expect(typeof result).toBe("object");
+  });
+
+  it.each(["non-json", "http-error", "json-rpc-error"])(
+    "never exposes the local bearer credential in %s diagnostics",
+    async (mode) => {
+      const secret = "private-local-bearer-token-should-never-appear";
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (mode === "non-json") {
+          return new Response(`upstream echoed ${secret}`, { status: 502 });
+        }
+        if (mode === "http-error") {
+          return Response.json({ error: `Bearer ${secret}` }, { status: 401 });
+        }
+        const body = await new Request(input, init).json() as { id: string };
+        return Response.json({
+          jsonrpc: "2.0",
+          id: body.id,
+          error: { code: -32001, message: `auth failed for Bearer ${secret}` },
+        });
+      }) as typeof fetch;
+
+      let failure: unknown;
+      try {
+        await runCli(["tools"], {
+          SCRIPT_KIT_MCP_ENDPOINT: "http://127.0.0.1:43129/rpc",
+          SCRIPT_KIT_MCP_TOKEN: secret,
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).not.toContain(secret);
+    },
+  );
+
+  it.each([
+    ["wrong-id", (id: string) => ({ jsonrpc: "2.0", id: `${id}-stale`, result: {} })],
+    ["wrong-protocol", (id: string) => ({ jsonrpc: "1.0", id, result: {} })],
+    ["missing-outcome", (id: string) => ({ jsonrpc: "2.0", id })],
+    ["contradictory-outcome", (id: string) => ({ jsonrpc: "2.0", id, result: {}, error: { code: 1, message: "failed" } })],
+  ])("refuses mismatched or malformed JSON-RPC response %s", async (_name, response) => {
+    const mock = startMockMcp((body) => response(body.id));
+    await expect(runCli(["tools"], {
+      SCRIPT_KIT_MCP_ENDPOINT: mock.url.origin,
+      SCRIPT_KIT_MCP_TOKEN: "test-token",
+    })).rejects.toThrow("invalid JSON-RPC response");
+  });
+
+  it("bounds an unresponsive MCP request without using a socket or leaving a timer", async () => {
+    globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted", "AbortError"));
+        }, { once: true });
+      })) as typeof fetch;
+
+    const started = performance.now();
+    await expect(runCli(["tools"], {
+      SCRIPT_KIT_MCP_ENDPOINT: "http://127.0.0.1:43129/rpc",
+      SCRIPT_KIT_MCP_TOKEN: "test-token",
+      SCRIPT_KIT_MCP_TIMEOUT_MS: "25",
+    })).rejects.toThrow("timed out after 25ms");
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  it.each(["0", "-1", "1.5", "120001", "invalid"])(
+    "refuses invalid MCP request timeout %s before fetching",
+    async (timeout) => {
+      let requestCount = 0;
+      globalThis.fetch = (async () => {
+        requestCount += 1;
+        return Response.json({});
+      }) as typeof fetch;
+      await expect(runCli(["tools"], {
+        SCRIPT_KIT_MCP_ENDPOINT: "http://127.0.0.1:43129/rpc",
+        SCRIPT_KIT_MCP_TOKEN: "test-token",
+        SCRIPT_KIT_MCP_TIMEOUT_MS: timeout,
+      })).rejects.toThrow("SCRIPT_KIT_MCP_TIMEOUT_MS");
+      expect(requestCount).toBe(0);
+    },
+  );
 
   it("installs a scriptkit command symlink at a chosen target", async () => {
     const dir = mkdtempSync(join(tmpdir(), "script-kit-command-"));
