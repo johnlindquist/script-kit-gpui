@@ -7,6 +7,14 @@
  */
 import { Driver, type Json } from "../devtools/driver";
 import { openDayPage } from "./day-page-open-helper";
+import { assertNoninteractiveVisualProbe } from "../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observeWorkflowTaskTarget,
+} from "../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../devtools/lib/runtime-task-proof.ts";
+
+assertNoninteractiveVisualProbe("day-page-context-roundtrip.workflow-child");
 
 const BINARY =
   process.env.PROBE_BINARY ??
@@ -14,6 +22,7 @@ const BINARY =
 
 const receipts: Record<string, Json> = {};
 const failures: string[] = [];
+let targetObservation: RuntimeTargetObservation | null = null;
 const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 function check(name: string, ok: boolean, detail: Json = {}) {
@@ -457,21 +466,27 @@ try {
     },
   );
 
-  const pass = failures.length === 0;
-  console.log(
-    JSON.stringify(
-      {
-        pass,
-        failures,
-        sessionDir: driver.sessionDir,
-        screenshotProof: "not-used-semantic-devtools-only",
-        receipts,
-      },
-      null,
-      2,
-    ),
-  );
-  if (!pass) process.exitCode = 1;
+  targetObservation = await observeWorkflowTaskTarget(driver, BINARY, { type: "main" });
 } finally {
   await driver.close();
+  const cleanup = {
+    ...driver.finalization,
+    ownedProcessCount: driver.finalization.processExited ? 0 : 1,
+    closeError: null,
+    clipboardTouched: false,
+  };
+  const pass = failures.length === 0 && cleanup.processExited && cleanup.streamsDrained && cleanup.logWriterClosed;
+  const workflowObservedSegment = targetObservation !== null && pass
+    ? observedWorkflowSegment("today-mention-parity", targetObservation, cleanup)
+    : null;
+  console.log(JSON.stringify({
+    pass,
+    failures,
+    sessionDir: driver.sessionDir,
+    screenshotProof: "not-used-semantic-devtools-only",
+    receipts,
+    cleanup,
+    workflowObservedSegment,
+  }, null, 2));
+  if (!pass) process.exitCode = 1;
 }

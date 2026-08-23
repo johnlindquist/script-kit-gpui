@@ -1437,6 +1437,34 @@ describe("noninteractive DevTools operator safety", () => {
     expect(result.stdout.toString()).not.toContain("unsafe consistency workflow side effect reached");
   });
 
+  test.each([
+    ["notes-spine-host-wiring", "notes-spine-host-wiring.workflow-child"],
+    ["day-page-context-roundtrip", "day-page-context-roundtrip.workflow-child"],
+    ["day-page-agent-chat-handoff-scope", "day-page-agent-chat-handoff-scope.workflow-child"],
+    ["day-agent-chat-return", "day-agent-chat-return.workflow-child"],
+  ])("Notes/Today child %s refuses before auth, output, app, or native access", (name, expectedOwner) => {
+    const result = child(`
+      import * as filesystem from "node:fs";
+      import { mock } from "bun:test";
+      const unsafe = (() => { throw new Error("unsafe Notes/Today child side effect reached"); });
+      mock.module("node:fs", () => ({
+        ...filesystem,
+        copyFileSync: unsafe,
+        mkdirSync: unsafe,
+        mkdtempSync: unsafe,
+        writeFileSync: unsafe,
+      }));
+      Bun.spawn = unsafe;
+      Bun.spawnSync = unsafe;
+      try { await import(${JSON.stringify("./scripts/agentic/")} + ${JSON.stringify(name)} + "-probe.ts"); }
+      catch (error) { console.log("failure=" + error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain(`SCRIPT_KIT_NONINTERACTIVE=1 refused ${expectedOwner}`);
+    expect(result.stdout.toString()).not.toContain("unsafe Notes/Today child side effect reached");
+  });
+
   test("SAFE-001 refusal preserves its exact preexisting authoritative runtime receipt", () => {
     const root = mkdtempSync(join(tmpdir(), "script-kit-safe001-receipt-safety-"));
     const directory = join(root, ".artifacts", "consistency", "cons-flow-ux", "safe001-canonical-v2", "SAFE-001");

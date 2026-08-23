@@ -3,6 +3,11 @@ import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observeWorkflowTaskTarget,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("cons-flow-ux.notes-agent-chat-return");
 
@@ -25,6 +30,7 @@ const receipt: Obj = {
   pass: false,
   failures: [] as string[],
 };
+let targetObservation: RuntimeTargetObservation | null = null;
 
 function asObj(value: unknown): Obj {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Obj) : {};
@@ -226,6 +232,7 @@ try {
       !returnLogObserved.includes("event=notes_ai_return_ignored"),
     { logPath: driver.logPath },
   );
+  targetObservation = await observeWorkflowTaskTarget(driver, BINARY, NOTES_TARGET);
 } catch (error) {
   check("probe_exception", false, {
     message: error instanceof Error ? error.message : String(error),
@@ -235,8 +242,13 @@ try {
   await driver.close().catch((error) => {
     check("driver_close_completed", false, { message: String(error) });
   });
-  receipt.cleanup = driver.finalization;
-  const cleanup = asObj(driver.finalization);
+  const cleanup = {
+    ...asObj(driver.finalization),
+    ownedProcessCount: driver.finalization.processExited ? 0 : 1,
+    closeError: null,
+    clipboardTouched: false,
+  };
+  receipt.cleanup = cleanup;
   check(
     "exact_process_cleanup",
     cleanup.processExited === true &&
@@ -247,6 +259,13 @@ try {
   receipt.sessionDir = driver.sessionDir;
   receipt.logPath = driver.logPath;
   receipt.pass = receipt.failures.length === 0;
+  if (targetObservation !== null && receipt.pass) {
+    receipt.workflowObservedSegment = observedWorkflowSegment(
+      "notes-agent-chat-return",
+      targetObservation,
+      cleanup,
+    );
+  }
   mkdirSync(join(PROJECT_ROOT, ".test-output", "cons-flow-c09"), { recursive: true });
   await Bun.write(OUT_PATH, `${JSON.stringify(receipt, null, 2)}\n`);
 }

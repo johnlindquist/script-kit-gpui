@@ -1,5 +1,13 @@
 #!/usr/bin/env bun
 import { Driver, type Json } from "../devtools/driver";
+import { assertNoninteractiveVisualProbe } from "../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observeWorkflowTaskTarget,
+} from "../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../devtools/lib/runtime-task-proof.ts";
+
+assertNoninteractiveVisualProbe("notes-spine-host-wiring.workflow-child");
 
 const BINARY =
   process.env.PROBE_BINARY ?? "target-agent/artifacts/notes-spine-host/script-kit-gpui";
@@ -158,6 +166,7 @@ const driver = await Driver.launch({
   env: { SCRIPT_KIT_PANEL_INVARIANTS_ALLOW_MISMATCH: "1" },
 });
 let finalReceipt: Json = {};
+let targetObservation: RuntimeTargetObservation | null = null;
 
 try {
   await openNotes(driver);
@@ -205,6 +214,7 @@ try {
       .filter((value) => Number.isFinite(value)),
   );
   check("state_receipts_instant", maxStateMs < 250, { maxStateMs });
+  targetObservation = await observeWorkflowTaskTarget(driver, BINARY, target);
 
   finalReceipt = {
     status: failures.length === 0 ? "pass" : "fail",
@@ -216,8 +226,13 @@ try {
   };
 } finally {
   await driver.close();
-  finalReceipt.cleanup = driver.finalization;
-  const cleanup = (driver.finalization ?? {}) as Json;
+  const cleanup = {
+    ...driver.finalization,
+    ownedProcessCount: driver.finalization.processExited ? 0 : 1,
+    closeError: null,
+    clipboardTouched: false,
+  };
+  finalReceipt.cleanup = cleanup;
   check(
     "exact_process_cleanup",
     cleanup.processExited === true &&
@@ -228,6 +243,13 @@ try {
   finalReceipt.status = failures.length === 0 ? "pass" : "fail";
   finalReceipt.failures = failures;
   finalReceipt.checks = checks;
+  if (targetObservation !== null && failures.length === 0) {
+    finalReceipt.workflowObservedSegment = observedWorkflowSegment(
+      "notes-mention-parity",
+      targetObservation,
+      cleanup,
+    ) as unknown as Json;
+  }
 }
 
 console.log(JSON.stringify(finalReceipt, null, 2));

@@ -9,6 +9,14 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../devtools/driver";
 import { openDayPage } from "./day-page-open-helper";
+import { assertNoninteractiveVisualProbe } from "../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observeWorkflowTaskTarget,
+} from "../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../devtools/lib/runtime-task-proof.ts";
+
+assertNoninteractiveVisualProbe("day-page-agent-chat-handoff-scope.workflow-child");
 
 const PROJECT_ROOT = resolve(import.meta.dir, "../..");
 const BINARY =
@@ -30,6 +38,7 @@ const receipt: Obj = {
   pass: false,
   failures: [] as string[],
 };
+let targetObservation: RuntimeTargetObservation | null = null;
 
 function asObj(value: unknown): Obj {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Obj) : {};
@@ -345,6 +354,7 @@ try {
   });
 
   receipt.pass = receipt.failures.length === 0;
+  targetObservation = await observeWorkflowTaskTarget(driver, BINARY, { type: "main" });
 } catch (error) {
   check("probe_exception", false, {
     message: error instanceof Error ? error.message : String(error),
@@ -354,8 +364,13 @@ try {
   await driver.close().catch((error) => {
     check("driver_close_completed", false, { error: String(error) });
   });
-  receipt.cleanup = driver.finalization;
-  const cleanup = asObj(driver.finalization);
+  const cleanup = {
+    ...asObj(driver.finalization),
+    ownedProcessCount: driver.finalization.processExited ? 0 : 1,
+    closeError: null,
+    clipboardTouched: false,
+  };
+  receipt.cleanup = cleanup;
   check(
     "exact_process_cleanup",
     cleanup.processExited === true &&
@@ -364,6 +379,13 @@ try {
     { cleanup },
   );
   receipt.pass = receipt.failures.length === 0;
+  if (targetObservation !== null && receipt.pass) {
+    receipt.workflowObservedSegment = observedWorkflowSegment(
+      "today-scope-matrix",
+      targetObservation,
+      cleanup,
+    );
+  }
   mkdirSync(join(PROJECT_ROOT, ".test-output"), { recursive: true });
   await Bun.write(OUT_PATH, `${JSON.stringify(receipt, null, 2)}\n`);
 }

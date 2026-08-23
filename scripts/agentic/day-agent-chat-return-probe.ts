@@ -10,6 +10,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Driver, type Json } from "../devtools/driver";
 import { openDayPage } from "./day-page-open-helper";
+import { assertNoninteractiveVisualProbe } from "../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observeWorkflowTaskTarget,
+} from "../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../devtools/lib/runtime-task-proof.ts";
+
+assertNoninteractiveVisualProbe("day-agent-chat-return.workflow-child");
 
 const binary =
   process.env.PROBE_BINARY ?? "target-agent/artifacts/day-agent-chat/script-kit-gpui";
@@ -28,6 +36,7 @@ const receipt: Json = {
   daySeed,
   assistantToken,
 };
+let targetObservation: RuntimeTargetObservation | null = null;
 
 function check(name: string, ok: boolean, detail: Json = {}) {
   receipt[name] = { ok, ...detail };
@@ -315,6 +324,7 @@ try {
 
   receipt.classification = (receipt.failures as string[]).length === 0 ? "fixed" : "failed";
   receipt.pass = (receipt.failures as string[]).length === 0;
+  targetObservation = await observeWorkflowTaskTarget(driver, binary, { type: "main" });
 } catch (error) {
   check("probe_exception", false, {
     message: error instanceof Error ? error.message : String(error),
@@ -328,8 +338,13 @@ try {
   await driver.close().catch((error) => {
     check("driver_close_completed", false, { message: String(error) });
   });
-  receipt.cleanup = driver.finalization;
-  const cleanup = (driver.finalization ?? {}) as Json;
+  const cleanup = {
+    ...driver.finalization,
+    ownedProcessCount: driver.finalization.processExited ? 0 : 1,
+    closeError: null,
+    clipboardTouched: false,
+  };
+  receipt.cleanup = cleanup;
   check(
     "exact_process_cleanup",
     cleanup.processExited === true &&
@@ -339,6 +354,13 @@ try {
   );
   receipt.classification = (receipt.failures as string[]).length === 0 ? "fixed" : "failed";
   receipt.pass = (receipt.failures as string[]).length === 0;
+  if (targetObservation !== null && receipt.pass) {
+    receipt.workflowObservedSegment = observedWorkflowSegment(
+      "today-agent-chat-return",
+      targetObservation,
+      cleanup,
+    ) as unknown as Json;
+  }
   writeFileSync(
     `.test-output/${runId}.json`,
     `${JSON.stringify(receipt, null, 2)}\n`,

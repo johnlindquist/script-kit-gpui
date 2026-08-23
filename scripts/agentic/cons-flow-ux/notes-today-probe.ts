@@ -2,6 +2,13 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowStage,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+  type WorkflowObservedSegment,
+} from "../../devtools/lib/workflow-task-proof.ts";
 
 assertNoninteractiveVisualProbe("cons-flow-ux.notes-today");
 
@@ -20,6 +27,10 @@ const scenarios = [
   {
     id: "notes-agent-chat-return",
     script: join(PROJECT_ROOT, "scripts/agentic/cons-flow-ux/notes-agent-chat-return-probe.ts"),
+  },
+  {
+    id: "today-mention-parity",
+    script: join(PROJECT_ROOT, "scripts/agentic/day-page-context-roundtrip-probe.ts"),
   },
   {
     id: "today-scope-matrix",
@@ -123,5 +134,83 @@ const receipt: Obj = {
 
 mkdirSync(join(PROJECT_ROOT, ".test-output", "cons-flow-c09"), { recursive: true });
 await Bun.write(OUT_PATH, `${JSON.stringify(receipt, null, 2)}\n`);
+for (const taskId of ["WF-013", "WF-014", "WF-015"] as const) {
+  try {
+    if (receipt.pass !== true) throw new Error("Notes/Today host journey did not pass");
+    const stageIds = taskId === "WF-013"
+      ? ["notes-mention-parity", "today-mention-parity"]
+      : taskId === "WF-014"
+        ? ["notes-agent-chat-return", "today-scope-matrix"]
+        : ["notes-agent-chat-return", "today-agent-chat-return"];
+    const selected = stageIds.map((id) => {
+      const result = results.find((candidate) => candidate.id === id);
+      const segment = asObj(result?.receipt?.workflowObservedSegment);
+      if (result?.pass !== true || segment.id !== id) {
+        throw new Error(`missing actual Notes/Today child target observation: ${id}`);
+      }
+      return { result, segment: segment as unknown as WorkflowObservedSegment };
+    });
+    const notesParity = results.find((result) => result.id === "notes-mention-parity");
+    const notesChecks = Array.isArray(notesParity?.receipt?.checks)
+      ? notesParity.receipt.checks.map(asObj)
+      : [];
+    const notesReturn = asObj(results.find((result) => result.id === "notes-agent-chat-return")?.receipt);
+    const dayScope = asObj(results.find((result) => result.id === "today-scope-matrix")?.receipt);
+    const dayReturn = asObj(results.find((result) => result.id === "today-agent-chat-return")?.receipt);
+    const controls = taskId === "WF-013"
+      ? {
+          "partial-reference-never-survives-deletion":
+            notesChecks.some((check) => check.name === "context_reference_deletes_atomically" && check.ok === true),
+          "file-discovery-never-silently-disappears":
+            notesChecks.some((check) => check.name === "at_context_subsearch_loading_visible" && check.ok === true),
+        }
+      : taskId === "WF-014"
+        ? {
+            "outside-selected-range-never-staged":
+              asObj(dayScope.selection_receipt_has_no_outside_range_canary).ok === true,
+            "context-handoff-never-auto-submits":
+              asObj(notesReturn.main_agent_chat_opened_composer_only).ok === true &&
+              asObj(dayScope.current_line_is_composer_only_without_authored_prompt).ok === true,
+          }
+        : {
+            "return-never-targets-a-different-host":
+              asObj(notesReturn.notes_host_state_preserved_on_return).ok === true &&
+              asObj(dayReturn.restored_day_page).ok === true,
+            "unsaved-editor-state-never-discarded":
+              asObj(notesReturn.notes_host_state_preserved_on_return).ok === true,
+          };
+    const prepared = prepareWorkflowTaskProof(taskId, {
+      producerOwner: "scripts/agentic/cons-flow-ux/notes-today-probe.ts",
+      segments: selected.map((item) => item.segment),
+      stages: selected.map(({ result, segment }) => observedWorkflowStage({
+        id: result.id,
+        primitiveId: "devtools.act",
+        segment,
+        command: "notesToday.executeHostJourney",
+        requestId: `${taskId}:${result.id}`,
+        result: {
+          pass: result.pass,
+          exitCode: result.exitCode,
+          failureCount: Array.isArray(result.failures) ? result.failures.length : 0,
+        },
+        pass: result.pass === true,
+      })),
+      negativeControls: controls,
+      safety: {
+        microphoneCaptureStarted: false,
+        nativeInputInjected: false,
+        liveAiStarted: false,
+        screenTakeoverStarted: false,
+        clipboardTouched: false,
+      },
+    });
+    writeWorkflowTaskProof(taskId, prepared.receipt);
+  } catch (error) {
+    writeWorkflowTaskProof(taskId, prepareBlockedWorkflowTaskProof(
+      taskId,
+      error instanceof Error ? error.message : String(error),
+    ).receipt);
+  }
+}
 console.log(JSON.stringify(receipt, null, 2));
 if (!receipt.pass) process.exitCode = 1;
