@@ -91,6 +91,26 @@ pub(crate) struct TabAiResolvedContext {
     pub(crate) suggested_intents: Vec<crate::ai::TabAiSuggestedIntentSpec>,
 }
 
+/// Typed launch choices selected before the source surface is snapshotted.
+#[derive(Debug, Clone)]
+pub(crate) struct TabAiHarnessEntryOptions {
+    pub(crate) entry: super::agent_chat_entry::AgentChatEntryIntent,
+    pub(crate) context_policy: AgentChatContextPolicy,
+    pub(crate) quick_submit_plan: Option<crate::ai::TabAiQuickSubmitPlan>,
+    pub(crate) capture_kind: crate::ai::TabAiCaptureKind,
+    pub(crate) force_agent_chat_surface: bool,
+    pub(crate) ui_variant: crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant,
+}
+
+/// Context projection choices applied after the authoritative launch request exists.
+#[derive(Debug, Clone)]
+pub(crate) struct TabAiAgentChatOpenOptions {
+    pub(crate) focused_part: Option<crate::ai::message_parts::AiContextPart>,
+    pub(crate) use_ask_anything_fallback: bool,
+    pub(crate) explicit_ambient_chip_label: Option<String>,
+    pub(crate) force_agent_chat_surface: bool,
+}
+
 /// Pre-switch snapshot of the UI state captured at the Tab interception
 /// boundary, before the view flips to `QuickTerminalView`.
 ///

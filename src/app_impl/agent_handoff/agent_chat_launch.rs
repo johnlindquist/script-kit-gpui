@@ -241,12 +241,15 @@ impl ScriptListApp {
         &mut self,
         request: TabAiLaunchRequest,
         capture_rx: TabAiDeferredCaptureRx,
-        focused_part: Option<crate::ai::message_parts::AiContextPart>,
-        use_ask_anything_fallback: bool,
-        explicit_ambient_chip_label: Option<String>,
-        force_agent_chat_surface: bool,
+        options: TabAiAgentChatOpenOptions,
         cx: &mut Context<Self>,
     ) {
+        let TabAiAgentChatOpenOptions {
+            focused_part,
+            use_ask_anything_fallback,
+            explicit_ambient_chip_label,
+            force_agent_chat_surface,
+        } = options;
         let open_started_at = std::time::Instant::now();
         let source_view = request.source_view.clone();
         let had_harness_session = self.tab_ai_harness.is_some();
@@ -890,9 +893,16 @@ impl ScriptListApp {
             snapshot.failure.as_ref(),
             attempts,
         );
-        let recovery =
+        let Some(recovery) =
             crate::ai::agent_chat::agent_chat_recovery::warm_recovery_spec(&recovery_state)
-                .expect("warm failure must project a recovery card");
+        else {
+            tracing::error!(attempts, "agent_chat.warm_recovery_projection_missing");
+            self.show_error_toast(
+                "Agent Chat could not prepare recovery. Please try again.",
+                cx,
+            );
+            return;
+        };
         let title = if attempts == 0 {
             recovery.title.to_string()
         } else {

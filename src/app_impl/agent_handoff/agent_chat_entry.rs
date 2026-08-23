@@ -23,6 +23,10 @@ pub(crate) enum AgentChatEntryOrigin {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "thread targets intentionally mirror the serialized AI host-ownership vocabulary"
+)]
 pub(crate) enum AgentChatThreadTarget {
     ExistingDetachedOrEmbedded,
     CurrentHostEmbedded,

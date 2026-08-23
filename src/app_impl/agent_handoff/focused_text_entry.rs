@@ -308,13 +308,16 @@ impl ScriptListApp {
 
         self.begin_tab_ai_harness_entry_from_source_view(
             source_view,
-            agent_chat_entry::AgentChatEntryIntent::open(None),
-            AgentChatContextPolicy::SuppressFocused,
-            None,
-            crate::ai::TabAiCaptureKind::DefaultContext,
-            // force_agent_chat_surface: focused-text apply semantics must not route to the terminal.
-            true,
-            crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::FocusedTextMini,
+            TabAiHarnessEntryOptions {
+                entry: agent_chat_entry::AgentChatEntryIntent::open(None),
+                context_policy: AgentChatContextPolicy::SuppressFocused,
+                quick_submit_plan: None,
+                capture_kind: crate::ai::TabAiCaptureKind::DefaultContext,
+                // Focused-text apply semantics must never route to the terminal.
+                force_agent_chat_surface: true,
+                ui_variant:
+                    crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::FocusedTextMini,
+            },
             cx,
         );
 
@@ -523,12 +526,15 @@ impl ScriptListApp {
 
         self.begin_tab_ai_harness_entry_from_source_view(
             source_view,
-            agent_chat_entry::AgentChatEntryIntent::open(None),
-            AgentChatContextPolicy::SuppressFocused,
-            None,
-            crate::ai::TabAiCaptureKind::DefaultContext,
-            true,
-            crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::FocusedTextMini,
+            TabAiHarnessEntryOptions {
+                entry: agent_chat_entry::AgentChatEntryIntent::open(None),
+                context_policy: AgentChatContextPolicy::SuppressFocused,
+                quick_submit_plan: None,
+                capture_kind: crate::ai::TabAiCaptureKind::DefaultContext,
+                force_agent_chat_surface: true,
+                ui_variant:
+                    crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::FocusedTextMini,
+            },
             cx,
         );
 

@@ -2,6 +2,7 @@
 
 pub(crate) mod agent_chat_recovery;
 pub(crate) mod codex_exec;
+mod codex_exec_protocol;
 pub(crate) mod content;
 pub mod events;
 pub(crate) mod launch;

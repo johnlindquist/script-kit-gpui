@@ -34,6 +34,16 @@ pub(crate) struct AgentChatSurfaceLifecycleReceipt {
     pub(crate) warnings: Vec<String>,
 }
 
+struct AgentChatSurfaceTransitionSnapshot {
+    previous_state: AgentChatSurfaceState,
+    previous_view: AppView,
+    main_rekeyed: bool,
+    embedded_ai_window_visible: bool,
+    return_view: Option<String>,
+    return_focus_target: Option<String>,
+    warnings: Vec<String>,
+}
+
 impl ScriptListApp {
     /// Switch the launcher into the embedded Agent Chat chat surface and update
     /// every state mirror that must move in lock-step with that view.
@@ -58,13 +68,15 @@ impl ScriptListApp {
         let receipt = self.agent_chat_surface_lifecycle_receipt(
             "embedded_entry",
             "enter_embedded_agent_chat_surface",
-            previous_state,
-            previous_view,
-            main_rekeyed,
-            true,
-            None,
-            None,
-            Vec::new(),
+            AgentChatSurfaceTransitionSnapshot {
+                previous_state,
+                previous_view,
+                main_rekeyed,
+                embedded_ai_window_visible: true,
+                return_view: None,
+                return_focus_target: None,
+                warnings: Vec::new(),
+            },
         );
         self.log_agent_chat_surface_lifecycle_receipt(&receipt);
         receipt
@@ -92,13 +104,15 @@ impl ScriptListApp {
         let receipt = self.agent_chat_surface_lifecycle_receipt(
             "embedded_exit",
             source,
-            previous_state,
-            previous_view,
-            main_rekeyed,
-            false,
-            Some(return_view_debug),
-            Some(return_focus_debug),
-            Vec::new(),
+            AgentChatSurfaceTransitionSnapshot {
+                previous_state,
+                previous_view,
+                main_rekeyed,
+                embedded_ai_window_visible: false,
+                return_view: Some(return_view_debug),
+                return_focus_target: Some(return_focus_debug),
+                warnings: Vec::new(),
+            },
         );
         self.log_agent_chat_surface_lifecycle_receipt(&receipt);
         receipt
@@ -177,34 +191,28 @@ impl ScriptListApp {
         &self,
         event: &'static str,
         source: &'static str,
-        previous_state: AgentChatSurfaceState,
-        previous_view: AppView,
-        main_rekeyed: bool,
-        embedded_ai_window_visible: bool,
-        return_view: Option<String>,
-        return_focus_target: Option<String>,
-        warnings: Vec<String>,
+        snapshot: AgentChatSurfaceTransitionSnapshot,
     ) -> AgentChatSurfaceLifecycleReceipt {
         AgentChatSurfaceLifecycleReceipt {
             schema_version: 1,
             event,
             source,
-            previous_state: format!("{previous_state:?}"),
+            previous_state: format!("{:?}", snapshot.previous_state),
             next_state: format!("{:?}", self.agent_chat_surface_state),
-            previous_view: format!("{previous_view:?}"),
+            previous_view: format!("{:?}", snapshot.previous_view),
             next_view: format!("{:?}", self.current_view),
             target_automation_id: "main".to_string(),
             target_kind: "main".to_string(),
             surface_kind: crate::semantic_surface_for_main_view(&self.current_view)
                 .unwrap_or_else(|| "unknown".to_string()),
             app_view_variant: format!("{:?}", self.current_view),
-            return_view,
-            return_focus_target,
+            return_view: snapshot.return_view,
+            return_focus_target: snapshot.return_focus_target,
             focused_input: format!("{:?}", self.focused_input),
-            main_rekeyed,
-            embedded_ai_window_visible,
+            main_rekeyed: snapshot.main_rekeyed,
+            embedded_ai_window_visible: snapshot.embedded_ai_window_visible,
             actions_popup_cleared: !self.show_actions_popup && self.actions_dialog.is_none(),
-            warnings,
+            warnings: snapshot.warnings,
         }
     }
 

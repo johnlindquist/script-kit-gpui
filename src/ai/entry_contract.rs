@@ -36,6 +36,10 @@ pub enum AiContextAdmission {
 /// focus while a handoff is in flight.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "the stable serialized host policy distinguishes embedded ownership explicitly"
+)]
 pub enum AiEntryHost {
     ExistingDetachedOrEmbedded,
     CurrentHostEmbedded,

@@ -499,6 +499,10 @@ pub struct AgentChatSetupSnapshot {
 /// with the TypeScript driver consumers (camelCase kept as an alias).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "type")]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "AgentChat-prefixed variants preserve the documented public automation wire contract"
+)]
 pub enum AgentChatWaitCondition {
     /// Wait until the Agent Chat view is ready (context bootstrapped, status idle).
     #[serde(rename = "agent_chatReady", alias = "agentChatReady")]
