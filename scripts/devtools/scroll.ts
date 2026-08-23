@@ -15,6 +15,7 @@ import {
   startClock,
 } from "./lib/client.ts";
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { evidenceIntersectionRatio, isValidEvidenceRect } from "./lib/geometry-evidence.ts";
 import { diagnostic } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
@@ -44,12 +45,19 @@ export type RenderedSafeViewportMeasurement = {
   selectedSemanticId: string | null;
   rowMeasurementId: string | null;
   safeViewportMeasurementId: string | null;
+  rowObservationCount: number;
+  safeViewportObservationCount: number;
   rowBounds: Rect | null;
   rowVisibleBounds: Rect | null;
+  rowClipBounds: Rect | null;
   safeViewportBounds: Rect | null;
+  safeViewportClipBounds: Rect | null;
+  safeViewportPaintBounds: Rect | null;
+  coordinateSpace: string | null;
   visibleRatio: number | null;
   withinSafeViewport: boolean | null;
   frameGeneration: number | null;
+  viewportFrameGeneration: number | null;
   frameMatches: boolean | null;
   targetDataGeneration: number | null;
   missingPrimitives: string[];
@@ -82,19 +90,6 @@ function rectFrom(value: unknown): Rect | null {
   return x == null || y == null || width == null || height == null
     ? null
     : { x, y, width, height };
-}
-
-function rectIntersectionRatio(bounds: Rect, clip: Rect) {
-  const width = Math.max(
-    0,
-    Math.min(bounds.x + bounds.width, clip.x + clip.width) - Math.max(bounds.x, clip.x),
-  );
-  const height = Math.max(
-    0,
-    Math.min(bounds.y + bounds.height, clip.y + clip.height) - Math.max(bounds.y, clip.y),
-  );
-  const area = Math.max(0, bounds.width) * Math.max(0, bounds.height);
-  return area > 0 ? (width * height) / area : 1;
 }
 
 export function notesScrollFromState(state: JsonObject): JsonObject {
@@ -308,35 +303,70 @@ export function renderedSafeViewportMeasurement(
   layoutReceipt: JsonObject | null,
   required: boolean,
 ): RenderedSafeViewportMeasurement {
-  const selectedSemanticId = typeof scroll.selectedSemanticId === "string"
+  const selectedSemanticId = typeof scroll.selectedSemanticId === "string" &&
+    scroll.selectedSemanticId.length > 0
     ? scroll.selectedSemanticId
     : null;
   const nodes = nodesOf(layoutReceipt?.nodes);
   const renderedNodes = nodes.filter((node) => node.measurementProvenance === "paint-time");
-  const row = selectedSemanticId == null
-    ? null
-    : renderedNodes.find((node) => node.name === `list-row:${selectedSemanticId}`) ?? null;
-  const safeViewport = renderedNodes.find((node) => node.name === "main-view-main") ?? null;
-  const rowBounds = rectFrom(row?.bounds);
-  const rowVisibleBounds = rectFrom(row?.visibleBounds);
-  const safeViewportBounds = rectFrom(safeViewport?.visibleBounds ?? safeViewport?.bounds);
-  const rowFrame = asNumber(row?.measurementFrameGeneration);
-  const viewportFrame = asNumber(safeViewport?.measurementFrameGeneration);
+  const rows = selectedSemanticId == null
+    ? []
+    : renderedNodes.filter((node) => node.name === `list-row:${selectedSemanticId}`);
+  const safeViewports = renderedNodes.filter((node) => node.name === "main-view-main");
+  const row = rows.length === 1 ? rows[0] : null;
+  const safeViewport = safeViewports.length === 1 ? safeViewports[0] : null;
+  const observedRect = (value: unknown): Rect | null =>
+    isValidEvidenceRect(value) ? value : null;
+  const rowBounds = observedRect(row?.bounds);
+  const rowVisibleBounds = observedRect(row?.visibleBounds);
+  const rowClipBounds = observedRect(row?.clipBounds);
+  const safeViewportBounds = observedRect(safeViewport?.visibleBounds);
+  const safeViewportClipBounds = observedRect(safeViewport?.clipBounds);
+  const viewportBounds = observedRect(safeViewport?.bounds);
+  const generation = (value: unknown): number | null =>
+    Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : null;
+  const rowFrame = generation(row?.measurementFrameGeneration);
+  const viewportFrame = generation(safeViewport?.measurementFrameGeneration);
+  const coordinateSpace = typeof row?.coordinateSpace === "string" &&
+      row.coordinateSpace.length > 0 && row.coordinateSpace !== "unknown" &&
+      row.coordinateSpace === safeViewport?.coordinateSpace
+    ? row.coordinateSpace
+    : null;
+  const rowMeasurementId = typeof row?.measurementId === "string" && row.measurementId.length > 0
+    ? row.measurementId
+    : null;
+  const safeViewportMeasurementId = typeof safeViewport?.measurementId === "string" &&
+      safeViewport.measurementId.length > 0
+    ? safeViewport.measurementId
+    : null;
   const frameMatches = rowFrame == null || viewportFrame == null ? null : rowFrame === viewportFrame;
-  const visibleRatio = rowBounds && rowVisibleBounds && safeViewportBounds
+  const visibleRatio = rowBounds && rowVisibleBounds && rowClipBounds &&
+      safeViewportBounds && safeViewportClipBounds && viewportBounds
     ? Math.min(
-        rectIntersectionRatio(rowBounds, rowVisibleBounds),
-        rectIntersectionRatio(rowBounds, safeViewportBounds),
+        evidenceIntersectionRatio(rowBounds, rowVisibleBounds),
+        evidenceIntersectionRatio(rowBounds, rowClipBounds),
+        evidenceIntersectionRatio(rowBounds, safeViewportBounds),
+        evidenceIntersectionRatio(rowBounds, safeViewportClipBounds),
+        evidenceIntersectionRatio(rowBounds, viewportBounds),
       )
     : null;
   const withinSafeViewport = visibleRatio == null ? null : visibleRatio >= 0.999;
   const transaction = asObject(layoutReceipt?.transaction);
-  const targetDataGeneration = asNumber(transaction.dataGeneration);
+  const targetDataGeneration = generation(transaction.dataGeneration);
   const missingPrimitives = [
     selectedSemanticId == null ? "selectedSemanticId" : "",
+    rows.length > 1 ? "uniqueRenderedSelectedRow" : "",
+    safeViewports.length > 1 ? "uniqueRenderedSafeViewport" : "",
+    row?.semanticId != null && row.semanticId !== selectedSemanticId ? "selectedSemanticIdentity" : "",
     rowBounds == null ? "renderedSelectedRowBounds" : "",
     rowVisibleBounds == null ? "renderedSelectedRowVisibleBounds" : "",
+    rowClipBounds == null ? "renderedSelectedRowClipBounds" : "",
     safeViewportBounds == null ? "renderedSafeViewportBounds" : "",
+    safeViewportClipBounds == null ? "renderedSafeViewportClipBounds" : "",
+    viewportBounds == null ? "renderedSafeViewportPaintBounds" : "",
+    rowMeasurementId == null ? "renderedSelectedRowMeasurementId" : "",
+    safeViewportMeasurementId == null ? "renderedSafeViewportMeasurementId" : "",
+    coordinateSpace == null ? "sameRenderedCoordinateSpace" : "",
     frameMatches == null ? "renderedFrameGeneration" : "",
     targetDataGeneration == null ? "targetDataGeneration" : "",
   ].filter(Boolean);
@@ -350,16 +380,21 @@ export function renderedSafeViewportMeasurement(
     required,
     classification,
     selectedSemanticId,
-    rowMeasurementId: typeof row?.measurementId === "string" ? row.measurementId : null,
-    safeViewportMeasurementId: typeof safeViewport?.measurementId === "string"
-      ? safeViewport.measurementId
-      : null,
+    rowMeasurementId,
+    safeViewportMeasurementId,
+    rowObservationCount: rows.length,
+    safeViewportObservationCount: safeViewports.length,
     rowBounds,
     rowVisibleBounds,
+    rowClipBounds,
     safeViewportBounds,
+    safeViewportClipBounds,
+    safeViewportPaintBounds: viewportBounds,
+    coordinateSpace,
     visibleRatio,
     withinSafeViewport,
     frameGeneration: rowFrame,
+    viewportFrameGeneration: viewportFrame,
     frameMatches,
     targetDataGeneration,
     missingPrimitives,

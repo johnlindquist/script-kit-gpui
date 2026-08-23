@@ -120,16 +120,20 @@ describe("rendered selected-row safe viewport", () => {
         name: "main-view-main",
         measurementId: "layout:main-view-main",
         measurementProvenance: "paint-time",
+        coordinateSpace: "window",
         bounds: { x: 1, y: 59, width: 748, height: 380 },
         visibleBounds: { x: 1, y: 59, width: 748, height: 380 },
+        clipBounds: { x: 1, y: 59, width: 748, height: 380 },
         measurementFrameGeneration: 12,
       },
       {
         name: "list-row:main-list-row:script/example",
         measurementId: "layout:list-row-main-list-row-script-example",
         measurementProvenance: "paint-time",
+        coordinateSpace: "window",
         bounds: { x: 1, y: 390, width: 748, height: 44 },
         visibleBounds: { x: 1, y: 390, width: 748, height: 44 },
+        clipBounds: { x: 1, y: 390, width: 748, height: 44 },
         measurementFrameGeneration: 12,
       },
     ],
@@ -161,6 +165,81 @@ describe("rendered selected-row safe viewport", () => {
     }, true);
     expect(result.classification).toBe("blocked-by-missing-primitive");
     expect(result.missingPrimitives).toContain("renderedSelectedRowBounds");
+  });
+
+  test("never declares empty, negative, nonfinite, or unobserved paint geometry visible", () => {
+    const variants: Array<[string, Record<string, unknown>, string]> = [
+      ["zero-area row", { bounds: { x: 1, y: 390, width: 0, height: 44 } }, "renderedSelectedRowBounds"],
+      ["negative-area row", { bounds: { x: 1, y: 390, width: 748, height: -1 } }, "renderedSelectedRowBounds"],
+      ["nonfinite row", { bounds: { x: NaN, y: 390, width: 748, height: 44 } }, "renderedSelectedRowBounds"],
+      ["unobserved visible bounds", { visibleBounds: undefined }, "renderedSelectedRowVisibleBounds"],
+      ["unobserved clip bounds", { clipBounds: undefined }, "renderedSelectedRowClipBounds"],
+      ["missing measurement identity", { measurementId: "" }, "renderedSelectedRowMeasurementId"],
+      ["missing coordinate space", { coordinateSpace: undefined }, "sameRenderedCoordinateSpace"],
+    ];
+
+    for (const [name, overrides, primitive] of variants) {
+      const candidate = structuredClone(layout);
+      Object.assign(candidate.nodes[1], overrides);
+      const result = renderedSafeViewportMeasurement(scroll, candidate, true);
+      expect(result.classification, name).toBe("blocked-by-missing-primitive");
+      expect(result.missingPrimitives, name).toContain(primitive);
+    }
+  });
+
+  test("duplicate selected rows or viewports cannot hide a clipped later observation", () => {
+    const duplicateRow = structuredClone(layout);
+    duplicateRow.nodes.push({
+      ...structuredClone(duplicateRow.nodes[1]),
+      bounds: { ...duplicateRow.nodes[1].bounds, y: 430 },
+      visibleBounds: { ...duplicateRow.nodes[1].visibleBounds, y: 430 },
+      clipBounds: { ...duplicateRow.nodes[1].clipBounds, y: 430 },
+    });
+    const row = renderedSafeViewportMeasurement(scroll, duplicateRow, true);
+    expect(row.classification).toBe("blocked-by-missing-primitive");
+    expect(row.missingPrimitives).toContain("uniqueRenderedSelectedRow");
+
+    const duplicateViewport = structuredClone(layout);
+    duplicateViewport.nodes.push(structuredClone(duplicateViewport.nodes[0]));
+    const viewport = renderedSafeViewportMeasurement(scroll, duplicateViewport, true);
+    expect(viewport.classification).toBe("blocked-by-missing-primitive");
+    expect(viewport.missingPrimitives).toContain("uniqueRenderedSafeViewport");
+  });
+
+  test("requires exact selected identity, coordinate space, and nonnegative integer generations", () => {
+    const wrongOwner = structuredClone(layout);
+    Object.assign(wrongOwner.nodes[1], { semanticId: "row:someone-else" });
+    expect(renderedSafeViewportMeasurement(scroll, wrongOwner, true).missingPrimitives)
+      .toContain("selectedSemanticIdentity");
+
+    const wrongSpace = structuredClone(layout);
+    wrongSpace.nodes[1].coordinateSpace = "screen";
+    expect(renderedSafeViewportMeasurement(scroll, wrongSpace, true).missingPrimitives)
+      .toContain("sameRenderedCoordinateSpace");
+
+    for (const generation of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const wrongFrame = structuredClone(layout);
+      wrongFrame.nodes[0].measurementFrameGeneration = generation;
+      wrongFrame.nodes[1].measurementFrameGeneration = generation;
+      expect(renderedSafeViewportMeasurement(scroll, wrongFrame, true).missingPrimitives)
+        .toContain("renderedFrameGeneration");
+
+      const wrongData = structuredClone(layout);
+      wrongData.transaction.dataGeneration = generation;
+      expect(renderedSafeViewportMeasurement(scroll, wrongData, true).missingPrimitives)
+        .toContain("targetDataGeneration");
+    }
+  });
+
+  test("includes independent row and viewport clip regions in full-visibility proof", () => {
+    for (const nodeIndex of [0, 1]) {
+      const clipped = structuredClone(layout);
+      clipped.nodes[nodeIndex].clipBounds.width -= 1;
+      const result = renderedSafeViewportMeasurement(scroll, clipped, true);
+      expect(result.classification).toBe("not-ok");
+      expect(result.visibleRatio).toBeLessThan(1);
+      expect(result.withinSafeViewport).toBe(false);
+    }
   });
 });
 
