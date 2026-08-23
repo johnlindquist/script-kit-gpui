@@ -10,9 +10,7 @@ mod focused_text_entry;
 mod source_classification;
 mod types;
 use agent_chat_context_staging::materialize_selection_context_parts;
-pub(crate) use agent_chat_entry::{
-    AgentChatEntryDispatch, AgentChatEntryOutcome, AgentChatSubmissionOutcome,
-};
+pub(crate) use agent_chat_entry::AgentChatEntryDispatch;
 use source_classification::{
     app_view_to_prompt_type_str, build_tab_ai_apply_back_hint, detect_tab_ai_source_type,
     detect_tab_ai_source_type_early,

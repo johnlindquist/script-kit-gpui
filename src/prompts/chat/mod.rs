@@ -73,10 +73,13 @@ pub use types::{
     default_models, ChatClaudeCodeCallback, ChatConfigureCallback, ChatContinueCallback, ChatModel,
     ChatPromptDismissBinding, ChatPromptDismissCallback, ChatPromptDismissRequest,
     ChatPromptDismissRoute, ChatPromptHostMode, ChatPromptPreparedRequest,
-    ChatPromptRecoveryBinding, ChatPromptRetryRequest, ChatPromptStopRequest, ChatRecoveryCallback,
-    ChatRetryCallback, ChatShowActionsCallback, ChatStopCallback, ChatSubmitCallback,
-    ChatTranscriptAlignment, ConversationStarter, ConversationTurn, ConversationTurnRenderKey,
+    ChatPromptRecoveryBinding, ChatPromptRetryRequest, ChatPromptStopRequest, ChatRetryCallback,
+    ChatShowActionsCallback, ChatStopCallback, ChatSubmitCallback, ChatTranscriptAlignment,
+    ConversationStarter, ConversationTurn, ConversationTurnRenderKey,
 };
+// Consumers of the public recovery binding also need its callback type.
+#[allow(unused_imports)]
+pub use types::ChatRecoveryCallback;
 
 // Internal render-plan resolution (pure logic, unit-tested).
 pub(crate) use types::resolve_chat_render_plan;

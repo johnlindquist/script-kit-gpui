@@ -64,8 +64,12 @@ pub use actions::{
     close_window, focus_window, maximize_window, minimize_window, move_to_next_display,
     move_to_previous_display, move_window, resize_window, tile_window,
 };
-pub use display_topology::{display_topology_snapshot, list_displays, DisplayTopologySnapshot};
+pub use display_topology::list_displays;
+// Snapshot APIs remain part of the public library even when the binary does not call them.
+#[allow(unused_imports)]
+pub use display_topology::{display_topology_snapshot, DisplayTopologySnapshot};
 pub use query::{get_frontmost_window_of_previous_app, has_accessibility_permission, list_windows};
+#[allow(unused_imports)]
 pub use registry::{refresh_window_registry, registry_snapshot, RegistrySnapshot};
 #[allow(unused_imports)]
 pub use snap_mode::{
@@ -77,8 +81,10 @@ pub use snap_runtime::{
     cancel_snap_runtime, finish_snap_runtime, is_snap_runtime_active,
     refresh_snap_runtime_for_mode, start_snap_runtime,
 };
+#[allow(unused_imports)]
 pub use transaction::{MutationStatus, TransactionReceipt};
 pub use types::*;
+#[allow(unused_imports)]
 pub use undo::{
     clear_window_undo_history, redo_last_window_transaction, undo_last_window_transaction,
 };

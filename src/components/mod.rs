@@ -77,10 +77,15 @@ mod unified_list_item_tests;
 
 // Re-export commonly used types
 pub use ai_recovery::{
-    ai_recovery_footer_hint_labels, decide_recovery_key, recovery_semantic_tree,
-    render_ai_recovery_card, render_ai_recovery_footer, AiRecoveryActionHandler,
-    AiRecoveryCardHandlers, AiRecoveryDismissHandler, AiRecoveryFocusTarget, AiRecoveryKey,
-    AiRecoveryKeyDecision, AiRecoverySemanticNode, AI_RECOVERY_FOOTER_ID,
+    recovery_semantic_tree, render_ai_recovery_card, render_ai_recovery_footer,
+    AiRecoveryCardHandlers,
+};
+// These public library contracts are intentionally not all consumed by the binary target.
+#[allow(unused_imports)]
+pub use ai_recovery::{
+    ai_recovery_footer_hint_labels, decide_recovery_key, AiRecoveryActionHandler,
+    AiRecoveryDismissHandler, AiRecoveryFocusTarget, AiRecoveryKey, AiRecoveryKeyDecision,
+    AiRecoverySemanticNode, AI_RECOVERY_FOOTER_ID,
 };
 #[allow(unused_imports)]
 pub use alias_input::{AliasInput, AliasInputAction, AliasInputColors};
