@@ -15,6 +15,7 @@ import {
   type SpotlightFailure,
 } from "./spotlight-sync-filmstrip-contract.ts";
 import { newRunId } from "./glass-evidence-contract.ts";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
 
 type CommandReceipt = {
   argv: string[];
@@ -219,7 +220,11 @@ async function gitCommit(root: string): Promise<string | null> {
     : null;
 }
 
-async function main(): Promise<number> {
+export async function main(): Promise<number> {
+  const gradeOnly = hasFlag("--grade-only");
+  if (!gradeOnly) {
+    assertNoninteractiveVisualProbe("spotlight-sync-filmstrip");
+  }
   const startedAt = new Date().toISOString();
   const root = rootDir();
   const outPath = resolve(
@@ -240,7 +245,6 @@ async function main(): Promise<number> {
   const exitColorPath = resolve(
     arg("--exit-color-receipt", join(attemptDir, "exit-color.json"))!,
   );
-  const gradeOnly = hasFlag("--grade-only");
   const commands: Record<string, CommandReceipt> = {};
   let binaryIdentity: Record<string, unknown> | null = null;
   let fixtureIdentity: Record<string, unknown> | null = null;

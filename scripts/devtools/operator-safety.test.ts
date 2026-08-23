@@ -8,6 +8,7 @@ import {
   assertNoninteractiveSessionCommand,
   assertNoninteractiveSubprocess,
   assertNoninteractiveUnownedSessionCommand,
+  assertNoninteractiveVisualProbe,
   inspectionSessionCleanup,
   NONINTERACTIVE_SAFE_COMMAND_TYPES,
   NoninteractiveSafetyError,
@@ -987,6 +988,15 @@ describe("noninteractive DevTools operator safety", () => {
     );
   });
 
+  test("visible native probes fail closed while explicit interactive mode remains available", () => {
+    expect(() => assertNoninteractiveVisualProbe("reviewed-native-probe"))
+      .toThrow("visible windows, native pointer or keyboard input, screen capture");
+    withParentAuthority({ SCRIPT_KIT_NONINTERACTIVE: "0" }, () => {
+      expect(() => assertNoninteractiveVisualProbe("reviewed-native-probe"))
+        .not.toThrow();
+    });
+  });
+
   test("generic subprocess guard preserves reviewed read-only session transport", () => {
     expect(() => assertNoninteractiveSubprocess([
       "bash", "scripts/agentic/session.sh", "status", "reviewed-session",
@@ -1170,6 +1180,10 @@ describe("noninteractive DevTools operator safety", () => {
       'const { maybeStartSession } = await import("./scripts/devtools/actions.ts"); await maybeStartSession({ session: "reviewed-session", start: true, keepOpen: false });',
     ],
     [
+      "Main window",
+      'process.argv = ["bun", "scripts/devtools/main.ts", "inspect", "--session", "reviewed-session", "--start", "--show"]; await import("./scripts/devtools/main.ts");',
+    ],
+    [
       "Dictation",
       'process.argv = ["bun", "scripts/devtools/dictation.ts", "inspect", "--session", "reviewed-session", "--start", "--show"]; await import("./scripts/devtools/dictation.ts");',
     ],
@@ -1209,6 +1223,10 @@ describe("noninteractive DevTools operator safety", () => {
     [
       "shared target resolver",
       'const { maybeStartAndShow } = await import("./scripts/devtools/lib/target-identity.ts"); await maybeStartAndShow({ session: "reviewed-session", start: true, show: true, timeoutMs: 100 });',
+    ],
+    [
+      "Main window",
+      'process.argv = ["bun", "scripts/devtools/main.ts", "inspect", "--session", "reviewed-session", "--start", "--show"]; await import("./scripts/devtools/main.ts");',
     ],
     [
       "Dictation",
@@ -1271,6 +1289,65 @@ describe("noninteractive DevTools operator safety", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toContain("immutable parent safety authority");
     expect(result.stdout.toString()).not.toContain("unsafe Actions subprocess started");
+  });
+
+  test.each([
+    ["Notes live resize", "notes-live-resize.ts"],
+    ["Notes bottom resize", "notes-bottom-resize.ts"],
+    ["Actions entry filmstrip", "actions-entry-filmstrip.ts"],
+    ["glass lifecycle filmstrip", "glass-lifecycle-filmstrip.ts"],
+    ["rapid toggle stress", "rapid-toggle-stress.ts"],
+  ])("%s refuses before native compilation, screen takeover, or output mutation", (_owner, file) => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-visual-probe-safety-"));
+    const output = join(root, "uncreated-output");
+    try {
+      const result = child(`
+        import { existsSync } from "node:fs";
+        Bun.spawn = (() => { throw new Error("unsafe visual-probe subprocess started"); });
+        Bun.spawnSync = (() => { throw new Error("unsafe visual-probe native compiler started"); });
+        process.argv = ["bun", ${JSON.stringify(`scripts/devtools/${file}`)}, "--binary", process.execPath, "--out", ${JSON.stringify(output)}];
+        try { await import(${JSON.stringify(`./scripts/devtools/${file}`)}); }
+        catch (error) { console.log("failure=" + error.message); }
+        console.log("outExists=" + existsSync(${JSON.stringify(output)}));
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+      expect(result.stdout.toString()).toContain("outExists=false");
+      expect(result.stdout.toString()).not.toContain("unsafe visual-probe");
+      expect(existsSync(output)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["glass observer verification", "glass-observers.ts", "verifyCommand"],
+    ["Spotlight live filmstrip", "spotlight-sync-filmstrip.ts", "main"],
+    ["main-window native drag", "main-window-native-drag.ts", "cli"],
+  ])("%s refuses before native capture while pure imports stay available", (_owner, file, entrypoint) => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-visible-entry-safety-"));
+    const output = join(root, "uncreated-output");
+    try {
+      const result = child(`
+        import { existsSync } from "node:fs";
+        Bun.spawn = (() => { throw new Error("unsafe visible entry subprocess started"); });
+        Bun.spawnSync = (() => { throw new Error("unsafe visible entry compiler started"); });
+        process.argv = ["bun", ${JSON.stringify(`scripts/devtools/${file}`)}, "verify", "--binary", process.execPath, "--out", ${JSON.stringify(output)}];
+        const entry = await import(${JSON.stringify(`./scripts/devtools/${file}`)});
+        try { await entry[${JSON.stringify(entrypoint)}](); }
+        catch (error) { console.log("failure=" + error.message); }
+        console.log("outExists=" + existsSync(${JSON.stringify(output)}));
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+      expect(result.stdout.toString()).toContain("outExists=false");
+      expect(result.stdout.toString()).not.toContain("unsafe visible entry");
+      expect(existsSync(output)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("filterable matrix cleanup forwards exact owned identity and protects resumed sessions", () => {

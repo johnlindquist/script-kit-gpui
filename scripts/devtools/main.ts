@@ -3,6 +3,7 @@
 import {
   assertNoninteractiveProtocolCommand,
   assertNoninteractiveSessionCommand,
+  requireSuccessfulSessionAction,
 } from "./lib/operator-safety.ts";
 import { privateReceiptFingerprint } from "./lib/privacy.ts";
 
@@ -121,7 +122,11 @@ function asArray(value: unknown): JsonObject[] {
 
 async function maybeStartSession(args: Args) {
   if (!args.start) return null;
-  return run(["bash", "scripts/agentic/session.sh", "start", args.session], "session.start");
+  const started = await run(
+    ["bash", "scripts/agentic/session.sh", "start", args.session],
+    "session.start",
+  );
+  return requireSuccessfulSessionAction(args.session, "start", started);
 }
 
 async function maybeShowMain(args: Args) {
@@ -272,7 +277,8 @@ async function closeMain(args: Args) {
 }
 
 async function showMain(args: Args) {
-  return send(args.session, { type: "show" }, args.timeoutMs);
+  const shown = await send(args.session, { type: "show" }, args.timeoutMs);
+  return requireSuccessfulSessionAction(args.session, "show", shown);
 }
 
 async function sampleMainAfterReopen(args: Args, markerFingerprint: string | null) {

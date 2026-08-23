@@ -11,6 +11,9 @@ import { basename, dirname, join, resolve } from "node:path";
 import { Driver, type Json } from "./driver.ts";
 import { validateNotesBottomResizeReceipt } from "./notes-bottom-resize-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("notes-bottom-resize");
 
 const arg = (name: string, fallback?: string) => {
   const index = process.argv.indexOf(name);

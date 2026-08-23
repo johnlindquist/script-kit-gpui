@@ -67,6 +67,9 @@ import {
   startSampler,
   summarizeTelemetry,
 } from "../agentic/glass-system-telemetry.ts";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("glass-lifecycle-filmstrip");
 
 function arg(name: string, fallback?: string) {
   const index = process.argv.indexOf(name);

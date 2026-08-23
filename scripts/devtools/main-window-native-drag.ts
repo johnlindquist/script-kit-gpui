@@ -10,6 +10,7 @@ import {
 } from "./glass-evidence-contract.ts";
 import { requireValidatedHelper } from "./glass-native-helper-cache.ts";
 import { announceTestStatus } from "./test-status.ts";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
 
 export type Rect = { x: number; y: number; width: number; height: number };
 export type TimedRead<T> = {
@@ -1842,7 +1843,8 @@ function parseCLI() {
   };
 }
 
-async function cli() {
+export async function cli() {
+  assertNoninteractiveVisualProbe("main-window-native-drag");
   const {
     binary,
     outDir,

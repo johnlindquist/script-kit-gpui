@@ -27,6 +27,9 @@ import {
   waitForInterferenceReady,
 } from "./glass-interference.ts";
 import { exitCodeForDisposition } from "./glass-observers.ts";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("rapid-toggle-stress");
 
 type WindowSnapshot = {
   id?: string;

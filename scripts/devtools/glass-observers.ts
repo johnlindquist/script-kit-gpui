@@ -57,6 +57,7 @@ import {
 } from "./glass-native-helper-cache.ts";
 import { newRunId } from "./glass-evidence-contract.ts";
 import { producerIdentityForTool } from "./lib/receipt-schema.ts";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
 
 // ---------------------------------------------------------------------------
 // Disposition table (plan §2.2)
@@ -1117,7 +1118,8 @@ function arg(name: string, fallback?: string) {
   return index >= 0 ? process.argv[index + 1] : fallback;
 }
 
-async function verifyCommand(): Promise<never> {
+export async function verifyCommand(): Promise<never> {
+  assertNoninteractiveVisualProbe("glass-observers.verify");
   const startedAt = new Date().toISOString();
   const root = repoRoot();
   const binaryArg = arg("--binary");

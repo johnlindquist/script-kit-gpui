@@ -24,6 +24,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "./driver.ts";
 import { announceTestStatus } from "./test-status.ts";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
 import {
   NATIVE_RESIZE_DIRECTIONS,
   REQUIRED_MOVING_EDGES,
@@ -35,6 +36,8 @@ import {
   validateDirectionTrial,
   validateNotesLiveResizeReceipt,
 } from "./notes-live-resize-contract.ts";
+
+assertNoninteractiveVisualProbe("notes-live-resize");
 
 const arg = (name: string, fallback?: string) => {
   const index = process.argv.indexOf(name);

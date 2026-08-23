@@ -57,6 +57,9 @@ import {
   type GlassObservationInput,
   validateOwnedRenderedFrames,
 } from "./glass-observers.ts";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("actions-entry-filmstrip");
 
 function arg(name: string, fallback?: string) {
   const index = process.argv.indexOf(name);

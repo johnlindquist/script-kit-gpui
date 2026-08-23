@@ -199,6 +199,15 @@ export class NoninteractiveSafetyError extends Error {
   }
 }
 
+export function assertNoninteractiveVisualProbe(probe: string): void {
+  if (process.env.SCRIPT_KIT_NONINTERACTIVE !== "1") return;
+  assertNoIncompatibleOptIns(process.env);
+  throw new NoninteractiveSafetyError(
+    probe,
+    "visible windows, native pointer or keyboard input, screen capture, and native-helper compilation are forbidden; use a reviewed synthetic or grade-only mode",
+  );
+}
+
 function object(value: unknown): ProtocolCommand | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as ProtocolCommand)
