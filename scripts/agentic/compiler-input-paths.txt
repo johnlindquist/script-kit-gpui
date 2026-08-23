@@ -4,6 +4,8 @@ vendor
 assets
 kit-init
 scripts/kit-sdk.ts
+scripts/mcp-cli.ts
+scripts/examples/menu-syntax
 .cargo
 Cargo.toml
 Cargo.lock

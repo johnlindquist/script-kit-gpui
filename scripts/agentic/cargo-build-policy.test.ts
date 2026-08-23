@@ -835,7 +835,16 @@ describe("bounded Cargo builds", () => {
     );
     expect(result.status).toBe(0);
     const observed = readFileSync(capture, "utf8");
-    for (const owner of ["src", "crates", "vendor", "assets", "kit-init", "scripts/kit-sdk.ts"]) {
+    for (const owner of [
+      "src",
+      "crates",
+      "vendor",
+      "assets",
+      "kit-init",
+      "scripts/kit-sdk.ts",
+      "scripts/mcp-cli.ts",
+      "scripts/examples/menu-syntax",
+    ]) {
       expect(observed).toContain(owner);
     }
   });
