@@ -1196,15 +1196,20 @@ offline receipts until their real producers are run again.
     current 40-character HEAD, actual missing IDs, and genuine direct-runtime
     policies. It produces **BLOCKED / 0 of 28** until real proof exists,
     never invents test/governance/consultation counts, and offers passive
-    `--no-write` inspection. **17 anti-forgery cases / 30 assertions** and
-    **86 combined canonical-governance cases / 528 assertions** pass; the
+    `--no-write` inspection. **18 anti-forgery cases / 31 assertions** and
+    **88 combined canonical-governance cases / 533 assertions** pass; the
     actual GOV-006 producer executes and fingerprints both audit owners,
     while publication requires their tracked source and directly executed
     workflow suite. The canonical receipt schema accepts the one exactly
     reviewed workflow behavior owner during the shared **14-task** offline
     run, rejects arbitrary agentic suites, and requires both completion
-    sources and their real suites specifically for GOV-006. The full program
-    remains honestly **15/75 accepted, 60 runtime tasks missing**.
+    sources and their real suites specifically for GOV-006. The completion
+    auditor independently validates those exact fingerprints; the previously
+    committed false-green lane is now a permanent **BLOCKED / 0 of 28**
+    marker, while regenerated source-current receipts live in an ignored
+    `final-audit/current/` directory and cannot dirty or invalidate their own
+    checkout. The full program remains honestly **15/75 accepted,
+    60 runtime tasks missing**.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1496,8 +1501,8 @@ offline receipts until their real producers are run again.
     The separate canonical workflow completion owner and its anti-forgery
     behavior suite are independently mandatory release provenance; GOV-006
     directly executes and fingerprints both completion-auditor sources.
-    Three pure canonical-governance suites pass **86 cases / 528 assertions**,
-    including **17 workflow anti-forgery cases / 30 assertions**.
+    Three pure canonical-governance suites pass **88 cases / 533 assertions**,
+    including **18 workflow anti-forgery cases / 31 assertions**.
     The independent SDK/custom-script runner now forcibly clears inherited
     screen-takeover, visible-probe, native-input, screen-capture, live-AI,
     application-launch, and notification permissions in every test child.
