@@ -5,10 +5,13 @@ import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
 import { diagnostic } from "./lib/privacy.ts";
 import {
   assertNoninteractiveProtocolCommand,
-  assertNoninteractiveSessionCommand,
+  assertNoninteractiveSubprocess,
+  inspectionSessionCleanup,
+  SessionOwnershipRegistry,
 } from "./lib/operator-safety.ts";
 
 type JsonObject = Record<string, unknown>;
+const notesSessionOwnership = new SessionOwnershipRegistry();
 
 type Args = {
   command: "inspect" | "resize-compare";
@@ -91,7 +94,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 async function run(command: string[], label: string, env: Record<string, string> = {}): Promise<JsonObject> {
-  assertNoninteractiveSessionCommand(command);
+  assertNoninteractiveSubprocess(command, env);
   const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -108,9 +111,18 @@ async function run(command: string[], label: string, env: Record<string, string>
   }
 }
 
-async function maybeOpenNotes(args: Args, env: Record<string, string> = {}) {
+export async function maybeOpenNotes(args: Args, env: Record<string, string> = {}) {
   if (args.start) {
-    await run(["bash", "scripts/agentic/session.sh", "start", args.session], "session-start", env);
+    inspectionSessionCleanup(args.session, null);
+    if (args.session === "dev-watch") {
+      throw new Error("Notes DevTools cannot claim the borrowed operator session");
+    }
+    const started = await run(
+      ["bash", "scripts/agentic/session.sh", "start", args.session],
+      "session-start",
+      env,
+    );
+    notesSessionOwnership.rememberStart(args.session, started);
   }
   if (!args.open) {
     return null;
@@ -510,8 +522,10 @@ async function sessionStatus(session: string) {
   return run(["bash", "scripts/agentic/session.sh", "status", session], "session-status");
 }
 
-async function stopSession(session: string) {
-  return run(["bash", "scripts/agentic/session.sh", "stop", session], "session-stop");
+export async function stopSession(session: string) {
+  const receipt = await run(notesSessionOwnership.stopCommand(session), "session-stop");
+  notesSessionOwnership.release(session);
+  return receipt;
 }
 
 async function getNotesState(args: Args, notesTargetId: string, label: string) {
@@ -758,7 +772,7 @@ async function runResizeCompare(args: Args) {
       cleanup: null,
     };
   } finally {
-    if (args.cleanup && startedByTool) {
+    if (args.cleanup && startedByTool && notesSessionOwnership.isOwned(args.session)) {
       cleanupReceipt = await stopSession(args.session);
     }
     if (result) {
@@ -902,4 +916,4 @@ async function main() {
   await runInspect(args);
 }
 
-await main();
+if (import.meta.main) await main();

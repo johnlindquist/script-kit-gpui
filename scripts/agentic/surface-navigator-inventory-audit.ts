@@ -204,7 +204,8 @@ async function main(): Promise<void> {
   const live: { id: string; surface: string; screenshotable: boolean; exempt: boolean }[] = [];
   const matrix = matrixSurfaces();
 
-  await sessionStart(session);
+  const startReceipt = await sessionStart(session);
+  const ownsSession = startReceipt.resumed !== true;
   try {
     for (const probe of LIVE_TRIGGER_BUILTINS) {
       const result = await probeLiveSurface(session, probe);
@@ -231,7 +232,7 @@ async function main(): Promise<void> {
       }
     }
   } finally {
-    if (!keepSession) {
+    if (!keepSession && ownsSession) {
       await sessionStop(session);
     }
   }

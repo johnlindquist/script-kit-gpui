@@ -1009,7 +1009,8 @@ async function main(): Promise<void> {
             ? opts.session
             : `${opts.session}-${selected.sourceGroup}-${entry.viewName}`;
         const startReceipt = await startOrReuseSession(caseSession);
-        activeSessions.add(caseSession);
+        const ownsCaseSession = startReceipt.resumed !== true;
+        if (ownsCaseSession) activeSessions.add(caseSession);
         startReceipts.push({
           caseId: entry.id,
           sourceGroup: selected.sourceGroup,
@@ -1017,17 +1018,20 @@ async function main(): Promise<void> {
           startReceipt,
         });
         caseReceipts.push(await runNavigatorCase(caseSession, selected, opts));
-        await sessionStop(caseSession);
-        activeSessions.delete(caseSession);
+        if (ownsCaseSession) {
+          await sessionStop(caseSession);
+          activeSessions.delete(caseSession);
+        }
       }
     } else {
       const startReceipt = await startOrReuseSession(opts.session);
-      activeSessions.add(opts.session);
+      const ownsSession = startReceipt.resumed !== true;
+      if (ownsSession) activeSessions.add(opts.session);
       startReceipts.push({ session: opts.session, startReceipt });
       for (const selected of cases) {
         caseReceipts.push(await runNavigatorCase(opts.session, selected, opts));
       }
-      if (!opts.keepSession) {
+      if (!opts.keepSession && ownsSession) {
         await sessionStop(opts.session);
         activeSessions.delete(opts.session);
       }
