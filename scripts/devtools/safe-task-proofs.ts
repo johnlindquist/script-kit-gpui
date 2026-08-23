@@ -148,11 +148,14 @@ export const SAFE_TASK_SPECS: readonly SafeTaskSpec[] = [
     testFiles: [
       "scripts/devtools/consistency.test.ts",
       "scripts/devtools/runtime-task-proof.test.ts",
+      "scripts/devtools/workflow-task-proof.test.ts",
       "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
     ],
     productionSources: [
       "scripts/devtools/consistency.ts",
       "scripts/devtools/lib/runtime-task-proof.ts",
+      "scripts/devtools/lib/workflow-task-contract.ts",
+      "scripts/devtools/lib/workflow-task-proof.ts",
       "scripts/agentic/cons-flow-ux/final-workflow-audit.ts",
     ],
   },

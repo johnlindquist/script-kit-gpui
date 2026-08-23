@@ -188,16 +188,23 @@ describe("catalog-bound offline consistency task proofs", () => {
     expect(completion.productionSources).toEqual([
       "scripts/devtools/consistency.ts",
       "scripts/devtools/lib/runtime-task-proof.ts",
+      "scripts/devtools/lib/workflow-task-contract.ts",
+      "scripts/devtools/lib/workflow-task-proof.ts",
       "scripts/agentic/cons-flow-ux/final-workflow-audit.ts",
     ]);
     expect(completion.testRun.executedSuiteFiles).toEqual([
       "scripts/devtools/consistency.test.ts",
       "scripts/devtools/runtime-task-proof.test.ts",
+      "scripts/devtools/workflow-task-proof.test.ts",
       "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
     ]);
     expect(completion.sourceFingerprints["scripts/devtools/consistency.ts"])
       .toMatch(/^[a-f0-9]{64}$/);
     expect(completion.sourceFingerprints["scripts/devtools/lib/runtime-task-proof.ts"])
+      .toMatch(/^[a-f0-9]{64}$/);
+    expect(completion.sourceFingerprints["scripts/devtools/lib/workflow-task-contract.ts"])
+      .toMatch(/^[a-f0-9]{64}$/);
+    expect(completion.sourceFingerprints["scripts/devtools/lib/workflow-task-proof.ts"])
       .toMatch(/^[a-f0-9]{64}$/);
     expect(completion.sourceFingerprints["scripts/agentic/cons-flow-ux/final-workflow-audit.ts"])
       .toMatch(/^[a-f0-9]{64}$/);
@@ -215,6 +222,18 @@ describe("catalog-bound offline consistency task proofs", () => {
         ...completion,
         productionSources: completion.productionSources.filter((path) =>
           path !== "scripts/devtools/lib/runtime-task-proof.ts"
+        ),
+      },
+      {
+        ...completion,
+        productionSources: completion.productionSources.filter((path) =>
+          path !== "scripts/devtools/lib/workflow-task-contract.ts"
+        ),
+      },
+      {
+        ...completion,
+        productionSources: completion.productionSources.filter((path) =>
+          path !== "scripts/devtools/lib/workflow-task-proof.ts"
         ),
       },
       {
