@@ -28,6 +28,8 @@ jq -e '.url and .token and .version and (.capabilities.tools == true)' "$SERVER_
 
 `~/.scriptkit/server.json` contains sensitive bearer-token material. Do not paste it into issues, shell transcripts, logs, screenshots, commits, or shared docs. The file is app-owned discovery metadata and may disappear when the app stops because the MCP server removes discovery metadata on shutdown.
 
+If the app runs with `SK_PATH`, discovery lives at `$SK_PATH/server.json`; the shipped `scriptkit` CLI and SDK use that same active workspace. Discovery must be an owner-only regular file, and the app's bearer token is accepted only for a loopback `localhost`, `127.0.0.1`, or `[::1]` `/rpc` endpoint. Redirects and remote/lookalike destinations are refused before the token is sent.
+
 The file's `.url` value is the base server URL, not the JSON-RPC endpoint. Codex and direct JSON-RPC checks must append `/rpc`:
 
 ```bash

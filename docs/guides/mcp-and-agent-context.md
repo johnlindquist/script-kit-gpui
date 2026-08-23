@@ -60,7 +60,11 @@ The app maintains a command shim at `~/.scriptkit/bin/scriptkit` that reads `ser
 ~/.scriptkit/bin/scriptkit mcp call kit/trigger_builtin '{"builtinId":"builtin/clipboard-history"}'
 ```
 
-It requires the app to be running and also accepts `SCRIPT_KIT_MCP_ENDPOINT` / `SCRIPT_KIT_MCP_TOKEN` overrides.
+It requires the app to be running and also accepts `SCRIPT_KIT_MCP_ENDPOINT` / `SCRIPT_KIT_MCP_TOKEN` overrides. If `SK_PATH` selects a custom Script Kit workspace, the CLI and SDK read that workspace's `server.json` and `config.ts` instead of another account directory.
+
+The app-owned MCP endpoint is always local: only `localhost`, `127.0.0.1`, or `[::1]` with the exact `/rpc` path can receive its discovery bearer token. Discovery must be an owner-only regular file, redirects never forward credentials, and errors never print bearer values. The SDK and CLI validate the exact JSON-RPC request ID and report provider failures rather than treating HTTP 200 as success.
+
+Requests default to a 30-second timeout. Set `SCRIPT_KIT_MCP_TIMEOUT_MS` to a positive whole number no greater than `120000` when a deliberately slower local or configured remote server needs another budget. A timed-out stdio server and its owned subprocesses are stopped together.
 
 ## External MCP Servers (Script Kit as a Client)
 
@@ -96,6 +100,8 @@ const tools = await mcp.listTools();          // across configured servers
 const matches = await mcp.discover("calendar");
 const result = await mcp.call("localTools", "create_event", { title: "Standup" });
 ```
+
+The local-only restriction applies to the app's own discovery token, not to explicitly configured external HTTP servers. Remote MCP servers remain supported when their endpoint and credentials are deliberately defined under the active workspace's `mcp.servers` configuration.
 
 ## Agent Chat Context
 
