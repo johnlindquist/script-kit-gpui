@@ -1494,6 +1494,17 @@ offline receipts until their real producers are run again.
     diagnostic. The exact same release-bound custom-script matrix still runs
     all **215/215 real SDK cases**, and its independent adversarial suite
     remains green at **35/35 cases / 103 assertions**.
+52. Fast application-test reuse decided freshness only by comparing source
+    modification timestamps against the cached harness. A real disposable
+    regression edited a Rust source, backdated its timestamp, and watched the
+    supposedly current harness execute successfully; replacing its `src`
+    owner with an external symlink also executed foreign, unreviewed source.
+    Reuse now consumes the same canonical compiler-input ownership list as
+    real builds, rejects every symlinked input root, independently requires a
+    full current Git commit, checks tracked and untracked compiled-source
+    dirtiness before trusting timestamps, and fails before any test process
+    starts when proof is impossible. All **14 fake-harness ownership cases /
+    39 assertions** pass with no Rust compiler or real application.
 
 ### Ten implemented improvements and their verification contracts
 
