@@ -73,6 +73,7 @@ import { readdir, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { spawn } from 'bun';
+import { SDK_SYSTEM_INPUT_TESTS } from '../tests/sdk/system-input-tests.ts';
 
 // =============================================================================
 // Types
@@ -201,11 +202,7 @@ if (NONINTERACTIVE && INCLUDE_SYSTEM) {
 // Excluded by default to avoid interfering with the user's desktop and to keep
 // CI aligned with the supported GPUI runtime surface.
 // Pass --include-system to run them.
-const SYSTEM_INPUT_TESTS = new Set([
-  'test-system.ts',
-  'test-clipboard-image.ts',
-  'test-scroll-perf.ts',
-]);
+const SYSTEM_INPUT_TESTS = new Set<string>(SDK_SYSTEM_INPUT_TESTS);
 
 // Parse --filter pattern
 function getFilterPattern(): RegExp | null {
