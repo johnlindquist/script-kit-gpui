@@ -82,6 +82,69 @@ export interface ReceiptSchemaDefinition {
   description: string;
 }
 
+export const RUNTIME_TASK_PROOF_SPECS = {
+  "PF-004": {
+    primitiveId: "devtools.elements.snapshot",
+    productionOwner: "scripts/devtools/elements.ts",
+    runtimeProducer: "scripts/agentic/cons-proof-gov/semantic-projection-proof.ts",
+    proofMode: "action",
+    negativeControlIds: [
+      "partialActionProofBlocked",
+      "unsupportedCustomDocumentBlocked",
+      "missingFlowEntityBlocked",
+      "duplicateSemanticIdsInvalid",
+    ],
+  },
+  "PF-005": {
+    primitiveId: "devtools.layout.measure",
+    productionOwner: "scripts/devtools/layout.ts",
+    runtimeProducer: "scripts/agentic/cons-proof-gov/layout-text-proof.ts",
+    proofMode: "join",
+    negativeControlIds: [
+      "renderedOnePointClipDetected",
+      "roleMismatchNotComparable",
+      "staleFrameNotComparable",
+      "renderedOnlyNotComparable",
+      "modelSiblingOverlapNotHiddenByCleanPaint",
+    ],
+  },
+  "PF-006": {
+    primitiveId: "devtools.text.measure",
+    productionOwner: "scripts/devtools/text.ts",
+    runtimeProducer: "scripts/agentic/cons-proof-gov/layout-text-proof.ts",
+    proofMode: "fit",
+    negativeControlIds: [
+      "onePointGlyphClipFails",
+      "footerOcclusionFails",
+      "fontsNotReadyFails",
+      "backingScaleMismatchFails",
+    ],
+  },
+  "PF-007": {
+    primitiveId: "devtools.focus.inspect",
+    productionOwner: "scripts/devtools/focus.ts",
+    runtimeProducer: "scripts/agentic/cons-proof-gov/ax-scroll-proof.ts",
+    proofMode: "ax",
+    negativeControlIds: [
+      "hiddenAxPeerRejected",
+      "wrongHostRejected",
+      "disabledActivationRefused",
+    ],
+  },
+  "PF-008": {
+    primitiveId: "devtools.scroll.inspect",
+    productionOwner: "scripts/devtools/scroll.ts",
+    runtimeProducer: "scripts/agentic/cons-proof-gov/ax-scroll-proof.ts",
+    proofMode: "rendered-safe-viewport",
+    negativeControlIds: [
+      "onePointBelowViewportRejected",
+      "missingRenderedRowBlocks",
+    ],
+  },
+} as const;
+
+export type RuntimeTaskProofId = keyof typeof RUNTIME_TASK_PROOF_SPECS;
+
 const commonTargetFields = ["requestedTarget", "target"];
 const allDispositions = [...receiptDispositions];
 
@@ -870,8 +933,10 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
             !productionSources.includes("design/mockups/generated/tokens.json")) ||
           (taskId === "GOV-006" && (
             !productionSources.includes("scripts/devtools/consistency.ts") ||
+            !productionSources.includes("scripts/devtools/lib/runtime-task-proof.ts") ||
             !productionSources.includes(reviewedWorkflowOwner) ||
             !suiteFiles.includes("scripts/devtools/consistency.test.ts") ||
+            !suiteFiles.includes("scripts/devtools/runtime-task-proof.test.ts") ||
             !suiteFiles.includes(reviewedWorkflowSuite)
           ))
         ) {
@@ -1864,6 +1929,7 @@ const sharedReceiptPolicyOwners = [
   "privacy.ts",
   "evidence-class.ts",
   "geometry-evidence.ts",
+  "runtime-task-proof.ts",
   "task-proof-policy.ts",
 ] as const;
 let cachedReceiptPolicyFingerprint: string | null = null;

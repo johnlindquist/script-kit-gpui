@@ -234,6 +234,10 @@ export function nativeFooterActivationProof(
       : "",
   ].filter(Boolean);
   return {
+    host: result.host ?? null,
+    actionId: result.actionId ?? null,
+    resultOk: result.ok ?? null,
+    resultErrorCode: result.errorCode ?? null,
     expectedSemanticId,
     expectedDisposition: expectDisabledRefusal ? "refused-disabled" : "dispatched",
     activation,
