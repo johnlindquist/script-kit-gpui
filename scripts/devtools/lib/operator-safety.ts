@@ -70,6 +70,54 @@ export function inspectionSessionCleanup(
   };
 }
 
+export class SessionOwnershipRegistry {
+  private readonly owned = new Map<string, { pid: number; generation: string }>();
+
+  rememberStart(
+    session: string,
+    startReceipt: Record<string, unknown>,
+    options: { allowPendingReadiness?: boolean } = {},
+  ): InspectionSessionCleanup {
+    // A process can be unready yet still need exact owned cleanup if its
+    // readiness wait fails. This never mutates or upgrades its actual receipt.
+    const ownershipReceipt = options.allowPendingReadiness && startReceipt.ready === false
+      ? { ...startReceipt, ready: true }
+      : startReceipt;
+    const cleanup = inspectionSessionCleanup(session, ownershipReceipt);
+    if (cleanup.createdSession && cleanup.ownership) {
+      this.owned.set(session, cleanup.ownership);
+    } else {
+      this.owned.delete(session);
+    }
+    return cleanup;
+  }
+
+  isOwned(session: string): boolean {
+    return this.owned.has(session);
+  }
+
+  stopCommand(session: string): string[] {
+    const ownership = this.owned.get(session);
+    if (!ownership) {
+      throw new Error(`DevTools session is not owned by this invocation: ${session}`);
+    }
+    return [
+      "bash",
+      "scripts/agentic/session.sh",
+      "stop",
+      session,
+      "--expected-pid",
+      String(ownership.pid),
+      "--expected-generation",
+      ownership.generation,
+    ];
+  }
+
+  release(session: string): void {
+    this.owned.delete(session);
+  }
+}
+
 export const NONINTERACTIVE_SAFE_COMMAND_TYPES = [
   "getState",
   "getElements",
@@ -490,4 +538,26 @@ export function assertNoninteractiveSessionCommand(command: string[]): void {
       `unreviewed session transport argument: ${flag ?? "(missing)"}`,
     );
   }
+}
+
+export function assertNoninteractiveSubprocess(
+  command: string[],
+  overrides: Record<string, string | undefined> = {},
+): void {
+  if (process.env.SCRIPT_KIT_NONINTERACTIVE !== "1") return;
+
+  assertNoIncompatibleOptIns(process.env);
+  for (const key of immutableLaunchAuthority) {
+    if (
+      Object.prototype.hasOwnProperty.call(overrides, key) &&
+      overrides[key] !== process.env[key]
+    ) {
+      throw new NoninteractiveSafetyError(
+        "subprocess",
+        `${key} cannot override immutable parent safety authority`,
+      );
+    }
+  }
+  assertNoIncompatibleOptIns({ ...process.env, ...overrides });
+  assertNoninteractiveSessionCommand(command);
 }

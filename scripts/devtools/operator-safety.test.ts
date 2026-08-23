@@ -6,10 +6,12 @@ import {
   assertNoninteractiveDriverLaunch,
   assertNoninteractiveProtocolCommand,
   assertNoninteractiveSessionCommand,
+  assertNoninteractiveSubprocess,
   assertNoninteractiveUnownedSessionCommand,
   inspectionSessionCleanup,
   NONINTERACTIVE_SAFE_COMMAND_TYPES,
   NoninteractiveSafetyError,
+  SessionOwnershipRegistry,
 } from "./lib/operator-safety.ts";
 import { AttachedDriver } from "./driver.ts";
 
@@ -940,6 +942,233 @@ describe("noninteractive DevTools operator safety", () => {
       expect(() => inspectionSessionCleanup(session!, null)).toThrow("safe session identity");
     },
   );
+
+  test.each([
+    ["AppleScript", ["osascript", "-e", "display notification unsafe"]],
+    ["Swift", ["swift", "scripts/agentic/macos-window-query.swift"]],
+    ["native input", ["bun", "scripts/agentic/macos-input.ts", "key", "enter"]],
+    ["screen capture", ["screencapture", "-x", "/tmp/unsafe.png"]],
+    ["shell mutation", ["bash", "-lc", "open -a System Settings"]],
+  ])("generic subprocess guard refuses %s before any child can start", (_name, command) => {
+    expect(() => assertNoninteractiveSubprocess(command!)).toThrow(
+      "only the reviewed bash scripts/agentic/session.sh",
+    );
+  });
+
+  test("generic subprocess guard preserves reviewed read-only session transport", () => {
+    expect(() => assertNoninteractiveSubprocess([
+      "bash", "scripts/agentic/session.sh", "status", "reviewed-session",
+    ])).not.toThrow();
+    expect(() => assertNoninteractiveSubprocess([
+      "bash", "scripts/agentic/session.sh", "rpc", "reviewed-session",
+      JSON.stringify({ type: "getState" }), "--expect", "stateResult", "--timeout", "1000",
+    ])).not.toThrow();
+  });
+
+  test.each([
+    ["SCRIPT_KIT_NONINTERACTIVE", "0"],
+    ["SCRIPT_KIT_ALLOW_NATIVE_INPUT", "1"],
+    ["SCRIPT_KIT_ALLOW_SCREEN_CAPTURE", "1"],
+    ["SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH", "1"],
+    ["CI", "true"],
+  ])("generic subprocess guard rejects child authority override %s", (key, value) => {
+    expect(() => assertNoninteractiveSubprocess(
+      ["bash", "scripts/agentic/session.sh", "status", "reviewed-session"],
+      { [key!]: value! },
+    )).toThrow("immutable parent safety authority");
+  });
+
+  test("the shared ownership registry emits only exact owned stop commands", () => {
+    const ownership = new SessionOwnershipRegistry();
+    const receipt = {
+      status: "ok",
+      session: "reviewed-session",
+      pid: 4242,
+      sessionGeneration: "reviewed-generation",
+      resumed: false,
+      ready: true,
+    };
+
+    expect(ownership.rememberStart("reviewed-session", receipt).createdSession).toBe(true);
+    expect(ownership.stopCommand("reviewed-session")).toEqual([
+      "bash", "scripts/agentic/session.sh", "stop", "reviewed-session",
+      "--expected-pid", "4242", "--expected-generation", "reviewed-generation",
+    ]);
+    ownership.release("reviewed-session");
+    expect(() => ownership.stopCommand("reviewed-session")).toThrow("not owned");
+  });
+
+  test("the shared ownership registry never claims a resumed session", () => {
+    const ownership = new SessionOwnershipRegistry();
+    expect(ownership.rememberStart("reviewed-session", {
+      status: "ok",
+      session: "reviewed-session",
+      pid: 4242,
+      resumed: true,
+      ready: true,
+    }).createdSession).toBe(false);
+    expect(() => ownership.stopCommand("reviewed-session")).toThrow("not owned");
+  });
+
+  test("pending startup can retain cleanup identity without masquerading as ready", () => {
+    const ownership = new SessionOwnershipRegistry();
+    const pending = {
+      status: "ok",
+      session: "reviewed-session",
+      pid: 4242,
+      sessionGeneration: "pending-generation",
+      resumed: false,
+      ready: false,
+    };
+
+    expect(() => ownership.rememberStart("reviewed-session", pending)).toThrow("unready");
+    expect(ownership.rememberStart("reviewed-session", pending, {
+      allowPendingReadiness: true,
+    }).createdSession).toBe(true);
+    expect(ownership.stopCommand("reviewed-session")).toContain("pending-generation");
+  });
+
+  test.each([
+    "filterable-surface-matrix",
+    "target-thread",
+    "scenario",
+  ])("%s subprocess transport refuses native commands before Bun.spawn", (moduleName) => {
+    const result = child(`
+      import { runTool } from "./scripts/agentic/${moduleName}.ts";
+      Bun.spawn = (() => { throw new Error("unsafe native subprocess started"); });
+      try {
+        await runTool(["osascript", "-e", "display notification unsafe"], "unsafe-native");
+      } catch (error) { console.log(error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("only the reviewed bash scripts/agentic/session.sh");
+    expect(result.stdout.toString()).not.toContain("unsafe native subprocess started");
+  });
+
+  test("filterable matrix cleanup forwards exact owned identity and protects resumed sessions", () => {
+    const result = child(`
+      process.env.SCRIPT_KIT_NONINTERACTIVE = "0";
+      const calls = [];
+      let resumed = false;
+      Bun.spawn = ((command) => {
+        calls.push(command);
+        const payload = command[2] === "start"
+          ? { status: "ok", session: command[3], pid: 4242, sessionGeneration: "owned-generation", resumed, ready: true }
+          : { status: "ok", session: command[3], ownershipVerified: true };
+        return {
+          stdout: new Response(JSON.stringify(payload)).body,
+          stderr: new Response("").body,
+          exited: Promise.resolve(0),
+        };
+      });
+      const { sessionStart, sessionStop } = await import("./scripts/agentic/filterable-surface-matrix.ts");
+      await sessionStart("owned-session");
+      await sessionStop("owned-session");
+      resumed = true;
+      await sessionStart("borrowed-session");
+      try { await sessionStop("borrowed-session"); }
+      catch (error) { console.log("borrowed=" + error.message); }
+      console.log("calls=" + JSON.stringify(calls));
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("borrowed=DevTools session is not owned");
+    expect(result.stdout.toString()).toContain(
+      '["bash","scripts/agentic/session.sh","stop","owned-session","--expected-pid","4242","--expected-generation","owned-generation"]',
+    );
+    expect(result.stdout.toString()).not.toContain('"stop","borrowed-session"');
+  });
+
+  test("scenario cleanup rewrites name-only stops to exact owned process identity", () => {
+    const result = child(`
+      process.env.SCRIPT_KIT_NONINTERACTIVE = "0";
+      const calls = [];
+      let resumed = false;
+      Bun.spawn = ((command) => {
+        calls.push(command);
+        const payload = command[2] === "start"
+          ? { status: "ok", session: command[3], pid: 4242, sessionGeneration: "scenario-generation", resumed, ready: true }
+          : { status: "ok", session: command[3], ownershipVerified: true };
+        return {
+          stdout: new Response(JSON.stringify(payload)).body,
+          stderr: new Response("").body,
+          exited: Promise.resolve(0),
+        };
+      });
+      const { runTool } = await import("./scripts/agentic/scenario.ts");
+      await runTool(["bash", "scripts/agentic/session.sh", "start", "owned-session"], "start");
+      await runTool(["bash", "scripts/agentic/session.sh", "stop", "owned-session"], "stop");
+      resumed = true;
+      await runTool(["bash", "scripts/agentic/session.sh", "start", "borrowed-session"], "resume");
+      try { await runTool(["bash", "scripts/agentic/session.sh", "stop", "borrowed-session"], "stop-borrowed"); }
+      catch (error) { console.log("borrowed=" + error.message); }
+      console.log("calls=" + JSON.stringify(calls));
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("borrowed=DevTools session is not owned");
+    expect(result.stdout.toString()).toContain(
+      '["bash","scripts/agentic/session.sh","stop","owned-session","--expected-pid","4242","--expected-generation","scenario-generation"]',
+    );
+    expect(result.stdout.toString()).not.toContain('"stop","borrowed-session"');
+  });
+
+  test("scenario never starts or stops the reserved live operator session", () => {
+    const result = child(`
+      process.env.SCRIPT_KIT_NONINTERACTIVE = "0";
+      Bun.spawn = (() => { throw new Error("live operator session was touched"); });
+      const { runTool } = await import("./scripts/agentic/scenario.ts");
+      for (const operation of ["start", "stop"]) {
+        try {
+          await runTool(["bash", "scripts/agentic/session.sh", operation, "dev-watch"], operation);
+        } catch (error) { console.log(operation + "=" + error.message); }
+      }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("start=Agentic scenario cannot claim the borrowed operator session");
+    expect(result.stdout.toString()).toContain("stop=DevTools session is not owned");
+    expect(result.stdout.toString()).not.toContain("live operator session was touched");
+  });
+
+  test("Notes cleanup owns its exact session and never stops resumed operator state", () => {
+    const result = child(`
+      process.env.SCRIPT_KIT_NONINTERACTIVE = "0";
+      const calls = [];
+      let resumed = false;
+      Bun.spawn = ((command) => {
+        calls.push(command);
+        const payload = command[2] === "start"
+          ? { status: "ok", session: command[3], pid: 4242, sessionGeneration: "notes-generation", resumed, ready: true }
+          : { status: "ok", session: command[3], ownershipVerified: true };
+        return {
+          stdout: new Response(JSON.stringify(payload)).body,
+          stderr: new Response("").body,
+          exited: Promise.resolve(0),
+        };
+      });
+      const { maybeOpenNotes, stopSession } = await import("./scripts/devtools/notes.ts");
+      await maybeOpenNotes({ start: true, session: "owned-notes", open: false });
+      await stopSession("owned-notes");
+      resumed = true;
+      await maybeOpenNotes({ start: true, session: "borrowed-notes", open: false });
+      try { await stopSession("borrowed-notes"); }
+      catch (error) { console.log("borrowed=" + error.message); }
+      try { await maybeOpenNotes({ start: true, session: "dev-watch", open: false }); }
+      catch (error) { console.log("reserved=" + error.message); }
+      console.log("calls=" + JSON.stringify(calls));
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("borrowed=DevTools session is not owned");
+    expect(result.stdout.toString()).toContain("reserved=Notes DevTools cannot claim the borrowed operator session");
+    expect(result.stdout.toString()).toContain(
+      '["bash","scripts/agentic/session.sh","stop","owned-notes","--expected-pid","4242","--expected-generation","notes-generation"]',
+    );
+    expect(result.stdout.toString()).not.toContain('"stop","borrowed-notes"');
+    expect(result.stdout.toString()).not.toContain('"start","dev-watch"');
+  });
 
   test("independent DevTools transports cannot bypass strict session-start safety", () => {
     const commands: Array<[string, string[]]> = [
