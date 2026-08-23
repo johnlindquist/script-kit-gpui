@@ -3,6 +3,9 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
+import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("dictation-history.system-clipboard");
 
 const ROOT = resolve(import.meta.dir, "../../..");
 const BINARY = resolve(process.env.PROBE_BINARY ?? join(ROOT, "target-agent/artifacts/cons-flow-c14/script-kit-gpui"));

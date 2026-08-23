@@ -1350,6 +1350,157 @@ describe("noninteractive DevTools operator safety", () => {
     }
   });
 
+  test("Flow multiline proof refuses before reading the operator clipboard or creating output", () => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-clipboard-proof-safety-"));
+    const output = join(root, ".test-output", "ai-rock-solid-ux");
+    const probe = join(new URL("../..", import.meta.url).pathname, "scripts/agentic/flow-composer-multiline-probe.ts");
+    try {
+      const result = child(`
+        import { existsSync } from "node:fs";
+        process.chdir(${JSON.stringify(root)});
+        Bun.spawn = ((command) => { throw new Error("operator clipboard accessed: " + command[0]); });
+        try { await import(${JSON.stringify(probe)}); }
+        catch (error) { console.log("failure=" + error.message); }
+        console.log("outExists=" + existsSync(${JSON.stringify(output)}));
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+      expect(result.stdout.toString()).not.toContain("operator clipboard accessed");
+      expect(result.stdout.toString()).toContain("outExists=false");
+      expect(existsSync(output)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("Dictation History proof refuses before touching the operator pasteboard", () => {
+    const result = child(`
+      import * as filesystem from "node:fs";
+      import { mock } from "bun:test";
+      mock.module("node:fs", () => ({ ...filesystem, mkdirSync: (() => {}) }));
+      Bun.spawnSync = ((command) => { throw new Error("operator clipboard accessed: " + command[0]); });
+      try { await import("./scripts/agentic/cons-flow-ux/dictation-history-probe.ts"); }
+      catch (error) { console.log("failure=" + error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+    expect(result.stdout.toString()).not.toContain("operator clipboard accessed");
+  });
+
+  test.each([
+    ["surface navigation", ["surface-navigate", "--session", "reviewed-session"]],
+    ["vision delegation", ["vision-loop", "--receipt", "/tmp/never-read.json", "--out-dir", "/tmp/never-written"]],
+  ])("central agentic %s refuses its independent child before spawn", (_kind, args) => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("unsafe central agentic child started"); });
+      process.argv = ["bun", "scripts/agentic/index.ts", ...${JSON.stringify(args)}];
+      try { await import("./scripts/agentic/index.ts"); }
+      catch (error) { console.log("failure=" + error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+    expect(result.stdout.toString()).not.toContain("unsafe central agentic child started");
+  });
+
+  test("central agentic help restores all commands without spawning or promising a missing scenario", () => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("passive agentic help started a subprocess"); });
+      process.argv = ["bun", "scripts/agentic/index.ts", "help", "--json"];
+      await import("./scripts/agentic/index.ts");
+    `);
+
+    expect(result.exitCode).toBe(0);
+    const help = JSON.parse(result.stdout.toString()) as {
+      script: string;
+      commands: Array<{ name: string; description: string }>;
+    };
+    expect(help.script).toBe("index");
+    expect(help.commands.length).toBeGreaterThanOrEqual(127);
+    expect(help.commands.find((command) => command.name === "confirm-modal-style-preview-proof")?.description)
+      .toContain("scenario owner is missing");
+    expect(result.stderr.toString()).not.toContain("passive agentic help started");
+  });
+
+  test("missing Confirm Modal scenario fails honestly without disabling unrelated commands", () => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("missing scenario started a subprocess"); });
+      process.argv = ["bun", "scripts/agentic/index.ts", "confirm-modal-style-preview-proof", "--json"];
+      await import("./scripts/agentic/index.ts");
+    `);
+
+    expect(result.exitCode).toBe(2);
+    const receipt = JSON.parse(result.stdout.toString()) as Record<string, unknown>;
+    expect(receipt.status).toBe("error");
+    expect(receipt.failClosed).toBe(true);
+    expect(receipt.reasonCode).toBe("missing_confirm_modal_style_preview_scenario");
+    expect(result.stdout.toString()).not.toContain("missing scenario started");
+  });
+
+  test.each([
+    ["activation", ["act", "set-input", "--text", "unsafe"]],
+    ["app launch", ["driver", "smoke"]],
+    ["performance recording", ["perf", "record", "--pid", "42", "--template", "Leaks"]],
+    ["session start", ["actions", "inspect", "--start"]],
+    ["window reveal", ["notes", "inspect", "--open"]],
+  ])("central DevTools dispatcher rejects %s before delegation", (_kind, args) => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("unsafe DevTools dispatcher child started"); });
+      process.argv = ["bun", "scripts/devtools/devtools.ts", ...${JSON.stringify(args)}];
+      try { await import("./scripts/devtools/devtools.ts"); }
+      catch (error) { console.log("failure=" + error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+    expect(result.stdout.toString()).not.toContain("unsafe DevTools dispatcher child started");
+  });
+
+  test("central DevTools inventory remains genuinely passive", () => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("passive DevTools inventory started a subprocess"); });
+      process.argv = ["bun", "scripts/devtools/devtools.ts", "list"];
+      await import("./scripts/devtools/devtools.ts");
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("Usage: bun scripts/devtools/devtools.ts");
+    expect(result.stdout.toString()).toContain("targets");
+    expect(result.stderr.toString()).not.toContain("passive DevTools inventory started");
+  });
+
+  test.each([
+    ["record", ["record", "--pid", "42", "--template", "Leaks"]],
+    ["analyze", ["analyze", "--input", "/tmp/never-read.trace"]],
+  ])("direct performance %s refuses before xctrace or filesystem access", (_kind, args) => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("unsafe xctrace profiler started"); });
+      process.argv = ["bun", "scripts/devtools/perf.ts", ...${JSON.stringify(args)}];
+      const { main } = await import("./scripts/devtools/perf.ts");
+      try { await main(); }
+      catch (error) { console.log("failure=" + error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+    expect(result.stdout.toString()).not.toContain("unsafe xctrace profiler started");
+  });
+
+  test("performance help remains available without profiling", () => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("performance help started a profiler"); });
+      process.argv = ["bun", "scripts/devtools/perf.ts", "--help"];
+      const { main } = await import("./scripts/devtools/perf.ts");
+      await main();
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("bun scripts/devtools/perf.ts record");
+    expect(result.stdout.toString()).not.toContain("performance help started");
+  });
+
   test("filterable matrix cleanup forwards exact owned identity and protects resumed sessions", () => {
     const result = child(`
       process.env.SCRIPT_KIT_NONINTERACTIVE = "0";

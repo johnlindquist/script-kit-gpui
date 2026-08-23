@@ -32,6 +32,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Driver, type Json } from "../devtools/driver.ts";
+import { assertNoninteractiveVisualProbe } from "../devtools/lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("flow-composer-multiline.system-clipboard");
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

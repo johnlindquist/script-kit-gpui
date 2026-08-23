@@ -204,7 +204,7 @@ export function assertNoninteractiveVisualProbe(probe: string): void {
   assertNoIncompatibleOptIns(process.env);
   throw new NoninteractiveSafetyError(
     probe,
-    "visible windows, native pointer or keyboard input, screen capture, and native-helper compilation are forbidden; use a reviewed synthetic or grade-only mode",
+    "visible windows, native pointer or keyboard input, screen capture, system clipboard access, and native-helper compilation are forbidden; use a reviewed synthetic or grade-only mode",
   );
 }
 

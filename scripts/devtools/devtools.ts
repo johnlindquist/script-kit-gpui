@@ -11,6 +11,7 @@
  */
 
 import { join } from "node:path";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
 
 const TOOLS: Record<string, { file: string; summary: string }> = {
   targets: { file: "targets.ts", summary: "List/inspect automation windows and resolve target identity (list | inspect)" },
@@ -58,6 +59,20 @@ const entry = TOOLS[tool];
 if (!entry) {
   console.error(`Unknown tool '${tool}'. Run: bun scripts/devtools/devtools.ts list`);
   process.exit(2);
+}
+
+const unsafeTool = ["act", "driver", "perf"].includes(tool);
+const unsafeFlags = rest.some((argument) => [
+  "--start",
+  "--show",
+  "--open",
+  "--open-actions",
+  "--prove-hover",
+  "--prove-click-select",
+  "--prove-click-activate",
+].includes(argument));
+if (unsafeTool || unsafeFlags) {
+  assertNoninteractiveVisualProbe(`devtools.${tool}`);
 }
 
 const proc = Bun.spawn(["bun", join(import.meta.dir, entry.file), ...rest], {

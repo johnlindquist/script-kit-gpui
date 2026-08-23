@@ -2,6 +2,7 @@
 import { spawn } from "bun";
 import { resolve, basename } from "path";
 import { mkdirSync, writeFileSync, readFileSync } from "fs";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -113,9 +114,16 @@ async function analyze(args: { input: string; output?: string }) {
   console.log(JSON.stringify(result, null, 2));
 }
 
-async function main() {
+export async function main() {
   const argv = process.argv.slice(2);
   const command = argv[0];
+  if (command === "--help" || command === "-h") {
+    console.log(usage());
+    return;
+  }
+  if (command === "record" || command === "analyze") {
+    assertNoninteractiveVisualProbe(`performance.${command}`);
+  }
   
   if (command === "record") {
     const params: any = {};
@@ -147,4 +155,4 @@ async function main() {
   }
 }
 
-main();
+if (import.meta.main) await main();

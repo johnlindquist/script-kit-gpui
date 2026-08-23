@@ -119,7 +119,7 @@
  *   destructive-confirm-modal-safety-stress
  *                         Fail-closed destructive confirm dry-run safety proof
  *   confirm-modal-style-preview-proof
- *                         Pass-now dev style Confirm Modal preview and live style mutation proof
+ *                         Fail-closed: Confirm Modal style-preview scenario owner is missing
  *   sdk-confirm-runtime-proof
  *                         Pass-now SDK confirm script route proof
  *   loading-skeleton-progress-restoration-stress
@@ -237,6 +237,7 @@
  */
 
 import { resolve } from "path";
+import { assertNoninteractiveSubprocess } from "../devtools/lib/operator-safety.ts";
 import {
   runAgentChatPortalRoundTripOriginStressScenario,
   runActionsCapturedSubjectFrameStressScenario,
@@ -300,7 +301,6 @@ import {
   runDenseListDetailPreviewReadabilityStressScenario,
   runToastNotificationQueueLifecycleStressScenario,
   runDestructiveConfirmModalSafetyStressScenario,
-  runConfirmModalStylePreviewProofScenario,
   runSdkConfirmRuntimeProofScenario,
   runLoadingSkeletonProgressRestorationStressScenario,
   runIconImageFallbackRedactionStressScenario,
@@ -450,6 +450,7 @@ async function runTool(
   cmd: string[],
   _label: string
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  assertNoninteractiveSubprocess(cmd);
   const proc = Bun.spawn(cmd, {
     stdout: "pipe",
     stderr: "pipe",
@@ -4383,20 +4384,24 @@ switch (recipe) {
   }
 
   case "confirm-modal-style-preview-proof": {
-    const proofBundle = await runConfirmModalStylePreviewProofScenario({
-      session,
-    });
     result = {
       schemaVersion: SCHEMA_VERSION,
       recipe: "confirm-modal-style-preview-proof",
-      status: proofBundle.status,
-      failClosed: proofBundle.failClosed,
-      failureMode: proofBundle.failureMode,
-      missingReceipt: proofBundle.missingReceipt,
-      linearIssue: proofBundle.linearIssue,
-      steps: proofBundle.steps as StepReceipt[],
-      summary: "Confirm Modal Styling opens a live ConfirmPrompt preview, applies confirmModal style controls while it remains visible, and dismisses it with Escape",
-      proofBundle,
+      status: "error",
+      failClosed: true,
+      failureMode: "missing_scenario_owner",
+      missingReceipt: "confirm_modal_style_preview_scenario",
+      reasonCode: "missing_confirm_modal_style_preview_scenario",
+      steps: [{
+        name: "confirm-modal-style-preview-owner",
+        status: "error",
+        output: {
+          code: "missing_confirm_modal_style_preview_scenario",
+          message: "The requested scenario owner is not implemented.",
+        },
+        durationMs: 0,
+      }],
+      summary: "Confirm Modal style preview cannot run because its scenario owner is missing; no runtime interaction was attempted.",
     };
     break;
   }
@@ -4801,8 +4806,10 @@ switch (recipe) {
     // Delegate to the standalone vision-loop.ts script.
     // Expects --receipt and --out-dir to be passed after the recipe name.
     const vlArgs = process.argv.slice(3); // everything after "vision-loop"
+    const command = ["bun", "scripts/agentic/vision-loop.ts", ...vlArgs];
+    assertNoninteractiveSubprocess(command);
     const proc = Bun.spawn(
-      ["bun", "scripts/agentic/vision-loop.ts", ...vlArgs],
+      command,
       { stdout: "pipe", stderr: "pipe", cwd: PROJECT_ROOT }
     );
     const vlStdout = await new Response(proc.stdout).text();
@@ -4816,8 +4823,10 @@ switch (recipe) {
 
   case "surface-navigate": {
     const navArgs = process.argv.slice(3);
+    const command = ["bun", "scripts/agentic/surface-navigator.ts", ...navArgs];
+    assertNoninteractiveSubprocess(command);
     const proc = Bun.spawn(
-      ["bun", "scripts/agentic/surface-navigator.ts", ...navArgs],
+      command,
       { stdout: "pipe", stderr: "pipe", cwd: PROJECT_ROOT }
     );
     const navStdout = await new Response(proc.stdout).text();
@@ -4905,7 +4914,7 @@ switch (recipe) {
           { name: "dense-list-detail-preview-readability-stress", description: "Fail-closed UX stress for dense list/detail preview readability during filter, selection, and resize churn", flags: ["--session", "--surfaces", "--query", "--filter-cycles", "--selection-cycles", "--resize-cycles", "--json"] },
           { name: "toast-notification-queue-lifecycle-stress", description: "Fail-closed UX stress for toast queue, notification bridge, duplicate collapse, autohide, dismiss, bounds, and stale rejection", flags: ["--session", "--surface", "--fixtures", "--cycles", "--json"] },
           { name: "destructive-confirm-modal-safety-stress", description: "Fail-closed UX stress for destructive confirm dry-run identity, Enter/Escape safety, parent restore, and no real system command", flags: ["--session", "--host", "--fixture", "--paths", "--dry-run-only", "--json"] },
-          { name: "confirm-modal-style-preview-proof", description: "Pass-now dev style Confirm Modal preview target and live style mutation proof", flags: ["--session", "--json"] },
+          { name: "confirm-modal-style-preview-proof", description: "Fail-closed: the Confirm Modal style-preview scenario owner is missing", flags: ["--session", "--json"] },
           { name: "sdk-confirm-runtime-proof", description: "Pass-now SDK confirm script route proof through shared ConfirmPrompt and Escape false result", flags: ["--session", "--json"] },
           { name: "loading-skeleton-progress-restoration-stress", description: "Fail-closed UX stress for local loading skeleton/progress generations, stale rejection, activation blocking, and restoration", flags: ["--session", "--surfaces", "--fixture", "--cycles", "--json"] },
           { name: "icon-image-fallback-redaction-stress", description: "Fail-closed UX stress for icon/image fallback, source redaction, stale image rejection, and accessible labels", flags: ["--session", "--surfaces", "--fixtures", "--json"] },
@@ -5202,7 +5211,7 @@ Recipes:
   destructive-confirm-modal-safety-stress
                          Fail-closed destructive confirm dry-run safety proof
   confirm-modal-style-preview-proof
-                         Pass-now dev style Confirm Modal preview and live style mutation proof
+                         Fail-closed: Confirm Modal style-preview scenario owner is missing
   sdk-confirm-runtime-proof
                          Pass-now SDK confirm script route proof
   loading-skeleton-progress-restoration-stress
@@ -5362,7 +5371,7 @@ Available scenarios:
   destructive-confirm-modal-safety-stress
                          Emit fail-closed destructive confirm dry-run safety requirements
   confirm-modal-style-preview-proof
-                         Prove Confirm Modal Styling opens and live-tweaks a shared ConfirmPrompt
+                         Fail closed because the Confirm Modal style-preview scenario owner is missing
   sdk-confirm-runtime-proof
                          Prove SDK global confirm() reaches shared ConfirmPrompt
   loading-skeleton-progress-restoration-stress
