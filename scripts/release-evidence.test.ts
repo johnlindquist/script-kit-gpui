@@ -463,6 +463,7 @@ function makeFixture(): ReleaseFixture {
     "scripts/devtools/state-ownership.test.ts:",
     "scripts/migrate/__tests__/classify.test.ts:",
     "scripts/agentic/cargo-build-policy.test.ts:",
+    "scripts/agentic/macos-input.test.ts:",
     "scripts/agentic/quick-ai-latency-bench.test.ts:",
     "tests/sdk/runner-safety.test.ts:",
     " 355 pass",
@@ -922,6 +923,11 @@ describe("fail-closed release evidence", () => {
     expect(() => buildGateReceipt({
       gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
     })).toThrow("missing its required directly executed fixture suite: scripts/agentic/cargo-build-policy.test.ts");
+
+    writeFileSync(resultPath, valid.replace("scripts/agentic/macos-input.test.ts:", ""));
+    expect(() => buildGateReceipt({
+      gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
+    })).toThrow("missing its required directly executed fixture suite: scripts/agentic/macos-input.test.ts");
   });
 
   test("signing attestation requires an accepted notarization and the exact signing team", () => {
@@ -2237,6 +2243,10 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/agent-check.sh",
     "scripts/agentic/session.sh",
     "scripts/agentic/filterable-surface-matrix.ts",
+    "scripts/agentic/automation-window.ts",
+    "scripts/agentic/window.ts",
+    "scripts/agentic/macos-input.ts",
+    "scripts/agentic/macos-input.test.ts",
     "scripts/agentic/surface-navigator.ts",
     "scripts/agentic/surface-navigator-inventory-audit.ts",
     "scripts/agentic/target-thread.ts",

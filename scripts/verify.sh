@@ -151,6 +151,10 @@ require_clean_source_identity() {
     scripts/devtools/test-status.ts
     scripts/agent-check.sh
     scripts/agentic/session.sh
+    scripts/agentic/automation-window.ts
+    scripts/agentic/window.ts
+    scripts/agentic/macos-input.ts
+    scripts/agentic/macos-input.test.ts
     scripts/agentic/filterable-surface-matrix.ts
     scripts/agentic/surface-navigator.ts
     scripts/agentic/surface-navigator-inventory-audit.ts
@@ -462,6 +466,7 @@ run_phase() {
         ./scripts/devtools/glass-lifecycle-filmstrip.test.ts \
         ./scripts/devtools/rapid-toggle-stress.test.ts \
         ./scripts/agentic/cargo-build-policy.test.ts \
+        ./scripts/agentic/macos-input.test.ts \
         ./scripts/agentic/cargo-timings-summary.test.ts \
         ./scripts/agentic/quick-ai-latency-bench.test.ts \
         ./scripts/agentic/ai-phase-trace-report.test.ts \

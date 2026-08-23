@@ -111,12 +111,17 @@ const REQUIRED_PROOF_SUITES = [
   "scripts/devtools/state-ownership.test.ts",
   "scripts/migrate/__tests__/classify.test.ts",
   "scripts/agentic/cargo-build-policy.test.ts",
+  "scripts/agentic/macos-input.test.ts",
   "scripts/agentic/quick-ai-latency-bench.test.ts",
   "tests/sdk/runner-safety.test.ts",
 ] as const;
 
 const REQUIRED_OPERATOR_SAFETY_OWNERS = [
   "scripts/agentic/session.sh",
+  "scripts/agentic/automation-window.ts",
+  "scripts/agentic/window.ts",
+  "scripts/agentic/macos-input.ts",
+  "scripts/agentic/macos-input.test.ts",
   "scripts/agentic/filterable-surface-matrix.ts",
   "scripts/agentic/surface-navigator.ts",
   "scripts/agentic/surface-navigator-inventory-audit.ts",
