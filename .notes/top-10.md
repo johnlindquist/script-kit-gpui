@@ -1085,6 +1085,23 @@ offline receipts until their real producers are run again.
     without converting `ready: false` into a successful readiness receipt.
     The six independently proven consumer sources are mandatory release
     owners, and both existing 12-case inventories remain passive.
+28. The actual macOS leaf helpers still bypassed every orchestration guard:
+    direct `macos-input.ts key|type|click` reached System Events or `cliclick`,
+    while `window.ts` could activate/focus a window, invoke AppleScript/Swift,
+    and fall back from targeted capture to a full-screen screenshot. Real
+    red tests replaced `Bun.spawn` with a throwing fake and proved all three
+    input routes reached it. Direct native commands now return typed
+    `NONINTERACTIVE_SAFETY_REFUSED` before any child starts; focused/fullscreen
+    capture and window discovery are guarded too, while pure `check`, help,
+    and passive inventories remain available.
+29. Exact automation-window inspection and the navigator's independent
+    screenshot subprocess were additional guard bypasses. The release verifier
+    neither required their source owners nor executed the existing actual
+    macOS-input behavior suite, so a green-looking proof could omit the
+    low-level input boundary entirely. Both transports now validate before
+    spawn, all four native source/test owners are mandatory, and publishable
+    proof refuses receipts that did not directly execute the
+    **43-case / 89-assertion** native-input suite.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1335,17 +1352,19 @@ offline receipts until their real producers are run again.
     explicit `noninteractive: false` options nor replacement environments
     can weaken the real parent's authority; target resolution stays on its
     capture-free hidden-state path even when callers request an interactive
-    override. The standalone operator-safety suite passes **77 cases and
-    310 assertions**, including pure canonical-inspector ownership, immutable
+    override. The standalone operator-safety suite passes **86 cases and
+    341 assertions**, including pure canonical-inspector ownership, immutable
     subprocess policy, Notes/matrix/scenario cleanup, and mocked native-spawn
-    cases;
+    cases; the separate direct native-input suite passes **43 cases and 89
+    assertions** without touching a keyboard, pointer, window, or screen;
     the separate hidden-target identity suite passes
     **14 cases and 66 assertions**. Release evidence now fail-closes unless
-    all seventeen actual safety owners—the direct session shell, shared
+    all twenty-one actual safety owners—the direct session shell, shared
     identity helper, isolated startup, DevTools bootstrap, readiness waiter,
     canonical inspector, Notes, filterable matrix, both navigators, exact
-    target thread, scenario runner, Driver, shared client, central policy,
-    target resolver, and status announcer—are
+    target thread, scenario runner, automation-window owner, native window
+    owner, native-input owner and behavior suite, Driver, shared client,
+    central policy, target resolver, and status announcer—are
     tracked and included in the canonical release-source inventory. Real
     failing-then-passing mutations cover each previously omitted owner.
     The independent SDK/custom-script runner now forcibly clears inherited
@@ -1366,7 +1385,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **twenty direct release-owner/proof-gate cases / 59 assertions** and
+    **twenty-four direct release-owner/proof-gate cases / 72 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
