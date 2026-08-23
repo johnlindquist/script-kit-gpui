@@ -102,10 +102,20 @@ function parseJsonArg(raw: string | undefined, fallback: unknown): unknown {
 }
 
 function discoveryPath(): string {
-  return (
-    process.env.SCRIPT_KIT_MCP_SERVER_JSON?.trim() ||
-    join(process.env.SK_PATH?.trim() || join(homedir(), ".scriptkit"), "server.json")
+  const explicit = process.env.SCRIPT_KIT_MCP_SERVER_JSON?.trim();
+  if (explicit) return explicit;
+
+  const configured = process.env.SK_PATH?.trim();
+  if (!configured) return join(homedir(), ".scriptkit", "server.json");
+  const homeExpanded = configured === "~" || configured.startsWith("~/")
+    ? join(homedir(), configured.slice(1))
+    : configured;
+  const workspace = homeExpanded.replace(
+    /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+    (match, braced: string | undefined, unbraced: string | undefined) =>
+      process.env[braced ?? unbraced ?? ""] ?? match,
   );
+  return join(workspace, "server.json");
 }
 
 function loadDiscovery(): DiscoveryInfo | null {

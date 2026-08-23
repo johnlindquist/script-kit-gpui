@@ -141,6 +141,31 @@ describe("mcp-cli", () => {
     }
   });
 
+  it.each([
+    "$SCRIPT_KIT_MCP_FIXTURE_ROOT",
+    "${SCRIPT_KIT_MCP_FIXTURE_ROOT}",
+  ])("expands host-style SK_PATH variables before private discovery: %s", async (root) => {
+    const mock = startMockMcp((body) => ({
+      jsonrpc: "2.0",
+      id: body.id,
+      result: { tools: [{ name: "expanded-workspace-tool" }] },
+    }));
+    const { dir } = discoveryEnv(mock.url.origin);
+    try {
+      const result = await runCli(["mcp", "tools"], {
+        SK_PATH: root,
+        SCRIPT_KIT_MCP_FIXTURE_ROOT: dir,
+        SCRIPT_KIT_MCP_SERVER_JSON: "",
+        SCRIPT_KIT_MCP_ENDPOINT: "",
+        SCRIPT_KIT_MCP_TOKEN: "",
+      });
+      expect(typeof result).toBe("object");
+      expect((result as any).data.result.tools[0].name).toBe("expanded-workspace-tool");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("calls tools with JSON arguments and bearer auth", async () => {
     const mock = startMockMcp((body) => {
       expect(body.method).toBe("tools/call");
