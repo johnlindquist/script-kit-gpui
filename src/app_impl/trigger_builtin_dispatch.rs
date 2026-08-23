@@ -19,7 +19,7 @@ use crate::stdin_commands::{BuiltinRef, ExternalCommand};
 #[derive(Debug)]
 enum FilterableRouteState {
     Start(FilterableView),
-    Prepared(FilterableRoutePlan),
+    Prepared(Box<FilterableRoutePlan>),
     Failed {
         view: FilterableView,
         reason: String,
@@ -41,13 +41,12 @@ struct FilterableRoutePlan {
 
 /// Oracle-Session `logging-observability-next-pass` PR1 migrated the
 /// three log sites below off the ad-hoc `UNKNOWN_NAME_PREVIEW_CHAR_LIMIT`
-/// + `chars().take(N)` preview. Every user-value preview now flows
+/// and `chars().take(N)` preview. Every user-value preview now flows
 /// through [`logging::log_user_value`] (byte-capped + UTF-8-safe), and
 /// every site is gated by [`logging::log_rate_limit`] on
 /// `(category, key)` so same-name bursts cannot leak O(untrusted-input)
 /// warn lines even when `protocol_stats::should_log_occurrence` would
 /// have let them through.
-
 impl ScriptListApp {
     /// Normalize an `ExternalCommand::TriggerBuiltin` payload via
     /// [`ExternalCommand::trigger_builtin_ref`] and dispatch.
@@ -250,11 +249,11 @@ impl ScriptListApp {
         loop {
             state = match state {
                 FilterableRouteState::Start(view) => match self.prepare_filterable_route(view) {
-                    Ok(plan) => FilterableRouteState::Prepared(plan),
+                    Ok(plan) => FilterableRouteState::Prepared(Box::new(plan)),
                     Err(reason) => FilterableRouteState::Failed { view, reason },
                 },
                 FilterableRouteState::Prepared(plan) => {
-                    self.apply_filterable_route_plan(plan, window, cx)
+                    self.apply_filterable_route_plan(*plan, window, cx)
                 }
                 terminal @ FilterableRouteState::Failed { .. }
                 | terminal @ FilterableRouteState::Applied { .. } => return terminal,

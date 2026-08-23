@@ -2997,7 +2997,10 @@ impl ScriptListApp {
                         }
 
                         if this.try_execute_root_file_action_shortcut(
-                            &key_lower, has_cmd, has_shift, has_alt, has_ctrl, window, cx,
+                            &key_lower,
+                            &event.keystroke.modifiers,
+                            window,
+                            cx,
                         ) {
                             cx.stop_propagation();
                             return;

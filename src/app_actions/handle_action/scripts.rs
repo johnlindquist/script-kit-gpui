@@ -446,7 +446,6 @@ impl ScriptListApp {
                     {
                         let trace_id = trace_id.clone();
                         let target = target.clone();
-                        let removal_action = removal_action;
                         move |_window, cx| {
                             tracing::info!(
                                 trace_id = %trace_id,

@@ -268,6 +268,7 @@ impl ScriptListApp {
     /// 1. Cancels any running script
     /// 2. Resets state to the default script list
     /// 3. Hides the window
+    ///
     /// Clear owner-bound popup state and force-close detached popup windows owned
     /// by the main launcher (Agent Chat `@` composer picker and Agent Chat history).
     /// Detached windows cache a `WeakEntity` of the owner view but
@@ -424,7 +425,7 @@ impl ScriptListApp {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
-            let _ = cx.update(move |cx| {
+            cx.update(move |cx| {
                 if !calibrated_hide_request_is_current(
                     expected_visibility_generation,
                     script_kit_gpui::main_window_visibility_generation(),
@@ -459,7 +460,7 @@ impl ScriptListApp {
                                         reason,
                                         reset_mini_bounds_after_hidden_reset,
                                     };
-                                    let _ = cx.update(|cx| {
+                                    cx.update(|cx| {
                                         if let Some(app_entity) = app_entity.upgrade() {
                                             app_entity.update(cx, |app, cx| {
                                                 app.complete_hidden_main_window_script_list_reset(
@@ -476,7 +477,7 @@ impl ScriptListApp {
                                         reason,
                                         reset_mini_bounds_after_hidden_reset: false,
                                     };
-                                    let _ = cx.update(|cx| {
+                                    cx.update(|cx| {
                                         if let Some(app_entity) = app_entity.upgrade() {
                                             app_entity.update(cx, |app, cx| {
                                                 app.complete_hidden_main_window_reset(request, cx);

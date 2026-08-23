@@ -45,15 +45,7 @@ impl ScriptListApp {
         let entity = entity.clone();
         let key_lower = key.to_ascii_lowercase();
         entity.update(cx, |view, cx| {
-            view.handle_day_switcher_key(
-                &key_lower,
-                modifiers.platform,
-                modifiers.shift,
-                modifiers.alt,
-                modifiers.control,
-                window,
-                cx,
-            )
+            view.handle_day_switcher_key(&key_lower, *modifiers, window, cx)
         })
     }
 

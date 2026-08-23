@@ -972,6 +972,21 @@ enum FileSearchStreamSource {
     Spotlight { query: String },
 }
 
+#[derive(Clone, Debug)]
+struct FileSearchStreamPolicy {
+    debounce_ms: u64,
+    query_guard: Option<String>,
+    clear_on_first_batch: bool,
+    sort_on_done: bool,
+    defer_batches_until_done: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FileSearchStreamBatchState {
+    is_first_batch: bool,
+    is_done: bool,
+}
+
 impl ScriptListApp {
     fn reset_file_search_selection_mode(&mut self) {
         self.file_search_selection_mode = FileSearchSelectionMode::AutoFirst;
@@ -1056,11 +1071,7 @@ impl ScriptListApp {
         gen: u64,
         source: FileSearchStreamSource,
         presentation: FileSearchPresentation,
-        debounce_ms: u64,
-        query_guard: Option<String>,
-        clear_on_first_batch: bool,
-        sort_on_done: bool,
-        defer_batches_until_done: bool,
+        policy: FileSearchStreamPolicy,
         cx: &mut Context<Self>,
     ) {
         let cancel = crate::file_search::new_cancel_token();
@@ -1068,7 +1079,7 @@ impl ScriptListApp {
 
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(std::time::Duration::from_millis(debounce_ms))
+                .timer(std::time::Duration::from_millis(policy.debounce_ms))
                 .await;
 
             let (tx, rx) = std::sync::mpsc::channel();
@@ -1106,6 +1117,7 @@ impl ScriptListApp {
             let mut pending: Vec<crate::file_search::FileResult> = Vec::new();
             let mut done = false;
             let mut first_batch = true;
+            let defer_batches_until_done = policy.defer_batches_until_done;
 
             while !done {
                 cx.background_executor()
@@ -1130,9 +1142,10 @@ impl ScriptListApp {
 
                 if !pending.is_empty() || done {
                     let batch = std::mem::take(&mut pending);
-                    let is_done = done;
-                    let is_first_batch = first_batch;
-                    let guard = query_guard.clone();
+                    let batch_state = FileSearchStreamBatchState {
+                        is_done: done,
+                        is_first_batch: first_batch,
+                    };
                     first_batch = false;
 
                     let _ = cx.update(|cx| {
@@ -1140,12 +1153,9 @@ impl ScriptListApp {
                             app.apply_file_search_stream_batch(
                                 gen,
                                 presentation,
-                                guard.as_deref(),
+                                &policy,
                                 batch,
-                                clear_on_first_batch,
-                                sort_on_done,
-                                is_first_batch,
-                                is_done,
+                                batch_state,
                                 cx,
                             );
                         })
@@ -1163,19 +1173,16 @@ impl ScriptListApp {
         &mut self,
         gen: u64,
         presentation: FileSearchPresentation,
-        query_guard: Option<&str>,
+        policy: &FileSearchStreamPolicy,
         batch: Vec<crate::file_search::FileResult>,
-        clear_on_first_batch: bool,
-        sort_on_done: bool,
-        is_first_batch: bool,
-        is_done: bool,
+        batch_state: FileSearchStreamBatchState,
         cx: &mut Context<Self>,
     ) {
         if self.file_search_gen != gen {
             return;
         }
 
-        if let Some(expected_query) = query_guard {
+        if let Some(expected_query) = policy.query_guard.as_deref() {
             let AppView::FileSearchView { query, .. } = &self.current_view else {
                 return;
             };
@@ -1189,7 +1196,7 @@ impl ScriptListApp {
 
         let mut needs_recompute = false;
 
-        if clear_on_first_batch && is_first_batch {
+        if policy.clear_on_first_batch && batch_state.is_first_batch {
             self.cached_file_results.clear();
             needs_recompute = true;
         }
@@ -1221,7 +1228,7 @@ impl ScriptListApp {
             );
         }
 
-        if is_done {
+        if batch_state.is_done {
             self.file_search_loading = false;
             self.file_search_frozen_filter = None;
 
@@ -1234,7 +1241,7 @@ impl ScriptListApp {
                 AppView::FileSearchView { query, .. }
                     if crate::file_search::parse_directory_path(query).is_some()
             );
-            if sort_on_done || is_directory_query {
+            if policy.sort_on_done || is_directory_query {
                 self.apply_file_search_sort_mode();
                 self.recompute_file_search_display_indices();
                 self.restore_file_search_selection_after_results_change(
@@ -1253,8 +1260,8 @@ impl ScriptListApp {
         Self::resize_file_search_window_after_results_change(
             presentation,
             self.file_search_display_indices.len(),
-            is_first_batch,
-            is_done,
+            batch_state.is_first_batch,
+            batch_state.is_done,
         );
         cx.notify();
     }
@@ -1296,11 +1303,13 @@ impl ScriptListApp {
                     show_hidden: parsed.show_hidden,
                 },
                 presentation,
-                30,
-                None,
-                preserve_old_results_until_first_batch,
-                true,
-                true,
+                FileSearchStreamPolicy {
+                    debounce_ms: 30,
+                    query_guard: None,
+                    clear_on_first_batch: preserve_old_results_until_first_batch,
+                    sort_on_done: true,
+                    defer_batches_until_done: true,
+                },
                 cx,
             );
             cx.notify();
@@ -1321,11 +1330,13 @@ impl ScriptListApp {
                 query: query.clone(),
             },
             presentation,
-            75,
-            Some(query),
-            false,
-            false,
-            false,
+            FileSearchStreamPolicy {
+                debounce_ms: 75,
+                query_guard: Some(query),
+                clear_on_first_batch: false,
+                sort_on_done: false,
+                defer_batches_until_done: false,
+            },
             cx,
         );
         cx.notify();

@@ -59,6 +59,8 @@ pub use command_bar::{CommandBar, CommandBarConfig};
 pub(crate) use dialog::matching_filtered_action_id_for_keystroke;
 #[allow(unused_imports)] // Used by binary target through include!()-ed app_impl code.
 pub(crate) use dialog::ActionsHostContextSnapshot;
+#[allow(unused_imports)] // The binary's app implementation owns activation callback creation.
+pub(crate) use dialog::ActivationCallback;
 pub(crate) use dialog::AgentChatActionsDialogContext;
 pub(crate) use dialog::GroupedActionItem;
 #[allow(unused_imports)] // Used by binary target through include!()-ed render/app_impl code.
@@ -76,6 +78,13 @@ pub use types::{
     Action, ActionCategory, ActionsDialogConfig, AnchorPosition, ScriptInfo, SearchPosition,
     SectionStyle,
 };
+
+/// Screen-relative parent geometry required to place a detached actions popup.
+pub struct ActionsWindowPlacement {
+    pub parent_window_handle: gpui::AnyWindowHandle,
+    pub main_bounds: gpui::Bounds<gpui::Pixels>,
+    pub display_id: Option<gpui::DisplayId>,
+}
 
 // Window functions for separate vibrancy window
 #[allow(

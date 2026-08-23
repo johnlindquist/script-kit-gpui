@@ -226,10 +226,10 @@ impl ScriptListApp {
             self.root_search.root_file_search_cancel = None;
         }
         self.invalidate_grouped_cache();
-        if matches!(self.current_view, AppView::ScriptList) {
+        if let Some(interaction_before) = interaction_before {
             self.reconcile_script_list_after_results_refresh(
                 "root_file_results_publish",
-                interaction_before.expect("script-list refresh captured interaction"),
+                interaction_before,
                 cx,
             );
         }

@@ -205,7 +205,7 @@ impl RootUnifiedResultAction {
 
 #[derive(Clone, Debug)]
 pub(crate) enum RootUnifiedResultActionOwner {
-    RootSubject(RootUnifiedActionSubject),
+    RootSubject(Box<RootUnifiedActionSubject>),
     ExistingScriptActions,
     None,
 }
@@ -323,7 +323,7 @@ pub(crate) fn root_unified_action_owner_for_result(
         | SearchResult::BuiltIn(_)
         | SearchResult::App(_) => RootUnifiedResultActionOwner::ExistingScriptActions,
         _ => root_unified_action_subject_from_result(result)
-            .map(RootUnifiedResultActionOwner::RootSubject)
+            .map(|subject| RootUnifiedResultActionOwner::RootSubject(Box::new(subject)))
             .unwrap_or(RootUnifiedResultActionOwner::None),
     }
 }
@@ -1263,7 +1263,10 @@ mod tests {
             preview: "Dictation preview".to_string(),
         };
         let actions = root_unified_actions_for_subject(&subject);
-        let action_ids = actions.iter().map(|action| action.id.as_str()).collect::<Vec<_>>();
+        let action_ids = actions
+            .iter()
+            .map(|action| action.id.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(
             action_ids,
             vec![

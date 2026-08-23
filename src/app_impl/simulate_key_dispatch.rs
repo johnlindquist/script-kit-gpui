@@ -41,11 +41,13 @@ impl ScriptListApp {
                 || key_lower == "return"
                 || key_lower == "tab")
         {
-            let mut gpui_modifiers = gpui::Modifiers::default();
-            gpui_modifiers.platform = has_cmd;
-            gpui_modifiers.shift = has_shift;
-            gpui_modifiers.alt = _has_alt;
-            gpui_modifiers.control = _has_ctrl;
+            let gpui_modifiers = gpui::Modifiers {
+                platform: has_cmd,
+                shift: has_shift,
+                alt: _has_alt,
+                control: _has_ctrl,
+                ..Default::default()
+            };
             let confirm_key = if key_lower == "return" {
                 "enter"
             } else if key_lower == "esc" {
@@ -349,7 +351,16 @@ impl ScriptListApp {
                     {
                         logging::log("STDIN", "SimulateKey: Enter - spine consumed (script list)");
                     } else if view.try_execute_root_file_action_shortcut(
-                        &key_lower, has_cmd, has_shift, _has_alt, _has_ctrl, window, ctx,
+                        &key_lower,
+                        &gpui::Modifiers {
+                            platform: has_cmd,
+                            shift: has_shift,
+                            alt: _has_alt,
+                            control: _has_ctrl,
+                            ..Default::default()
+                        },
+                        window,
+                        ctx,
                     ) {
                         logging::log("STDIN", "SimulateKey: root file direct action shortcut");
                     } else if view.try_execute_main_list_action_shortcut_from_display(
@@ -1550,17 +1561,18 @@ impl ScriptListApp {
                                 && !_has_ctrl
                                 && key_lower.chars().count() == 1 =>
                             {
-                                let ch = key_lower.chars().next().unwrap();
-                                logging::log(
-                                    "STDIN",
-                                    &format!(
-                                        "SimulateKey: Char '{}' - edit TemplatePrompt field",
-                                        ch
-                                    ),
-                                );
-                                entity_clone.update(ctx, |prompt, cx| {
-                                    prompt.handle_char(ch, cx);
-                                });
+                                if let Some(ch) = key_lower.chars().next() {
+                                    logging::log(
+                                        "STDIN",
+                                        &format!(
+                                            "SimulateKey: Char '{}' - edit TemplatePrompt field",
+                                            ch
+                                        ),
+                                    );
+                                    entity_clone.update(ctx, |prompt, cx| {
+                                        prompt.handle_char(ch, cx);
+                                    });
+                                }
                             }
                             _ => {
                                 logging::log(
@@ -1589,11 +1601,13 @@ impl ScriptListApp {
                         view.submit_prompt_response(prompt_id_clone, None, ctx);
                         view.cancel_script_execution(ctx);
                     } else {
-                        let mut modifiers = gpui::Modifiers::default();
-                        modifiers.platform = has_cmd;
-                        modifiers.control = _has_ctrl;
-                        modifiers.alt = _has_alt;
-                        modifiers.shift = has_shift;
+                        let modifiers = gpui::Modifiers {
+                            platform: has_cmd,
+                            control: _has_ctrl,
+                            alt: _has_alt,
+                            shift: has_shift,
+                            ..Default::default()
+                        };
                         let submitted = entity_clone.update(ctx, |prompt, cx| {
                             prompt.handle_key_down(&key_lower, modifiers, cx);
                             if prompt.shortcut.is_complete() {
@@ -1972,26 +1986,12 @@ impl ScriptListApp {
                         &format!("SimulateKey: Dispatching '{}' to AgentChatView", key_lower),
                     );
                     let entity_clone = entity.clone();
-                    if has_cmd && key_lower == "k" {
-                        logging::log("STDIN", "SimulateKey: Cmd+K - open actions in Agent Chat");
-                        view.toggle_actions(ctx, window);
-                    } else if has_cmd && key_lower == "p" {
-                        logging::log(
-                            "STDIN",
-                            "SimulateKey: Cmd+P - open history command from Agent Chat",
-                        );
-                        view.handle_action("agent_chat_show_history".into(), window, ctx);
-                    } else if has_cmd && key_lower == "n" {
-                        logging::log(
-                            "STDIN",
-                            "SimulateKey: Cmd+N - start new Agent Chat thread (retain current)",
-                        );
-                        entity_clone.update(ctx, |chat, cx| chat.start_new_thread(cx));
-                    } else if {
+                    let spine_handled = !has_cmd || !matches!(key_lower.as_str(), "k" | "p" | "n");
+                    let spine_handled = spine_handled && {
                         // Spine projection in Agent Chat owns Up/Down for row selection
                         // and Escape to dismiss. These short-circuit before the
                         // legacy actions / cancel-streaming paths.
-                        let spine_handled = entity_clone.update(ctx, |chat, cx| {
+                        let handled = entity_clone.update(ctx, |chat, cx| {
                             if !chat.agent_chat_spine_owns_list() {
                                 return false;
                             }
@@ -2011,7 +2011,7 @@ impl ScriptListApp {
                                 _ => false,
                             }
                         });
-                        if spine_handled {
+                        if handled {
                             logging::log(
                                 "STDIN",
                                 &format!(
@@ -2020,8 +2020,24 @@ impl ScriptListApp {
                                 ),
                             );
                         }
-                        spine_handled
-                    } {
+                        handled
+                    };
+                    if has_cmd && key_lower == "k" {
+                        logging::log("STDIN", "SimulateKey: Cmd+K - open actions in Agent Chat");
+                        view.toggle_actions(ctx, window);
+                    } else if has_cmd && key_lower == "p" {
+                        logging::log(
+                            "STDIN",
+                            "SimulateKey: Cmd+P - open history command from Agent Chat",
+                        );
+                        view.handle_action("agent_chat_show_history".into(), window, ctx);
+                    } else if has_cmd && key_lower == "n" {
+                        logging::log(
+                            "STDIN",
+                            "SimulateKey: Cmd+N - start new Agent Chat thread (retain current)",
+                        );
+                        entity_clone.update(ctx, |chat, cx| chat.start_new_thread(cx));
+                    } else if spine_handled {
                         // Spine handled it; no further action.
                     } else if view.show_actions_popup && key_lower == "escape" {
                         logging::log(
@@ -2215,7 +2231,16 @@ impl ScriptListApp {
                         let entity = entity.clone();
                         entity.update(ctx, |day_page, cx| {
                             day_page.handle_key_parts(
-                                &key_lower, has_cmd, has_shift, _has_alt, _has_ctrl, window, cx,
+                                &key_lower,
+                                gpui::Modifiers {
+                                    platform: has_cmd,
+                                    shift: has_shift,
+                                    alt: _has_alt,
+                                    control: _has_ctrl,
+                                    ..Default::default()
+                                },
+                                window,
+                                cx,
                             );
                         });
                     }

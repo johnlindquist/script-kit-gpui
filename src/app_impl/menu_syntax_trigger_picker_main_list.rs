@@ -23,7 +23,7 @@ impl crate::menu_syntax::CaptureHandlerScaffoldEffects for AppCaptureHandlerScaf
 
     fn open_in_editor(&self, path: &Path) -> io::Result<()> {
         crate::script_creation::open_in_editor(path, self.config)
-            .map_err(|error| io::Error::other(error))
+            .map_err(io::Error::other)
             .or_else(|_| {
                 let _child = std::process::Command::new("open").arg(path).spawn()?;
                 Ok(())
@@ -86,7 +86,10 @@ impl ScriptListApp {
         &mut self,
         route: &'static str,
     ) -> bool {
-        let Some(label) = self.menu_syntax_filter_accept_primary_label().map(str::to_string) else {
+        let Some(label) = self
+            .menu_syntax_filter_accept_primary_label()
+            .map(str::to_string)
+        else {
             return false;
         };
 
@@ -490,16 +493,14 @@ impl ScriptListApp {
         grouped_index: usize,
     ) -> Option<String> {
         let (grouped, flat) = self.get_grouped_results_cached();
-        let crate::list_item::GroupedListItem::Item(flat_index) =
-            grouped.get(grouped_index)?
+        let crate::list_item::GroupedListItem::Item(flat_index) = grouped.get(grouped_index)?
         else {
             return None;
         };
         let Some(crate::scripts::SearchResult::SpineProjection(row)) = flat.get(*flat_index) else {
             return None;
         };
-        row
-            .id
+        row.id
             .as_ref()
             .strip_prefix("menu-syntax-trigger:")
             .map(str::to_string)
@@ -690,7 +691,11 @@ impl ScriptListApp {
 
         let selected_row_id = self
             .selected_menu_syntax_trigger_row_id_from_main_list()
-            .or_else(|| self.menu_syntax_trigger_picker_state.selected_row_id.clone());
+            .or_else(|| {
+                self.menu_syntax_trigger_picker_state
+                    .selected_row_id
+                    .clone()
+            });
         let selected_index = selected_row_id
             .as_deref()
             .and_then(|id| snapshot.rows.iter().position(|row| row.id == id));
@@ -709,7 +714,10 @@ impl ScriptListApp {
                         snapshot.rows.len(),
                     );
                 self.menu_syntax_trigger_picker_state.selected_row_id = next_row_id;
-                let selected_row_id = self.menu_syntax_trigger_picker_state.selected_row_id.clone();
+                let selected_row_id = self
+                    .menu_syntax_trigger_picker_state
+                    .selected_row_id
+                    .clone();
                 self.sync_menu_syntax_form_selection_from_trigger_row(selected_row_id.as_deref());
                 cx.notify();
                 true

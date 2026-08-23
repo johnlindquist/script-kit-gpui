@@ -1376,10 +1376,7 @@ impl ScriptListApp {
     pub(crate) fn try_execute_root_file_action_shortcut(
         &mut self,
         key_lower: &str,
-        has_cmd: bool,
-        has_shift: bool,
-        has_alt: bool,
-        has_ctrl: bool,
+        modifiers: &gpui::Modifiers,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -1389,11 +1386,11 @@ impl ScriptListApp {
         {
             return false;
         }
-        if !has_cmd || has_alt || has_ctrl {
+        if !modifiers.platform || modifiers.alt || modifiers.control {
             return false;
         }
 
-        let action_id = match (key_lower, has_shift) {
+        let action_id = match (key_lower, modifiers.shift) {
             ("y", false) => crate::action_helpers::ROOT_FILE_QUICK_LOOK_ACTION_ID,
             ("c", true) => crate::action_helpers::ROOT_FILE_COPY_PATH_ACTION_ID,
             ("f", true) => crate::action_helpers::ROOT_FILE_REVEAL_IN_FINDER_ACTION_ID,

@@ -395,7 +395,7 @@ fn extract_last_code_block_with_lang(text: &str) -> Option<CodeBlock> {
 
     for line in text.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
+        if let Some(fence_suffix) = trimmed.strip_prefix("```") {
             if in_block {
                 last_block = Some(CodeBlock {
                     code: current_code.clone(),
@@ -408,7 +408,7 @@ fn extract_last_code_block_with_lang(text: &str) -> Option<CodeBlock> {
                 in_block = true;
                 current_code.clear();
                 // Parse language from ```typescript or ```ts etc.
-                let lang = trimmed[3..].trim();
+                let lang = fence_suffix.trim();
                 current_lang = if lang.is_empty() {
                     None
                 } else {

@@ -282,6 +282,12 @@ fn attach_shortcut_recorder_to_parent_window(
     });
 }
 
+struct ShortcutRecorderParentWindow {
+    handle: AnyWindowHandle,
+    bounds: Bounds<Pixels>,
+    display_id: Option<DisplayId>,
+}
+
 /// Opens the shortcut recorder as a key popup because raw shortcut capture must
 /// receive Tab/modifier keystrokes instead of routing them through the main
 /// window. This is the explicit exception to confirm's `focus:false` model: the
@@ -294,9 +300,7 @@ fn open_shortcut_recorder_window(
     command_id: String,
     command_name: String,
     theme: std::sync::Arc<theme::Theme>,
-    parent_window_handle: AnyWindowHandle,
-    parent_bounds: Bounds<Pixels>,
-    display_id: Option<DisplayId>,
+    parent: ShortcutRecorderParentWindow,
 ) -> anyhow::Result<WindowHandle<ShortcutRecorderPopupWindow>> {
     close_shortcut_recorder_window(cx);
 
@@ -306,7 +310,7 @@ fn open_shortcut_recorder_window(
         WindowBackgroundAppearance::Opaque
     };
     let is_dark_vibrancy = theme.should_use_dark_vibrancy();
-    let bounds = shortcut_recorder_window_bounds(parent_bounds);
+    let bounds = shortcut_recorder_window_bounds(parent.bounds);
 
     let window_theme = std::sync::Arc::clone(&theme);
     // Intentionally not Root-wrapped: this popup is fixed compact capture chrome.
@@ -322,7 +326,7 @@ fn open_shortcut_recorder_window(
             is_movable: false,
             is_resizable: false,
             is_minimizable: false,
-            display_id,
+            display_id: parent.display_id,
             ..Default::default()
         },
         move |_window, cx| {
@@ -343,7 +347,7 @@ fn open_shortcut_recorder_window(
                             is_dark_vibrancy,
                         );
                     }
-                    attach_shortcut_recorder_to_parent_window(cx, parent_window_handle, ns_window);
+                    attach_shortcut_recorder_to_parent_window(cx, parent.handle, ns_window);
                 }
             });
         });
@@ -599,9 +603,11 @@ export default {
                     command_id,
                     command_name,
                     theme,
-                    parent_window_handle,
-                    parent_bounds,
-                    display_id,
+                    ShortcutRecorderParentWindow {
+                        handle: parent_window_handle,
+                        bounds: parent_bounds,
+                        display_id,
+                    },
                 ) {
                     tracing::error!(
                         target: "script_kit::shortcut",
