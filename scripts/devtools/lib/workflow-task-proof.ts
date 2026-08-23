@@ -22,6 +22,7 @@ import {
 } from "./workflow-task-contract.ts";
 import {
   observeRuntimeTaskTarget,
+  verifyRuntimeBinaryProvenance,
   type RuntimeTargetObservation,
 } from "./runtime-task-proof.ts";
 
@@ -192,6 +193,11 @@ export function prepareWorkflowTaskProof(
     fingerprintFile(binary.path) !== binary.sha256
   ) {
     throw new Error(`${taskId} requires independently verified current-source binary bytes`);
+  }
+  try {
+    verifyRuntimeBinaryProvenance(binary.path as string, binary);
+  } catch (error) {
+    throw new Error(`${taskId} requires verified build provenance: ${String(error)}`);
   }
   if (options.segments.some((segment) => object(segment.binary).sha256 !== binary.sha256)) {
     throw new Error(`${taskId} workflow segments cannot mix executable identities`);

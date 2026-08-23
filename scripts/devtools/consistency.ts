@@ -39,7 +39,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   RECEIPT_REGISTRY_VERSION,
   RECEIPT_SCHEMA_VERSION,
@@ -399,18 +399,31 @@ export interface CurrentIdentity {
   producerFingerprint: (tool: string) => string;
 }
 
-const fileHashCache = new Map<string, string | null>();
+const fileHashCache = new Map<string, { identity: string; sha256: string }>();
 
 export function fileSha256(path: string): string | null {
-  if (fileHashCache.has(path)) return fileHashCache.get(path)!;
-  let value: string | null = null;
-  try {
-    value = sha256(readFileSync(path));
-  } catch {
-    value = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const before = statSync(path, { bigint: true });
+      const beforeIdentity =
+        `${before.dev}:${before.ino}:${before.size}:${before.mtimeNs}:${before.ctimeNs}`;
+      const cached = fileHashCache.get(path);
+      if (cached?.identity === beforeIdentity) return cached.sha256;
+      const bytes = readFileSync(path);
+      const after = statSync(path, { bigint: true });
+      const afterIdentity =
+        `${after.dev}:${after.ino}:${after.size}:${after.mtimeNs}:${after.ctimeNs}`;
+      if (beforeIdentity !== afterIdentity) continue;
+      const value = sha256(bytes);
+      fileHashCache.set(path, { identity: afterIdentity, sha256: value });
+      return value;
+    } catch {
+      fileHashCache.delete(path);
+      return null;
+    }
   }
-  fileHashCache.set(path, value);
-  return value;
+  fileHashCache.delete(path);
+  return null;
 }
 
 function gitHead(): string | null {
@@ -690,6 +703,45 @@ export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentId
   }
   if (typeof binary.sourceCommit === "string" && current.headCommit && binary.sourceCommit !== current.headCommit) {
     reasons.push({ code: "stale-binary-source-commit", detail: `${binary.sourceCommit} != HEAD (${entry.path})` });
+  }
+  if (receipt.runtimeTaskProof || receipt.workflowTaskProof) {
+    const provenance = asObject(binary.provenance);
+    const binaryPath = typeof binary.path === "string" ? binary.path : "";
+    const manifestPath = typeof provenance.path === "string" ? provenance.path : "";
+    const approvedBinary =
+      binaryPath.startsWith("target-agent/artifacts/") ||
+      binaryPath.startsWith("target-agent/runtime/");
+    const allowedManifestPaths = [
+      `${binaryPath}.provenance.json`,
+      join(dirname(binaryPath), "manifest.json"),
+    ];
+    if (
+      !approvedBinary || binaryPath.split("/").includes("..") ||
+      !allowedManifestPaths.includes(manifestPath) ||
+      typeof provenance.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(provenance.sha256)
+    ) {
+      reasons.push({ code: "stale-binary-provenance-missing", detail: entry.path });
+    } else {
+      const manifestSha = current.fileSha256(manifestPath);
+      if (manifestSha === null || manifestSha !== provenance.sha256) {
+        reasons.push({ code: "stale-binary-provenance", detail: manifestPath });
+      }
+      try {
+        const manifest = asObject(JSON.parse(readFileSync(manifestPath, "utf8")));
+        if (
+          manifest.schemaVersion !== 2 ||
+          manifest.binaryPath !== binaryPath ||
+          manifest.binarySha256 !== binary.sha256 ||
+          manifest.rustDirty !== false ||
+          manifest.gitHead !== binary.sourceCommit ||
+          current.headCommit !== null && manifest.gitHead !== current.headCommit
+        ) {
+          reasons.push({ code: "stale-binary-provenance-identity", detail: manifestPath });
+        }
+      } catch {
+        reasons.push({ code: "stale-binary-provenance-unreadable", detail: manifestPath });
+      }
+    }
   }
   const fixture = asObject(receipt.fixture);
   if (typeof fixture.path === "string" && typeof fixture.sha256 === "string") {

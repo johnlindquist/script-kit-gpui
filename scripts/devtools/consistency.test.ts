@@ -6,17 +6,20 @@
  * generated per-test in unique temp directories so the shared file-hash
  * cache never sees two states of one path.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import {
   RECEIPT_REGISTRY_VERSION,
   prepareValidatedReceipt,
@@ -33,6 +36,7 @@ import {
   PROGRAM_IDS,
   UsageError,
   currentIdentity,
+  fileSha256,
   parseArgs,
   parseProgressSections,
   parseTaskCatalog,
@@ -69,6 +73,49 @@ import {
 
 const HEAD = "f".repeat(40);
 const WRONG_SHA = "0".repeat(64);
+let ownedSyntheticBinary: Record<string, unknown> | undefined;
+let ownedSyntheticBinaryDirectory: string | undefined;
+
+afterAll(() => {
+  if (ownedSyntheticBinaryDirectory) {
+    rmSync(ownedSyntheticBinaryDirectory, { recursive: true, force: true });
+  }
+});
+
+function signedSyntheticBinary(): Record<string, unknown> {
+  if (ownedSyntheticBinary) return { ...ownedSyntheticBinary };
+  const artifactRoot = join(process.cwd(), "target-agent", "artifacts");
+  mkdirSync(artifactRoot, { recursive: true });
+  ownedSyntheticBinaryDirectory = mkdtempSync(join(artifactRoot, ".consistency-proof-"));
+  const binaryPath = join(ownedSyntheticBinaryDirectory, "script-kit-gpui");
+  const binaryBytes = readFileSync("scripts/devtools/lib/runtime-task-proof.ts");
+  const binarySha = createHash("sha256").update(binaryBytes).digest("hex");
+  writeFileSync(binaryPath, binaryBytes);
+  const relativeBinary = relative(process.cwd(), binaryPath);
+  const manifestPath = `${binaryPath}.provenance.json`;
+  const manifestBytes = JSON.stringify({
+    schemaVersion: 2,
+    pool: "agent-debug",
+    source: "target-agent/pools/agent-debug/debug/script-kit-gpui",
+    binaryPath: relativeBinary,
+    binarySha256: binarySha,
+    sizeBytes: binaryBytes.byteLength,
+    gitHead: HEAD,
+    rustDirty: false,
+    builtAt: new Date().toISOString(),
+  });
+  writeFileSync(manifestPath, manifestBytes);
+  ownedSyntheticBinary = {
+    path: relativeBinary,
+    sha256: binarySha,
+    sourceCommit: HEAD,
+    provenance: {
+      path: relative(process.cwd(), manifestPath),
+      sha256: createHash("sha256").update(manifestBytes).digest("hex"),
+    },
+  };
+  return { ...ownedSyntheticBinary };
+}
 
 function catalogMarkdown(ids: Iterable<string> = PROGRAM_IDS, extraLines: string[] = []): string {
   const sections = [...ids].map((id) => `### ${id} — Synthetic ${id}\n\n- catalog body for ${id}\n`);
@@ -349,6 +396,7 @@ function passingReceipt(taskId: string, overrides: ReceiptOverrides = {}): Recor
     return { ...common, ...overrides };
   }
 
+  const signedBinary = signedSyntheticBinary();
   const bounds = { x: 0, y: 0, width: 800, height: 600 };
   const candidate = {
     ...common,
@@ -368,12 +416,13 @@ function passingReceipt(taskId: string, overrides: ReceiptOverrides = {}): Recor
       comparableJoinCount: 1,
     },
     repository: { gitCommit: HEAD },
+    binary: signedBinary,
     transaction: {
       transactionId: `proof:${taskId.toLowerCase()}`,
       runId: `proof-run-${taskId.toLowerCase()}`,
       pid: 42,
       processStartTime: "Fri Aug 7 00:00:00 2026",
-      binarySha256: "a".repeat(64),
+      binarySha256: signedBinary.sha256,
       automationId: "main",
       windowInstanceId: "main@1",
       windowGeneration: 1,
@@ -394,12 +443,10 @@ function passingReceipt(taskId: string, overrides: ReceiptOverrides = {}): Recor
   delete (candidate as Record<string, unknown>).producerValidation;
   const workflowSpec = WORKFLOW_TASK_PROOF_SPECS[taskId as WorkflowTaskProofId];
   if (workflowSpec) {
-    const owner = "scripts/devtools/lib/workflow-task-proof.ts";
-    const binarySha = createHash("sha256").update(readFileSync(owner)).digest("hex");
     const sourceOwners = workflowTaskProofSourceOwners(taskId as WorkflowTaskProofId);
     const transaction = {
       ...candidate.transaction,
-      binarySha256: binarySha,
+      binarySha256: signedBinary.sha256,
     };
     const target = {
       ...candidate.target,
@@ -423,7 +470,7 @@ function passingReceipt(taskId: string, overrides: ReceiptOverrides = {}): Recor
       command: "workflow.prove",
       target,
       transaction,
-      binary: { path: owner, sha256: binarySha, sourceCommit: HEAD },
+      binary: signedBinary,
       sourceFingerprints: Object.fromEntries(
         sourceOwners.map((path) => [
           path,
@@ -689,6 +736,20 @@ describe("catalog parser mutations", () => {
 });
 
 describe("verify-task mutations", () => {
+  test("source fingerprints invalidate missing files and same-size rewrites at one path", () => {
+    const directory = mkdtempSync(join(tmpdir(), "consistency-fingerprint-drift-"));
+    const path = join(directory, "source.txt");
+    expect(fileSha256(path)).toBeNull();
+    writeFileSync(path, "aaaa");
+    const first = fileSha256(path);
+    expect(first).toBe(createHash("sha256").update("aaaa").digest("hex"));
+    const originalStat = statSync(path);
+    writeFileSync(path, "bbbb");
+    utimesSync(path, originalStat.atime, originalStat.mtime);
+    expect(fileSha256(path)).toBe(createHash("sha256").update("bbbb").digest("hex"));
+    rmSync(directory, { recursive: true, force: true });
+  });
+
   test("baseline synthetic scope task passes", () => {
     const tree = setup();
     const { receipt, exitCode } = tree.runTask("GOV-002");

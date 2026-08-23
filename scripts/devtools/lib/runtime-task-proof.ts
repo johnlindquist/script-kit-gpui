@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import {
   currentIdentity,
   DEFAULT_CONSISTENCY_CATALOG_PATH,
@@ -50,6 +50,103 @@ function currentGitHead(): string {
     throw new Error("runtime task proof requires the exact current Git source commit");
   }
   return head;
+}
+
+/** Bind one actual executable to the manifest written by its owned build/export. */
+export function verifyRuntimeBinaryProvenance(binaryPath: string, expected: Obj = {}): Obj {
+  const repositoryRoot = realpathSync(process.cwd());
+  const resolvedBinary = resolve(repositoryRoot, binaryPath);
+  const repositoryRelative = relative(repositoryRoot, resolvedBinary);
+  if (
+    repositoryRelative.startsWith("../") || repositoryRelative.startsWith("/") ||
+    !(repositoryRelative.startsWith("target-agent/artifacts/") ||
+      repositoryRelative.startsWith("target-agent/runtime/"))
+  ) {
+    throw new Error("verified build provenance requires one owned exported or staged runtime binary");
+  }
+  let canonicalBinary: string;
+  try {
+    canonicalBinary = realpathSync(resolvedBinary);
+  } catch {
+    throw new Error("verified build provenance cannot independently observe its runtime binary");
+  }
+  if (canonicalBinary !== resolvedBinary || lstatSync(resolvedBinary).isSymbolicLink()) {
+    throw new Error("verified build provenance cannot follow a binary symlink");
+  }
+
+  const candidates = [
+    `${resolvedBinary}.provenance.json`,
+    join(dirname(resolvedBinary), "manifest.json"),
+  ].filter((candidate) => existsSync(candidate));
+  if (candidates.length !== 1) {
+    throw new Error("verified build provenance requires exactly one independently observed artifact manifest");
+  }
+  const manifestPath = candidates[0]!;
+  if (lstatSync(manifestPath).isSymbolicLink() || realpathSync(manifestPath) !== manifestPath) {
+    throw new Error("verified build provenance cannot follow an artifact manifest symlink");
+  }
+  const manifestBytes = readFileSync(manifestPath);
+  let manifest: Obj;
+  try {
+    manifest = asObject(JSON.parse(manifestBytes.toString("utf8")));
+  } catch {
+    throw new Error("verified build provenance manifest is not valid JSON");
+  }
+  const binaryStat = statSync(resolvedBinary);
+  const binaryHash = sha256File(resolvedBinary);
+  if (
+    manifest.schemaVersion !== 2 ||
+    manifest.binaryPath !== repositoryRelative ||
+    manifest.binarySha256 !== binaryHash ||
+    manifest.sizeBytes !== binaryStat.size ||
+    typeof manifest.pool !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(manifest.pool) ||
+    typeof manifest.source !== "string" ||
+    !(manifest.source.startsWith("target-agent/pools/") ||
+      manifest.source.startsWith("target-agent/agents/")) ||
+    manifest.source.split("/").includes("..") ||
+    typeof manifest.builtAt !== "string" || Number.isNaN(Date.parse(manifest.builtAt))
+  ) {
+    throw new Error("verified build provenance manifest does not match its exact owned executable bytes");
+  }
+  if (manifest.rustDirty !== false) {
+    throw new Error("verified build provenance rejects uncommitted compiler-input sources");
+  }
+  const head = currentGitHead();
+  if (manifest.gitHead !== head) {
+    throw new Error("verified build provenance executable was not built from the current source commit");
+  }
+
+  const manifestRelative = relative(repositoryRoot, manifestPath);
+  const manifestHash = createHash("sha256").update(manifestBytes).digest("hex");
+  if (
+    (expected.path !== undefined && expected.path !== repositoryRelative) ||
+    (expected.sha256 !== undefined && expected.sha256 !== binaryHash) ||
+    (expected.sourceCommit !== undefined && expected.sourceCommit !== manifest.gitHead)
+  ) {
+    throw new Error("verified build provenance identity does not match the observed executable");
+  }
+  if (Object.keys(expected).length > 0) {
+    const declaredManifest = asObject(expected.provenance);
+    if (declaredManifest.path !== manifestRelative || declaredManifest.sha256 !== manifestHash) {
+      throw new Error("verified build provenance manifest identity does not match its observed receipt");
+    }
+  }
+
+  return {
+    path: repositoryRelative,
+    sha256: binaryHash,
+    sizeBytes: binaryStat.size,
+    modifiedAt: new Date(binaryStat.mtimeMs).toISOString(),
+    sourceCommit: manifest.gitHead,
+    pinned: Boolean(process.env.SCRIPT_KIT_GPUI_BINARY),
+    provenance: {
+      path: manifestRelative,
+      sha256: manifestHash,
+      schemaVersion: manifest.schemaVersion,
+      pool: manifest.pool,
+      rustDirty: false,
+    },
+  };
 }
 
 function canonicalTaskBinding(taskId: RuntimeTaskProofId) {
@@ -202,6 +299,7 @@ export async function observeRuntimeTaskTarget(
   binaryPath: string,
   selector: Json = { type: "main" },
 ): Promise<RuntimeTargetObservation> {
+  const verifiedBinary = verifyRuntimeBinaryProvenance(binaryPath);
   const windows = asObject(await driver.listAutomationWindows({ timeoutMs: 5_000 }));
   const inspection = asObject(await driver.request({
     type: "inspectAutomationWindow",
@@ -225,31 +323,17 @@ export async function observeRuntimeTaskTarget(
     throw new Error("runtime task proof target process does not match its actual owned driver");
   }
 
-  const resolvedBinary = resolve(binaryPath);
-  const binaryHash = sha256File(resolvedBinary);
-  const binaryStat = statSync(resolvedBinary);
   const transaction = proofTransactionIdentity(driver.sessionName, target) as unknown as Obj;
-  transaction.binarySha256 = binaryHash;
+  transaction.binarySha256 = verifiedBinary.sha256;
   const missing = strictTransactionMissingFields(transaction as ProofTransactionIdentity);
   if (missing.length > 0) {
     throw new Error(`runtime task proof target lacks strict transaction identity: ${missing.join(", ")}`);
-  }
-  const repositoryRelative = relative(process.cwd(), resolvedBinary);
-  if (repositoryRelative.startsWith("../") || repositoryRelative.startsWith("/")) {
-    throw new Error("runtime task proof binary must resolve inside the reviewed repository");
   }
   return {
     requestedTarget: identity.requestedTarget as Obj,
     target,
     transaction,
-    binary: {
-      path: repositoryRelative,
-      sha256: binaryHash,
-      sizeBytes: binaryStat.size,
-      modifiedAt: new Date(binaryStat.mtimeMs).toISOString(),
-      sourceCommit: currentGitHead(),
-      pinned: Boolean(process.env.SCRIPT_KIT_GPUI_BINARY),
-    },
+    binary: verifiedBinary,
   };
 }
 
@@ -317,6 +401,11 @@ export function prepareRuntimeTaskProof(
   }
   if (currentBinarySha !== binary.sha256) {
     throw new Error(`${taskId} runtime binary bytes do not match their observed fingerprint`);
+  }
+  try {
+    verifyRuntimeBinaryProvenance(binary.path as string, binary);
+  } catch (error) {
+    throw new Error(`${taskId} requires verified build provenance: ${String(error)}`);
   }
 
   const catalogBinding = canonicalTaskBinding(taskId);

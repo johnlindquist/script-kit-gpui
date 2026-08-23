@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   currentIdentity,
@@ -18,6 +26,7 @@ import {
   prepareBlockedRuntimeTaskProof,
   prepareRuntimeTaskProof,
   runtimeTaskProofSourceOwners,
+  verifyRuntimeBinaryProvenance,
 } from "./lib/runtime-task-proof.ts";
 
 type Obj = Record<string, unknown>;
@@ -44,7 +53,43 @@ function controls(taskId: RuntimeTaskProofId): Record<string, boolean> {
   );
 }
 
-function baseCandidate(): Obj {
+function syntheticBinary(unsigned = false): Obj {
+  if (unsigned) {
+    return { path: binaryPath, sha256: binarySha, sourceCommit: gitHead };
+  }
+  const artifactRoot = join(process.cwd(), "target-agent", "artifacts");
+  mkdirSync(artifactRoot, { recursive: true });
+  const directory = mkdtempSync(join(artifactRoot, ".runtime-task-proof-"));
+  temporaryDirectories.push(directory);
+  const executablePath = join(directory, "script-kit-gpui");
+  const executableBytes = readFileSync(binaryPath);
+  writeFileSync(executablePath, executableBytes);
+  const executableRelative = relative(process.cwd(), executablePath);
+  const manifestPath = `${executablePath}.provenance.json`;
+  const manifestBytes = JSON.stringify({
+    schemaVersion: 2,
+    pool: "agent-debug",
+    source: "target-agent/pools/agent-debug/debug/script-kit-gpui",
+    binaryPath: executableRelative,
+    binarySha256: binarySha,
+    sizeBytes: executableBytes.byteLength,
+    gitHead,
+    rustDirty: false,
+    builtAt: new Date().toISOString(),
+  });
+  writeFileSync(manifestPath, manifestBytes);
+  return {
+    path: executableRelative,
+    sha256: binarySha,
+    sourceCommit: gitHead,
+    provenance: {
+      path: relative(process.cwd(), manifestPath),
+      sha256: createHash("sha256").update(manifestBytes).digest("hex"),
+    },
+  };
+}
+
+function baseCandidate(unsigned = false): Obj {
   return {
     schemaVersion: 2,
     classification: "ok",
@@ -78,7 +123,7 @@ function baseCandidate(): Obj {
       surfaceGeneration: 1,
       dataGeneration: 1,
     },
-    binary: { path: binaryPath, sha256: binarySha, sourceCommit: gitHead },
+    binary: syntheticBinary(unsigned),
     repository: { gitCommit: gitHead },
     cleanup: {
       processExited: true,
@@ -94,8 +139,8 @@ function baseCandidate(): Obj {
   };
 }
 
-function candidateFor(taskId: RuntimeTaskProofId): Obj {
-  const common = baseCandidate();
+function candidateFor(taskId: RuntimeTaskProofId, unsigned = false): Obj {
+  const common = baseCandidate(unsigned);
   if (taskId === "PF-004") {
     return {
       ...common,
@@ -344,6 +389,57 @@ function candidateFor(taskId: RuntimeTaskProofId): Obj {
 }
 
 describe("canonical direct runtime task receipts", () => {
+  test("an unsigned existing executable cannot borrow current HEAD as build provenance", () => {
+    expect(() => prepareRuntimeTaskProof("PF-004", candidateFor("PF-004", true), controls("PF-004")))
+      .toThrow("verified build provenance");
+  });
+
+  test("stale, dirty, substituted, ambiguous, and symlinked artifact manifests fail closed", () => {
+    const scenarios: Array<[
+      string,
+      (binary: Obj, manifest: Obj, manifestPath: string) => void,
+      string,
+    ]> = [
+      ["missing manifest", (_binary, _manifest, manifestPath) => {
+        unlinkSync(manifestPath);
+      }, "exactly one"],
+      ["old source", (_binary, manifest, manifestPath) => {
+        manifest.gitHead = "b".repeat(40);
+        writeFileSync(manifestPath, JSON.stringify(manifest));
+      }, "current source commit"],
+      ["dirty sources", (_binary, manifest, manifestPath) => {
+        manifest.rustDirty = true;
+        writeFileSync(manifestPath, JSON.stringify(manifest));
+      }, "uncommitted compiler-input"],
+      ["substituted executable", (binary) => {
+        writeFileSync(binary.path as string, "not-the-observed-build");
+      }, "exact owned executable bytes"],
+      ["incorrect size", (_binary, manifest, manifestPath) => {
+        manifest.sizeBytes = Number(manifest.sizeBytes) + 1;
+        writeFileSync(manifestPath, JSON.stringify(manifest));
+      }, "exact owned executable bytes"],
+      ["ambiguous manifests", (_binary, manifest, manifestPath) => {
+        writeFileSync(join(manifestPath, "..", "manifest.json"), JSON.stringify(manifest));
+      }, "exactly one"],
+      ["manifest symlink", (_binary, manifest, manifestPath) => {
+        const external = mkdtempSync(join(tmpdir(), "runtime-task-external-manifest-"));
+        temporaryDirectories.push(external);
+        const target = join(external, "manifest.json");
+        writeFileSync(target, JSON.stringify(manifest));
+        unlinkSync(manifestPath);
+        symlinkSync(target, manifestPath);
+      }, "manifest symlink"],
+    ];
+
+    for (const [name, mutateManifest, expected] of scenarios) {
+      const binary = syntheticBinary();
+      const manifestPath = (binary.provenance as Obj).path as string;
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Obj;
+      mutateManifest(binary, manifest, manifestPath);
+      expect(() => verifyRuntimeBinaryProvenance(binary.path as string), name).toThrow(expected);
+    }
+  });
+
   test.each(Object.keys(RUNTIME_TASK_PROOF_SPECS) as RuntimeTaskProofId[])(
     "%s binds the real primitive, exact task, source owners, controls, and target transaction",
     (taskId) => {
@@ -498,6 +594,32 @@ describe("canonical direct runtime task receipts", () => {
     expect(audited.exitCode).toBe(3);
     expect(audited.receipt.disposition).toBe("BLOCKED_STALE_GENERATION");
     expect(JSON.stringify(audited.receipt)).toContain("stale-runtime-proof-source");
+  });
+
+  test("final auditing rejects build provenance that is mutated after receipt publication", () => {
+    const taskId = "PF-004";
+    const prepared = prepareRuntimeTaskProof(taskId, candidateFor(taskId), controls(taskId));
+    const manifestPath = ((prepared.receipt.binary as Obj).provenance as Obj).path as string;
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.gitHead = "b".repeat(40);
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+
+    const directory = mkdtempSync(join(tmpdir(), "runtime-task-provenance-"));
+    temporaryDirectories.push(directory);
+    const taskDirectory = join(directory, taskId);
+    mkdirSync(taskDirectory, { recursive: true });
+    writeFileSync(join(taskDirectory, "observed.json"), JSON.stringify(prepared.receipt));
+    const progressText = `### ${taskId} — ${catalog.byId.get(taskId)!.title}\n`;
+    const audited = verifyTask({
+      taskId,
+      scope: "cons-proof-gov",
+      receiptsRoot: directory,
+      catalog,
+      progress: parseProgressSections(progressText),
+      current: currentIdentity(),
+    });
+    expect(audited.exitCode).toBe(3);
+    expect(JSON.stringify(audited.receipt)).toContain("stale-binary-provenance");
   });
 
   test("an absent application emits a registered typed block without revealing diagnostic content", () => {

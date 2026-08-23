@@ -157,6 +157,7 @@ const fingerprint = (value: unknown): boolean =>
 export function workflowTaskProofSourceOwners(taskId: WorkflowTaskProofId): string[] {
   return [
     "scripts/devtools/lib/receipt-schema.ts",
+    "scripts/devtools/lib/runtime-task-proof.ts",
     "scripts/devtools/lib/workflow-task-contract.ts",
     "scripts/devtools/lib/workflow-task-proof.ts",
     WORKFLOW_TASK_PROOF_SPECS[taskId].producerOwner,
@@ -198,12 +199,21 @@ export function workflowTaskProofErrors(receipt: JsonObject): string[] {
 
   const repository = object(receipt.repository);
   const binary = object(receipt.binary);
+  const provenance = object(binary.provenance);
   const rootTransaction = object(receipt.transaction);
+  const binaryPath = typeof binary.path === "string" ? binary.path : "";
+  const manifestPath = typeof provenance.path === "string" ? provenance.path : "";
+  const isolatedManifest = binaryPath.replace(/\/[^/]+$/, "/manifest.json");
   if (
     !fingerprint(binary.sha256) || binary.sha256 !== rootTransaction.binarySha256 ||
-    binary.sourceCommit !== repository.gitCommit
+    binary.sourceCommit !== repository.gitCommit ||
+    !(binaryPath.startsWith("target-agent/artifacts/") ||
+      binaryPath.startsWith("target-agent/runtime/")) ||
+    binaryPath.split("/").includes("..") ||
+    !(manifestPath === `${binaryPath}.provenance.json` || manifestPath === isolatedManifest) ||
+    !fingerprint(provenance.sha256)
   ) {
-    errors.push("workflow proof requires one exact source-bound binary and root transaction");
+    errors.push("workflow proof requires one exact source-bound binary, reviewed build provenance, and root transaction");
   }
 
   const safety = object(proof.safety);

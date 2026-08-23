@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   CONS_FLOW_UX_IDS,
@@ -40,7 +40,41 @@ afterEach(() => {
   }
 });
 
-function segment(id = "observed-session") {
+function syntheticBinary(unsigned = false): JsonObject {
+  if (unsigned) return { path: binaryPath, sha256: binarySha, sourceCommit: head };
+  const artifactRoot = join(process.cwd(), "target-agent", "artifacts");
+  mkdirSync(artifactRoot, { recursive: true });
+  const directory = mkdtempSync(join(artifactRoot, ".workflow-task-proof-"));
+  temporaryDirectories.push(directory);
+  const executablePath = join(directory, "script-kit-gpui");
+  const executableBytes = readFileSync(binaryPath);
+  writeFileSync(executablePath, executableBytes);
+  const executableRelative = relative(process.cwd(), executablePath);
+  const manifestPath = `${executablePath}.provenance.json`;
+  const manifestBytes = JSON.stringify({
+    schemaVersion: 2,
+    pool: "agent-debug",
+    source: "target-agent/pools/agent-debug/debug/script-kit-gpui",
+    binaryPath: executableRelative,
+    binarySha256: binarySha,
+    sizeBytes: executableBytes.byteLength,
+    gitHead: head,
+    rustDirty: false,
+    builtAt: new Date().toISOString(),
+  });
+  writeFileSync(manifestPath, manifestBytes);
+  return {
+    path: executableRelative,
+    sha256: binarySha,
+    sourceCommit: head,
+    provenance: {
+      path: relative(process.cwd(), manifestPath),
+      sha256: createHash("sha256").update(manifestBytes).digest("hex"),
+    },
+  };
+}
+
+function segment(id = "observed-session", unsigned = false) {
   const bounds = { x: 0, y: 0, width: 800, height: 600 };
   const transaction = {
     transactionId: `proof:${id}`,
@@ -74,7 +108,7 @@ function segment(id = "observed-session") {
       bounds,
     },
     transaction,
-    binary: { path: binaryPath, sha256: binarySha, sourceCommit: head },
+    binary: syntheticBinary(unsigned),
   }, {
     processExited: true,
     streamsDrained: true,
@@ -85,9 +119,9 @@ function segment(id = "observed-session") {
   });
 }
 
-function options(taskId: WorkflowTaskProofId): WorkflowTaskProofOptions {
+function options(taskId: WorkflowTaskProofId, unsigned = false): WorkflowTaskProofOptions {
   const spec = WORKFLOW_TASK_PROOF_SPECS[taskId];
-  const observed = segment(`session-${taskId.toLowerCase()}`);
+  const observed = segment(`session-${taskId.toLowerCase()}`, unsigned);
   return {
     producerOwner: spec.producerOwner,
     segments: [observed],
@@ -120,6 +154,11 @@ function mutate(taskId: WorkflowTaskProofId, update: (value: WorkflowTaskProofOp
 }
 
 describe("source-bound canonical safety and workflow task proofs", () => {
+  test("an unsigned existing executable cannot borrow current HEAD as build provenance", () => {
+    expect(() => prepareWorkflowTaskProof("SAFE-001", options("SAFE-001", true)))
+      .toThrow("verified build provenance");
+  });
+
   test("all 28 tasks have one exact executable owner and task-specific observed stages", () => {
     expect(new Set(Object.keys(WORKFLOW_TASK_PROOF_SPECS))).toEqual(new Set(CONS_FLOW_UX_IDS));
     for (const [taskId, spec] of Object.entries(WORKFLOW_TASK_PROOF_SPECS)) {
