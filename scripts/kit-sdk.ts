@@ -10031,6 +10031,50 @@ function mcpRequestTimeoutMs(): number {
   return timeout;
 }
 
+function mcpMaxResponseBytes(): number {
+  const configured = process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES;
+  if (configured === undefined || configured === '') return 16 * 1024 * 1024;
+  const budget = Number(configured);
+  if (!/^[1-9][0-9]*$/.test(configured) || !Number.isSafeInteger(budget) || budget > 64 * 1024 * 1024) {
+    throw new Error('SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES must be a positive whole byte budget no greater than 67108864.');
+  }
+  return budget;
+}
+
+async function readBoundedMcpResponse(
+  response: Response,
+  maximumBytes: number,
+  serverId: string,
+  method: string,
+): Promise<string> {
+  const oversized = () => new Error(`[mcp:${serverId}] ${method} exceeded its ${maximumBytes}-byte response safety budget`);
+  const declared = response.headers.get('content-length');
+  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maximumBytes) {
+    await response.body?.cancel();
+    throw oversized();
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maximumBytes) {
+        await reader.cancel();
+        throw oversized();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks, received));
+}
+
 function assertMcpJsonRpcSuccess(
   response: unknown,
   serverId: string,
@@ -10071,6 +10115,7 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
   }
 
   const requestTimeoutMs = mcpRequestTimeoutMs();
+  const maximumResponseBytes = mcpMaxResponseBytes();
   const serverEnvironment = {
     ...process.env,
     ...(server.env ?? {}),
@@ -10114,6 +10159,7 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
   let nextRequestId = 1;
   const stderrChunks: string[] = [];
   let stderrBytes = 0;
+  let stdoutBytes = 0;
   const secretValues = Object.entries(server.env ?? {})
     .filter(([name]) => /authorization|token|api[-_]?key|password|secret/i.test(name))
     .map(([, value]) => value);
@@ -10131,6 +10177,15 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
     }
     pending.clear();
   };
+
+  child.stdout.on('data', (chunk) => {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    stdoutBytes += bytes.byteLength;
+    if (stdoutBytes > maximumResponseBytes) {
+      child.stdout.pause();
+      rejectPending(new Error(`[mcp:${serverId}] stdio exceeded its ${maximumResponseBytes}-byte response safety budget`));
+    }
+  });
 
   child.stderr.on('data', (chunk) => {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -10189,6 +10244,7 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
     }
     const request = pending.get(message.id);
     pending.delete(message.id);
+    stdoutBytes = 0;
     request?.resolve(message as McpJsonRpcResponse);
   });
 
@@ -10300,6 +10356,7 @@ async function createHttpMcpSession(serverId: string, server: McpHttpServerConfi
 
   let sessionId: string | null = null;
   const requestTimeoutMs = mcpRequestTimeoutMs();
+  const maximumResponseBytes = mcpMaxResponseBytes();
   const secrets = Object.entries(server.headers ?? {})
     .filter(([name]) => /authorization|token|api[-_]?key/i.test(name))
     .flatMap(([, value]) => [value, value.replace(/^Bearer\s+/i, '')]);
@@ -10359,7 +10416,7 @@ async function createHttpMcpSession(serverId: string, server: McpHttpServerConfi
         return {};
       }
 
-      const json = await response.json();
+      const json = JSON.parse(await readBoundedMcpResponse(response, maximumResponseBytes, serverId, method));
       return assertMcpJsonRpcSuccess(json, serverId, method, payload.id!, secrets);
     } catch (error) {
       if (controller.signal.aborted) {

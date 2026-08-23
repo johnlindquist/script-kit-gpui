@@ -26,6 +26,7 @@ const privateToken = "sdk-local-private-bearer-fixture";
 const originalFetch = globalThis.fetch;
 const previousDiscoveryPath = process.env.SCRIPT_KIT_MCP_SERVER_JSON;
 const previousTimeout = process.env.SCRIPT_KIT_MCP_TIMEOUT_MS;
+const previousResponseBudget = process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES;
 const previousKitPath = process.env.SK_PATH;
 const stdioServerPath = join(fixtureDirectory, "mcp-stdio-fixture.ts");
 const descendantPidPath = join(fixtureDirectory, "owned-descendant.pid");
@@ -47,6 +48,10 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (request.id === undefined) continue;
   if (mode === "stderr-flood") {
     process.stderr.write("x".repeat(1024 * 1024 + 1));
+    continue;
+  }
+  if (mode === "stdout-flood") {
+    process.stdout.write("x".repeat(513));
     continue;
   }
   if (mode === "private-error") {
@@ -72,6 +77,7 @@ writeFileSync(join(fixtureDirectory, "config.ts"), `export default ${JSON.string
       stdioNever: { transport: "stdio", command: process.execPath, args: [stdioServerPath, "never-respond"] },
       stdioWrong: { transport: "stdio", command: process.execPath, args: [stdioServerPath, "wrong-response"] },
       stdioFlood: { transport: "stdio", command: process.execPath, args: [stdioServerPath, "stderr-flood"] },
+      stdioOutputFlood: { transport: "stdio", command: process.execPath, args: [stdioServerPath, "stdout-flood"] },
       stdioPrivateError: {
         transport: "stdio",
         command: process.execPath,
@@ -137,6 +143,7 @@ async function check(name: string, operation: () => Promise<unknown>): Promise<v
   const started = Date.now();
   writeDiscovery();
   delete process.env.SCRIPT_KIT_MCP_TIMEOUT_MS;
+  delete process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES;
   globalThis.fetch = (async () => {
     throw new Error("MCP fixture attempted an unapproved real network request");
   }) as typeof fetch;
@@ -382,6 +389,41 @@ try {
     return { requests: observed.requests };
   });
 
+  await check("mcp-declared-http-response-size-refuses-before-unbounded-body-read", async () => {
+    process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES = "256";
+    const observed = installServer(() => new Response("x".repeat(257), {
+      headers: { "content-length": "257" },
+    }));
+    await expectFailure(() => computer.listNativeWindows(), "256-byte response safety budget");
+    if (observed.requests !== 1) throw new Error("Oversized MCP response advanced its session");
+    return { declaredBytes: 257, configuredBudget: 256 };
+  });
+
+  await check("mcp-streamed-http-response-overflow-cancels-its-owned-reader", async () => {
+    process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES = "256";
+    let cancelled = false;
+    let pullCount = 0;
+    installServer(() => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pullCount += 1;
+        controller.enqueue(new Uint8Array(pullCount === 1 ? 128 : 129));
+        if (pullCount >= 8) controller.close();
+      },
+      cancel() { cancelled = true; },
+    })));
+    await expectFailure(() => computer.listNativeWindows(), "256-byte response safety budget");
+    if (!cancelled) throw new Error("Oversized MCP response left its reader running");
+    return { readerCancelled: cancelled, configuredBudget: 256 };
+  });
+
+  await check("mcp-invalid-response-budget-refuses-before-network-or-token-transfer", async () => {
+    process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES = "67108865";
+    const observed = installServer((payload) => successResponse(payload));
+    await expectFailure(() => computer.listNativeWindows(), "SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES");
+    if (observed.requests !== 0) throw new Error("Invalid response budget reached MCP transport");
+    return { requests: observed.requests };
+  });
+
   await check("mcp-owned-stdio-server-preserves-real-request-and-response-identity", async () => {
     const tools = await mcp.listTools("stdioHealthy");
     if (tools.length !== 1 || tools[0]?.name !== "owned-local-tool") {
@@ -448,6 +490,15 @@ try {
     return { outputBudgetBytes: 1_048_576 };
   });
 
+  await check("mcp-stdio-stdout-response-is-bounded-before-line-buffer-expansion", async () => {
+    process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES = "256";
+    process.env.SCRIPT_KIT_MCP_TIMEOUT_MS = "100";
+    const started = Date.now();
+    await expectFailure(() => mcp.listTools("stdioOutputFlood"), "256-byte response safety budget");
+    if (Date.now() - started > 1_000) throw new Error("Stdio stdout flood cleanup was not bounded");
+    return { outputBudgetBytes: 256, oversizedServerTerminated: true };
+  });
+
   await check("mcp-wrong-stdio-response-id-fails-without-hanging", async () => {
     process.env.SCRIPT_KIT_MCP_TIMEOUT_MS = "150";
     await expectFailure(() => mcp.listTools("stdioWrong"), "invalid JSON-RPC response");
@@ -497,6 +548,11 @@ try {
     delete process.env.SCRIPT_KIT_MCP_TIMEOUT_MS;
   } else {
     process.env.SCRIPT_KIT_MCP_TIMEOUT_MS = previousTimeout;
+  }
+  if (previousResponseBudget === undefined) {
+    delete process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES;
+  } else {
+    process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES = previousResponseBudget;
   }
   if (previousKitPath === undefined) {
     delete process.env.SK_PATH;
