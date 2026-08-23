@@ -120,6 +120,27 @@ describe("mcp-cli", () => {
     }
   });
 
+  it("uses the same SK_PATH workspace as the running Script Kit host", async () => {
+    const mock = startMockMcp((body) => ({
+      jsonrpc: "2.0",
+      id: body.id,
+      result: { tools: [{ name: "workspace-owned-tool" }] },
+    }));
+    const { dir } = discoveryEnv(mock.url.origin);
+    try {
+      const result = await runCli(["mcp", "tools"], {
+        SK_PATH: dir,
+        SCRIPT_KIT_MCP_SERVER_JSON: "",
+        SCRIPT_KIT_MCP_ENDPOINT: "",
+        SCRIPT_KIT_MCP_TOKEN: "",
+      });
+      expect(typeof result).toBe("object");
+      expect((result as any).data.result.tools[0].name).toBe("workspace-owned-tool");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("calls tools with JSON arguments and bearer auth", async () => {
     const mock = startMockMcp((body) => {
       expect(body.method).toBe("tools/call");

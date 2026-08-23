@@ -103,8 +103,8 @@ function parseJsonArg(raw: string | undefined, fallback: unknown): unknown {
 
 function discoveryPath(): string {
   return (
-    process.env.SCRIPT_KIT_MCP_SERVER_JSON ??
-    join(homedir(), ".scriptkit", "server.json")
+    process.env.SCRIPT_KIT_MCP_SERVER_JSON?.trim() ||
+    join(process.env.SK_PATH?.trim() || join(homedir(), ".scriptkit"), "server.json")
   );
 }
 
