@@ -441,6 +441,8 @@ fn write_notes_run_exec_probe_receipt(
     .map_err(|error| format!("Failed to write Notes run receipt: {error}"))
 }
 
+include!("main_entry/app_run_setup_startup_helpers.rs");
+
 fn main() {
     script_kit_gpui::install_main_window_visibility_transition_hook(
         main_window_visibility_transition_hook,
