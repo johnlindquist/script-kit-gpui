@@ -1181,6 +1181,27 @@ offline receipts until their real producers are run again.
     live credentials, native subprocesses, or runtime launches. A complete
     per-owner matrix plus exact byte-for-byte receipt preservation passes;
     all twelve previously omitted producers are mandatory release sources.
+36. The workflow lane's existing final auditor claimed **28/28 PASS** against
+    historical source `493769e03208b411790f2b5639222179d8bd7eff` while the
+    canonical current-source auditor correctly found **0/28 direct runtime
+    proofs**. Its source owner invented focused Rust-test totals (including
+    **625 Agent Chat cases**), passing governance/glass counts, cleanup, and
+    Oracle provenance; selected only the latest `src`/`crates` commit rather
+    than exact HEAD; and promoted weak historical artifacts into 28 new PASS
+    receipts without validating their real producer, source, target, task, or
+    runtime transaction. `cons-flow-ux` is now a canonical, disjoint
+    **four-SAFE plus twenty-four-WF** scope beside `cons-proof-gov`. The
+    replacement final auditor validates the exact **75-task catalog**, all
+    28 identities and dispositions, canonical producer/schema evidence,
+    current 40-character HEAD, actual missing IDs, and genuine direct-runtime
+    policies. It produces **BLOCKED / 0 of 28** until real proof exists,
+    never invents test/governance/consultation counts, and offers passive
+    `--no-write` inspection. **17 anti-forgery cases / 30 assertions** and
+    **85 combined canonical-governance cases / 521 assertions** pass; the
+    actual GOV-006 producer executes and fingerprints both audit owners,
+    while publication requires their tracked source and directly executed
+    workflow suite. The full program remains honestly **15/75 accepted,
+    60 runtime tasks missing**.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1469,6 +1490,11 @@ offline receipts until their real producers are run again.
     status announcer—are
     tracked and included in the canonical release-source inventory. Real
     failing-then-passing mutations cover each previously omitted owner.
+    The separate canonical workflow completion owner and its anti-forgery
+    behavior suite are independently mandatory release provenance; GOV-006
+    directly executes and fingerprints both completion-auditor sources.
+    Three pure canonical-governance suites pass **85 cases / 521 assertions**,
+    including **17 workflow anti-forgery cases / 30 assertions**.
     The independent SDK/custom-script runner now forcibly clears inherited
     screen-takeover, visible-probe, native-input, screen-capture, live-AI,
     application-launch, and notification permissions in every test child.
@@ -1487,7 +1513,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **sixty-six direct release-owner/proof-gate cases / 198 assertions** and
+    **sixty-eight direct release-owner/proof-gate cases / 205 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
