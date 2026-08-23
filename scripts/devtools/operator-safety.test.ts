@@ -11,6 +11,7 @@ import {
   inspectionSessionCleanup,
   NONINTERACTIVE_SAFE_COMMAND_TYPES,
   NoninteractiveSafetyError,
+  requireSuccessfulSessionAction,
   SessionOwnershipRegistry,
 } from "./lib/operator-safety.ts";
 import { AttachedDriver } from "./driver.ts";
@@ -944,6 +945,37 @@ describe("noninteractive DevTools operator safety", () => {
   );
 
   test.each([
+    ["failed start", "start", { status: "error", error: { code: "readiness_timeout" } }, "readiness_timeout"],
+    ["failed parsed start", "start", { status: "error", parsedError: { error: { code: "start_failed" } } }, "start_failed"],
+    ["unready start", "start", { status: "ok", session: "reviewed-session", ready: false, resumed: false }, "not ready"],
+    ["missing readiness", "start", { status: "ok", session: "reviewed-session", resumed: false }, "not ready"],
+    ["foreign start", "start", { status: "ok", session: "other-session", ready: true, resumed: false }, "identity mismatch"],
+    ["unknown ownership", "start", { status: "ok", session: "reviewed-session", ready: true }, "ownership is unknown"],
+    ["failed show", "show", { status: "error", error: { code: "send_failed" } }, "send_failed"],
+    ["foreign show", "show", { status: "ok", session: "other-session" }, "identity mismatch"],
+  ])("shared session lifecycle rejects %s before any follow-up", (_name, action, receipt, detail) => {
+    expect(() => requireSuccessfulSessionAction(
+      "reviewed-session",
+      action as "start" | "show",
+      receipt as Record<string, unknown>,
+    )).toThrow(detail as string);
+  });
+
+  test("shared session lifecycle retains valid exact resumed and show receipts", () => {
+    const started = {
+      status: "ok",
+      session: "reviewed-session",
+      ready: true,
+      resumed: true,
+    };
+    const shown = { status: "ok", session: "reviewed-session" };
+    expect(requireSuccessfulSessionAction("reviewed-session", "start", started)).toBe(started);
+    expect(requireSuccessfulSessionAction("reviewed-session", "show", shown)).toBe(shown);
+    expect(() => requireSuccessfulSessionAction("../dev-watch", "start", started))
+      .toThrow("safe session identity");
+  });
+
+  test.each([
     ["AppleScript", ["osascript", "-e", "display notification unsafe"]],
     ["Swift", ["swift", "scripts/agentic/macos-window-query.swift"]],
     ["native input", ["bun", "scripts/agentic/macos-input.ts", "key", "enter"]],
@@ -1126,6 +1158,119 @@ describe("noninteractive DevTools operator safety", () => {
     expect(result.stdout.toString()).toContain('"status": "pass"');
     expect(result.stdout.toString()).toContain('"screenshot": null');
     expect(result.stdout.toString()).not.toContain("passive screenshot proof");
+  });
+
+  test.each([
+    [
+      "shared target resolver",
+      'const { maybeStartAndShow } = await import("./scripts/devtools/lib/target-identity.ts"); await maybeStartAndShow({ session: "reviewed-session", start: true, show: true, timeoutMs: 100 });',
+    ],
+    [
+      "Actions",
+      'const { maybeStartSession } = await import("./scripts/devtools/actions.ts"); await maybeStartSession({ session: "reviewed-session", start: true, keepOpen: false });',
+    ],
+    [
+      "Dictation",
+      'process.argv = ["bun", "scripts/devtools/dictation.ts", "inspect", "--session", "reviewed-session", "--start", "--show"]; await import("./scripts/devtools/dictation.ts");',
+    ],
+    [
+      "Agent Chat",
+      'process.argv = ["bun", "scripts/devtools/agent_chat.ts", "open-detached-placeholder", "--session", "reviewed-session", "--start", "--show"]; await import("./scripts/devtools/agent_chat.ts");',
+    ],
+    [
+      "Events",
+      'process.argv = ["bun", "scripts/devtools/events.ts", "tail", "--session", "reviewed-session", "--start", "--show"]; await import("./scripts/devtools/events.ts");',
+    ],
+  ])("%s stops before follow-up work after session startup fails", (_owner, invocation) => {
+    const result = child(`
+      process.env.SCRIPT_KIT_NONINTERACTIVE = "0";
+      let calls = 0;
+      Bun.spawn = ((command) => {
+        calls += 1;
+        if (calls > 1) throw new Error("unsafe follow-up after failed session startup");
+        return {
+          stdout: new Response(JSON.stringify({ status: "error", error: { code: "readiness_timeout" } })).body,
+          stderr: new Response("").body,
+          exited: Promise.resolve(1),
+        };
+      });
+      try { ${invocation} }
+      catch (error) { console.log("failure=" + error.message); }
+      console.log("calls=" + calls);
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("failure=DevTools session start failed");
+    expect(result.stdout.toString()).toContain("calls=1");
+    expect(result.stdout.toString()).not.toContain("unsafe follow-up");
+  });
+
+  test.each([
+    [
+      "shared target resolver",
+      'const { maybeStartAndShow } = await import("./scripts/devtools/lib/target-identity.ts"); await maybeStartAndShow({ session: "reviewed-session", start: true, show: true, timeoutMs: 100 });',
+    ],
+    [
+      "Dictation",
+      'process.argv = ["bun", "scripts/devtools/dictation.ts", "inspect", "--session", "reviewed-session", "--start", "--show"]; await import("./scripts/devtools/dictation.ts");',
+    ],
+    [
+      "Agent Chat",
+      'process.argv = ["bun", "scripts/devtools/agent_chat.ts", "open-detached-placeholder", "--session", "reviewed-session", "--start", "--show"]; await import("./scripts/devtools/agent_chat.ts");',
+    ],
+    [
+      "Events",
+      'process.argv = ["bun", "scripts/devtools/events.ts", "tail", "--session", "reviewed-session", "--start", "--show"]; await import("./scripts/devtools/events.ts");',
+    ],
+  ])("%s stops before follow-up work after session show fails", (_owner, invocation) => {
+    const result = child(`
+      process.env.SCRIPT_KIT_NONINTERACTIVE = "0";
+      let calls = 0;
+      Bun.spawn = ((command) => {
+        calls += 1;
+        if (calls > 2) throw new Error("unsafe follow-up after failed session show");
+        const starting = command[2] === "start";
+        const payload = starting
+          ? { status: "ok", session: "reviewed-session", ready: true, resumed: true }
+          : { status: "error", error: { code: "send_failed" } };
+        return {
+          stdout: new Response(JSON.stringify(payload)).body,
+          stderr: new Response("").body,
+          exited: Promise.resolve(starting ? 0 : 1),
+        };
+      });
+      try { ${invocation} }
+      catch (error) { console.log("failure=" + error.message); }
+      console.log("calls=" + calls);
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("failure=DevTools session show failed");
+    expect(result.stdout.toString()).toContain("calls=2");
+    expect(result.stdout.toString()).not.toContain("unsafe follow-up");
+  });
+
+  test.each([
+    ["SCRIPT_KIT_NONINTERACTIVE", "0"],
+    ["SCRIPT_KIT_ALLOW_NATIVE_INPUT", "1"],
+    ["SCRIPT_KIT_ALLOW_SCREEN_CAPTURE", "1"],
+    ["CI", "true"],
+  ])("Actions transport rejects child authority override %s before spawn", (key, value) => {
+    const result = child(`
+      const { runActionsSubprocess } = await import("./scripts/devtools/actions.ts");
+      Bun.spawn = (() => { throw new Error("unsafe Actions subprocess started"); });
+      try {
+        await runActionsSubprocess(
+          ["bash", "scripts/agentic/session.sh", "status", "reviewed-session"],
+          "session-status",
+          { ${JSON.stringify(key)}: ${JSON.stringify(value)} },
+        );
+      } catch (error) { console.log("failure=" + error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("immutable parent safety authority");
+    expect(result.stdout.toString()).not.toContain("unsafe Actions subprocess started");
   });
 
   test("filterable matrix cleanup forwards exact owned identity and protects resumed sessions", () => {

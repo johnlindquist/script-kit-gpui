@@ -1,7 +1,10 @@
 #!/usr/bin/env bun
 
 import { inspectAiReliabilityFixture } from "./ai_reliability_cli.ts";
-import { assertNoninteractiveSessionCommand } from "./lib/operator-safety.ts";
+import {
+  assertNoninteractiveSessionCommand,
+  requireSuccessfulSessionAction,
+} from "./lib/operator-safety.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -107,10 +110,14 @@ async function run(command: string[], label: string): Promise<JsonObject> {
 
 async function maybeStartAndShow(args: Args) {
   if (args.start) {
-    await run(["bash", "scripts/agentic/session.sh", "start", args.session], "session-start");
+    const started = await run(
+      ["bash", "scripts/agentic/session.sh", "start", args.session],
+      "session-start",
+    );
+    requireSuccessfulSessionAction(args.session, "start", started);
   }
   if (args.show) {
-    await run([
+    const shown = await run([
       "bash",
       "scripts/agentic/session.sh",
       "send",
@@ -120,6 +127,7 @@ async function maybeStartAndShow(args: Args) {
       "--timeout",
       String(args.timeoutMs),
     ], "session-show");
+    requireSuccessfulSessionAction(args.session, "show", shown);
   }
 }
 

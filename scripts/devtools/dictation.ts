@@ -6,6 +6,7 @@ import { resolveTargetReceipt } from "./lib/target-identity.ts";
 import {
   assertNoninteractiveProtocolCommand,
   assertNoninteractiveSessionCommand,
+  requireSuccessfulSessionAction,
 } from "./lib/operator-safety.ts";
 
 type JsonObject = Record<string, unknown>;
@@ -101,10 +102,18 @@ async function run(command: string[], label: string): Promise<JsonObject> {
 
 async function maybeStartAndShow(args: Args) {
   if (args.start) {
-    await run(["bash", "scripts/agentic/session.sh", "start", args.session], "session-start");
+    const started = await run(
+      ["bash", "scripts/agentic/session.sh", "start", args.session],
+      "session-start",
+    );
+    requireSuccessfulSessionAction(args.session, "start", started);
   }
   if (args.show) {
-    await run(["bash", "scripts/agentic/session.sh", "send", args.session, JSON.stringify({ type: "show" }), "--await-parse", "--timeout", String(args.timeoutMs)], "session-show");
+    const shown = await run(
+      ["bash", "scripts/agentic/session.sh", "send", args.session, JSON.stringify({ type: "show" }), "--await-parse", "--timeout", String(args.timeoutMs)],
+      "session-show",
+    );
+    requireSuccessfulSessionAction(args.session, "show", shown);
   }
 }
 

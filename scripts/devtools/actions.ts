@@ -5,7 +5,8 @@ import { diagnostic, userContent } from "./lib/privacy.ts";
 import { classifyTransportError } from "./lib/transport-errors.ts";
 import {
   assertNoninteractiveProtocolCommand,
-  assertNoninteractiveSessionCommand,
+  assertNoninteractiveSubprocess,
+  requireSuccessfulSessionAction,
 } from "./lib/operator-safety.ts";
 
 type JsonObject = Record<string, unknown>;
@@ -199,8 +200,12 @@ function openForwarded(args: Args): string[] {
   ];
 }
 
-async function run(command: string[], label: string, env?: Record<string, string>): Promise<JsonObject> {
-  assertNoninteractiveSessionCommand(command);
+export async function runActionsSubprocess(
+  command: string[],
+  label: string,
+  env?: Record<string, string>,
+): Promise<JsonObject> {
+  assertNoninteractiveSubprocess(command, env ?? {});
   const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe", env: env ? { ...process.env, ...env } : process.env });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -217,6 +222,8 @@ async function run(command: string[], label: string, env?: Record<string, string
   }
 }
 
+const run = runActionsSubprocess;
+
 function requestId(prefix: string) {
   return `devtools-actions-${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
@@ -226,10 +233,17 @@ async function rpc(session: string, payload: JsonObject, expect: string, timeout
   return run(["bash", "scripts/agentic/session.sh", "rpc", session, JSON.stringify(payload), "--expect", expect, "--timeout", String(timeoutMs)], String(payload.type ?? "rpc"));
 }
 
-async function maybeStartSession(args: Args) {
+export async function maybeStartSession(
+  args: Pick<Args, "start" | "session" | "keepOpen">,
+) {
   if (!args.start) return null;
   const env = args.keepOpen ? { SCRIPT_KIT_AGENTIC_KEEP_ACTIONS_WINDOW_OPEN: "1" } : undefined;
-  return run(["bash", "scripts/agentic/session.sh", "start", args.session], "session.start", env);
+  const started = await run(
+    ["bash", "scripts/agentic/session.sh", "start", args.session],
+    "session.start",
+    env,
+  );
+  return requireSuccessfulSessionAction(args.session, "start", started);
 }
 
 async function maybeOpenParentTarget(args: Args) {

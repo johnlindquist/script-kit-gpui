@@ -31,6 +31,7 @@ import { externalContent, productStatic } from "./privacy.ts";
 import {
   assertNoninteractiveProtocolCommand,
   NoninteractiveSafetyError,
+  requireSuccessfulSessionAction,
 } from "./operator-safety.ts";
 
 export function stableWindowKind(value: unknown) {
@@ -471,10 +472,14 @@ export function classifyTarget(
 
 export async function maybeStartAndShow(args: Pick<TargetArgs, "session" | "start" | "show" | "timeoutMs">) {
   if (args.start) {
-    await run(["bash", "scripts/agentic/session.sh", "start", args.session], "session-start");
+    const started = await run(
+      ["bash", "scripts/agentic/session.sh", "start", args.session],
+      "session-start",
+    );
+    requireSuccessfulSessionAction(args.session, "start", started);
   }
   if (args.show) {
-    await run(
+    const shown = await run(
       [
         "bash",
         "scripts/agentic/session.sh",
@@ -487,6 +492,7 @@ export async function maybeStartAndShow(args: Pick<TargetArgs, "session" | "star
       ],
       "session-show",
     );
+    requireSuccessfulSessionAction(args.session, "show", shown);
   }
 }
 

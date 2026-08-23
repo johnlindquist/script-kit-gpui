@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
 import { outputSummary, summarizeText, tryParseJson as summarizeJsonText } from "./lib/receipt-output";
-import { assertNoninteractiveSessionCommand } from "./lib/operator-safety.ts";
+import {
+  assertNoninteractiveSessionCommand,
+  requireSuccessfulSessionAction,
+} from "./lib/operator-safety.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -417,10 +420,18 @@ function compactEventEntries(entries: ReturnType<typeof parseLine>[], previewByt
 
 async function sessionStatus(args: Args) {
   if (args.start) {
-    await run(["bash", "scripts/agentic/session.sh", "start", args.session], "session-start");
+    const started = await run(
+      ["bash", "scripts/agentic/session.sh", "start", args.session],
+      "session-start",
+    );
+    requireSuccessfulSessionAction(args.session, "start", started);
   }
   if (args.show) {
-    await run(["bash", "scripts/agentic/session.sh", "send", args.session, JSON.stringify({ type: "show" }), "--await-parse", "--timeout", String(args.timeoutMs)], "session-show");
+    const shown = await run(
+      ["bash", "scripts/agentic/session.sh", "send", args.session, JSON.stringify({ type: "show" }), "--await-parse", "--timeout", String(args.timeoutMs)],
+      "session-show",
+    );
+    requireSuccessfulSessionAction(args.session, "show", shown);
   }
   return run(["bash", "scripts/agentic/session.sh", "status", args.session], "session-status");
 }

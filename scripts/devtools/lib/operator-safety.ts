@@ -20,6 +20,39 @@ export type InspectionSessionCleanup = {
 
 const safeSessionIdentity = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
+export function requireSuccessfulSessionAction(
+  session: string,
+  action: "start" | "show",
+  receipt: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!safeSessionIdentity.test(session)) {
+    throw new Error("DevTools session lifecycle requires one safe session identity");
+  }
+
+  if (receipt.status !== "ok") {
+    const parsedError = object(receipt.parsedError);
+    const directError = object(receipt.error);
+    const nestedError = object(parsedError?.error);
+    const failureCode = directError?.code ?? nestedError?.code;
+    const detail = typeof failureCode === "string" ? ` (${failureCode})` : "";
+    throw new Error(`DevTools session ${action} failed for ${session}${detail}`);
+  }
+
+  if (receipt.session !== session) {
+    throw new Error(`DevTools session ${action} failed for ${session}: session identity mismatch`);
+  }
+
+  if (action === "start" && receipt.ready !== true) {
+    throw new Error(`DevTools session start failed for ${session}: session is not ready`);
+  }
+
+  if (action === "start" && typeof receipt.resumed !== "boolean") {
+    throw new Error(`DevTools session start failed for ${session}: session ownership is unknown`);
+  }
+
+  return receipt;
+}
+
 export function inspectionSessionCleanup(
   session: string,
   startReceipt: Record<string, unknown> | null,
