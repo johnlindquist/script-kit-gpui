@@ -1151,6 +1151,22 @@ offline receipts until their real producers are run again.
     effects; passive inventories and help remain available. The activation
     owner, both clipboard probes, both central dispatchers, and the profiler
     are six newly mandatory release sources.
+34. Conversation Hosts and Notes Actions compiled private Swift helpers and
+    archived **every `NSPasteboard` representation** before their later Driver
+    safety boundary. Independent root-search visual stability, Notes glass
+    fallback, browser fidelity capture, the native AppKit window fixture,
+    Swift-helper preparation, global keyboard/pointer monitoring, glass
+    contrast, and live smoke-study orchestration likewise bypassed the shared
+    policy. Actual disposable fake-process cases reproduced **13 failing
+    paths**, including clipboard-helper compilation, browser/network capture,
+    real AppKit launch preparation, native compiler discovery, preexisting
+    monitor-file deletion, output creation, and direct application startup.
+    All ten actual owners now fail before clipboard archives, filesystem
+    mutation, native helpers, operator observation, application/window
+    launch, screenshots, or backdrop takeover. Pure interference grading,
+    helper keys, deterministic window fixtures, browser help, and a complete
+    mocked-storage smoke-study `--dry-run` remain behavior-proven; every
+    owner is independently mandatory release provenance.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1401,20 +1417,26 @@ offline receipts until their real producers are run again.
     explicit `noninteractive: false` options nor replacement environments
     can weaken the real parent's authority; target resolution stays on its
     capture-free hidden-state path even when callers request an interactive
-    override. The standalone operator-safety suite passes **138 cases and
-    518 assertions**, including pure canonical-inspector ownership, immutable
+    override. The standalone operator-safety suite passes **153 cases and
+    578 assertions**, including pure canonical-inspector ownership, immutable
     subprocess policy, Notes/matrix/scenario cleanup, mocked native-spawn
     cases, default/render/fallback screenshot refusal, exact session lifecycle,
     independent consumer/Actions child-authority refusal, and eight
     fail-closed native visual entrypoints, clipboard privacy, all 127 restored
     agentic commands, truthful optional-scenario refusal, central dispatch,
-    and direct profiler isolation; the separate
+    direct profiler isolation, rich-pasteboard archive refusal, browser
+    capture, AppKit/native-helper isolation, preserved input-monitor files,
+    and safe smoke-study dry runs; the separate
     direct native-input suite passes **43 cases and 89
     assertions** without touching a keyboard, pointer, window, or screen;
     the separate hidden-target identity suite passes
     **14 cases and 66 assertions**, and six pure locked-glass suites pass
-    **114 cases and 357 assertions** without visual capture. Release evidence
-    now fail-closes unless all forty-one actual safety owners—the direct
+    **114 cases and 357 assertions** without visual capture. The combined
+    glass/native-input/window-fixture lane passes **167 cases and 458
+    assertions**; three pure helper-key cases and ten pure smoke-study
+    scheduling/manifest cases also pass without Swift compilation or capture.
+    Release evidence now fail-closes unless all fifty-one actual safety
+    owners—the direct
     session shell, shared
     identity helper, isolated startup, DevTools bootstrap, readiness waiter,
     canonical inspector, main inspector, Actions, Agent Chat, Dictation,
@@ -1423,9 +1445,12 @@ offline receipts until their real producers are run again.
     filterable matrix, both navigators, exact
     target thread, scenario runner, automation-window owner, dedicated
     screenshot verifier, native window owner, native-input owner and behavior
-    suite, activation owner, both pre-Driver clipboard probes, central
-    agentic/DevTools dispatchers, profiler, Driver, shared client, central
-    policy, target resolver, and status announcer—are
+    suite, activation owner, all four pre-Driver clipboard/archive probes,
+    root-search visual proof, Notes glass fallback, browser fidelity capture,
+    native AppKit fixture, Swift helper cache, global input monitor, glass
+    contrast, live smoke study, central agentic/DevTools dispatchers,
+    profiler, Driver, shared client, central policy, target resolver, and
+    status announcer—are
     tracked and included in the canonical release-source inventory. Real
     failing-then-passing mutations cover each previously omitted owner.
     The independent SDK/custom-script runner now forcibly clears inherited
@@ -1446,7 +1471,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **forty-four direct release-owner/proof-gate cases / 132 assertions** and
+    **fifty-four direct release-owner/proof-gate cases / 162 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
