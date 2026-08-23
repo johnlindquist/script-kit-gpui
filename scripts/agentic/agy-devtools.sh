@@ -17,6 +17,8 @@ SURFACE_HINT="auto"
 TARGET_HINT="auto"
 MODE="inspect"
 SESSION_NAME=""
+EXPECTED_SESSION_PID=""
+EXPECTED_SESSION_GENERATION=""
 OUT_ROOT="${PROJECT_ROOT}/.test-output/agy-devtools"
 RUN_ID=""
 PRINT_TIMEOUT="5m"
@@ -61,6 +63,9 @@ Core options:
   --target <target>        auto, main, focused, id:<automation-id>, kind:<target-kind>, title:<substring>.
   --mode <mode>            plan, inspect, act, full. Default: inspect.
   --session <name>         DevTools session hint. Default: agy-devtools-<timestamp>-<pid>.
+  --expected-pid <pid>     Exact owned PID from an isolated-start receipt; required for cleanup.
+  --expected-generation <generation>
+                           Exact owned generation from that same receipt; required for cleanup.
   --out-dir <path>         Output root. Default: .test-output/agy-devtools.
   --run-id <id>            Stable run id. Default: timestamp + surface + prompt hash.
   --run-dir <path>         Existing run dir for compact/cleanup-oriented commands.
@@ -127,6 +132,8 @@ parse_common_args() {
       --target) TARGET_HINT="${2:-auto}"; shift 2 ;;
       --mode) MODE="${2:-inspect}"; shift 2 ;;
       --session) SESSION_NAME="${2:-}"; shift 2 ;;
+      --expected-pid) EXPECTED_SESSION_PID="${2:-}"; shift 2 ;;
+      --expected-generation) EXPECTED_SESSION_GENERATION="${2:-}"; shift 2 ;;
       --out-dir) OUT_ROOT="${2:-}"; shift 2 ;;
       --run-id) RUN_ID="${2:-}"; shift 2 ;;
       --run-dir) RUN_DIR_ARG="${2:-}"; shift 2 ;;
@@ -690,7 +697,9 @@ cmd_compact() {
 cmd_cleanup() {
   parse_common_args "$@"
   [[ -n "$SESSION_NAME" ]] || die "cleanup requires --session <name>"
-  bash scripts/agentic/devtools-session.sh cleanup --session "$SESSION_NAME"
+  bash scripts/agentic/devtools-session.sh cleanup --session "$SESSION_NAME" \
+    --expected-pid "$EXPECTED_SESSION_PID" \
+    --expected-generation "$EXPECTED_SESSION_GENERATION"
 }
 
 case "$SUBCOMMAND" in

@@ -74,17 +74,22 @@ elif [[ "$(pgrep -fl 'script-kit-gpui' 2>/dev/null | grep -E 'script-kit-gpui($|
   echo "[verify-devtools-session] SKIP isolated start: multiple GPUI instances" >&2
 else
   SESSION="dt-smoke-$$"
-  if json="$(bash scripts/agentic/devtools-session.sh start --session "$SESSION" --mode isolated --build never --ready-timeout-sec 60 --prove 2>/dev/null)"; then
+  if json="$(bash scripts/agentic/devtools-session.sh start --session "$SESSION" --mode isolated --build never --ready-timeout-sec 60 --cleanup-on-fail --prove 2>/dev/null)"; then
     if printf '%s' "$json" | grep -q '"ready":true'; then
       pass "isolated start ready:true"
-      bash scripts/agentic/devtools-session.sh cleanup --session "$SESSION" >/dev/null 2>&1 || true
+      owner_pid="$(printf '%s' "$json" | sed -nE 's/.*"ownership":\{"created":true,"pid":([0-9]+),"generation":"[^"]+"\}.*/\1/p')"
+      owner_generation="$(printf '%s' "$json" | sed -nE 's/.*"ownership":\{"created":true,"pid":[0-9]+,"generation":"([^"]+)"\}.*/\1/p')"
+      if [[ -n "$owner_pid" && -n "$owner_generation" ]]; then
+        bash scripts/agentic/devtools-session.sh cleanup --session "$SESSION" \
+          --expected-pid "$owner_pid" --expected-generation "$owner_generation" >/dev/null 2>&1 || true
+      else
+        fail "isolated start did not return exact cleanup ownership"
+      fi
     else
       fail "start without ready:true: $json"
-      bash scripts/agentic/session.sh stop "$SESSION" >/dev/null 2>&1 || true
     fi
   else
     fail "isolated start failed"
-    bash scripts/agentic/session.sh stop "$SESSION" >/dev/null 2>&1 || true
   fi
 fi
 
