@@ -114,6 +114,15 @@ require_clean_source_identity() {
     scripts/devtools/agent_chat.ts
     scripts/devtools/dictation.ts
     scripts/devtools/events.ts
+    scripts/devtools/main.ts
+    scripts/devtools/notes-live-resize.ts
+    scripts/devtools/notes-bottom-resize.ts
+    scripts/devtools/actions-entry-filmstrip.ts
+    scripts/devtools/glass-lifecycle-filmstrip.ts
+    scripts/devtools/rapid-toggle-stress.ts
+    scripts/devtools/glass-observers.ts
+    scripts/devtools/spotlight-sync-filmstrip.ts
+    scripts/devtools/main-window-native-drag.ts
     scripts/devtools/inspect.ts
     scripts/devtools/notes.ts
     scripts/devtools/target-identity.test.ts
