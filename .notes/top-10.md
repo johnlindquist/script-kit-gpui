@@ -1239,6 +1239,43 @@ offline receipts until their real producers are run again.
     definitions are mandatory release provenance; the actual Node story
     suite still correctly reports **two pixel proofs pending**. PF-012 remains
     missing until approved visible runtime observation genuinely exists.
+38. The production PF-005/PF-006 primitives themselves returned false green:
+    duplicate paint nodes hid a later **50-pixel** renderer drift; wrong
+    semantic owners, absent coordinate spaces, `NaN`/zero-area bounds, missing
+    visible rectangles, and narrower clip bounds all reported `Match`. Text
+    lines with no glyph bounds, zero-area paint, hidden visible bounds,
+    missing font/measurement identity, or explicitly returned private content
+    still reported `fullDisplayPass: true`. The receipt schema separately
+    trusted invented comparable-join counts and self-reported fit booleans.
+    One shared `geometry-evidence.ts` owner now defines finite positive
+    observed rectangles and exact visible intersections for production
+    layout, text, and receipt validation. Joins require exactly one model
+    and one paint owner, matching nonempty semantic identity, explicit
+    coordinate space, valid typed role/frame, complete finite geometry, and
+    independent visible/clip agreement. Text proof requires actual positive
+    glyph paint, fingerprinted fonts/content, same-frame scale, nonnegative
+    paint order, independent visible/clip containment, and zero raw private
+    content. Receipt validation recomputes those facts instead of trusting
+    summary booleans. The real GEO-001 producer now directly executes and
+    fingerprints both the layout owner and the new shared geometry owner.
+39. The actual `scroll.test.ts` suite could not run under strict operator
+    safety: its supposedly isolated wheel checks crossed the real
+    `simulateGpuiEvent` input protocol. Arbitrary `deltaMode`, non-finite
+    coordinates, malformed lifecycle phases, and invalid timestamps were
+    forwarded unchecked. Three PF-004 through PF-008 runtime producers also
+    lacked their own boundary and could overwrite an existing receipt after
+    a failed Driver launch. A pure, finite, pixel-only typed wheel encoder
+    now validates the exact wire contract without injecting any event;
+    strict real transports refuse before their first write. All three
+    semantic/layout/text/accessibility/scroll runtime owners refuse before
+    app startup or output mutation, with byte-for-byte preservation of
+    existing receipts. Release now requires all **18 semantic/geometry/
+    text/focus/scroll/registry/runtime** source owners and directly executes
+    every corresponding safe suite. The combined lane passes **236 cases /
+    1,053 assertions across 13 files**, including **76 foundation cases /
+    307 assertions**, **18 pure scroll cases / 65 assertions**, and **three
+    receipt-preservation cases / 11 assertions**; no app, native input,
+    clipboard, screen, or browser is touched.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1533,8 +1570,11 @@ offline receipts until their real producers are run again.
     Three pure canonical-governance suites pass **88 cases / 533 assertions**,
     including **18 workflow anti-forgery cases / 31 assertions**.
     The browser-pixel foundation adds **19 isolated cases / 87 assertions**;
-    its combined schema/workflow/completion lane passes **139 cases / 750
-    assertions** without a browser. Publication also requires the exact
+    its combined semantic/schema/workflow/geometry lane passes **236 cases /
+    1,053 assertions across 13 files** without a browser. The pure typed
+    scroll lane adds **18 cases / 65 assertions**, and all three real
+    proof-foundation producers preserve existing receipts across **three
+    cases / 11 assertions**. Publication also requires the exact
     geometry producer, executable suite, shared harness, story manifest, and
     both story definitions; no synthetic rectangle can satisfy PF-012.
     The independent SDK/custom-script runner now forcibly clears inherited
@@ -1555,7 +1595,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **seventy-four direct release-owner/proof-gate cases / 224 assertions** and
+    **ninety-two direct release-owner/proof-gate cases / 286 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
