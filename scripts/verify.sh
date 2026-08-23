@@ -117,15 +117,21 @@ require_clean_source_identity() {
     scripts/devtools/main.ts
     scripts/devtools/notes-live-resize.ts
     scripts/devtools/notes-bottom-resize.ts
+    scripts/devtools/notes-glass-entry-fallback.ts
     scripts/devtools/actions-entry-filmstrip.ts
     scripts/devtools/glass-lifecycle-filmstrip.ts
     scripts/devtools/rapid-toggle-stress.ts
     scripts/devtools/glass-observers.ts
+    scripts/devtools/glass-interference.ts
+    scripts/devtools/glass-motion-contrast.ts
+    scripts/devtools/glass-native-helper-cache.ts
     scripts/devtools/spotlight-sync-filmstrip.ts
     scripts/devtools/main-window-native-drag.ts
     scripts/devtools/act.ts
     scripts/devtools/devtools.ts
     scripts/devtools/perf.ts
+    scripts/devtools/capture-dom-fidelity.ts
+    scripts/devtools/window-engine-foundation.ts
     scripts/devtools/inspect.ts
     scripts/devtools/notes.ts
     scripts/devtools/target-identity.test.ts
@@ -170,6 +176,10 @@ require_clean_source_identity() {
     scripts/agentic/index.ts
     scripts/agentic/flow-composer-multiline-probe.ts
     scripts/agentic/cons-flow-ux/dictation-history-probe.ts
+    scripts/agentic/cons-flow-ux/conversation-hosts-probe.ts
+    scripts/agentic/cons-flow-ux/notes-actions-probe.ts
+    scripts/agentic/root-search-visual-stability.ts
+    scripts/agentic/glass-smoke-study.ts
     scripts/agentic/automation-window.ts
     scripts/agentic/verify-shot.ts
     scripts/agentic/window.ts
