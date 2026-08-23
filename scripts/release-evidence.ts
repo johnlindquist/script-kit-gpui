@@ -117,8 +117,10 @@ const REQUIRED_PROOF_SUITES = [
 
 const REQUIRED_OPERATOR_SAFETY_OWNERS = [
   "scripts/agentic/session.sh",
+  "scripts/agentic/devtools-session-lib.sh",
   "scripts/agentic/start-isolated.sh",
   "scripts/agentic/devtools-session.sh",
+  "scripts/agentic/wait-session-ready.sh",
   "scripts/devtools/driver.ts",
   "scripts/devtools/lib/client.ts",
   "scripts/devtools/lib/operator-safety.ts",

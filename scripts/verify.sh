@@ -149,8 +149,10 @@ require_clean_source_identity() {
     scripts/devtools/test-status.ts
     scripts/agent-check.sh
     scripts/agentic/session.sh
+    scripts/agentic/devtools-session-lib.sh
     scripts/agentic/start-isolated.sh
     scripts/agentic/devtools-session.sh
+    scripts/agentic/wait-session-ready.sh
     scripts/agentic/agent-cargo.sh
     scripts/agentic/cargo-cache-locks.sh
     scripts/agentic/cargo-build-policy.test.ts
