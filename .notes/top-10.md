@@ -1453,9 +1453,31 @@ offline receipts until their real producers are run again.
     GOV-003 as stale/missing until its actual four compiler-contract cases are
     rerun. The full nonintrusive proof lane now passes **284 cases / 1,695
     assertions across 15 suites**; the exact standalone publication gate
-    independently rejects every omitted owner in **116 cases / 362
+    independently rejects every omitted owner in **117 cases / 365
     assertions**. No application, browser, Cargo/rustc, Swift, native input,
     clipboard, screenshots, microphone, or live AI is started.
+50. The real custom-script SDK verifier accepted an arbitrary absolute script
+    outside the reviewed repository and executed it successfully despite
+    strict noninteractive mode. JavaScript timers silently truncated
+    `SDK_TEST_TIMEOUT=2147484` to approximately **1ms**, producing a false
+    failure after a child had already started; malformed noninteractive
+    values disabled protection, huge worker counts were accepted, missing
+    filter values or unknown flags expanded unintended execution, and timeout
+    cleanup killed only the immediate script process. A disposable **3-second
+    grandchild** kept the owner's pipes open for the full three seconds after
+    its supposed one-second timeout. The canonical SDK runner now accepts
+    only exact `0`/`1` authority, known complete options, timer-safe
+    positive seconds, at most **eight explicitly requested workers** (still
+    defaulting to two in noninteractive mode), and canonical descendants of
+    the reviewed `tests/sdk` directory. Every child runs in its own process
+    group; timeout cleanup first terminates that exact owned group, escalates
+    if necessary, and independently drains all pipes before returning. The
+    reproduced grandchild now exits in approximately **one second**, with
+    no survivor. **32 SDK process/ownership cases / 96 assertions** pass;
+    **25 actual editor, hotkey, field/date, and synthetic window-management
+    authoring behaviors** pass without opening an application or using real
+    input. Standalone release mutation now explicitly proves that removing
+    the actual `scripts/test-runner.ts` owner blocks publication.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -3172,6 +3194,12 @@ with the same runtime command contract.
    rejection; prove every stale/unknown window-action ID rejects, valid
    synthetic IDs succeed, and the complete strict suite stays green without
    weakening assertions, enabling system input, or fabricating native proof.
+   Keep the executable SDK verifier restricted to reviewed `tests/sdk`
+   descendants; reject malformed noninteractive authority, unsupported
+   flags, timer overflow, unbounded workers, and ambiguous filters before a
+   child starts. Run every child in its own owned process group and prove
+   that timeout cleanup terminates grandchildren without touching unrelated
+   operator processes.
 2. Inventory every SDK export, prompt, action, metadata field, permission,
    dependency, message shape, and command schema consumed by the Rust host.
 3. Reconcile SDK exports, generated SDK references, starter templates,
