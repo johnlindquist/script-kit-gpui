@@ -7,6 +7,7 @@
  */
 
 import { resolve } from "path";
+import { assertNoninteractiveSubprocess } from "../devtools/lib/operator-safety.ts";
 
 const SCHEMA_VERSION = 1;
 const PROJECT_ROOT = resolve(import.meta.dir, "../..");
@@ -33,10 +34,11 @@ function stderrLog(event: string, fields: Record<string, unknown> = {}): void {
   console.error(JSON.stringify({ event, ts: new Date().toISOString(), ...fields }));
 }
 
-async function runTool(
+export async function runTool(
   cmd: string[],
   label: string
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  assertNoninteractiveSubprocess(cmd);
   const proc = Bun.spawn(cmd, {
     stdout: "pipe",
     stderr: "pipe",
@@ -386,7 +388,7 @@ function buildTargetJson(): AutomationTargetJson {
   }
 }
 
-switch (subcmd) {
+if (import.meta.main) switch (subcmd) {
   case "resolve": {
     const targetJson = buildTargetJson();
     const result = await resolveTarget(session, targetJson);

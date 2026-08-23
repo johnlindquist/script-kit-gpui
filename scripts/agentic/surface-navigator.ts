@@ -9,6 +9,7 @@
 
 import { existsSync, mkdirSync, statSync, writeFileSync } from "fs";
 import { resolve } from "path";
+import { assertNoninteractiveSubprocess } from "../devtools/lib/operator-safety.ts";
 import {
   ATTACHED_POPUP_SURFACE_MATRIX,
   selectedAttachedPopupCases,
@@ -575,7 +576,8 @@ async function safeInteractWithSurface(
   };
 }
 
-async function runTool(cmd: string[]): Promise<JsonObject> {
+export async function runTool(cmd: string[]): Promise<JsonObject> {
+  assertNoninteractiveSubprocess(cmd);
   const proc = Bun.spawn(cmd, {
     cwd: PROJECT_ROOT,
     stdout: "pipe",
