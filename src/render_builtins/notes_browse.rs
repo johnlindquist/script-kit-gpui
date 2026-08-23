@@ -72,7 +72,10 @@ impl ScriptListApp {
     fn build_notes_browse_portal_part(
         &self,
         row: &crate::notes::search_model::NoteSearchRow,
-    ) -> Result<crate::ai::message_parts::AiContextPart, crate::ai::reliability::AppFailureRecord> {
+    ) -> Result<
+        crate::ai::message_parts::AiContextPart,
+        Box<crate::ai::reliability::AppFailureRecord>,
+    > {
         let document = crate::notes::search_model::load_note_search_document(
             row.id,
             &crate::notes::notes_brain_days_dir(),
@@ -81,10 +84,7 @@ impl ScriptListApp {
         let target = crate::ai::TabAiTargetContext {
             source: "NotesBrowse".to_string(),
             kind: row.kind.as_str().to_string(),
-            semantic_id: crate::protocol::generate_semantic_id_named(
-                row.kind.as_str(),
-                &stable_id,
-            ),
+            semantic_id: crate::protocol::generate_semantic_id_named(row.kind.as_str(), &stable_id),
             label: document.title.clone(),
             metadata: Some(serde_json::json!({
                 "documentId": stable_id,
@@ -143,7 +143,10 @@ impl ScriptListApp {
                             destination = destination.as_str(),
                             "notes_browse_open_in_notes_window_failed"
                         );
-                        self.show_error_toast("The selected note couldn’t be opened.".to_string(), cx);
+                        self.show_error_toast(
+                            "The selected note couldn’t be opened.".to_string(),
+                            cx,
+                        );
                         false
                     }
                 }
@@ -197,8 +200,8 @@ impl ScriptListApp {
             .unwrap_or(filtered_len);
         let preview_note = filtered_notes.get(selected_index).cloned();
         let destination = search.destination;
-        let in_portal = destination
-            == crate::notes::search_model::NoteSearchDestination::AttachNote;
+        let in_portal =
+            destination == crate::notes::search_model::NoteSearchDestination::AttachNote;
 
         let handle_key = cx.listener(
             move |this: &mut Self,
@@ -346,7 +349,8 @@ impl ScriptListApp {
                                             search,
                                         } = &mut this.current_view
                                         {
-                                            let was_selected = search.selected_id == Some(activation_row.id);
+                                            let was_selected =
+                                                search.selected_id == Some(activation_row.id);
                                             search.select_index(display_ix);
                                             crate::ui_foundation::should_submit_selected_row_click(
                                                 was_selected,
@@ -453,8 +457,11 @@ impl ScriptListApp {
                 .into_any_element(),
         };
 
-        let failure_notice = search.state.failure().filter(|_| !filtered_notes.is_empty()).map(
-            |_failure| {
+        let failure_notice = search
+            .state
+            .failure()
+            .filter(|_| !filtered_notes.is_empty())
+            .map(|_failure| {
                 crate::components::render_info_state(
                     crate::components::InfoStateSpec::new("notes-browse-stale-results")
                         .layout(crate::components::InfoStateLayout::InlineRow)
@@ -464,8 +471,7 @@ impl ScriptListApp {
                     &self.theme,
                     cx,
                 )
-            },
-        );
+            });
 
         let list_pane = div()
             .relative()

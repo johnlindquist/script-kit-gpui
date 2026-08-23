@@ -99,7 +99,7 @@ impl ScriptListApp {
                     window_control::focus_window(window_id).map_err(|error| error.to_string())
                 })
                 .await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(entity) = this.upgrade() else {
                     return;
                 };

@@ -49,7 +49,8 @@ impl ScriptListApp {
                 "profile": entry.profile,
             })),
         };
-        let _needing = script_kit_gpui::favicons::domains_needing_favicons(&[entry.url.clone()]);
+        let _needing =
+            script_kit_gpui::favicons::domains_needing_favicons(std::slice::from_ref(&entry.url));
         let label = crate::ai::format_explicit_target_chip_label(&target);
         crate::ai::message_parts::AiContextPart::FocusedTarget { target, label }
     }

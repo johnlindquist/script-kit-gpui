@@ -8,19 +8,7 @@ use gpui_component::{
     Colorize as _,
 };
 
-#[derive(Clone, Copy, Debug)]
-enum ThemeChooserSliderBinding {
-    SurfaceOpacity,
-    SecondaryTextOpacity,
-    FocusedBackgroundOpacity,
-    GlassVeilOpacity,
-    GlassTintOpacity,
-    GlassMorphDuration,
-    GlassMorphInset,
-    UiFontSize,
-    GradientAngle { layer_index: Option<usize> },
-    GradientOpacity { layer_index: Option<usize> },
-}
+include!("theme_chooser_state.rs");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ThemeChooserSliderApplyMode {
@@ -96,60 +84,28 @@ pub(crate) struct ThemeChooserControls {
     subscriptions: Vec<Subscription>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum ThemeChooserBase {
-    BuiltIn {
-        index: usize,
-        name: String,
-        fingerprint: u64,
-    },
-    User {
-        slug: String,
-        name: String,
-        fingerprint: u64,
-    },
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ThemeChooserSaveReceipt {
-    pub(crate) slug: String,
-    pub(crate) name: String,
-    pub(crate) fingerprint: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ThemeChooserDeleteCandidate {
-    pub(crate) slug: String,
-    pub(crate) name: String,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ThemeChooserDeletedTheme {
-    pub(crate) slug: String,
-    pub(crate) name: String,
-    pub(crate) contents: String,
-}
-
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) enum ThemeChooserManagementStatus {
     #[default]
     Clean,
     Dirty,
-    Saved { name: String },
-    DuplicateName { requested: String, resolved: String },
-    DeleteNeedsConfirmation { name: String },
-    DeletedCanRestore { name: String },
-    Error { message: String },
+    Saved {
+        name: String,
+    },
+    DuplicateName {
+        requested: String,
+        resolved: String,
+    },
+    DeleteNeedsConfirmation {
+        name: String,
+    },
+    DeletedCanRestore {
+        name: String,
+    },
+    Error {
+        message: String,
+    },
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ThemeChooserManagementButtonKind {
-    Primary,
-    Neutral,
-    Destructive,
-}
-
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ThemeChooserManagementState {
@@ -159,23 +115,6 @@ pub(crate) struct ThemeChooserManagementState {
     pub(crate) pending_delete: Option<ThemeChooserDeleteCandidate>,
     pub(crate) last_deleted: Option<ThemeChooserDeletedTheme>,
     pub(crate) status: ThemeChooserManagementStatus,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ThemeChooserManagementSnapshot {
-    pub(crate) status_label: String,
-    pub(crate) status_value: String,
-    pub(crate) status_kind: String,
-    pub(crate) is_dirty: bool,
-    pub(crate) save_name: String,
-    pub(crate) resolved_save_name: String,
-    pub(crate) duplicate_status_kind: Option<String>,
-    pub(crate) base_name: Option<String>,
-    pub(crate) base_slug: Option<String>,
-    pub(crate) can_update: bool,
-    pub(crate) update_disabled: Option<String>,
-    pub(crate) delete_disabled: Option<String>,
-    pub(crate) restore_disabled: Option<String>,
 }
 
 const THEME_LIST_PAGE_SIZE: usize = 5;
@@ -194,33 +133,6 @@ fn sync_theme_chooser_preview(
         source,
         sync_native_vibrancy,
     );
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ThemeChooserMatchSummary {
-    catalog_total: usize,
-    catalog_dark: usize,
-    catalog_light: usize,
-    visible_total: usize,
-    visible_dark: usize,
-    visible_light: usize,
-}
-
-#[derive(Clone, Debug)]
-struct ThemeChooserContrastRow {
-    label: String,
-    ratio: f32,
-    minimum: f32,
-    passes: bool,
-}
-
-#[derive(Clone, Debug)]
-struct ThemeChooserContrastSnapshot {
-    rows: Vec<ThemeChooserContrastRow>,
-    passing: usize,
-    total: usize,
-    worst_label: String,
-    worst_ratio: f32,
 }
 
 fn render_theme_chooser_browser_main(
@@ -389,14 +301,17 @@ impl ScriptListApp {
     fn new_theme_chooser_slider(
         &self,
         binding: ThemeChooserSliderBinding,
-        min: f32,
-        max: f32,
-        step: f32,
-        initial: f32,
+        range: ThemeChooserSliderRange,
         window: &mut Window,
         cx: &mut Context<Self>,
         subscriptions: &mut Vec<Subscription>,
     ) -> gpui::Entity<SliderState> {
+        let ThemeChooserSliderRange {
+            min,
+            max,
+            step,
+            initial,
+        } = range;
         let slider = cx.new(|_| {
             SliderState::new()
                 .min(min)
@@ -468,14 +383,17 @@ impl ScriptListApp {
     fn new_theme_chooser_gradient_controls(
         &self,
         layer_index: Option<usize>,
-        from: u32,
-        to: u32,
-        angle: f32,
-        opacity: f32,
+        values: ThemeChooserGradientValues,
         window: &mut Window,
         cx: &mut Context<Self>,
         subscriptions: &mut Vec<Subscription>,
     ) -> ThemeChooserGradientControls {
+        let ThemeChooserGradientValues {
+            from,
+            to,
+            angle,
+            opacity,
+        } = values;
         ThemeChooserGradientControls {
             from: self.new_theme_chooser_color_controls(
                 ThemeChooserColorBinding::GradientFrom { layer_index },
@@ -493,20 +411,24 @@ impl ScriptListApp {
             ),
             angle: self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::GradientAngle { layer_index },
-                0.0,
-                360.0,
-                1.0,
-                angle.rem_euclid(360.0),
+                ThemeChooserSliderRange {
+                    min: 0.0,
+                    max: 360.0,
+                    step: 1.0,
+                    initial: angle.rem_euclid(360.0),
+                },
                 window,
                 cx,
                 subscriptions,
             ),
             opacity: self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::GradientOpacity { layer_index },
-                0.0,
-                1.0,
-                0.01,
-                opacity.clamp(0.0, 1.0),
+                ThemeChooserSliderRange {
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.01,
+                    initial: opacity.clamp(0.0, 1.0),
+                },
                 window,
                 cx,
                 subscriptions,
@@ -537,96 +459,114 @@ impl ScriptListApp {
             );
             let surface_opacity = self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::SurfaceOpacity,
-                0.0,
-                1.0,
-                0.01,
-                opacity.main,
+                ThemeChooserSliderRange {
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.01,
+                    initial: opacity.main,
+                },
                 window,
                 cx,
                 &mut subscriptions,
             );
             let secondary_text_opacity = self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::SecondaryTextOpacity,
-                0.0,
-                1.0,
-                0.01,
-                opacity.text_placeholder,
+                ThemeChooserSliderRange {
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.01,
+                    initial: opacity.text_placeholder,
+                },
                 window,
                 cx,
                 &mut subscriptions,
             );
             let focused_background_opacity = self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::FocusedBackgroundOpacity,
-                0.0,
-                1.0,
-                0.01,
-                opacity.selected,
+                ThemeChooserSliderRange {
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.01,
+                    initial: opacity.selected,
+                },
                 window,
                 cx,
                 &mut subscriptions,
             );
             let glass_veil_opacity = self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::GlassVeilOpacity,
-                0.0,
-                1.0,
-                0.01,
-                opacity
-                    .glass_veil_opacity
-                    .unwrap_or(crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP),
+                ThemeChooserSliderRange {
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.01,
+                    initial: opacity
+                        .glass_veil_opacity
+                        .unwrap_or(crate::theme::opacity::OPACITY_GLASS_MODE_VEIL_CAP),
+                },
                 window,
                 cx,
                 &mut subscriptions,
             );
             let glass_tint_opacity = self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::GlassTintOpacity,
-                0.0,
-                1.0,
-                0.01,
-                opacity.glass_tint_opacity.unwrap_or(0.0),
+                ThemeChooserSliderRange {
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.01,
+                    initial: opacity.glass_tint_opacity.unwrap_or(0.0),
+                },
                 window,
                 cx,
                 &mut subscriptions,
             );
             let glass_morph_duration = self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::GlassMorphDuration,
-                0.0,
-                1.0,
-                0.01,
-                opacity
-                    .glass_morph_duration
-                    .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION),
+                ThemeChooserSliderRange {
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.01,
+                    initial: opacity
+                        .glass_morph_duration
+                        .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_DURATION),
+                },
                 window,
                 cx,
                 &mut subscriptions,
             );
             let glass_morph_inset = self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::GlassMorphInset,
-                0.0,
-                0.4,
-                0.01,
-                opacity
-                    .glass_morph_inset
-                    .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET),
+                ThemeChooserSliderRange {
+                    min: 0.0,
+                    max: 0.4,
+                    step: 0.01,
+                    initial: opacity
+                        .glass_morph_inset
+                        .unwrap_or(crate::theme::opacity::GLASS_MORPH_DEFAULT_INSET),
+                },
                 window,
                 cx,
                 &mut subscriptions,
             );
             let ui_font_size = self.new_theme_chooser_slider(
                 ThemeChooserSliderBinding::UiFontSize,
-                12.0,
-                24.0,
-                0.5,
-                fonts.ui_size,
+                ThemeChooserSliderRange {
+                    min: 12.0,
+                    max: 24.0,
+                    step: 0.5,
+                    initial: fonts.ui_size,
+                },
                 window,
                 cx,
                 &mut subscriptions,
             );
             let gradient_base = self.new_theme_chooser_gradient_controls(
                 None,
-                gradient.from,
-                gradient.to,
-                gradient.angle,
-                gradient.opacity,
+                ThemeChooserGradientValues {
+                    from: gradient.from,
+                    to: gradient.to,
+                    angle: gradient.angle,
+                    opacity: gradient.opacity,
+                },
                 window,
                 cx,
                 &mut subscriptions,
@@ -638,10 +578,12 @@ impl ScriptListApp {
                 .map(|(index, layer)| {
                     self.new_theme_chooser_gradient_controls(
                         Some(index),
-                        layer.from,
-                        layer.to,
-                        layer.angle,
-                        layer.opacity,
+                        ThemeChooserGradientValues {
+                            from: layer.from,
+                            to: layer.to,
+                            angle: layer.angle,
+                            opacity: layer.opacity,
+                        },
                         window,
                         cx,
                         &mut subscriptions,
@@ -1511,15 +1453,18 @@ impl ScriptListApp {
         label: &'static str,
         kind: ThemeChooserManagementButtonKind,
         disabled: bool,
-        text_hex: u32,
-        bg_rgba: u32,
-        border_rgba: u32,
-        hover_rgba: u32,
+        style: ThemeChooserManagementButtonStyle,
         on_click: F,
     ) -> gpui::AnyElement
     where
         F: Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     {
+        let ThemeChooserManagementButtonStyle {
+            text_hex,
+            bg_rgba,
+            border_rgba,
+            hover_rgba,
+        } = style;
         let hover_rgba = Self::theme_chooser_management_hover_token(kind, hover_rgba);
         div()
             .id(id)
@@ -2677,13 +2622,16 @@ impl ScriptListApp {
         &self,
         title: String,
         enabled: bool,
-        from_hex: u32,
-        to_hex: u32,
-        angle: f32,
-        opacity: f32,
+        values: ThemeChooserGradientValues,
         controls: &ThemeChooserGradientControls,
         chrome: &theme::AppChromeColors,
     ) -> gpui::AnyElement {
+        let ThemeChooserGradientValues {
+            from: from_hex,
+            to: to_hex,
+            angle,
+            opacity,
+        } = values;
         div()
             .w_full()
             .flex()
@@ -4118,10 +4066,17 @@ impl ScriptListApp {
         // ── Preview panel with customization controls (Sliders & ColorPickers) ──
         self.ensure_theme_chooser_controls(window, cx);
         self.sync_theme_chooser_control_values(window, cx);
-        let controls = self
-            .theme_chooser_controls
-            .as_ref()
-            .expect("theme chooser controls should be initialized before rendering");
+        let Some(controls) = self.theme_chooser_controls.as_ref() else {
+            tracing::error!("theme_chooser.controls_unavailable_after_initialization");
+            return crate::components::render_simple_empty_state(
+                "theme-chooser-controls-unavailable",
+                "Theme controls could not be loaded",
+                "alert-circle",
+                None,
+                &self.theme,
+                cx,
+            );
+        };
         let opacity = self.theme.get_opacity();
         let fonts = self.theme.get_fonts();
         let accent_name_str = Self::accent_color_name(accent_color);
@@ -4181,10 +4136,12 @@ impl ScriptListApp {
                         "Save Copy",
                         ThemeChooserManagementButtonKind::Primary,
                         false,
-                        chrome.accent_badge_text_hex,
-                        chrome.accent_badge_bg_rgba,
-                        chrome.accent_badge_border_rgba,
-                        save_copy_hover_rgba,
+                        ThemeChooserManagementButtonStyle {
+                            text_hex: chrome.accent_badge_text_hex,
+                            bg_rgba: chrome.accent_badge_bg_rgba,
+                            border_rgba: chrome.accent_badge_border_rgba,
+                            hover_rgba: save_copy_hover_rgba,
+                        },
                         move |_, _, cx| {
                             cx.stop_propagation();
                             if let Some(app) = save_click_entity.upgrade() {
@@ -4202,14 +4159,16 @@ impl ScriptListApp {
                         "Update",
                         ThemeChooserManagementButtonKind::Neutral,
                         update_disabled,
-                        if update_disabled {
-                            text_muted
-                        } else {
-                            text_primary
+                        ThemeChooserManagementButtonStyle {
+                            text_hex: if update_disabled {
+                                text_muted
+                            } else {
+                                text_primary
+                            },
+                            bg_rgba: chrome.whisper_surface_rgba,
+                            border_rgba: chrome.whisper_border_rgba,
+                            hover_rgba: neutral_hover_rgba,
                         },
-                        chrome.whisper_surface_rgba,
-                        chrome.whisper_border_rgba,
-                        neutral_hover_rgba,
                         move |_, _, cx| {
                             cx.stop_propagation();
                             if let Some(app) = update_click_entity.upgrade() {
@@ -4227,14 +4186,16 @@ impl ScriptListApp {
                         "Delete",
                         ThemeChooserManagementButtonKind::Destructive,
                         delete_disabled,
-                        if delete_disabled {
-                            text_muted
-                        } else {
-                            ui_error
+                        ThemeChooserManagementButtonStyle {
+                            text_hex: if delete_disabled {
+                                text_muted
+                            } else {
+                                ui_error
+                            },
+                            bg_rgba: chrome.whisper_surface_rgba,
+                            border_rgba: chrome.whisper_border_rgba,
+                            hover_rgba: destructive_hover_rgba,
                         },
-                        chrome.whisper_surface_rgba,
-                        chrome.whisper_border_rgba,
-                        destructive_hover_rgba,
                         move |_, _, cx| {
                             cx.stop_propagation();
                             if let Some(app) = delete_click_entity.upgrade() {
@@ -4252,14 +4213,16 @@ impl ScriptListApp {
                         "Restore",
                         ThemeChooserManagementButtonKind::Neutral,
                         restore_disabled,
-                        if restore_disabled {
-                            text_muted
-                        } else {
-                            text_primary
+                        ThemeChooserManagementButtonStyle {
+                            text_hex: if restore_disabled {
+                                text_muted
+                            } else {
+                                text_primary
+                            },
+                            bg_rgba: chrome.whisper_surface_rgba,
+                            border_rgba: chrome.whisper_border_rgba,
+                            hover_rgba: neutral_hover_rgba,
                         },
-                        chrome.whisper_surface_rgba,
-                        chrome.whisper_border_rgba,
-                        neutral_hover_rgba,
                         move |_, _, cx| {
                             cx.stop_propagation();
                             if let Some(app) = restore_click_entity.upgrade() {
@@ -4615,26 +4578,32 @@ impl ScriptListApp {
                         self.render_theme_chooser_gradient_layer_controls(
                             "Base Layer".to_string(),
                             gradient_enabled,
-                            self.theme
-                                .background_gradient
-                                .as_ref()
-                                .map(|gradient| gradient.from)
-                                .unwrap_or_default(),
-                            self.theme
-                                .background_gradient
-                                .as_ref()
-                                .map(|gradient| gradient.to)
-                                .unwrap_or_default(),
-                            self.theme
-                                .background_gradient
-                                .as_ref()
-                                .map(|gradient| gradient.angle)
-                                .unwrap_or_default(),
-                            self.theme
-                                .background_gradient
-                                .as_ref()
-                                .map(|gradient| gradient.opacity)
-                                .unwrap_or(1.0),
+                            ThemeChooserGradientValues {
+                                from: self
+                                    .theme
+                                    .background_gradient
+                                    .as_ref()
+                                    .map(|gradient| gradient.from)
+                                    .unwrap_or_default(),
+                                to: self
+                                    .theme
+                                    .background_gradient
+                                    .as_ref()
+                                    .map(|gradient| gradient.to)
+                                    .unwrap_or_default(),
+                                angle: self
+                                    .theme
+                                    .background_gradient
+                                    .as_ref()
+                                    .map(|gradient| gradient.angle)
+                                    .unwrap_or_default(),
+                                opacity: self
+                                    .theme
+                                    .background_gradient
+                                    .as_ref()
+                                    .map(|gradient| gradient.opacity)
+                                    .unwrap_or(1.0),
+                            },
                             &controls.gradient_base,
                             &chrome,
                         ),
@@ -4665,10 +4634,12 @@ impl ScriptListApp {
                             .child(self.render_theme_chooser_gradient_layer_controls(
                                 format!("Layer {}", i + 1),
                                 layer.enabled,
-                                layer.from,
-                                layer.to,
-                                layer.angle,
-                                layer.opacity,
+                                ThemeChooserGradientValues {
+                                    from: layer.from,
+                                    to: layer.to,
+                                    angle: layer.angle,
+                                    opacity: layer.opacity,
+                                },
                                 layer_controls,
                                 &chrome,
                             ))
@@ -4702,10 +4673,12 @@ impl ScriptListApp {
                         "Add Layer",
                         ThemeChooserManagementButtonKind::Neutral,
                         false,
-                        text_primary,
-                        chrome.whisper_surface_rgba,
-                        chrome.whisper_border_rgba,
-                        neutral_hover_rgba,
+                        ThemeChooserManagementButtonStyle {
+                            text_hex: text_primary,
+                            bg_rgba: chrome.whisper_surface_rgba,
+                            border_rgba: chrome.whisper_border_rgba,
+                            hover_rgba: neutral_hover_rgba,
+                        },
                         move |_, _, cx| {
                             cx.stop_propagation();
                             if let Some(app) = add_layer_entity.upgrade() {
@@ -4723,14 +4696,16 @@ impl ScriptListApp {
                         "Remove Layer",
                         ThemeChooserManagementButtonKind::Neutral,
                         remove_disabled,
-                        if remove_disabled {
-                            text_muted
-                        } else {
-                            text_primary
+                        ThemeChooserManagementButtonStyle {
+                            text_hex: if remove_disabled {
+                                text_muted
+                            } else {
+                                text_primary
+                            },
+                            bg_rgba: chrome.whisper_surface_rgba,
+                            border_rgba: chrome.whisper_border_rgba,
+                            hover_rgba: neutral_hover_rgba,
                         },
-                        chrome.whisper_surface_rgba,
-                        chrome.whisper_border_rgba,
-                        neutral_hover_rgba,
                         move |_, _, cx| {
                             cx.stop_propagation();
                             if let Some(app) = remove_layer_entity.upgrade() {
@@ -5080,361 +5055,4 @@ impl ScriptListApp {
 }
 
 #[cfg(test)]
-mod theme_chooser_zero_match_paint_tests {
-    use super::*;
-    use gpui::AppContext;
-
-    struct TestThemeChooserZeroMatch;
-
-    impl gpui::Render for TestThemeChooserZeroMatch {
-        fn render(
-            &mut self,
-            _window: &mut gpui::Window,
-            _cx: &mut gpui::Context<Self>,
-        ) -> impl gpui::IntoElement {
-            let list_colors =
-                crate::list_item::ListItemColors::from_theme(&crate::theme::Theme::default());
-
-            render_theme_chooser_browser_main(
-                "definitely-no-theme-matches",
-                0,
-                div().child("unexpected result row").into_any_element(),
-                div()
-                    .flex_1()
-                    .child("No matching themes")
-                    .into_any_element(),
-                div().w_1_2().child("Theme Preview").into_any_element(),
-                list_colors,
-            )
-        }
-    }
-
-    #[gpui::test]
-    fn zero_match_renders_builtin_leading_separator_with_non_zero_paint_bounds(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use gpui::px;
-
-        let window = cx.update(|cx| {
-            let mut options = gpui::WindowOptions::default();
-            options.window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
-                gpui::point(px(0.0), px(0.0)),
-                gpui::size(px(748.0), px(320.0)),
-            )));
-            cx.open_window(options, |_, cx| cx.new(|_| TestThemeChooserZeroMatch))
-                .expect("theme chooser zero-match paint test window should open")
-        });
-
-        cx.run_until_parked();
-
-        window
-            .update(cx, |_, window, _| {
-                let measurement = window
-                    .debug_bounds_entries()
-                    .iter()
-                    .find(|entry| {
-                        entry.selector
-                            == crate::components::builtin_leading_separator::BUILTIN_LEADING_SEPARATOR_ID
-                    })
-                    .expect("zero-match theme chooser should paint the shared leading separator");
-
-                assert!(measurement.bounds.size.width > px(0.0));
-                assert!(measurement.bounds.size.height > px(0.0));
-            })
-            .expect("theme chooser zero-match paint test window should remain available");
-    }
-}
-
-#[cfg(test)]
-mod theme_chooser_chrome_audit {
-    //! Source audits for footer/chrome decisions in the Theme Designer.
-    //! Forbidden-pattern needles are built with `concat!` so the audit can
-    //! never match its own assertion text (the failure mode that previously
-    //! made these tests fail on a clean tree).
-
-    #[test]
-    fn theme_chooser_uses_truthful_actions_footer() {
-        let source = include_str!("theme_chooser.rs");
-        let generic_hints = concat!("universal_prompt_", "hints()");
-        assert!(
-            !source.contains(generic_hints),
-            "theme_chooser should use its own truthful hint set"
-        );
-        assert!(
-            source.contains("render_simple_hint_strip("),
-            "theme_chooser should use render_simple_hint_strip"
-        );
-        for label in ["↵ Done", "⌘K Actions", "Esc Undo"] {
-            assert!(
-                source.contains(&format!("SharedString::from(\"{label}\")")),
-                "theme_chooser footer should advertise truthful '{label}' hint"
-            );
-        }
-        // Chaos OF-7: the footer is capped at the three-affordance budget
-        // (.impeccable.md); Customize/Remix moved to ⌘K discovery. Their
-        // shortcut labels must NOT reappear as footer hints.
-        for banished in [
-            "SharedString::from(\"⌘E Customize\")",
-            "SharedString::from(\"⌘J Remix\")",
-        ] {
-            assert!(
-                !source.contains(banished),
-                "footer is capped at 3 affordances; {banished} belongs in the ⌘K actions dialog"
-            );
-        }
-    }
-
-    #[test]
-    fn theme_chooser_footer_holds_three_affordance_budget() {
-        // Behavior-rung lock for the same OF-7 decision: the hint items
-        // themselves stay within the .impeccable.md footer budget.
-        let hints = crate::ScriptListApp::theme_chooser_hint_items();
-        assert_eq!(
-            hints.len(),
-            3,
-            "footer ≤3 affordances; discovery lives in ⌘K"
-        );
-    }
-
-    #[test]
-    fn theme_chooser_has_no_legacy_multi_shortcut_footer() {
-        let source = include_str!("theme_chooser.rs");
-        let legacy = concat!(".child(short", "cut(\"⌘[]\", \"Accent\"))");
-        assert!(
-            !source.contains(legacy),
-            "theme_chooser should not have legacy multi-shortcut footer"
-        );
-    }
-
-    #[test]
-    fn theme_chooser_has_no_prompt_footer() {
-        let source = include_str!("theme_chooser.rs");
-        let legacy = concat!("Prompt", "Footer::new(");
-        assert!(
-            !source.contains(legacy),
-            "theme_chooser should not use PromptFooter"
-        );
-    }
-
-    #[test]
-    fn theme_chooser_live_preview_uses_shared_shell() {
-        let source = include_str!("theme_chooser.rs");
-        assert!(
-            source.contains("render_minimal_list_prompt_shell("),
-            "theme_chooser live preview should use the shared minimal-list prompt shell"
-        );
-        let bespoke_keycap = concat!("render_theme_chooser_preview_", "keycap");
-        assert!(
-            !source.contains(bespoke_keycap),
-            "bespoke preview keycap helper should be removed"
-        );
-    }
-}
-
-#[cfg(test)]
-mod theme_chooser_filter_tests {
-    use super::*;
-
-    fn preset_only_catalog() -> Vec<ThemeChooserCatalogEntry> {
-        let presets = theme::presets::presets_cached();
-        let preview_colors = theme::presets::preset_preview_colors_cached();
-        presets
-            .iter()
-            .enumerate()
-            .map(|(index, preset)| ThemeChooserCatalogEntry {
-                kind: ThemeChooserCatalogKind::BuiltIn(index),
-                name: preset.name.to_string(),
-                description: preset.description.to_string(),
-                is_dark: preset.is_dark,
-                theme: theme::presets::preset_theme_cached(index),
-                preview_colors: preview_colors[index],
-            })
-            .collect()
-    }
-
-    #[test]
-    fn test_theme_chooser_catalog_filter_returns_all_entries_when_filter_empty() {
-        let catalog = preset_only_catalog();
-        let filtered = ScriptListApp::theme_chooser_catalog_filtered_indices("", &catalog);
-        assert_eq!(filtered.len(), catalog.len());
-    }
-
-    #[test]
-    fn test_theme_chooser_catalog_filter_matches_ascii_filter_case_insensitively() {
-        let catalog = preset_only_catalog();
-        let presets = theme::presets::presets_cached();
-        let dracula_index = presets
-            .iter()
-            .position(|preset| preset.id == "dracula")
-            .expect("dracula preset should exist");
-
-        let filtered = ScriptListApp::theme_chooser_catalog_filtered_indices("DRAC", &catalog);
-        assert!(filtered.contains(&dracula_index));
-    }
-
-    #[test]
-    fn test_theme_chooser_catalog_filter_matches_user_theme_slug() {
-        let mut catalog = preset_only_catalog();
-        catalog.insert(
-            0,
-            ThemeChooserCatalogEntry {
-                kind: ThemeChooserCatalogKind::User {
-                    slug: "my-night-shift".to_string(),
-                },
-                name: "Night Shift".to_string(),
-                description: "User theme saved in ~/.scriptkit/themes".to_string(),
-                is_dark: true,
-                theme: theme::presets::preset_theme_cached(0),
-                preview_colors: theme::presets::preset_preview_colors_cached()[0],
-            },
-        );
-
-        let by_slug =
-            ScriptListApp::theme_chooser_catalog_filtered_indices("night-shift", &catalog);
-        assert!(
-            by_slug.contains(&0),
-            "user themes must stay findable by slug"
-        );
-        let by_kind = ScriptListApp::theme_chooser_catalog_filtered_indices("custom", &catalog);
-        assert!(
-            by_kind.contains(&0),
-            "user themes must match the 'custom' keyword"
-        );
-    }
-
-    #[test]
-    fn test_theme_chooser_catalog_index_prefers_exact_user_theme_fingerprint() {
-        let mut catalog = preset_only_catalog();
-        let user_theme = theme::presets::preset_theme_cached(3);
-        catalog.insert(
-            0,
-            ThemeChooserCatalogEntry {
-                kind: ThemeChooserCatalogKind::User {
-                    slug: "saved-copy".to_string(),
-                },
-                name: "Saved Copy".to_string(),
-                description: "User theme saved in ~/.scriptkit/themes".to_string(),
-                is_dark: user_theme.has_dark_colors(),
-                theme: std::sync::Arc::clone(&user_theme),
-                preview_colors: theme::presets::preset_preview_colors_cached()[3],
-            },
-        );
-
-        let index =
-            ScriptListApp::theme_chooser_catalog_index_for_theme(&catalog, user_theme.as_ref());
-        assert_eq!(
-            index, 0,
-            "opening the designer should land on the matching user theme row"
-        );
-    }
-
-    #[test]
-    fn test_theme_chooser_filter_hex_parses_only_full_hex_queries() {
-        assert_eq!(
-            ScriptListApp::theme_chooser_filter_hex("#FF8800"),
-            Some(0xFF8800)
-        );
-        assert_eq!(
-            ScriptListApp::theme_chooser_filter_hex("  #ff8800  "),
-            Some(0xFF8800)
-        );
-        assert_eq!(ScriptListApp::theme_chooser_filter_hex("ff8800"), None);
-        assert_eq!(ScriptListApp::theme_chooser_filter_hex("#ff88"), None);
-        assert_eq!(ScriptListApp::theme_chooser_filter_hex("nord"), None);
-    }
-
-    #[test]
-    fn test_accent_on_text_color_prefers_background_for_bright_accent() {
-        let bg_main = 0x1E1E1E;
-        assert_eq!(best_contrast_of_two(0xFBBF24, 0xFFFFFF, bg_main), bg_main);
-    }
-
-    #[test]
-    fn test_accent_on_text_color_prefers_white_for_dark_accent() {
-        let bg_main = 0x1E1E1E;
-        assert_eq!(best_contrast_of_two(0x312E81, 0xFFFFFF, bg_main), 0xFFFFFF);
-    }
-
-    #[test]
-    fn test_theme_chooser_uses_shared_list_item_row() {
-        // The theme chooser uses the shared ListItem component for preset rows,
-        // matching the main menu's selection background, description reveal, and spacing.
-        let source = include_str!("theme_chooser.rs");
-        assert!(
-            source.contains("self.theme_chooser_list_state.clone(),"),
-            "theme chooser should use the variable-height list state for mixed header/row heights"
-        );
-        let uniform = concat!("uniform_", "list(");
-        assert!(
-            !source.contains(uniform),
-            "theme chooser should not use uniform_list because rows can grow"
-        );
-        assert!(
-            source.contains("ListItem::new(name.to_string(), list_colors)"),
-            "theme chooser preset rows should use the shared ListItem primitive"
-        );
-        assert!(
-            source.contains("leading_accessory(color_bar)"),
-            "theme chooser should pass color swatch as leading accessory"
-        );
-        assert!(
-            source.contains("trailing_accessory_opt(saved_badge)"),
-            "theme chooser should pass Saved badge as trailing accessory"
-        );
-    }
-}
-
-#[cfg(test)]
-mod theme_chooser_actions_dialog_sync_tests {
-    #[test]
-    fn theme_chooser_preview_updates_open_actions_dialog_theme() {
-        let source = include_str!("theme_chooser.rs");
-        let preview_fn = source
-            .split("fn apply_theme_chooser_theme_preview(")
-            .nth(1)
-            .and_then(|section| section.split("fn apply_and_persist_theme(").next())
-            .expect("missing apply_theme_chooser_theme_preview");
-        let restore_fn = source
-            .split("fn restore_theme_chooser_theme(")
-            .nth(1)
-            .and_then(|section| {
-                section
-                    .split("fn preview_theme_chooser_catalog_entry(")
-                    .next()
-            })
-            .expect("missing restore_theme_chooser_theme");
-
-        assert!(
-            preview_fn.contains("self.sync_open_actions_dialog_theme(cx);"),
-            "theme chooser preview mutations should propagate to open actions dialogs"
-        );
-        assert!(
-            restore_fn.contains("self.sync_open_actions_dialog_theme(cx);"),
-            "theme chooser restore should propagate to open actions dialogs"
-        );
-    }
-
-    #[test]
-    fn theme_chooser_pure_cancel_paths_do_not_persist_theme_json() {
-        // Esc / ⌘W / "Undo Changes and Close" restore the opening snapshot in
-        // memory. Persisting on cancel used to rewrite the on-disk theme
-        // override on every abandoned browse session.
-        let source = include_str!("theme_chooser.rs");
-        for restore_reason in [
-            "\"theme_chooser_escape_undo\"",
-            "\"theme_chooser_close_undo\"",
-            "\"theme_chooser_action_undo\"",
-        ] {
-            let restore_site = source
-                .split(restore_reason)
-                .next()
-                .map(|before| before.len())
-                .expect("restore reason should exist");
-            let after = &source[restore_site..(restore_site + 600).min(source.len())];
-            assert!(
-                !after.contains("persist_theme_and_sync_all_windows"),
-                "cancel path `{restore_reason}` must not persist the theme override"
-            );
-        }
-    }
-}
+include!("theme_chooser_tests.rs");

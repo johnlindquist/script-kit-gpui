@@ -220,11 +220,9 @@ impl ScriptListApp {
                 .flex()
                 .flex_col()
                 .overflow_y_scrollbar()
-                .children(visible_for_list.into_iter().enumerate().map(
+                .children(visible_for_list.into_iter().enumerate().filter_map(
                     move |(display_ix, original_idx)| {
-                        let entry = entries_for_list
-                            .get(original_idx)
-                            .expect("visible index within bounds");
+                        let entry = entries_for_list.get(original_idx)?;
                         let is_selected = display_ix == selected;
                         let is_unsupported =
                             entry.support == crate::mcp_resources::SdkSupport::Unsupported;
@@ -244,7 +242,7 @@ impl ScriptListApp {
                             .w_full()
                             .child(item);
 
-                        if is_unsupported {
+                        Some(if is_unsupported {
                             row.child(
                                 div()
                                     .absolute()
@@ -258,7 +256,7 @@ impl ScriptListApp {
                             )
                         } else {
                             row
-                        }
+                        })
                     },
                 ))
                 .into_any_element()
@@ -377,10 +375,8 @@ impl ScriptListApp {
             entries.len(),
             if entries.len() == 1 { "" } else { "s" },
         );
-        let main = self.render_builtin_split_main_content(
-            list_pane.into_any_element(),
-            preview_panel,
-        );
+        let main =
+            self.render_builtin_split_main_content(list_pane.into_any_element(), preview_panel);
 
         crate::components::main_view_chrome::render_main_view_chrome_footer_flush(
             crate::components::main_view_chrome::render_main_view_shell()
@@ -392,9 +388,10 @@ impl ScriptListApp {
             &self.theme,
             menu_def,
             crate::components::main_view_chrome::MainViewChrome {
-                header: self.render_builtin_main_input_header(vec![
-                    self.render_builtin_main_input_count_label(count_label),
-                ], cx),
+                header: self.render_builtin_main_input_header(
+                    vec![self.render_builtin_main_input_count_label(count_label)],
+                    cx,
+                ),
                 divider: crate::components::main_view_chrome::MainViewDividerChrome {
                     margin_x: shell.divider_margin_x,
                     height: shell.divider_height,

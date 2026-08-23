@@ -175,7 +175,6 @@ impl ScriptListApp {
         selected_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-
         // Load favorites and resolve to script/scriptlet names
         let favorites = script_kit_gpui::favorites::load_favorites().unwrap_or_default();
 
@@ -420,7 +419,7 @@ impl ScriptListApp {
         if original_index == 0 {
             return Ok(action
                 .boundary_message(&id)
-                .expect("MoveUp has a boundary message"));
+                .unwrap_or_else(|| format!("'{id}' is already first")));
         }
 
         tracing::info!(
@@ -451,7 +450,7 @@ impl ScriptListApp {
         if original_index + 1 >= favorites.script_ids.len() {
             return Ok(action
                 .boundary_message(&id)
-                .expect("MoveDown has a boundary message"));
+                .unwrap_or_else(|| format!("'{id}' is already last")));
         }
 
         tracing::info!(
