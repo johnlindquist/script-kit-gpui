@@ -94,6 +94,8 @@ require_clean_source_identity() {
     scripts/release-evidence.test.ts
     scripts/generate-surface-contracts.ts
     scripts/kit-sdk.ts
+    scripts/mcp-cli.ts
+    scripts/mcp-cli.test.ts
     scripts/test-runner.ts
     scripts/check-sdk-types.ts
     scripts/devtools/consistency-catalog.md
@@ -554,6 +556,7 @@ run_phase() {
         ./scripts/agentic/root-typing-lag-benchmark.test.ts \
         ./scripts/agentic/root-search-frame-stability.test.ts \
         ./scripts/migrate/__tests__/classify.test.ts \
+        ./scripts/mcp-cli.test.ts \
         ./tests/sdk/runner-safety.test.ts
       ;;
     consistency-catalog)

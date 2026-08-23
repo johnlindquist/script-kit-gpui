@@ -477,6 +477,7 @@ function makeFixture(): ReleaseFixture {
     "scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts:",
     "scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts:",
     "scripts/agentic/quick-ai-latency-bench.test.ts:",
+    "scripts/mcp-cli.test.ts:",
     "tests/sdk/runner-safety.test.ts:",
     " 355 pass",
     " 0 fail",
@@ -962,6 +963,7 @@ describe("fail-closed release evidence", () => {
       "scripts/devtools/runtime-task-proof.test.ts",
       "scripts/devtools/workflow-task-proof.test.ts",
       "scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts",
+      "scripts/mcp-cli.test.ts",
     ]) {
       writeFileSync(resultPath, valid.replace(`${suite}:`, ""));
       expect(() => buildGateReceipt({
@@ -2379,6 +2381,8 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/agentic/reuse-rust-test-binary.sh",
     "scripts/agentic/build-isolated-binary.sh",
     "scripts/agentic/root-search-frame-stability.test.ts",
+    "scripts/mcp-cli.ts",
+    "scripts/mcp-cli.test.ts",
     "scripts/test-runner.ts",
     "tests/sdk/capability-types.fixture.ts",
     "tests/sdk/fixtures/runner-negative-case.ts",

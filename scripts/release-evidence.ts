@@ -125,6 +125,7 @@ const REQUIRED_PROOF_SUITES = [
   "scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts",
   "scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts",
   "scripts/agentic/quick-ai-latency-bench.test.ts",
+  "scripts/mcp-cli.test.ts",
   "tests/sdk/runner-safety.test.ts",
 ] as const;
 
@@ -199,6 +200,8 @@ const REQUIRED_OPERATOR_SAFETY_OWNERS = [
 ] as const;
 
 const REQUIRED_SDK_SAFETY_OWNERS = [
+  "scripts/mcp-cli.ts",
+  "scripts/mcp-cli.test.ts",
   "scripts/test-runner.ts",
   "tests/sdk/fixtures/runner-negative-case.ts",
   "tests/sdk/runner-safety.test.ts",
