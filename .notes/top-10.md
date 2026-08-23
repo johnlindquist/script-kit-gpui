@@ -375,8 +375,8 @@ Evidence in this checkpoint is intentionally time- and source-qualified:
   cases add **four more exact passing checks** without touching owner
   transaction logs,
   launching an app, or terminating another process.
-- The strict synthetic SDK release suite executes **215 passing cases, zero
-  failures, zero skips across 40 files**, retaining its real five-second
+- The strict synthetic SDK release suite executes **237 passing cases, zero
+  failures, zero skips across 41 files**, retaining its real five-second
   timeout. Its screenshot helper consumes only a synthetic 1×1 fixture,
   requires synthetic auto-submit, writes to an OS temporary directory, and
   removes that directory afterward. Independently rerun filtered receipts
@@ -887,7 +887,7 @@ Current program status:
 | 05. End-to-end latency | Blocked honestly | Observation kinds, exact owner approval, and actual positive sample counts are fail-closed; no owner-ratified painted measurements or permission to run visible performance journeys exist. |
 | 06. Execution lifecycle | Partial | Exact owned process groups remain tracked until verified dead, invalid/unowned PID zero cannot be signaled, Codex server replacement cannot orphan a predecessor, and real Quick AI startup reserves its exact generation before side effects and unwinds owned child/group/scratch failures transactionally; same-name command dispatch resolves the exact normalized source; Flow FIFO initialization cannot adopt a colliding project's revision/transcript, follow primary/legacy symlinks, or persist world-readable private turns; transaction traces redact private content, same-process replay is bounded/lossless, and continued batches retain their first failure. Secure cross-process replay and complete command-family receipts remain unproven. |
 | 07. AI consistency | Partial | Actual detached Agent Chat discovers scripts/scriptlets/skills through refreshed launcher snapshots, preserves multiple same-name selected-owner attachments, confirms individual/complete history deletion across all four stores, and protects conversation/prompt/full-transcript attachment files with validated IDs, owner-only `0700`/`0600` no-follow migration, spoof rejection, and atomic writes. Flow, Dictation, AI preflight receipts, current-app automation prompts/recipes, Tab AI intent/generated-source memory/execution receipts, actual screenshot PNGs, exported/handoff prompts, executable handoff wrappers, handoff/export receipts, Claude MCP bearer/API-key config and ownership state, custom agent credential catalogs, private project MRUs, authentication state, model favorites, private user-authored AI system-prompt presets/imports/exports, and real shared/Quick AI traces now share owner-only, no-follow private directory/file ownership and safe legacy repair. Auth-state, favorite, and preset workers serialize actual read/merge/atomic replacement so simultaneous agents cannot erase one another; malformed private state refuses destructive replacement and failed favorite saves surface an honest retry. Provider-declared error facts, empty/missing final responses, exact owned-child cancellation, nonduplicating fallback, and final-only response delivery are behavior-proven without live providers. Private answer/thought/query/diagnostic/prepared-context/prompt/export-path/gist/preset fingerprints use the cryptographically keyed process owner, trace appends remain concurrent-safe without injecting fsync latency, and AI diagnostics never expose private paths/window titles/project names/errors. Actual in-memory Pi and Flow transport paths emit complete private phase milestones and distinguish cancellation from completion. Flow retains exact ID/path SHA-256 identity and one-time legacy adoption. Notes/Todos/Clipboard/Dictation/conversation cold search has generation-fenced launcher-owned refresh. Notes conflict recovery remains private/collision-safe; all success/fallback/failure AI/Notes diagnostics use keyed fingerprints. Existing coverage also proves clean-chat entry, typed recovery, pending-permission safety, accepted-prompt preservation, credential-free Claude argv, and anonymous system prompts. Actual provider-backed transport and live target-scoped recovery remain unproven. |
-| 08. SDK compatibility | Partial | The full isolated suite passes 215/0/0; separate filtered runs prove eight fields date/time/search cases, two hotkey cases, and five editor/mini/micro cases; nine real Rust capability owners mark implemented prompts supported, mark all 18 genuinely unavailable capabilities unsupported, and enforce explicit native permission/platform boundaries. Generated scripts validate capabilities/topology and shared shell/slug policy, escape hostile JSON template values nonrecursively, and write complete final starter bytes through the original exclusive file handle; real seeded/template scripts declare parseable supported capabilities; Rust behavior plus the four repaired creation-contract cases prove collision/symlink-safe files and receipts. Native prompt/window/permission proof remains absent. |
+| 08. SDK compatibility | Partial | The full isolated suite passes 237/0/0; separate filtered runs prove eight fields date/time/search cases, two hotkey cases, five editor/mini/micro cases, and 22 real socket-free local/remote/stdio MCP transport, workspace, private-discovery, timeout, ownership, and orphan-cleanup cases; nine real Rust capability owners mark implemented prompts supported, mark all 18 genuinely unavailable capabilities unsupported, and enforce explicit native permission/platform boundaries. Generated scripts validate capabilities/topology and shared shell/slug policy, escape hostile JSON template values nonrecursively, and write complete final starter bytes through the original exclusive file handle; real seeded/template scripts declare parseable supported capabilities; Rust behavior plus the four repaired creation-contract cases prove collision/symlink-safe files and receipts. Native prompt/window/permission proof remains absent. |
 | 09. Behavioral proof | Partial | All 15 static/unit/fixture task receipts, the two-façade lifecycle inventory, and protected-source hashes are current; hidden target identity rejects fabricated fallback generations; the full proof lane passes 701 tests; the canonical 75-task catalog and every CLI subcommand resolve the now-committed portable catalog; and the auditor reports 15/75 with no stale/invalid/failed tasks after genuinely rerunning both invalidated governance producers and the façade ledger. The catalog and real library-tested owners are now tracked, but all 60 direct-runtime obligations remain honestly unproven. |
 | 10. Packaged release | Blocked honestly | Current strict Clippy, formatting, 497 real safe Rust behavior cases, 111 app-free integration cases, complete SDK/proof suites, exact generated JSON/CSS byte parity, canonical 54-target validators, packaged-asset byte parity, private AI/screenshot/trace/handoff/credential/auth-state/model-favorite/system-prompt/SQLite storage, truthful provider cancellation/failure/final-output ownership, and symlink rejection pass; version-3 release manifests independently attest every signed archive file/link/mode, the CodeResources envelope, and executable/Pi/SDK/Info.plist, including a real `ditto` framework-symlink archive and app-less Ubuntu verification. Actual packaged journeys, the full direct matrix, signing/notarization, and ratified paint still prevent publication even after the source/catalog are committed. |
 
@@ -1453,7 +1453,8 @@ offline receipts until their real producers are run again.
     GOV-003 as stale/missing until its actual four compiler-contract cases are
     rerun. The full nonintrusive proof lane now passes **284 cases / 1,695
     assertions across 15 suites**; the exact standalone publication gate
-    independently rejects every omitted owner in **117 cases / 365
+    independently rejects every omitted owner and forged SDK matrix in
+    **124 cases / 390
     assertions**. No application, browser, Cargo/rustc, Swift, native input,
     clipboard, screenshots, microphone, or live AI is started.
 50. The real custom-script SDK verifier accepted an arbitrary absolute script
@@ -1474,7 +1475,7 @@ offline receipts until their real producers are run again.
     if necessary, and independently drains all pipes before returning. The
     reproduced grandchild now exits in approximately **one second**, with
     no survivor. **49 SDK process/ownership cases / 145 assertions** pass;
-    all **215 actual authoring behaviors across 40 SDK script files** pass
+    all **237 actual authoring behaviors across 41 SDK script files** pass
     with exactly two bounded workers in approximately **1.7 seconds**,
     including the **25 editor, hotkey, field/date, and synthetic
     window-management behaviors**. No application opens and no real input
@@ -1492,7 +1493,7 @@ offline receipts until their real producers are run again.
     explicit failures, and a passing outcome cannot contain an error. Each
     contradictory transcript exits nonzero while preserving the original
     diagnostic. The exact same release-bound custom-script matrix still runs
-    all **215/215 real SDK cases**, and its independent adversarial suite
+    all **237/237 real SDK cases**, and its independent adversarial suite
     remains green at **49/49 cases / 145 assertions**.
 52. Fast application-test reuse decided freshness only by comparing source
     modification timestamps against the cached harness. A real disposable
@@ -1517,7 +1518,7 @@ offline receipts until their real producers are run again.
     result-like messages become terminal failures; both child streams default
     to independent **1-MiB** budgets with an explicit **8-MiB** ceiling and
     immediate owned-process-group cleanup. The complete custom-script suite
-    remains **215/215 across 40 actual SDK files**, and **49 adversarial
+    remains **237/237 across 41 actual SDK files**, and **49 adversarial
     cases / 145 assertions** independently prove the expanded contract.
 54. The bounded Cargo owner still accepted `--manifest-path`, Cargo's `-C`
     workspace relocation, `--workspace` / `--all` test expansion, and
@@ -1530,7 +1531,65 @@ offline receipts until their real producers are run again.
     `script-kit-gpui`, `sk-clipboard`, `sk-protocol`, and `sk-storage`
     package owners; named app integrations and the non-GUI exporter remain
     valid. The scoped fake-build/provenance/process lane passes **58 cases /
-    177 assertions**, with no Cargo, Rust, Swift, application, or GUI launch.
+    179 assertions**, with no Cargo, Rust, Swift, application, or GUI launch.
+55. The shipped `scriptkit` MCP CLI sent its private local bearer token to
+    arbitrary remote/lookalike URLs, followed redirect policy implicitly,
+    accepted world-readable or symlinked discovery files, returned
+    `success: true` for genuine HTTP-200 JSON-RPC errors, never checked
+    response identity, leaked credentials in three error formats, and could
+    hang forever. Its existing tests required binding a local socket and
+    failed outright inside the normal restricted environment. The actual
+    embedded CLI now opens its user-owned **0600** discovery file with
+    `O_NOFOLLOW`, permits only local `localhost` / `127.0.0.1` / `[::1]`
+    `/rpc` destinations, forbids redirects, validates the exact unique
+    JSON-RPC identity and outcome, sanitizes secrets, and enforces a
+    configurable **30-second default / 120-second ceiling**. Fully in-memory
+    network fixtures pass **35 cases / 76 assertions** without sockets.
+56. Compiler-source provenance still omitted **11 actual `include_str!`
+    inputs**: the embedded `scripts/mcp-cli.ts` plus all ten starter scripts
+    under `scripts/examples/menu-syntax`. As a result, a binary from before
+    a credential-security or packaged-example fix could masquerade as
+    equivalent current source. The canonical compiler-input owner now
+    includes both real paths; source hashing, dirty-source rejection, APFS
+    artifact export, staged build manifests, and cached harness reuse all
+    consume the expanded closure. The fake-build owner test independently
+    observes both additions through the exact Git source commands.
+57. The embedded SDK's real `computer.*` and configured `mcp.*` clients had
+    the same arbitrary-destination token exposure, response confusion,
+    unlimited wait, unsafe diagnostics, and unowned stdio descendants.
+    Worse, `skPath()`, `kitPath()`, private discovery, and config import
+    ignored Rust's supported `SK_PATH`, so a custom workspace silently read
+    another workspace's commands, credentials, and MCP servers. Both public
+    paths, the SDK, and the CLI now resolve one active workspace; config
+    cache entries are path-owned; self discovery is no-follow/owner-only and
+    loopback-only; deliberately configured remote servers remain supported;
+    all HTTP/stdio replies require their exact request identity; stderr is
+    capped at **1 MiB**; timeouts are bounded; configured MCP child
+    environments cannot elevate noninteractive desktop permissions; and
+    graceful termination/escalation owns the exact server process group.
+    **22 real SDK MCP journeys** prove healthy local/remote/stdio behavior,
+    malicious endpoints, wrong replies, private diagnostics, workspace
+    switching, and verified dead disposable descendants. The complete
+    isolated authoring suite now passes **237/237 behaviors across 41
+    scripts**; the actual SDK MCP fixture, embedded CLI, and **35-case**
+    CLI proof are mandatory tracked and directly executed release owners.
+58. The real shipping SDK gate previously trusted three unbound counters:
+    `{"total_passed":1,"total_failed":0,"total_skipped":0}` became valid
+    whole-product release evidence even when **40 of 41 script families**,
+    every sensitive MCP journey, and all actual test outcomes were omitted.
+    The runner and verifier now share one tracked unsafe-system-input owner;
+    release acceptance independently rediscovers every canonical reviewed
+    `test-*.ts` file, excludes real keyboard/clipboard/scroll probes, rejects
+    external/symlinked owners and duplicate/missing script receipts,
+    validates each result identity/timestamp/duration/error/terminal state,
+    recomputes per-script and aggregate pass/fail/skip counts, and requires
+    at least one real passing behavior for every reviewed script. Real
+    `scripts/verify.sh --skip-bundle --only sdk-tests` independently passes
+    **237 behaviors across all 41 script files**, including the exact
+    **22-case** safe MCP transport owner; source, proof, and adversarial
+    release controls pass **124 cases / 390 assertions**. A totals-only,
+    missing-MCP, unsafe-system-input, duplicate, contradictory, or forged
+    aggregate summary cannot ship.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1851,7 +1910,8 @@ offline receipts until their real producers are run again.
     All three SDK safety owners, including the actual negative fixture, are
     mandatory release sources. The isolated SDK safety suite passes
     **49 cases and 145 assertions**; the actual two-worker SDK runner
-    separately passes **215 cases, zero failures, and zero skips**.
+    separately passes **237 cases, zero failures, and zero skips**, including
+    **22 isolated MCP local/remote/stdio and workspace-ownership journeys**.
     At the preceding committed checkpoint, the full nonintrusive release
     lane executed **763 passing tests, zero failures, and 2,965 assertions
     across 37 files in 16.39s**, without the previous repository scan or load
@@ -2262,7 +2322,7 @@ quick-ai-latency-bench.ts --print-command         command inspected; no AI call
 ```
 
 The failing SDK counts above describe the committed baseline only. They must
-not overwrite the current **215 passed / 0 failed / 0 skipped** worktree receipt
+not overwrite the current **237 passed / 0 failed / 0 skipped** worktree receipt
 or imply the uncommitted improvements are present on `HEAD`. The intermediate
 August 21 **192 passed / 0 failed / 8 skipped** result is also historical.
 
@@ -3335,8 +3395,8 @@ bun test ./tests/sdk/runner-safety.test.ts
   five editor/mini/micro cases, and eight fields date/time/search cases.
   They use SDK auto-submit, not a live app, so native capture, focus, sizing,
   dismissal, and date-picker rendering still require direct runtime receipts.
-- The strict complete worktree suite currently reports **215 passed, 0 failed,
-  and 0 skipped across 40 files**. The previously skipped file search,
+- The strict complete worktree suite currently reports **237 passed, 0 failed,
+  and 0 skipped across 41 files**. The previously skipped file search,
   clipboard-history, menu-bar, and unavailable-network cases now have
   explicit safe synthetic behavior coverage. Preserve exact stale-ID
   negatives; never remove/skip an assertion, declare SDK auto-submit to be
@@ -3588,7 +3648,7 @@ bash scripts/verify-macos-bundle.sh '<packaged-app-path>'
   errors; its historical 280-error failure is not a current blocker. Preserve
   the actual source-bound gate rather than substituting fixtures or compile.
 - The full SDK command is an existing required release job; the current
-  uncommitted candidate passes **215 cases, with zero failures and zero skips**.
+  current candidate passes **237 cases, with zero failures and zero skips**.
   Shipping still requires the same exact green result from the actual
   committed release source without reduced safety or fabricated native proof.
 - Release Rust tests actually execute; `--no-run` cannot satisfy readiness.
@@ -3626,7 +3686,7 @@ moving the broader architecture forward.
    live-provider opt-in; prove all transport, SDK, benchmark, and release
    entry points reject takeover, focus/input, capture, microphone/camera, and
    live AI in noninteractive mode.
-4. Preserve the current 215-case, zero-skip SDK fix and owner-registry repair;
+4. Preserve the current 237-case, zero-skip SDK fix and owner-registry repair;
    rerun stale
    window-ID negatives, supported mini/micro/hotkey/fields cases, runner
    failure controls, corrected owners, and truthful zero-runtime coverage.
