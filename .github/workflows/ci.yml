@@ -177,8 +177,8 @@ jobs:
           shared-key: "macos-debug"
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Lint app crate
-        run: cargo clippy --locked --lib --no-deps -- -D warnings
+      - name: Lint app library and shipping binary
+        run: cargo clippy --locked --lib --bin script-kit-gpui --no-deps -- -D warnings
       - name: Lint domain crates
         run: cargo clippy --locked -p sk-clipboard -p sk-protocol --all-targets -- -D warnings
 

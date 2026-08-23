@@ -223,8 +223,8 @@ else
   echo "No related test filters discovered from changed files."
 fi
 
-if ! run_step "agent-cargo clippy --locked --lib --no-deps -- -D warnings" \
-  "$CARGO_WRAPPER" clippy --locked --lib --no-deps -- -D warnings; then
+if ! run_step "agent-cargo clippy --locked --lib --bin script-kit-gpui --no-deps -- -D warnings" \
+  "$CARGO_WRAPPER" clippy --locked --lib --bin script-kit-gpui --no-deps -- -D warnings; then
   TOTAL_TIME="$(( $(date +%s) - START_TIME ))"
   echo ""
   echo "=== RESULT: FAIL ($(format_duration "$TOTAL_TIME")) ==="

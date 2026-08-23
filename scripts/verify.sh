@@ -471,7 +471,7 @@ run_phase() {
       run_step "check" "$CARGO_CMD" check --locked
       ;;
     clippy)
-      run_step "clippy" "$CARGO_CMD" clippy --locked --lib --no-deps -- -D warnings
+      run_step "clippy" "$CARGO_CMD" clippy --locked --lib --bin script-kit-gpui --no-deps -- -D warnings
       ;;
     test)
       run_step "test" "$CARGO_CMD" test --locked --lib

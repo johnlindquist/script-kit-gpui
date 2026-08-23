@@ -34,6 +34,10 @@
 # Compiler flags, inherited worker settings, and Rust test-harness threads cannot
 # exceed the configured ceiling. Noninteractive runs never exceed two workers
 # and cannot inherit intentionally heavyweight search/storage stress corpora.
+# SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT=1..100 optionally refuses compiler
+# work before pool creation when current one-minute load plus its workers
+# would exceed the selected fraction of available logical CPUs. Metadata,
+# formatting, and dependency-tree inspection remain available under pressure.
 # SCRIPT_KIT_AGENT_TIMINGS=1 emits Cargo's target/cargo-timings HTML report.
 
 set -euo pipefail
@@ -289,6 +293,62 @@ export RUST_TEST_THREADS="$test_workers"
 if [[ "$noninteractive_mode" == "1" ]]; then
   export SCRIPT_KIT_SEARCH_FULL_STRESS=0
   export SCRIPT_KIT_STORAGE_FULL_STRESS=0
+fi
+
+system_load_1m_json="null"
+system_logical_cpus_json="null"
+system_load_limit_percent_json="null"
+system_load_reserved_workers_json="null"
+max_system_load_percent="${SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT:-}"
+if [[ -n "$max_system_load_percent" ]]; then
+  if [[ ! "$max_system_load_percent" =~ ^[1-9][0-9]*$ ]] \
+    || (( max_system_load_percent > 100 )); then
+    worker_failure "SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT must be a whole percentage from 1 to 100; got ${max_system_load_percent}"
+  fi
+  system_load_limit_percent_json="$max_system_load_percent"
+
+  case "${requested_args[0]:-}" in
+    build|check|clippy|test|nextest|rustc|rustdoc|doc|bench)
+      workload_workers="$compiler_workers"
+      case "${requested_args[0]}" in
+        test|nextest)
+          if (( test_workers > workload_workers )); then
+            workload_workers="$test_workers"
+          fi
+          ;;
+      esac
+
+      uptime_observation="$(LC_ALL=C uptime 2>/dev/null)" \
+        || worker_failure "could not observe one-minute system load before starting Cargo"
+      system_load_1m="$(printf '%s\n' "$uptime_observation" | awk -F'load averages?:[[:space:]]*' '
+        NF == 2 {
+          split($2, values, /[[:space:],]+/)
+          print values[1]
+        }
+      ')"
+      [[ "$system_load_1m" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+        || worker_failure "could not observe a valid one-minute system load before starting Cargo"
+
+      system_logical_cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null)" \
+        || worker_failure "could not observe the logical CPU count before starting Cargo"
+      [[ "$system_logical_cpus" =~ ^[1-9][0-9]*$ ]] \
+        || worker_failure "could not observe a valid logical CPU count before starting Cargo"
+
+      if ! awk \
+        -v current_load="$system_load_1m" \
+        -v workers="$workload_workers" \
+        -v logical_cpus="$system_logical_cpus" \
+        -v budget_percent="$max_system_load_percent" \
+        'BEGIN { exit ((current_load + workers) * 100 <= logical_cpus * budget_percent ? 0 : 1) }'; then
+        echo "AGENT_CARGO deferred: machine CPU pressure exceeds the explicit ${max_system_load_percent}% budget; load=${system_load_1m} logical_cpus=${system_logical_cpus} compiler_workers=${compiler_workers} test_workers=${test_workers} workload_workers=${workload_workers}; retry when other work subsides" >&2
+        exit 75
+      fi
+
+      system_load_1m_json="$system_load_1m"
+      system_logical_cpus_json="$system_logical_cpus"
+      system_load_reserved_workers_json="$workload_workers"
+      ;;
+  esac
 fi
 
 sanitize_id() {
@@ -703,7 +763,7 @@ if [[ -d "${target_dir}/debug/deps" ]] && [[ -n "$(find "${target_dir}/debug/dep
 fi
 started_epoch="$(date +%s)"
 free_before_gb="$(( $(free_disk_kb) / 1024 / 1024 ))"
-echo "AGENT_CARGO mode=${target_mode} pool=${pool} cache=${cache_state} jobs=${CARGO_BUILD_JOBS} test_threads=${RUST_TEST_THREADS} target_dir=${CARGO_TARGET_DIR} metal_module_cache=${metal_module_cache} lock=${lock_name} rustc_wrapper=${rustc_wrapper_state} debug=${CARGO_PROFILE_DEV_DEBUG} incremental=${CARGO_INCREMENTAL:-default} cargo ${cargo_args[*]}" >&2
+echo "AGENT_CARGO mode=${target_mode} pool=${pool} cache=${cache_state} jobs=${CARGO_BUILD_JOBS} test_threads=${RUST_TEST_THREADS} cpu_load=${system_load_1m_json} logical_cpus=${system_logical_cpus_json} cpu_budget_percent=${system_load_limit_percent_json} cpu_reserved_workers=${system_load_reserved_workers_json} target_dir=${CARGO_TARGET_DIR} metal_module_cache=${metal_module_cache} lock=${lock_name} rustc_wrapper=${rustc_wrapper_state} debug=${CARGO_PROFILE_DEV_DEBUG} incremental=${CARGO_INCREMENTAL:-default} cargo ${cargo_args[*]}" >&2
 
 if [[ -n "$validated_artifact_name" && "${cargo_args[0]:-}" == "build" ]]; then
   observe_artifact_source
@@ -734,10 +794,12 @@ fi
 elapsed_seconds="$(( $(date +%s) - started_epoch ))"
 free_after_gb="$(( $(free_disk_kb) / 1024 / 1024 ))"
 receipt_path="${SCRIPT_KIT_AGENT_BUILD_RECEIPT_PATH:-${REPO_ROOT}/target-agent/build-receipts.jsonl}"
-printf '{"started_epoch":%s,"elapsed_seconds":%s,"status":%s,"pool":"%s","cache":"%s","jobs":%s,"test_threads":%s,"free_before_gb":%s,"free_after_gb":%s,"command":"%s","timings":%s,"compiler_cache_backend":"%s","compiler_cache_required":%s}\n' \
+printf '{"started_epoch":%s,"elapsed_seconds":%s,"status":%s,"pool":"%s","cache":"%s","jobs":%s,"test_threads":%s,"free_before_gb":%s,"free_after_gb":%s,"command":"%s","timings":%s,"compiler_cache_backend":"%s","compiler_cache_required":%s,"system_load_1m":%s,"system_logical_cpus":%s,"system_load_limit_percent":%s,"system_load_reserved_workers":%s}\n' \
   "$started_epoch" "$elapsed_seconds" "$status" "$pool" "$cache_state" "$CARGO_BUILD_JOBS" "$RUST_TEST_THREADS" \
   "$free_before_gb" "$free_after_gb" "${cargo_args[0]:-unknown}" "${SCRIPT_KIT_AGENT_TIMINGS:-0}" \
   "$compiler_cache_backend" "$compiler_cache_required" \
+  "$system_load_1m_json" "$system_logical_cpus_json" "$system_load_limit_percent_json" \
+  "$system_load_reserved_workers_json" \
   >> "$receipt_path" 2>/dev/null || true
 echo "AGENT_CARGO result status=${status} elapsed=${elapsed_seconds}s cache=${cache_state} compiler_cache=${compiler_cache_backend} free=${free_before_gb}G->${free_after_gb}G receipt=${receipt_path}" >&2
 

@@ -119,6 +119,23 @@ function installFakeSccache(workspace: ReturnType<typeof fixture>, usable = true
   chmodSync(join(workspace.bin, "rustc"), 0o755);
 }
 
+function installFakeSystemLoad(
+  workspace: ReturnType<typeof fixture>,
+  load: string,
+  logicalCpus: string,
+) {
+  writeFileSync(
+    join(workspace.bin, "uptime"),
+    `#!/bin/bash\nprintf '03:00 2 users, load averages: ${load} 1.00 1.00\\n'\n`,
+  );
+  writeFileSync(
+    join(workspace.bin, "getconf"),
+    `#!/bin/bash\nprintf '${logicalCpus}\\n'\n`,
+  );
+  chmodSync(join(workspace.bin, "uptime"), 0o755);
+  chmodSync(join(workspace.bin, "getconf"), 0o755);
+}
+
 function installFakeGit(workspace: ReturnType<typeof fixture>) {
   writeFileSync(
     join(workspace.bin, "git"),
@@ -288,6 +305,26 @@ describe("bounded Cargo builds", () => {
     expect(readFileSync(workspace.capture, "utf8")).toContain("storage_stress=0\n");
   });
 
+  test("release verifier strictly lints both the library and shipping binary", () => {
+    const workspace = fixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(scripts, "..", "verify.sh"), "--skip-bundle", "--only", "clippy"],
+      {
+        env: {
+          ...workspace.env,
+          SCRIPT_KIT_CARGO: join(workspace.bin, "cargo"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(workspace.capture, "utf8")).toContain(
+      "args=clippy --locked --lib --bin script-kit-gpui --no-deps -- -D warnings ",
+    );
+  });
+
   test("agent-scoped verification rejects inherited desktop permissions before Cargo runs", () => {
     for (const permission of [
       "SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER",
@@ -341,7 +378,7 @@ describe("bounded Cargo builds", () => {
     expect(invocations.map((line) => line.split(" noninteractive=")[0])).toEqual([
       "args=check --locked --lib --bin script-kit-gpui",
       "args=test --locked --lib reliability",
-      "args=clippy --locked --lib --no-deps -- -D warnings",
+      "args=clippy --locked --lib --bin script-kit-gpui --no-deps -- -D warnings",
       "args=test --locked --lib",
       "args=test --locked -p sk-clipboard -p sk-protocol -p sk-storage",
     ]);
@@ -380,9 +417,126 @@ describe("bounded Cargo builds", () => {
       test_threads: 2,
       compiler_cache_backend: "disabled",
       compiler_cache_required: false,
+      system_load_1m: null,
+      system_logical_cpus: null,
+      system_load_limit_percent: null,
+      system_load_reserved_workers: null,
       command: "test",
       timings: 1,
     });
+  });
+
+  test("defers a CPU-intensive build before Cargo starts when the explicit machine budget is full", () => {
+    const workspace = fixture();
+    installFakeSystemLoad(workspace, "11.00", "16");
+    const result = run("agent-cargo.sh", ["check", "--lib"], {
+      ...workspace.env,
+      SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT: "75",
+    });
+
+    expect(result.status).toBe(75);
+    expect(result.stderr).toContain("machine CPU pressure exceeds the explicit 75% budget");
+    expect(result.stderr).toContain("load=11.00");
+    expect(result.stderr).toContain("logical_cpus=16");
+    expect(result.stderr).toContain("compiler_workers=2");
+    expect(existsSync(workspace.capture)).toBe(false);
+    expect(existsSync(join(workspace.root, "target-agent", ".locks", "pool-agent-debug.lock")))
+      .toBe(false);
+  });
+
+  test("accepts an exact projected CPU budget and records the actual machine observation", () => {
+    const workspace = fixture();
+    installFakeSystemLoad(workspace, "10.00", "16");
+    const result = run("agent-cargo.sh", ["check", "--lib"], {
+      ...workspace.env,
+      SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT: "75",
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(workspace.capture, "utf8")).toContain("jobs=2\n");
+    const receipt = JSON.parse(
+      readFileSync(join(workspace.root, "target-agent", "build-receipts.jsonl"), "utf8"),
+    );
+    expect(receipt).toMatchObject({
+      system_load_1m: 10,
+      system_logical_cpus: 16,
+      system_load_limit_percent: 75,
+      system_load_reserved_workers: 2,
+    });
+  });
+
+  test("machine pressure accounts for the reviewed effective one-worker Cargo override", () => {
+    const workspace = fixture();
+    installFakeSystemLoad(workspace, "11.00", "16");
+    const result = run("agent-cargo.sh", ["check", "--lib", "--jobs", "1"], {
+      ...workspace.env,
+      SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT: "75",
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(workspace.capture, "utf8")).toContain("jobs=1\n");
+  });
+
+  test("machine pressure reserves the larger Rust test-harness worker count", () => {
+    const workspace = fixture();
+    installFakeSystemLoad(workspace, "11.00", "16");
+    const result = run("agent-cargo.sh", ["test", "--lib", "reviewed_filter"], {
+      ...workspace.env,
+      CARGO_BUILD_JOBS: "1",
+      RUST_TEST_THREADS: "2",
+      SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT: "75",
+    });
+
+    expect(result.status).toBe(75);
+    expect(result.stderr).toContain("compiler_workers=1");
+    expect(result.stderr).toContain("test_workers=2");
+    expect(result.stderr).toContain("workload_workers=2");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("metadata-only Cargo remains available during explicit high machine pressure", () => {
+    const workspace = fixture();
+    installFakeSystemLoad(workspace, "90.00", "16");
+    const result = run("agent-cargo.sh", ["metadata", "--no-deps"], {
+      ...workspace.env,
+      SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT: "75",
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(workspace.capture, "utf8")).toContain("args=metadata --no-deps ");
+  });
+
+  test.each(["0", "101", "1.5", "auto"])(
+    "rejects malformed machine CPU budget %s before invoking Cargo",
+    (budget) => {
+      const workspace = fixture();
+      const result = run("agent-cargo.sh", ["check", "--lib"], {
+        ...workspace.env,
+        SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT: budget,
+      });
+
+      expect(result.status).toBe(64);
+      expect(result.stderr).toContain(
+        "SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT must be a whole percentage from 1 to 100",
+      );
+      expect(existsSync(workspace.capture)).toBe(false);
+    },
+  );
+
+  test.each([
+    ["unavailable", "16", "one-minute system load"],
+    ["10.00", "unknown", "logical CPU count"],
+  ])("fails closed when machine pressure observation is invalid: %s / %s", (load, cpus, detail) => {
+    const workspace = fixture();
+    installFakeSystemLoad(workspace, load!, cpus!);
+    const result = run("agent-cargo.sh", ["check", "--lib"], {
+      ...workspace.env,
+      SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT: "75",
+    });
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain(detail!);
+    expect(existsSync(workspace.capture)).toBe(false);
   });
 
   test.each([
@@ -2040,6 +2194,29 @@ describe("isolated session readiness ownership", () => {
 });
 
 describe("development, correctness-test, and CI profile separation", () => {
+  test("required CI strictly lints both the library and shipping binary", () => {
+    const workflow = Bun.YAML.parse(
+      readFileSync(join(scripts, "..", "..", ".github", "workflows", "ci.yml"), "utf8"),
+    );
+    const appLint = workflow.jobs.clippy.steps.filter(
+      (step: { run?: string }) => step.run?.includes("cargo clippy") && step.run.includes("--lib"),
+    );
+
+    expect(appLint).toHaveLength(1);
+    expect(appLint[0].run.trim().split(/\s+/)).toEqual([
+      "cargo",
+      "clippy",
+      "--locked",
+      "--lib",
+      "--bin",
+      "script-kit-gpui",
+      "--no-deps",
+      "--",
+      "-D",
+      "warnings",
+    ]);
+  });
+
   test("keeps interactive rendering optimized while correctness harnesses remain unoptimized", () => {
     const manifest = Bun.TOML.parse(readFileSync(join(scripts, "..", "..", "Cargo.toml"), "utf8"));
     expect(manifest.profile.dev.package["*"]["opt-level"]).toBe(2);
