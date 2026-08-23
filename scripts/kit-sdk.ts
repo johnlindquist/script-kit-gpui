@@ -8073,13 +8073,24 @@ globalThis.home = function home(...segments: string[]): string {
   return nodePath.join(os.homedir(), ...segments);
 };
 
+function activeScriptKitRoot(): string {
+  const configured = process.env.SK_PATH;
+  if (!configured) return nodePath.join(os.homedir(), '.scriptkit');
+  const homeExpanded = configured === '~' || configured.startsWith('~/')
+    ? nodePath.join(os.homedir(), configured.slice(1))
+    : configured;
+  return homeExpanded.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+    (match, braced: string | undefined, unbraced: string | undefined) =>
+      process.env[braced ?? unbraced ?? ''] ?? match);
+}
+
 globalThis.skPath = function skPath(...segments: string[]): string {
-  return nodePath.join(os.homedir(), '.scriptkit', ...segments);
+  return nodePath.join(activeScriptKitRoot(), ...segments);
 };
 
 globalThis.kitPath = function kitPath(...segments: string[]): string {
-  // Now returns ~/.scriptkit paths - ~/.kit is deprecated
-  return nodePath.join(os.homedir(), '.scriptkit', ...segments);
+  // Use the same owner-selected workspace as Rust setup; ~/.kit is deprecated.
+  return nodePath.join(activeScriptKitRoot(), ...segments);
 };
 
 globalThis.tmpPath = function tmpPath(...segments: string[]): string {
@@ -9789,7 +9800,7 @@ globalThis.batch = async function batch(
 };
 
 const MCP_PROTOCOL_VERSION = '2024-11-05';
-let cachedScriptKitConfig: Promise<Config | null> | null = null;
+let cachedScriptKitConfig: { path: string; result: Promise<Config | null> } | null = null;
 
 type McpJsonRpcId = number | string;
 type McpJsonRpcSuccess = {
@@ -9835,10 +9846,9 @@ function normalizeMcpConfig(config: unknown): McpConfig {
 }
 
 async function loadScriptKitConfig(): Promise<Config | null> {
-  if (!cachedScriptKitConfig) {
-    cachedScriptKitConfig = (async () => {
-      const configPath = nodePath.join(os.homedir(), '.scriptkit', 'config.ts');
-
+  const configPath = nodePath.join(activeScriptKitRoot(), 'config.ts');
+  if (!cachedScriptKitConfig || cachedScriptKitConfig.path !== configPath) {
+    const result = (async () => {
       try {
         await fs.access(configPath, fsConstants.F_OK);
       } catch {
@@ -9850,9 +9860,10 @@ async function loadScriptKitConfig(): Promise<Config | null> {
       const config = (imported.default ?? imported) as Config;
       return config ?? null;
     })();
+    cachedScriptKitConfig = { path: configPath, result };
   }
 
-  return cachedScriptKitConfig;
+  return cachedScriptKitConfig.result;
 }
 
 async function loadScriptKitMcpConfig(): Promise<McpConfig> {
@@ -9868,26 +9879,71 @@ interface ScriptKitMcpDiscovery {
 }
 
 async function loadScriptKitSelfMcpServerConfig(): Promise<McpHttpServerConfig> {
-  const discoveryPath = nodePath.join(os.homedir(), '.scriptkit', 'server.json');
+  const discoveryPath = process.env.SCRIPT_KIT_MCP_SERVER_JSON?.trim()
+    || nodePath.join(activeScriptKitRoot(), 'server.json');
   let discovery: ScriptKitMcpDiscovery;
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
 
   try {
-    const text = await fs.readFile(discoveryPath, 'utf8');
+    const owner = await fs.lstat(discoveryPath);
+    if (!owner.isFile() || owner.isSymbolicLink()) {
+      throw new Error('Script Kit MCP requires a private regular discovery file');
+    }
+    handle = await fs.open(discoveryPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    const opened = await handle.stat();
+    if (!opened.isFile() || owner.dev !== opened.dev || owner.ino !== opened.ino) {
+      throw new Error('Script Kit MCP requires a private regular discovery file');
+    }
+    if (process.platform !== 'win32' && (opened.mode & 0o077) !== 0) {
+      throw new Error('Script Kit MCP discovery requires owner-only permissions');
+    }
+    if (typeof process.getuid === 'function' && opened.uid !== process.getuid()) {
+      throw new Error('Script Kit MCP discovery must belong to the current user');
+    }
+    const text = await handle.readFile('utf8');
     discovery = JSON.parse(text) as ScriptKitMcpDiscovery;
   } catch (error) {
     throw new Error(
       `[computer] Script Kit MCP discovery is unavailable at ${discoveryPath}. Start Script Kit before using computer.* helpers. ${getMcpErrorMessage(error)}`
     );
+  } finally {
+    await handle?.close();
   }
 
-  if (!discovery.url?.trim() || !discovery.token?.trim()) {
+  if (
+    typeof discovery?.url !== 'string' ||
+    !discovery.url.trim() ||
+    typeof discovery.token !== 'string' ||
+    !discovery.token.trim() ||
+    /[\r\n]/.test(discovery.token)
+  ) {
     throw new Error(`[computer] Script Kit MCP discovery at ${discoveryPath} is missing url or token`);
   }
 
-  const baseUrl = discovery.url.replace(/\/+$/, '');
+  let endpoint: URL;
+  try {
+    endpoint = new URL(discovery.url);
+  } catch {
+    throw new Error('[computer] A local Script Kit MCP endpoint must be a valid loopback HTTP /rpc URL.');
+  }
+  const loopback = endpoint.hostname === 'localhost'
+    || endpoint.hostname === '127.0.0.1'
+    || endpoint.hostname === '[::1]';
+  if (
+    !loopback ||
+    !['http:', 'https:'].includes(endpoint.protocol) ||
+    endpoint.username ||
+    endpoint.password ||
+    endpoint.search ||
+    endpoint.hash ||
+    !['/', '/rpc'].includes(endpoint.pathname)
+  ) {
+    throw new Error('[computer] A local Script Kit MCP endpoint must be a loopback HTTP /rpc URL without credentials, query, or fragment.');
+  }
+  endpoint.pathname = '/rpc';
   return {
     transport: 'http',
-    endpoint: `${baseUrl}/rpc`,
+    endpoint: endpoint.toString(),
     headers: {
       authorization: `Bearer ${discovery.token}`,
     },
@@ -9945,18 +10001,56 @@ function getMcpErrorMessage(error: unknown): string {
   return String(error);
 }
 
+function safeMcpErrorMessage(message: string, secrets: readonly string[] = []): string {
+  let safe = message;
+  for (const secret of secrets) {
+    if (secret) safe = safe.split(secret).join('[REDACTED]');
+  }
+  return safe.replace(/\bBearer\s+[^\s,;"'}]+/gi, 'Bearer [REDACTED]').slice(0, 512);
+}
+
+function mcpRequestTimeoutMs(): number {
+  const configured = process.env.SCRIPT_KIT_MCP_TIMEOUT_MS;
+  if (configured === undefined || configured === '') return 30_000;
+  const timeout = Number(configured);
+  if (!/^[1-9][0-9]*$/.test(configured) || !Number.isSafeInteger(timeout) || timeout > 120_000) {
+    throw new Error('SCRIPT_KIT_MCP_TIMEOUT_MS must be a positive whole duration no greater than 120000ms.');
+  }
+  return timeout;
+}
+
 function assertMcpJsonRpcSuccess(
-  response: McpJsonRpcResponse,
+  response: unknown,
   serverId: string,
-  method: string
+  method: string,
+  expectedId: McpJsonRpcId,
+  secrets: readonly string[] = [],
 ): Record<string, unknown> {
+  if (
+    !isRecord(response) ||
+    response.jsonrpc !== '2.0' ||
+    response.id !== expectedId ||
+    Object.hasOwn(response, 'result') === Object.hasOwn(response, 'error')
+  ) {
+    throw new Error(`[mcp:${serverId}] ${method} returned an invalid JSON-RPC response`);
+  }
   if ('error' in response) {
+    if (
+      !isRecord(response.error) ||
+      !Number.isSafeInteger(response.error.code) ||
+      typeof response.error.message !== 'string' ||
+      !response.error.message
+    ) {
+      throw new Error(`[mcp:${serverId}] ${method} returned an invalid JSON-RPC response`);
+    }
     throw new Error(
-      `[mcp:${serverId}] ${method} failed: ${response.error.message} (code ${response.error.code})`
+      `[mcp:${serverId}] ${method} failed: ${safeMcpErrorMessage(response.error.message, secrets)} (code ${response.error.code})`
     );
   }
-
-  return response.result ?? {};
+  if (!isRecord(response.result)) {
+    throw new Error(`[mcp:${serverId}] ${method} returned an invalid JSON-RPC response`);
+  }
+  return response.result;
 }
 
 async function createStdioMcpSession(serverId: string, server: McpStdioServerConfig) {
@@ -9964,17 +10058,50 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
     throw new Error(`[mcp:${serverId}] stdio server is missing a command`);
   }
 
+  const requestTimeoutMs = mcpRequestTimeoutMs();
+  const serverEnvironment = {
+    ...process.env,
+    ...(server.env ?? {}),
+  };
+  if (process.env.SCRIPT_KIT_NONINTERACTIVE === '1') {
+    for (const permission of [
+      'SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER',
+      'SCRIPT_KIT_ALLOW_VISIBLE_PROBES',
+      'SCRIPT_KIT_ALLOW_NATIVE_INPUT',
+      'SCRIPT_KIT_ALLOW_SCREEN_CAPTURE',
+      'SCRIPT_KIT_ALLOW_LIVE_AI',
+      'SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH',
+    ]) {
+      if (server.env?.[permission] === '1') {
+        throw new Error(`[mcp:${serverId}] noninteractive MCP server cannot override ${permission}`);
+      }
+      serverEnvironment[permission] = '0';
+    }
+    serverEnvironment.INCLUDE_SYSTEM_INPUT = '0';
+  }
+  const ownsProcessGroup = process.platform !== 'win32';
   const child = spawnChildProcess(server.command, server.args ?? [], {
     cwd: server.cwd,
-    env: {
-      ...process.env,
-      ...(server.env ?? {}),
-    },
+    env: serverEnvironment,
+    detached: ownsProcessGroup,
     stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let closed = false;
+  const processClosed = new Promise<void>((resolve) => {
+    const finish = () => {
+      closed = true;
+      resolve();
+    };
+    child.once('close', finish);
+    child.once('error', finish);
   });
 
   let nextRequestId = 1;
   const stderrChunks: string[] = [];
+  let stderrBytes = 0;
+  const secretValues = Object.entries(server.env ?? {})
+    .filter(([name]) => /authorization|token|api[-_]?key|password|secret/i.test(name))
+    .map(([, value]) => value);
   const pending = new Map<
     number,
     {
@@ -9983,10 +10110,6 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
     }
   >();
 
-  child.stderr.on('data', (chunk) => {
-    stderrChunks.push(chunk.toString());
-  });
-
   const rejectPending = (error: Error) => {
     for (const { reject } of pending.values()) {
       reject(error);
@@ -9994,15 +10117,28 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
     pending.clear();
   };
 
+  child.stderr.on('data', (chunk) => {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    const remaining = 1024 * 1024 - stderrBytes;
+    if (bytes.byteLength > remaining) {
+      if (remaining > 0) stderrChunks.push(bytes.subarray(0, remaining).toString());
+      stderrBytes = 1024 * 1024;
+      rejectPending(new Error(`[mcp:${serverId}] stdio stderr exceeded its 1048576-byte safety budget`));
+      return;
+    }
+    stderrBytes += bytes.byteLength;
+    stderrChunks.push(bytes.toString());
+  });
+
   child.once('error', (error) => {
-    rejectPending(new Error(`[mcp:${serverId}] failed to start: ${error.message}`));
+    rejectPending(new Error(`[mcp:${serverId}] failed to start: ${safeMcpErrorMessage(error.message, secretValues)}`));
   });
 
   child.once('exit', (code, signal) => {
     if (pending.size === 0) {
       return;
     }
-    const stderr = stderrChunks.join('').trim();
+    const stderr = safeMcpErrorMessage(stderrChunks.join('').trim(), secretValues);
     const details = stderr ? ` stderr: ${stderr}` : '';
     rejectPending(
       new Error(
@@ -10022,16 +10158,23 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
       return;
     }
 
+    let message: unknown;
     try {
-      const message = JSON.parse(trimmed) as Partial<McpJsonRpcResponse>;
-      if (typeof message.id === 'number' && pending.has(message.id)) {
-        const request = pending.get(message.id);
-        pending.delete(message.id);
-        request?.resolve(message as McpJsonRpcResponse);
-      }
+      message = JSON.parse(trimmed);
     } catch {
       // Ignore non-JSON stdout noise from the child process.
+      return;
     }
+    if (!isRecord(message) || !Object.hasOwn(message, 'id')) {
+      return;
+    }
+    if (typeof message.id !== 'number' || !pending.has(message.id)) {
+      rejectPending(new Error(`[mcp:${serverId}] returned an invalid JSON-RPC response for the pending request`));
+      return;
+    }
+    const request = pending.get(message.id);
+    pending.delete(message.id);
+    request?.resolve(message as McpJsonRpcResponse);
   });
 
   const writeMessage = (payload: Record<string, unknown>) =>
@@ -10049,9 +10192,19 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
     async request(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
       const requestId = nextRequestId++;
       const response = await new Promise<McpJsonRpcResponse>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          pending.delete(requestId);
+          reject(new Error(`[mcp:${serverId}] ${method} timed out after ${requestTimeoutMs}ms`));
+        }, requestTimeoutMs);
         pending.set(requestId, {
-          resolve,
-          reject,
+          resolve: (result) => {
+            clearTimeout(timeout);
+            resolve(result);
+          },
+          reject: (error) => {
+            clearTimeout(timeout);
+            reject(error);
+          },
         });
         writeMessage({
           jsonrpc: '2.0',
@@ -10060,12 +10213,13 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
           params,
         }).catch((error) => {
           pending.delete(requestId);
+          clearTimeout(timeout);
           reject(
-            new Error(`[mcp:${serverId}] failed to write ${method}: ${getMcpErrorMessage(error)}`)
+            new Error(`[mcp:${serverId}] failed to write ${method}: ${safeMcpErrorMessage(getMcpErrorMessage(error), secretValues)}`)
           );
         });
       });
-      return assertMcpJsonRpcSuccess(response, serverId, method);
+      return assertMcpJsonRpcSuccess(response, serverId, method, requestId, secretValues);
     },
     async notify(method: string, params?: Record<string, unknown>): Promise<void> {
       await writeMessage({
@@ -10077,8 +10231,48 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
     async close(): Promise<void> {
       lineReader.close();
       child.stdin.end();
-      if (!child.killed) {
-        child.kill();
+      if (closed) return;
+      const ownedPid = child.pid;
+      if (typeof ownedPid !== 'number' || ownedPid <= 0) {
+        throw new Error(`[mcp:${serverId}] cannot identify its owned stdio server process`);
+      }
+
+      const signalOwnedServer = (signal: NodeJS.Signals) => {
+        try {
+          if (ownsProcessGroup) {
+            process.kill(-ownedPid, signal);
+          } else {
+            child.kill(signal);
+          }
+        } catch {
+          if (!closed) {
+            try { child.kill(signal); } catch {}
+          }
+        }
+      };
+
+      signalOwnedServer('SIGTERM');
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      const graceful = await Promise.race([
+        processClosed.then(() => true),
+        new Promise<boolean>((resolve) => {
+          graceTimer = setTimeout(() => resolve(false), 150);
+        }),
+      ]);
+      if (graceTimer) clearTimeout(graceTimer);
+      if (!graceful) {
+        signalOwnedServer('SIGKILL');
+        let killTimer: ReturnType<typeof setTimeout> | undefined;
+        const terminated = await Promise.race([
+          processClosed.then(() => true),
+          new Promise<boolean>((resolve) => {
+            killTimer = setTimeout(() => resolve(false), 1_000);
+          }),
+        ]);
+        if (killTimer) clearTimeout(killTimer);
+        if (!terminated) {
+          throw new Error(`[mcp:${serverId}] owned stdio server did not terminate after escalation`);
+        }
       }
     },
   };
@@ -10090,6 +10284,10 @@ async function createHttpMcpSession(serverId: string, server: McpHttpServerConfi
   }
 
   let sessionId: string | null = null;
+  const requestTimeoutMs = mcpRequestTimeoutMs();
+  const secrets = Object.entries(server.headers ?? {})
+    .filter(([name]) => /authorization|token|api[-_]?key/i.test(name))
+    .flatMap(([, value]) => [value, value.replace(/^Bearer\s+/i, '')]);
 
   const sendRequest = async (
     method: string,
@@ -10099,7 +10297,7 @@ async function createHttpMcpSession(serverId: string, server: McpHttpServerConfi
     const payload = includeId
       ? {
           jsonrpc: '2.0',
-          id: Date.now() + Math.floor(Math.random() * 1000),
+          id: crypto.randomUUID(),
           method,
           params,
         }
@@ -10120,29 +10318,43 @@ async function createHttpMcpSession(serverId: string, server: McpHttpServerConfi
       headers['mcp-session-id'] = sessionId;
     }
 
-    const response = await fetch(server.endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+    try {
+      const response = await fetch(server.endpoint, {
+        method: 'POST',
+        redirect: 'error',
+        signal: controller.signal,
+        headers,
+        body: JSON.stringify(payload),
+      });
 
-    if (!response.ok) {
-      throw new Error(
-        `[mcp:${serverId}] ${method} failed with HTTP ${response.status} ${response.statusText}`
-      );
+      if (!response.ok) {
+        throw new Error(
+          `[mcp:${serverId}] ${method} failed with HTTP ${response.status} ${response.statusText}`
+        );
+      }
+
+      const nextSessionId = response.headers.get('mcp-session-id');
+      if (nextSessionId) {
+        sessionId = nextSessionId;
+      }
+
+      if (!includeId) {
+        return {};
+      }
+
+      const json = await response.json();
+      return assertMcpJsonRpcSuccess(json, serverId, method, payload.id!, secrets);
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`[mcp:${serverId}] ${method} timed out after ${requestTimeoutMs}ms`);
+      }
+      const detail = safeMcpErrorMessage(getMcpErrorMessage(error), secrets);
+      throw new Error(detail);
+    } finally {
+      clearTimeout(timer);
     }
-
-    const nextSessionId = response.headers.get('mcp-session-id');
-    if (nextSessionId) {
-      sessionId = nextSessionId;
-    }
-
-    if (!includeId) {
-      return {};
-    }
-
-    const json = (await response.json()) as McpJsonRpcResponse;
-    return assertMcpJsonRpcSuccess(json, serverId, method);
   };
 
   return {
