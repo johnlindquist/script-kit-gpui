@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1294,6 +1294,7 @@ describe("noninteractive DevTools operator safety", () => {
   test.each([
     ["Notes live resize", "notes-live-resize.ts"],
     ["Notes bottom resize", "notes-bottom-resize.ts"],
+    ["Notes glass fallback", "notes-glass-entry-fallback.ts"],
     ["Actions entry filmstrip", "actions-entry-filmstrip.ts"],
     ["glass lifecycle filmstrip", "glass-lifecycle-filmstrip.ts"],
     ["rapid toggle stress", "rapid-toggle-stress.ts"],
@@ -1387,6 +1388,260 @@ describe("noninteractive DevTools operator safety", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
     expect(result.stdout.toString()).not.toContain("operator clipboard accessed");
+  });
+
+  test.each([
+    ["conversation hosts", "conversation-hosts-probe.ts"],
+    ["Notes actions", "notes-actions-probe.ts"],
+  ])("%s refuses before archiving every private pasteboard format", (_owner, file) => {
+    const result = child(`
+      import * as filesystem from "node:fs";
+      import { mock } from "bun:test";
+      mock.module("node:fs", () => ({
+        ...filesystem,
+        mkdtempSync: (() => "/tmp/script-kit-never-created-private-pasteboard"),
+        mkdirSync: (() => undefined),
+        writeFileSync: (() => undefined),
+      }));
+      Bun.spawnSync = ((command) => ({
+        exitCode: 0,
+        stdout: Buffer.from("0123456789abcdef  /tmp/reviewed-binary"),
+        stderr: Buffer.from(""),
+      }));
+      Bun.spawn = ((command) => {
+        console.log("private pasteboard archive helper reached: " + command[0]);
+        throw new Error("private pasteboard archive helper reached: " + command[0]);
+      });
+      try { await import(${JSON.stringify("./scripts/agentic/cons-flow-ux/") } + ${JSON.stringify(file)}); }
+      catch (error) { console.log("failure=" + error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+    expect(result.stdout.toString()).not.toContain("private pasteboard archive helper reached");
+  });
+
+  test("root-search visual proof refuses before creating screenshots or launching the app", () => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-root-visual-safety-"));
+    const output = join(root, "uncreated-output");
+    try {
+      const result = child(`
+        import { existsSync } from "node:fs";
+        process.env.SCRIPT_KIT_GPUI_BINARY = process.execPath;
+        process.argv = ["bun", "scripts/agentic/root-search-visual-stability.ts", "--out", ${JSON.stringify(output)}];
+        Bun.spawn = (() => {
+          console.log("unsafe root-search application started");
+          throw new Error("unsafe root-search application started");
+        });
+        try { await import("./scripts/agentic/root-search-visual-stability.ts"); }
+        catch (error) { console.log("failure=" + error.message); }
+        console.log("outExists=" + existsSync(${JSON.stringify(output)}));
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+      expect(result.stdout.toString()).not.toContain("unsafe root-search application started");
+      expect(result.stdout.toString()).toContain("outExists=false");
+      expect(existsSync(output)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["remote navigation", ["--url", "https://example.invalid/private"]],
+    ["pixel capture", ["--screenshot", "/tmp/script-kit-never-captured.png"]],
+  ])("browser fidelity %s refuses before launching agent-browser", (_kind, extra) => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("unsafe browser or screen capture started"); });
+      process.argv = ["bun", "scripts/devtools/capture-dom-fidelity.ts", "--session", "operator-session", "--out", "/tmp/script-kit-never-written.json", ...${JSON.stringify(extra)}];
+      try { await import("./scripts/devtools/capture-dom-fidelity.ts"); }
+      catch (error) { console.log("failure=" + error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+    expect(result.stdout.toString()).not.toContain("unsafe browser or screen capture started");
+  });
+
+  test("browser fidelity help stays passive and never starts a browser", () => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("passive browser help started a child"); });
+      process.argv = ["bun", "scripts/devtools/capture-dom-fidelity.ts", "--help"];
+      await import("./scripts/devtools/capture-dom-fidelity.ts");
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("capture-dom-fidelity.ts");
+    expect(result.stdout.toString()).not.toContain("passive browser help started");
+  });
+
+  test("global input monitor preserves existing files and refuses before native observation", () => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-interference-safety-"));
+    const names = ["interference-ready.json", "interference-stop", "interference.json"];
+    for (const name of names) writeFileSync(join(root, name), `preserve-${name}`);
+    try {
+      const result = child(`
+        Bun.spawn = (() => { throw new Error("global keyboard and pointer monitor started"); });
+        const { startInterferenceMonitor } = await import("./scripts/devtools/glass-interference.ts");
+        try { startInterferenceMonitor("/tmp/never-launched-observer", ${JSON.stringify(root)}); }
+        catch (error) { console.log("failure=" + error.message); }
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+      expect(result.stdout.toString()).not.toContain("global keyboard and pointer monitor started");
+      for (const name of names) {
+        expect(readFileSync(join(root, name), "utf8")).toBe(`preserve-${name}`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("pure interference classification remains available without monitoring the operator", () => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("pure interference grading started a monitor"); });
+      const { classifyInterference } = await import("./scripts/devtools/glass-interference.ts");
+      console.log(JSON.stringify(classifyInterference({ status: "ok", untaggedInputCount: 0, frontmostAppChanged: false, pointerDeviationPx: 0, targetMovedExternally: false })));
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString()).pass).toBe(true);
+  });
+
+  test.each([
+    ["compiler identity", "queryCompilerIdentity"],
+    ["cached native helper", "prepareHelper"],
+  ])("%s refuses before Swift subprocess or cache creation", (_kind, owner) => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-swift-helper-safety-"));
+    const cache = join(root, "uncreated-cache");
+    try {
+      const result = child(`
+        import { existsSync } from "node:fs";
+        Bun.spawn = (() => { throw new Error("unsafe Swift compiler started"); });
+        const helper = await import("./scripts/devtools/glass-native-helper-cache.ts");
+        try {
+          if (${JSON.stringify(owner)} === "prepareHelper") {
+            await helper.prepareHelper("fixture", { cacheDir: ${JSON.stringify(cache)} });
+          } else {
+            await helper.queryCompilerIdentity();
+          }
+        } catch (error) { console.log("failure=" + error.message); }
+        console.log("cacheExists=" + existsSync(${JSON.stringify(cache)}));
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+      expect(result.stdout.toString()).not.toContain("unsafe Swift compiler started");
+      expect(result.stdout.toString()).toContain("cacheExists=false");
+      expect(existsSync(cache)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("native AppKit fixture refuses before Swift discovery, temporary files, or windows", () => {
+    const result = child(`
+      import * as subprocess from "node:child_process";
+      import { mock } from "bun:test";
+      mock.module("node:child_process", () => ({
+        ...subprocess,
+        spawn: (() => { throw new Error("unsafe AppKit fixture application started"); }),
+        spawnSync: (() => { throw new Error("unsafe AppKit fixture compiler started"); }),
+      }));
+      const { SUITES } = await import("./scripts/devtools/window-engine-foundation.ts");
+      try { await SUITES.native({ cycles: 1 }); }
+      catch (error) { console.log("failure=" + error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+    expect(result.stdout.toString()).not.toContain("unsafe AppKit fixture");
+  });
+
+  test("glass contrast refuses before output creation, subprocesses, or backdrop launch", () => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-contrast-safety-"));
+    const output = join(root, "uncreated-output");
+    try {
+      const result = child(`
+        import { existsSync } from "node:fs";
+        Bun.spawn = (() => { throw new Error("unsafe glass contrast subprocess started"); });
+        process.argv = ["bun", "scripts/devtools/glass-motion-contrast.ts", "--binary", process.execPath, "--mode", "red", "--out", ${JSON.stringify(output)}];
+        try { await import("./scripts/devtools/glass-motion-contrast.ts"); }
+        catch (error) { console.log("failure=" + error.message); }
+        console.log("outExists=" + existsSync(${JSON.stringify(output)}));
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+      expect(result.stdout.toString()).not.toContain("unsafe glass contrast subprocess started");
+      expect(result.stdout.toString()).toContain("outExists=false");
+      expect(existsSync(output)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("live smoke study refuses before reading manifests or validating backdrop permissions", () => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("unsafe smoke-study capture started"); });
+      process.argv = ["bun", "scripts/agentic/glass-smoke-study.ts", "--manifest", "/tmp/script-kit-never-read-manifest.json", "--out", "/tmp/script-kit-never-written-study"];
+      const { main } = await import("./scripts/agentic/glass-smoke-study.ts");
+      try { await main(); }
+      catch (error) { console.log("failure=" + error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
+    expect(result.stdout.toString()).not.toContain("unsafe smoke-study capture started");
+    expect(result.stdout.toString()).not.toContain("ENOENT");
+  });
+
+  test("smoke-study dry-run keeps pure schedules and storage inspection without desktop effects", () => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-smoke-dry-run-safety-"));
+    const manifestPath = join(root, "study.json");
+    const output = join(root, "uncreated-output");
+    const baseline = join(root, "baseline");
+    const candidate = join(root, "candidate");
+    writeFileSync(baseline, "reviewed-baseline");
+    writeFileSync(candidate, "reviewed-candidate");
+    writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: 1,
+      studyId: "reviewed-passive-study",
+      profile: "full",
+      builds: [
+        { id: "baseline", role: "baseline", binary: baseline, expected: { morphStartAlpha: 0.85 } },
+        { id: "candidate", role: "candidate", binary: candidate, expected: { morphStartAlpha: 0.9 } },
+      ],
+      design: { type: "mirrored-cyclic", warmupsPerBuild: 3, requiredBlocks: 5, failureOnlyEarlyStop: true },
+      fixture: { mode: "saturated-stripes" },
+    }));
+    try {
+      const result = child(`
+        Bun.spawn = ((command) => {
+          if (!["df", "du"].includes(command[0])) {
+            throw new Error("unsafe smoke-study desktop child started: " + command[0]);
+          }
+          const stdout = command[0] === "df"
+            ? "Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/reviewed 99999999 1 99999999 1% /\\n"
+            : "1\\t/reviewed-history\\n";
+          return { stdout: new Response(stdout).body, stderr: new Response("").body, exited: Promise.resolve(0), kill() {} };
+        });
+        process.argv = ["bun", "scripts/agentic/glass-smoke-study.ts", "--manifest", ${JSON.stringify(manifestPath)}, "--out", ${JSON.stringify(output)}, "--dry-run"];
+        const { main } = await import("./scripts/agentic/glass-smoke-study.ts");
+        const exitCode = await main();
+        console.log("exitCode=" + exitCode);
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain('"status": "DRY_RUN"');
+      expect(result.stdout.toString()).toContain("exitCode=0");
+      expect(result.stdout.toString()).not.toContain("unsafe smoke-study desktop child started");
+      expect(existsSync(output)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test.each([

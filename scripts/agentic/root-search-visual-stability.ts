@@ -2,6 +2,9 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { assertNoninteractiveVisualProbe } from "../devtools/lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("root-search.visual-stability");
 
 type Json = Record<string, any>;
 

@@ -21,6 +21,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
 
 export type HelperRole =
   | "filmstrip"
@@ -125,6 +126,7 @@ export async function queryCompilerIdentity(): Promise<{
   sdkPath: string;
   architecture: string;
 }> {
+  assertNoninteractiveVisualProbe("glass-native-helper.swift-compiler");
   if (cachedCompilerIdentity) return cachedCompilerIdentity;
   const version = await runCommand(["xcrun", "swiftc", "--version"]);
   if (version.exitCode !== 0) {
@@ -166,6 +168,7 @@ export async function prepareHelper(
     repoRoot?: string;
   },
 ): Promise<PrepareHelperResult> {
+  assertNoninteractiveVisualProbe("glass-native-helper.prepare");
   const definition = HELPER_DEFINITIONS[role];
   if (!definition) throw new Error(`unknown helper role: ${role}`);
   const repoRoot = options.repoRoot ?? resolve(import.meta.dir, "../..");

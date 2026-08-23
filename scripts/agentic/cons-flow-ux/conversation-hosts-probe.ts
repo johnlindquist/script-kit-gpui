@@ -12,6 +12,9 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
+import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("conversation-hosts.private-pasteboard-archive");
 
 const ROOT = resolve(import.meta.dir, "../../..");
 const BINARY = resolve(

@@ -18,6 +18,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
 
 export interface FixtureBounds {
   x?: number;
@@ -355,6 +356,7 @@ export const SUITES: Record<string, SuiteRunner> = {
     };
   },
   native: (context) => {
+    assertNoninteractiveVisualProbe("window-engine.native-appkit-fixture");
     // Decision rule "Native fixture toolchain": requires xcrun swiftc.
     const which = spawnSync("xcrun", ["--find", "swiftc"], { encoding: "utf8" });
     if (which.status !== 0) {

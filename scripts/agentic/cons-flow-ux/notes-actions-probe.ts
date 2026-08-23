@@ -12,6 +12,9 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
+import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("notes-actions.private-pasteboard-archive");
 
 const BINARY = resolve(
   process.env.SCRIPT_KIT_GPUI_BINARY ??

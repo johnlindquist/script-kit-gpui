@@ -29,6 +29,7 @@ import {
 import os from "node:os";
 import { join, resolve } from "node:path";
 import { alphaToBitsHex } from "./glass-system-telemetry.ts";
+import { assertNoninteractiveVisualProbe } from "../devtools/lib/operator-safety.ts";
 
 // ---------------------------------------------------------------------------
 // Pure schedule algebra
@@ -722,7 +723,7 @@ async function measureStoragePreflight(repoRoot: string, plannedSlots: number) {
   };
 }
 
-async function main(): Promise<number> {
+export async function main(): Promise<number> {
   const manifestPath = cliArg("--manifest");
   const outDir = cliArg("--out");
   const dryRun = process.argv.includes("--dry-run");
@@ -731,6 +732,9 @@ async function main(): Promise<number> {
       "usage: glass-smoke-study.ts --manifest <path> --out <dir> [--dry-run]",
     );
     return 64;
+  }
+  if (!dryRun) {
+    assertNoninteractiveVisualProbe("glass-smoke-study.live-capture");
   }
   const repoRoot = resolve(import.meta.dir, "../..");
   const raw = JSON.parse(readFileSync(resolve(manifestPath), "utf8"));

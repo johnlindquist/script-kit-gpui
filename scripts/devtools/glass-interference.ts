@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
 
 export function classifyInterference(receipt: any) {
   const errors: string[] = [];
@@ -20,6 +21,7 @@ export function classifyInterference(receipt: any) {
 }
 
 export function startInterferenceMonitor(helper: string, directory: string) {
+  assertNoninteractiveVisualProbe("glass-interference.global-input-monitor");
   mkdirSync(directory, { recursive: true });
   const readyPath = join(directory, "interference-ready.json");
   const stopPath = join(directory, "interference-stop");

@@ -6,6 +6,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 
 import { BROWSER_COLLECTOR_SOURCE } from "./design-fidelity";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
 
 function value(args: string[], flag: string): string {
   const index = args.indexOf(flag);
@@ -77,6 +78,10 @@ async function collectDomReceipt(session: string): Promise<Record<string, any>> 
 
 async function main(): Promise<void> {
   const args = Bun.argv.slice(2);
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(usage());
+    return;
+  }
   const session = value(args, "--session");
   const out = value(args, "--out");
   const url = value(args, "--url");
@@ -91,6 +96,7 @@ async function main(): Promise<void> {
     console.error(usage());
     process.exit(2);
   }
+  assertNoninteractiveVisualProbe("browser-dom-fidelity.capture");
 
   const viewportRequested = Boolean(widthRaw || heightRaw || dprRaw);
   if (viewportRequested) {

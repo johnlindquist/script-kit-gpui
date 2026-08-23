@@ -17,6 +17,7 @@ import {
 import { LEGACY_FULL_SCENARIO_ORDER } from "./glass-lifecycle-filmstrip-contract.ts";
 import { announceTestStatus } from "./test-status.ts";
 import { requireValidatedHelper } from "./glass-native-helper-cache.ts";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
 
 type Disposition =
   | "EVALUABLE_PASS"
@@ -444,6 +445,7 @@ const classify = (result: CommandResult, receipt: any): Disposition => {
 };
 
 async function main() {
+  assertNoninteractiveVisualProbe("glass-motion-contrast.live-capture");
   const requestedBinary = value("--binary") ?? process.env.SCRIPT_KIT_GPUI_BINARY;
   if (!requestedBinary) {
     throw new Error("binary missing: <unset>");

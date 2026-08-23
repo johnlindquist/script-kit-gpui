@@ -14,6 +14,9 @@ import {
   startInterferenceMonitor,
   waitForInterferenceReady,
 } from "./glass-interference.ts";
+import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("notes-glass.entry-fallback");
 
 const arg = (name: string, fallback?: string) => {
   const index = process.argv.indexOf(name);
