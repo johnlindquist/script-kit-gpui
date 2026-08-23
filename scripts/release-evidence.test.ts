@@ -2386,6 +2386,7 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/test-runner.ts",
     "tests/sdk/capability-types.fixture.ts",
     "tests/sdk/fixtures/runner-negative-case.ts",
+    "tests/sdk/test-mcp-client.ts",
     "tests/sdk/runner-safety.test.ts",
     "tests/protocol_batch.rs",
   ])("standalone authoritative gates reject an untracked mandatory fixture: %s", (owner) => {

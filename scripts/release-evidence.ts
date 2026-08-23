@@ -204,6 +204,7 @@ const REQUIRED_SDK_SAFETY_OWNERS = [
   "scripts/mcp-cli.test.ts",
   "scripts/test-runner.ts",
   "tests/sdk/fixtures/runner-negative-case.ts",
+  "tests/sdk/test-mcp-client.ts",
   "tests/sdk/runner-safety.test.ts",
 ] as const;
 
