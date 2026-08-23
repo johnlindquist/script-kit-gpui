@@ -62,12 +62,17 @@ printf '\\n' >> "$CARGO_POLICY_CAPTURE"
   );
   chmodSync(join(bin, "cargo"), 0o755);
 
+  const inheritedEnvironment = { ...process.env };
+  delete inheritedEnvironment.CARGO_BUILD_JOBS;
+  delete inheritedEnvironment.RUST_TEST_THREADS;
+  delete inheritedEnvironment.SCRIPT_KIT_AGENT_MAX_JOBS;
+
   return {
     root,
     bin,
     capture,
     env: {
-      ...process.env,
+      ...inheritedEnvironment,
       PATH: `${bin}:/usr/bin:/bin`,
       SCRIPT_KIT_REPO_ROOT: root,
       CARGO_POLICY_CAPTURE: capture,
