@@ -1102,6 +1102,16 @@ offline receipts until their real producers are run again.
     spawn, all four native source/test owners are mandatory, and publishable
     proof refuses receipts that did not directly execute the
     **43-case / 89-assertion** native-input suite.
+30. The dedicated screenshot verifier independently owned seven unguarded
+    process routes and could show a real window, request native/full-screen or
+    render capture, inspect MCP credentials, contact the MCP server, or create
+    a screenshot directory before any upstream scenario guard ran. Its source
+    was absent from mandatory release provenance, and even `--skip-screenshot`
+    could create the screenshot directory. Strict mode now returns a typed
+    refusal before filesystem, session, network, or subprocess effects; all
+    seven child routes cross the immutable shared guard, MCP refuses before
+    discovery, and fully skipped/help paths remain genuinely passive. The
+    actual screenshot owner is mandatory release provenance.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1352,19 +1362,21 @@ offline receipts until their real producers are run again.
     explicit `noninteractive: false` options nor replacement environments
     can weaken the real parent's authority; target resolution stays on its
     capture-free hidden-state path even when callers request an interactive
-    override. The standalone operator-safety suite passes **86 cases and
-    341 assertions**, including pure canonical-inspector ownership, immutable
-    subprocess policy, Notes/matrix/scenario cleanup, and mocked native-spawn
-    cases; the separate direct native-input suite passes **43 cases and 89
+    override. The standalone operator-safety suite passes **90 cases and
+    357 assertions**, including pure canonical-inspector ownership, immutable
+    subprocess policy, Notes/matrix/scenario cleanup, mocked native-spawn
+    cases, and default/render/fallback screenshot refusal; the separate
+    direct native-input suite passes **43 cases and 89
     assertions** without touching a keyboard, pointer, window, or screen;
     the separate hidden-target identity suite passes
     **14 cases and 66 assertions**. Release evidence now fail-closes unless
-    all twenty-one actual safety owners—the direct session shell, shared
+    all twenty-two actual safety owners—the direct session shell, shared
     identity helper, isolated startup, DevTools bootstrap, readiness waiter,
     canonical inspector, Notes, filterable matrix, both navigators, exact
-    target thread, scenario runner, automation-window owner, native window
-    owner, native-input owner and behavior suite, Driver, shared client,
-    central policy, target resolver, and status announcer—are
+    target thread, scenario runner, automation-window owner, dedicated
+    screenshot verifier, native window owner, native-input owner and behavior
+    suite, Driver, shared client, central policy, target resolver, and status
+    announcer—are
     tracked and included in the canonical release-source inventory. Real
     failing-then-passing mutations cover each previously omitted owner.
     The independent SDK/custom-script runner now forcibly clears inherited
@@ -1385,7 +1397,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **twenty-four direct release-owner/proof-gate cases / 72 assertions** and
+    **twenty-five direct release-owner/proof-gate cases / 75 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
