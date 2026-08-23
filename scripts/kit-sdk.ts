@@ -10147,6 +10147,24 @@ function mcpMaxResponseBytes(): number {
   return budget;
 }
 
+function mcpDiscoveryConcurrency(): number {
+  const noninteractive = process.env.SCRIPT_KIT_NONINTERACTIVE === '1';
+  const maximum = noninteractive ? 2 : 8;
+  const configured = process.env.SCRIPT_KIT_MCP_CONCURRENCY;
+  if (configured === undefined || configured === '') return noninteractive ? 2 : 4;
+  const concurrency = Number(configured);
+  if (
+    !/^[1-9][0-9]*$/.test(configured) ||
+    !Number.isSafeInteger(concurrency) ||
+    concurrency > maximum
+  ) {
+    throw new Error(
+      `SCRIPT_KIT_MCP_CONCURRENCY must be a positive whole worker count no greater than ${maximum}.`
+    );
+  }
+  return concurrency;
+}
+
 async function readBoundedMcpResponse(
   response: Response,
   maximumBytes: number,
@@ -10689,6 +10707,7 @@ globalThis.mcp = {
   },
 
   async listTools(serverId?: string): Promise<McpToolInfo[]> {
+    const maximumConcurrency = mcpDiscoveryConcurrency();
     const config = await loadScriptKitMcpConfig();
     const entries = serverId
       ? (() => {
@@ -10697,17 +10716,31 @@ globalThis.mcp = {
         })()
       : getEnabledMcpServerEntries(config);
 
-    const toolGroups = await Promise.all(
-      entries.map(async ([id, server]) => {
-        const result = await withMcpSession(id, server, async (session) => {
-          const response = await session.request('tools/list', {});
-          return Array.isArray(response.tools)
-            ? response.tools.map((tool) => normalizeMcpToolInfo(id, tool as Record<string, unknown>))
-            : [];
-        });
-        return result;
-      })
-    );
+    if (entries.length === 0) return [];
+    const toolGroups: McpToolInfo[][] = new Array(entries.length);
+    let nextIndex = 0;
+    let stopped = false;
+    let firstFailure: unknown;
+    await Promise.all(Array.from({ length: Math.min(maximumConcurrency, entries.length) }, async () => {
+      while (!stopped && nextIndex < entries.length) {
+        const index = nextIndex++;
+        const [id, server] = entries[index]!;
+        try {
+          toolGroups[index] = await withMcpSession(id, server, async (session) => {
+            const response = await session.request('tools/list', {});
+            return Array.isArray(response.tools)
+              ? response.tools.map((tool) => normalizeMcpToolInfo(id, tool as Record<string, unknown>))
+              : [];
+          });
+        } catch (error) {
+          if (!stopped) {
+            stopped = true;
+            firstFailure = error;
+          }
+        }
+      }
+    }));
+    if (stopped) throw firstFailure;
 
     return toolGroups.flat();
   },

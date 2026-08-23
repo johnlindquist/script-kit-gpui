@@ -29,6 +29,7 @@ const originalFetch = globalThis.fetch;
 const previousDiscoveryPath = process.env.SCRIPT_KIT_MCP_SERVER_JSON;
 const previousTimeout = process.env.SCRIPT_KIT_MCP_TIMEOUT_MS;
 const previousResponseBudget = process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES;
+const previousDiscoveryConcurrency = process.env.SCRIPT_KIT_MCP_CONCURRENCY;
 const previousKitPath = process.env.SK_PATH;
 const stdioServerPath = join(fixtureDirectory, "mcp-stdio-fixture.ts");
 const descendantPidPath = join(fixtureDirectory, "owned-descendant.pid");
@@ -165,6 +166,7 @@ async function check(name: string, operation: () => Promise<unknown>): Promise<v
   writeDiscovery();
   delete process.env.SCRIPT_KIT_MCP_TIMEOUT_MS;
   delete process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES;
+  delete process.env.SCRIPT_KIT_MCP_CONCURRENCY;
   globalThis.fetch = (async () => {
     throw new Error("MCP fixture attempted an unapproved real network request");
   }) as typeof fetch;
@@ -231,6 +233,31 @@ function successResponse(payload: Record<string, unknown>, headers: HeadersInit 
       }) }],
     },
   }, { headers });
+}
+
+async function withDiscoveryWorkspace(
+  count: number,
+  operation: () => Promise<unknown>,
+): Promise<unknown> {
+  const workspace = join(fixtureDirectory, `bounded-discovery-${crypto.randomUUID()}`);
+  mkdirSync(workspace, { recursive: true });
+  const servers = Object.fromEntries(Array.from({ length: count }, (_unused, index) => [
+    `server-${index}`,
+    {
+      transport: "http",
+      endpoint: `https://configured-${index}.example/rpc`,
+      headers: { authorization: `Bearer owned-server-${index}` },
+    },
+  ]));
+  writeFileSync(join(workspace, "config.ts"), `export default ${JSON.stringify({
+    mcp: { enabled: true, servers },
+  })};\n`, { mode: 0o600 });
+  process.env.SK_PATH = workspace;
+  try {
+    return await operation();
+  } finally {
+    process.env.SK_PATH = fixtureDirectory;
+  }
 }
 
 try {
@@ -557,6 +584,93 @@ try {
     return { toolCount: tools.length, appStarted: false };
   });
 
+  for (const [name, requestedWorkers, maximumWorkers] of [
+    ["default", undefined, 2],
+    ["explicit-serial", "1", 1],
+  ] as const) {
+    await check(`mcp-discovery-${name}-bounds-workers-and-preserves-config-order`, async () =>
+      withDiscoveryWorkspace(6, async () => {
+        if (requestedWorkers !== undefined) process.env.SCRIPT_KIT_MCP_CONCURRENCY = requestedWorkers;
+        let activeRequests = 0;
+        let maximumObserved = 0;
+        globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = new Request(input, init);
+          const payload = await request.json() as Record<string, unknown>;
+          activeRequests += 1;
+          maximumObserved = Math.max(maximumObserved, activeRequests);
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          activeRequests -= 1;
+          if (payload.method === "notifications/initialized") return new Response(null, { status: 202 });
+          const owner = new URL(request.url).hostname.replace("configured-", "").replace(".example", "");
+          return Response.json({
+            jsonrpc: "2.0",
+            id: payload.id,
+            result: payload.method === "tools/list"
+              ? { tools: [{ name: `tool-${owner}` }] }
+              : { capabilities: {} },
+          });
+        }) as typeof fetch;
+        const tools = await mcp.listTools();
+        if (maximumObserved > maximumWorkers) {
+          throw new Error(`MCP discovery exceeded its ${maximumWorkers}-worker limit with ${maximumObserved} active requests`);
+        }
+        if (tools.map((tool) => tool.name).join(",") !== "tool-0,tool-1,tool-2,tool-3,tool-4,tool-5") {
+          throw new Error("Bounded MCP discovery reordered the configured server inventory");
+        }
+        return { maximumObserved, configuredServers: 6, orderPreserved: true };
+      }),
+    );
+  }
+
+  await check("mcp-discovery-failure-awaits-every-owned-inflight-server", async () =>
+    withDiscoveryWorkspace(6, async () => {
+      let activeRequests = 0;
+      const startedServers = new Set<string>();
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        const owner = new URL(request.url).hostname;
+        const payload = await request.json() as Record<string, unknown>;
+        startedServers.add(owner);
+        activeRequests += 1;
+        await new Promise((resolve) => setTimeout(resolve, owner.includes("configured-0") ? 2 : 12));
+        activeRequests -= 1;
+        if (owner.includes("configured-0")) {
+          return Response.json({
+            jsonrpc: "2.0",
+            id: payload.id,
+            error: { code: -32001, message: "owned discovery failure" },
+          });
+        }
+        if (payload.method === "notifications/initialized") return new Response(null, { status: 202 });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: payload.id,
+          result: payload.method === "tools/list" ? { tools: [] } : { capabilities: {} },
+        });
+      }) as typeof fetch;
+      await expectFailure(() => mcp.listTools(), "owned discovery failure");
+      if (activeRequests !== 0) {
+        throw new Error(`MCP discovery returned while ${activeRequests} owned requests were still running`);
+      }
+      if (startedServers.size > 2) {
+        throw new Error("MCP discovery started unbounded servers after the first failure");
+      }
+      return { inflightRequests: activeRequests, startedServers: startedServers.size };
+    }),
+  );
+
+  for (const invalid of ["0", "3", "1.5", "9"]) {
+    await check(`mcp-discovery-invalid-concurrency-${invalid}-refuses-before-transport`, async () =>
+      withDiscoveryWorkspace(2, async () => {
+        process.env.SCRIPT_KIT_MCP_CONCURRENCY = invalid;
+        const observed = installServer((payload) => successResponse(payload));
+        await expectFailure(() => mcp.listTools(), "SCRIPT_KIT_MCP_CONCURRENCY");
+        if (observed.requests !== 0) throw new Error("Invalid MCP discovery concurrency reached transport");
+        return { invalid, requests: observed.requests };
+      }),
+    );
+  }
+
   await check("mcp-explicit-remote-server-remains-supported-with-safe-redirect-policy", async () => {
     const observed = installServer((payload, request, init) => {
       if (new URL(request.url).hostname !== "configured-remote.example") {
@@ -678,6 +792,11 @@ try {
     delete process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES;
   } else {
     process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES = previousResponseBudget;
+  }
+  if (previousDiscoveryConcurrency === undefined) {
+    delete process.env.SCRIPT_KIT_MCP_CONCURRENCY;
+  } else {
+    process.env.SCRIPT_KIT_MCP_CONCURRENCY = previousDiscoveryConcurrency;
   }
   if (previousKitPath === undefined) {
     delete process.env.SK_PATH;
