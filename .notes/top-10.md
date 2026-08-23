@@ -1276,6 +1276,68 @@ offline receipts until their real producers are run again.
     307 assertions**, **18 pure scroll cases / 65 assertions**, and **three
     receipt-preservation cases / 11 assertions**; no app, native input,
     clipboard, screen, or browser is touched.
+40. The next native proof layer independently accepted missing, `NaN`, and
+    infinite AppKit opacity; an unobserved hidden flag; zero-area native
+    frames; duplicate structural view owners; and accidentally returned raw
+    accessibility labels. Its focus graph reported an empty list and a
+    missing focused owner as reciprocal. Worse, native activation accepted
+    two absent selectors, a self-consistently forged arbitrary selector, an
+    empty action identity, and an enabled button masquerading as a disabled
+    refusal. Scroll separately returned `ok` for zero/negative-area paint,
+    duplicate later clipped rows, fractional/negative generations, mismatched
+    semantic owners, unobserved coordinate/clip bounds, and hidden viewport
+    clips. The actual focus, native activation, and scroll owners now require
+    independently observed finite visibility, one genuine focused owner,
+    exact canonical action selector and before-dispatch disabled refusal,
+    unique positive same-frame row/viewport geometry, independent clip
+    intersections, and current nonnegative target generations. The receipt
+    registry independently recomputes native peers, focus edges, row
+    identities, visible ratios, and transaction generations rather than
+    trusting passing booleans. **16 native focus cases / 69 assertions** and
+    **22 pure scroll cases / 97 assertions** execute without real keyboard,
+    pointer, accessibility permission, window, or screen access.
+41. The top-level consistency auditor previously accepted a registered
+    generic **layout inspection** as complete proof of PF-004 semantic
+    projection. Meanwhile all three real PF-004–PF-008 producers emitted
+    ad-hoc `RUNTIME-CONFIRMED` objects with no registered primitive, exact
+    canonical task section, source-bound producer, observed target
+    transaction, binary lineage, real privacy envelope, or machine-readable
+    negative controls. Those files were therefore never acceptable current
+    runtime evidence, even after a genuine future application run. The new
+    shared `runtime-task-proof.ts` owner binds each of the five obligations
+    to exactly one real producer and proof mode: semantic/action, layout/join,
+    glyph/fit, accessibility/AX, or rendered-safe-viewport/selection. Every
+    future positive receipt independently checks the actual binary bytes,
+    current Git source, registered schema and policy fingerprint, exact
+    canonical task section, observed hidden/visible target and process,
+    same-target transaction, all required executed negative controls,
+    privacy-safe cleanup, and the exact adapter/schema/primitive/runtime
+    source fingerprints. Text additionally requires both Notes and Day Page
+    shaped glyphs; native accessibility requires genuinely enabled and
+    disabled real activations; scrolling requires an advancing selection
+    transaction on the identical window. Failed observations produce a
+    registered typed block with only a fingerprinted diagnostic. The
+    canonical auditor now rejects swapped primitives, generic inspection,
+    omitted owners, missing adversarial controls, and stale actual producer
+    bytes. **12 synthetic end-to-end runtime-contract cases / 79 assertions**
+    prove every real registered task can pass its actual canonical auditor;
+    these disposable synthetic fixtures never enter the authoritative
+    artifacts, and real acceptance honestly remains **15 / 75**.
+42. Shipping provenance now requires all **20 semantic/geometry/text/focus/
+    scroll/runtime-adapter** production, behavior, and producer owners, and
+    the actual release proof lane directly executes the new canonical
+    runtime-task suite. GOV-006 additionally executes and fingerprints both
+    the canonical adapter and its real anti-forgery behavior alongside the
+    existing completion auditor; deleting either source or executable suite
+    invalidates governance proof. The exact new adapter bytes also
+    participate in every shared receipt-policy fingerprint, so stale
+    pre-contract evidence cannot silently remain green. The expanded pure
+    foundation lane passes **110 cases / 541 assertions across eight
+    suites**, the broader nonintrusive consistency lane passes **262 cases /
+    1,260 assertions across 14 files**, and **108 release ownership/proof
+    mutations / 337 assertions** reject missing actual owners or omitted
+    directly executed behavior. No application, Cargo compiler, browser,
+    native input, clipboard, screen capture, or live provider is started.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1570,9 +1632,11 @@ offline receipts until their real producers are run again.
     Three pure canonical-governance suites pass **88 cases / 533 assertions**,
     including **18 workflow anti-forgery cases / 31 assertions**.
     The browser-pixel foundation adds **19 isolated cases / 87 assertions**;
-    its combined semantic/schema/workflow/geometry lane passes **236 cases /
-    1,053 assertions across 13 files** without a browser. The pure typed
-    scroll lane adds **18 cases / 65 assertions**, and all three real
+    its combined semantic/schema/workflow/geometry lane passes **262 cases /
+    1,260 assertions across 14 files** without a browser, including
+    **12 exact canonical runtime-task cases / 79 assertions**. The pure
+    native focus lane adds **16 cases / 69 assertions**, the pure typed
+    scroll lane adds **22 cases / 97 assertions**, and all three real
     proof-foundation producers preserve existing receipts across **three
     cases / 11 assertions**. Publication also requires the exact
     geometry producer, executable suite, shared harness, story manifest, and
@@ -1595,7 +1659,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **ninety-two direct release-owner/proof-gate cases / 286 assertions** and
+    **108 direct release-owner/proof-gate cases / 337 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
