@@ -65,6 +65,14 @@ for await (const line of createInterface({ input: process.stdin })) {
     }) + "\\n");
     continue;
   }
+  if (mode === "private-argv-error") {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: request.id,
+      error: { code: -32001, message: "failed " + process.argv.slice(3).join(" ") },
+    }) + "\\n");
+    continue;
+  }
   const id = mode === "wrong-response" ? request.id + 1 : request.id;
   const result = request.method === "tools/list"
     ? { tools: [{ name: "owned-local-tool", description: "isolated fixture" }] }
@@ -106,6 +114,11 @@ writeFileSync(join(fixtureDirectory, "config.ts"), `export default ${JSON.string
           "Authorization: Bearer header-argv-secret",
         ],
       },
+      stdioPrivateArgError: {
+        transport: "stdio",
+        command: process.execPath,
+        args: [stdioServerPath, "private-argv-error", "--token", privateToken, "--api-key=argv-private-key"],
+      },
       stdioUnsafe: {
         transport: "stdio",
         command: process.execPath,
@@ -136,6 +149,8 @@ writeFileSync(join(fixtureDirectory, "config.ts"), `export default ${JSON.string
         headers: {
           authorization: "Bearer explicitly-configured-remote-token",
           "x-api-key": "remote-private-api-key",
+          cookie: "session=remote-cookie-secret",
+          "x-secret-custom": "opaque-header-secret",
           "x-region": "fixture-region",
           "x-opaque-hint": "Bearer opaque-http-credential",
         },
@@ -692,6 +707,32 @@ try {
     return { requests: observed.requests, actualNetworkUsed: false };
   });
 
+  await check("mcp-configured-http-failures-never-expose-private-header-or-cookie-values", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("remote failed remote-cookie-secret opaque-header-secret remote-private-api-key");
+    }) as typeof fetch;
+    const failure = await expectFailure(() => mcp.listTools("remoteExplicit"), "remote failed");
+    for (const secret of ["remote-cookie-secret", "opaque-header-secret", "remote-private-api-key"]) {
+      if (failure.message.includes(secret)) {
+        throw new Error("Configured HTTP MCP diagnostic exposed a private header or cookie value");
+      }
+    }
+    return { privateHeaderValuesRedacted: true };
+  });
+
+  await check("mcp-configured-http-failures-never-expose-private-endpoint-values", async () => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      throw new Error(`remote failed for ${String(input)}`);
+    }) as typeof fetch;
+    const failure = await expectFailure(() => mcp.listTools("remotePrivateEndpoint"), "remote failed");
+    for (const secret of ["private-user", "url-private-password", "query-private-token", "opaque-query-secret"]) {
+      if (failure.message.includes(secret)) {
+        throw new Error("Configured HTTP MCP diagnostic exposed a private endpoint value");
+      }
+    }
+    return { privateEndpointValuesRedacted: true };
+  });
+
   await check("mcp-stdio-config-cannot-override-noninteractive-native-input-authority", async () => {
     rmSync(unsafeLaunchPath, { force: true });
     await expectFailure(() => mcp.listTools("stdioUnsafe"), "noninteractive MCP server cannot override");
@@ -720,6 +761,16 @@ try {
       throw new Error("Stdio MCP error exposed a configured private server credential");
     }
     return { tokenLeaked: false };
+  });
+
+  await check("mcp-stdio-failures-never-echo-private-command-line-values", async () => {
+    const failure = await expectFailure(() => mcp.listTools("stdioPrivateArgError"), "failed");
+    for (const secret of [privateToken, "argv-private-key"]) {
+      if (failure.message.includes(secret)) {
+        throw new Error("Stdio MCP error exposed a configured private command-line credential");
+      }
+    }
+    return { privateArgumentsRedacted: true };
   });
 
   await check("mcp-stdio-stderr-is-bounded-and-owned-process-cleanup-is-immediate", async () => {

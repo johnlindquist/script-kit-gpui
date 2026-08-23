@@ -10080,6 +10080,58 @@ function publicMcpServerEndpoint(endpoint: string): string {
   return redacted ? parsed.toString() : endpoint;
 }
 
+function privateMcpValueVariants(value: string): string[] {
+  const values = new Set<string>([value]);
+  const authorization = value.replace(/^(?:Bearer|Basic)\s+/i, '');
+  if (authorization !== value) values.add(authorization);
+  for (const part of value.split(/[;,]/)) {
+    const delimiter = part.indexOf('=');
+    if (delimiter >= 0) values.add(part.slice(delimiter + 1).trim());
+  }
+  for (const candidate of [...values]) {
+    if (!candidate) continue;
+    try {
+      values.add(decodeURIComponent(candidate));
+      values.add(encodeURIComponent(candidate));
+    } catch {
+      // Keep the observed bytes when malformed input is not URL-encoded.
+    }
+  }
+  return [...values].filter(Boolean);
+}
+
+function privateMcpServerMetadata(values: Record<string, string> = {}): string[] {
+  return Object.entries(values)
+    .filter(([name, value]) => isMcpCredential(name, value))
+    .flatMap(([, value]) => privateMcpValueVariants(value));
+}
+
+function privateMcpServerArguments(args: readonly string[] = []): string[] {
+  const projected = publicMcpServerArguments(args);
+  return args.flatMap((argument, index) => {
+    if (projected[index] === argument) return [];
+    const delimiter = argument.indexOf('=');
+    return privateMcpValueVariants(
+      projected[index]?.endsWith('=[REDACTED]') && delimiter >= 0
+        ? argument.slice(delimiter + 1)
+        : argument,
+    );
+  });
+}
+
+function privateMcpServerEndpoint(endpoint: string): string[] {
+  try {
+    const parsed = new URL(endpoint);
+    const secrets = [parsed.username, parsed.password].filter(Boolean);
+    for (const [name, value] of parsed.searchParams) {
+      if (isMcpCredential(name, value)) secrets.push(value);
+    }
+    return secrets.flatMap(privateMcpValueVariants);
+  } catch {
+    return [];
+  }
+}
+
 function toMcpServerInfo(id: string, server: McpServerConfig): McpServerInfo {
   if (server.transport === 'stdio') {
     return {
@@ -10284,9 +10336,10 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
   const stderrChunks: string[] = [];
   let stderrBytes = 0;
   let stdoutBytes = 0;
-  const secretValues = Object.entries(server.env ?? {})
-    .filter(([name]) => /authorization|token|api[-_]?key|password|secret/i.test(name))
-    .map(([, value]) => value);
+  const secretValues = [
+    ...privateMcpServerMetadata(server.env),
+    ...privateMcpServerArguments(server.args),
+  ];
   const pending = new Map<
     number,
     {
@@ -10481,9 +10534,10 @@ async function createHttpMcpSession(serverId: string, server: McpHttpServerConfi
   let sessionId: string | null = null;
   const requestTimeoutMs = mcpRequestTimeoutMs();
   const maximumResponseBytes = mcpMaxResponseBytes();
-  const secrets = Object.entries(server.headers ?? {})
-    .filter(([name]) => /authorization|token|api[-_]?key/i.test(name))
-    .flatMap(([, value]) => [value, value.replace(/^Bearer\s+/i, '')]);
+  const secrets = [
+    ...privateMcpServerMetadata(server.headers),
+    ...privateMcpServerEndpoint(server.endpoint),
+  ];
 
   const sendRequest = async (
     method: string,
