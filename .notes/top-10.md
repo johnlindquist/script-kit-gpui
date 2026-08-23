@@ -1473,11 +1473,27 @@ offline receipts until their real producers are run again.
     group; timeout cleanup first terminates that exact owned group, escalates
     if necessary, and independently drains all pipes before returning. The
     reproduced grandchild now exits in approximately **one second**, with
-    no survivor. **32 SDK process/ownership cases / 96 assertions** pass;
-    **25 actual editor, hotkey, field/date, and synthetic window-management
-    authoring behaviors** pass without opening an application or using real
-    input. Standalone release mutation now explicitly proves that removing
+    no survivor. **35 SDK process/ownership cases / 103 assertions** pass;
+    all **215 actual authoring behaviors across 40 SDK script files** pass
+    with exactly two bounded workers in approximately **1.7 seconds**,
+    including the **25 editor, hotkey, field/date, and synthetic
+    window-management behaviors**. No application opens and no real input
+    occurs. Standalone release mutation now explicitly proves that removing
     the actual `scripts/test-runner.ts` owner blocks publication.
+51. The SDK verifier's final summary silently overwrote terminal outcomes in
+    a `Map` keyed only by test name. A child could therefore emit a real
+    failing result followed by a passing result and the release summary
+    reported **exit 0 / zero failures**. A completed test could also emit a
+    subsequent `running` result without detection, and a `pass` carrying an
+    actual error string still counted as success. All three false-green
+    transcripts were reproduced against the real test-runner subprocess.
+    The verifier now owns one monotonic per-test lifecycle: terminal
+    results are final, duplicates and post-terminal transitions become
+    explicit failures, and a passing outcome cannot contain an error. Each
+    contradictory transcript exits nonzero while preserving the original
+    diagnostic. The exact same release-bound custom-script matrix still runs
+    all **215/215 real SDK cases**, and its independent adversarial suite
+    remains green at **35/35 cases / 103 assertions**.
 
 ### Ten implemented improvements and their verification contracts
 
