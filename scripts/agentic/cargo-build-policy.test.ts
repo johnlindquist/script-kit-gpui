@@ -496,6 +496,37 @@ describe("bounded Cargo builds", () => {
   });
 
   test.each([
+    ["test", "--lib", "--manifest-path", "/tmp/unreviewed/Cargo.toml"],
+    ["test", "--lib", "--manifest-path=/tmp/unreviewed/Cargo.toml"],
+    ["check", "--manifest-path", "/tmp/unreviewed/Cargo.toml"],
+    ["run", "--bin", "export_design_tokens", "--manifest-path", "/tmp/unreviewed/Cargo.toml"],
+    ["test", "--lib", "-C", "/tmp/unreviewed"],
+  ])("refuses foreign Cargo workspace ownership %j before Cargo runs", (...foreignArgs) => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", foreignArgs, workspace.env);
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("Cargo workspace ownership cannot be overridden");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test.each([
+    ["test", "--lib", "-p", "script-kit-ghost-llm-helper"],
+    ["test", "--lib", "--package=foreign-plugin"],
+    ["test", "--lib", "-p", "sk-storage", "-p", "foreign-plugin"],
+    ["test", "--lib", "--workspace"],
+    ["test", "--lib", "--all"],
+    ["run", "--bin", "export_design_tokens", "-p", "foreign-plugin"],
+  ])("refuses unreviewed Cargo package expansion %j before Cargo runs", (...packageArgs) => {
+    const workspace = fixture();
+    const result = run("agent-cargo.sh", packageArgs, workspace.env);
+
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("noninteractive agent Cargo refuses unreviewed workspace or package");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test.each([
     ["test", "--lib", "--", "--ignored"],
     ["test", "--lib", "--", "--include-ignored"],
     ["test", "--lib", "--features", "system-tests"],

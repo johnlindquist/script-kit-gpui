@@ -92,6 +92,45 @@ requested_args=("$@")
 
 if [[ "$noninteractive_mode" == "1" ]]; then
   cargo_subcommand="${requested_args[0]:-}"
+  for (( owner_index=1; owner_index<${#requested_args[@]}; owner_index++ )); do
+    owner_argument="${requested_args[$owner_index]}"
+    selected_package=""
+    case "$owner_argument" in
+      --manifest-path|--manifest-path=*|-C|-C=*)
+        worker_failure "Cargo workspace ownership cannot be overridden by ${owner_argument}"
+        ;;
+      --workspace|--all)
+        case "$cargo_subcommand" in
+          test|nextest|run)
+            worker_failure "noninteractive agent Cargo refuses unreviewed workspace or package: ${owner_argument}"
+            ;;
+        esac
+        ;;
+      -p|--package)
+        (( owner_index + 1 < ${#requested_args[@]} )) \
+          || worker_failure "noninteractive agent Cargo refuses unreviewed workspace or package: ${owner_argument}"
+        owner_index=$((owner_index + 1))
+        selected_package="${requested_args[$owner_index]}"
+        ;;
+      --package=*)
+        selected_package="${owner_argument#--package=}"
+        ;;
+      -p*)
+        selected_package="${owner_argument#-p}"
+        selected_package="${selected_package#=}"
+        ;;
+    esac
+    if [[ -n "$selected_package" ]]; then
+      case "$cargo_subcommand" in
+        test|nextest|run)
+          case "$selected_package" in
+            script-kit-gpui|sk-clipboard|sk-protocol|sk-storage) ;;
+            *) worker_failure "noninteractive agent Cargo refuses unreviewed workspace or package: ${selected_package}" ;;
+          esac
+          ;;
+      esac
+    fi
+  done
   case "$cargo_subcommand" in
     build|check|clippy|fmt|metadata|tree|bundle|rustc|rustdoc)
       ;;
