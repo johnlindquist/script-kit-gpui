@@ -15,6 +15,7 @@ import {
 } from "./privacy.ts";
 import { classifyReceiptEvidence } from "./evidence-class.ts";
 import { taskProofPolicy } from "./task-proof-policy.ts";
+import { evidenceIntersectionRatio, isValidEvidenceRect } from "./geometry-evidence.ts";
 
 export const RECEIPT_SCHEMA_VERSION = 2;
 export const RECEIPT_REGISTRY_VERSION = 1;
@@ -242,13 +243,58 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
         const rendered = truth.rendered && typeof truth.rendered === "object"
           ? truth.rendered as JsonObject
           : {};
-        const joins = Array.isArray(truth.joins) ? truth.joins : [];
-        const comparableJoinCount = Number(truth.comparableJoinCount ?? 0);
-        const joinedGeometryAgrees = joins.every((value) => {
-          const join = value && typeof value === "object" ? value as JsonObject : {};
-          return join.comparability !== "Comparable" || join.classification === "Match";
+        const joins = Array.isArray(truth.joins) ? truth.joins.map(asObject) : [];
+        const comparable = joins.filter((join) => join.comparability === "Comparable");
+        const measurementIds = joins.map((join) => String(join.measurementId ?? ""));
+        const expectedUnjoined = joins
+          .filter((join) => join.comparability === "ModelOnly" || join.comparability === "RenderedOnly")
+          .map((join) => String(join.measurementId ?? ""))
+          .sort();
+        const declaredUnjoined = stringArray(truth.unjoinedMeasurementIds).sort();
+        const joinedGeometryAgrees = comparable.every((join) => {
+          const modelJoin = asObject(join.model);
+          const renderedJoin = asObject(join.rendered);
+          const delta = asObject(join.delta);
+          const tolerance = asObject(join.tolerance);
+          const modelBounds = modelJoin.bounds;
+          const renderedBounds = renderedJoin.bounds;
+          const visibleBounds = renderedJoin.visibleBounds;
+          const clipBounds = renderedJoin.clipBounds;
+          if (
+            join.classification !== "Match" ||
+            typeof join.semanticId !== "string" || join.semanticId.length === 0 ||
+            typeof join.role !== "string" || join.role === "other" ||
+            typeof join.coordinateSpace !== "string" ||
+            join.coordinateSpace.length === 0 || join.coordinateSpace === "unknown" ||
+            !Number.isSafeInteger(modelJoin.generation) ||
+            !Number.isSafeInteger(renderedJoin.frameGeneration) ||
+            modelJoin.generation !== renderedJoin.frameGeneration ||
+            !isValidEvidenceRect(modelBounds) || !isValidEvidenceRect(renderedBounds) ||
+            !isValidEvidenceRect(visibleBounds, true) || !isValidEvidenceRect(clipBounds, true) ||
+            evidenceIntersectionRatio(renderedBounds, visibleBounds) < 0.999 ||
+            evidenceIntersectionRatio(renderedBounds, clipBounds) < 0.999
+          ) return false;
+          return ["x", "y", "width", "height"].every((field) =>
+            typeof delta[field] === "number" && Number.isFinite(delta[field]) &&
+            typeof tolerance[field] === "number" && Number.isFinite(tolerance[field]) &&
+            Number(tolerance[field]) >= 0 &&
+            delta[field] === renderedBounds[field as keyof typeof renderedBounds] -
+              modelBounds[field as keyof typeof modelBounds] &&
+            Math.abs(Number(delta[field])) <= Number(tolerance[field])
+          );
         });
-        return comparableJoinCount > 0 &&
+        return comparable.length > 0 &&
+            Number.isSafeInteger(truth.comparableJoinCount) &&
+            truth.comparableJoinCount === comparable.length &&
+            measurementIds.every(Boolean) &&
+            new Set(measurementIds).size === measurementIds.length &&
+            joins.every((join) =>
+              join.comparability === "Comparable" ||
+              join.comparability === "ModelOnly" ||
+              join.comparability === "RenderedOnly"
+            ) &&
+            expectedUnjoined.length === declaredUnjoined.length &&
+            expectedUnjoined.every((id, index) => id === declaredUnjoined[index]) &&
             Number(model.clippedNodeCount ?? 0) === 0 &&
             Number(model.overlapCount ?? 0) === 0 &&
             Number(rendered.clippedNodeCount ?? 0) === 0 &&
@@ -348,10 +394,50 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
         const fits = Array.isArray(receipt.textFits) ? receipt.textFits : [];
         return fits.length > 0 && fits.every((fit) => {
           const measurement = fit && typeof fit === "object" ? fit as JsonObject : {};
+          const glyphBounds = measurement.glyphBounds;
+          const lineBounds = measurement.lineBoxBounds;
+          const clipBounds = measurement.clipBounds;
+          const visibleBounds = measurement.visibleBounds;
           return measurement.fullDisplayPass === true &&
             measurement.rawContentReturned !== true &&
             measurement.frameMatches === true &&
-            measurement.backingScaleMatches === true;
+            measurement.backingScaleMatches === true &&
+            measurement.fontsReady === true &&
+            measurement.geometryValid === true &&
+            measurement.measurementIdentityValid === true &&
+            measurement.paintOrderValid === true &&
+            measurement.truncationPolicy === "fullDisplay" &&
+            typeof measurement.measurementId === "string" &&
+            measurement.measurementId.length > 0 &&
+            typeof measurement.semanticId === "string" &&
+            measurement.semanticId.length > 0 &&
+            measurement.role === "textLineBox" &&
+            typeof measurement.fontFamilyFingerprint === "string" &&
+            measurement.fontFamilyFingerprint.length > 0 &&
+            typeof measurement.contentFingerprint === "string" &&
+            measurement.contentFingerprint.length > 0 &&
+            typeof measurement.fontSize === "number" &&
+            Number.isFinite(measurement.fontSize) && measurement.fontSize > 0 &&
+            typeof measurement.lineHeight === "number" &&
+            Number.isFinite(measurement.lineHeight) && measurement.lineHeight > 0 &&
+            typeof measurement.backingScaleFactor === "number" &&
+            Number.isFinite(measurement.backingScaleFactor) &&
+            measurement.backingScaleFactor > 0 &&
+            Number.isSafeInteger(measurement.graphemeCount) &&
+            Number(measurement.graphemeCount) >= 0 &&
+            typeof measurement.visibleRatio === "number" &&
+            Number.isFinite(measurement.visibleRatio) && measurement.visibleRatio >= 0.999 &&
+            Array.isArray(measurement.occluderMeasurementIds) &&
+            measurement.occluderMeasurementIds.length === 0 &&
+            isValidEvidenceRect(lineBounds) &&
+            isValidEvidenceRect(glyphBounds, Number(measurement.graphemeCount) === 0) &&
+            isValidEvidenceRect(clipBounds, true) &&
+            isValidEvidenceRect(visibleBounds, true) &&
+            (Number(measurement.graphemeCount) === 0 ||
+              (
+                evidenceIntersectionRatio(glyphBounds, clipBounds) >= 0.999 &&
+                evidenceIntersectionRatio(glyphBounds, visibleBounds) >= 0.999
+              ));
         })
           ? []
           : ["fit proof requires same-frame, font-ready, unoccluded full glyph display without raw content"];
@@ -646,6 +732,12 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
             !/^[a-f0-9]{64}$/.test(String(hashes[path] ?? "")) ||
             fileFingerprint(resolve(process.cwd(), path)) !== hashes[path]
           ) ||
+          (taskId === "GEO-001" && (
+            !productionSources.includes("scripts/devtools/layout.ts") ||
+            !productionSources.includes("scripts/devtools/lib/geometry-evidence.ts") ||
+            !suiteFiles.includes("scripts/devtools/layout.test.ts") ||
+            !suiteFiles.includes("scripts/devtools/geometry-evidence.test.ts")
+          )) ||
           (taskId === "GOV-002" &&
             (
               !productionSources.includes(
@@ -1662,6 +1754,7 @@ const sharedReceiptPolicyOwners = [
   "receipt-schema.ts",
   "privacy.ts",
   "evidence-class.ts",
+  "geometry-evidence.ts",
   "task-proof-policy.ts",
 ] as const;
 let cachedReceiptPolicyFingerprint: string | null = null;

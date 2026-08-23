@@ -717,6 +717,62 @@ describe("executable receipt registry", () => {
     expect(drift.exitCode).toBe(4);
   });
 
+  test("join proof derives comparable counts and rejects duplicate, invalid, or incomplete identities", () => {
+    const bounds = { x: 0, y: 0, width: 100, height: 20 };
+    const validJoin = {
+      measurementId: "layout:row",
+      semanticId: "row:1",
+      role: "rowSlot",
+      coordinateSpace: "window",
+      comparability: "Comparable",
+      classification: "Match",
+      model: { bounds, generation: 7 },
+      rendered: {
+        bounds,
+        visibleBounds: bounds,
+        clipBounds: bounds,
+        frameGeneration: 7,
+        source: "paint-time",
+      },
+      delta: { x: 0, y: 0, width: 0, height: 0 },
+      tolerance: { x: 1, y: 1, width: 1, height: 1 },
+    };
+    const truth = {
+      model: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+      rendered: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+      joins: [validJoin],
+      comparableJoinCount: 1,
+      unjoinedMeasurementIds: [],
+    };
+
+    expect(prepareValidatedReceipt("devtools.layout.measure", baseReceipt({
+      proofMode: "join",
+      truthLayers: truth,
+    })).exitCode).toBe(0);
+
+    for (const forged of [
+      { ...truth, joins: [], comparableJoinCount: 1 },
+      { ...truth, comparableJoinCount: 2 },
+      { ...truth, joins: [validJoin, { ...validJoin, comparability: "DuplicateMeasurement" }] },
+      { ...truth, joins: [{ ...validJoin, semanticId: null }] },
+      { ...truth, joins: [{ ...validJoin, coordinateSpace: "unknown" }] },
+      { ...truth, joins: [{ ...validJoin, delta: { ...validJoin.delta, x: NaN } }] },
+      { ...truth, joins: [{ ...validJoin, rendered: {
+        ...validJoin.rendered,
+        visibleBounds: { ...bounds, width: 99 },
+      } }] },
+      { ...truth, joins: [{ ...validJoin, rendered: {
+        ...validJoin.rendered,
+        frameGeneration: 8,
+      } }] },
+    ]) {
+      expect(prepareValidatedReceipt("devtools.layout.measure", baseReceipt({
+        proofMode: "join",
+        truthLayers: forged,
+      })).exitCode).not.toBe(0);
+    }
+  });
+
   test("fit proof requires font-ready same-frame unoccluded glyphs", () => {
     const candidate = {
       schemaVersion: 2,
@@ -730,6 +786,26 @@ describe("executable receipt registry", () => {
       textSummary: { inputLength: 7, inputFingerprint: "fixture" },
       rows: [{ semanticId: "input:notes-editor", textLength: 7, fingerprint: "fixture" }],
       textFits: [{
+        measurementId: "text:notes-editor:line:0:0",
+        semanticId: "input:notes-editor",
+        role: "textLineBox",
+        lineBoxBounds: { x: 0, y: 0, width: 100, height: 20 },
+        glyphBounds: { x: 0, y: 0, width: 80, height: 16 },
+        clipBounds: { x: 0, y: 0, width: 100, height: 20 },
+        visibleBounds: { x: 0, y: 0, width: 100, height: 20 },
+        visibleRatio: 1,
+        truncationPolicy: "fullDisplay",
+        occluderMeasurementIds: [],
+        fontFamilyFingerprint: "fixture-font",
+        fontSize: 14,
+        lineHeight: 20,
+        backingScaleFactor: 2,
+        fontsReady: true,
+        contentFingerprint: "fixture-content",
+        graphemeCount: 7,
+        geometryValid: true,
+        measurementIdentityValid: true,
+        paintOrderValid: true,
         fullDisplayPass: true,
         rawContentReturned: false,
         frameMatches: true,
@@ -752,5 +828,69 @@ describe("executable receipt registry", () => {
     });
     expect(invalid.receipt.disposition).toBe("INVALID_SCHEMA");
     expect(invalid.exitCode).toBe(4);
+  });
+
+  test("fit proof cannot trust forged passing booleans over missing or private glyph evidence", () => {
+    const bounds = { x: 0, y: 0, width: 100, height: 20 };
+    const fit = {
+      measurementId: "text:row",
+      semanticId: "input:notes-editor",
+      role: "textLineBox",
+      lineBoxBounds: bounds,
+      glyphBounds: { x: 0, y: 0, width: 80, height: 16 },
+      clipBounds: bounds,
+      visibleBounds: bounds,
+      visibleRatio: 1,
+      truncationPolicy: "fullDisplay",
+      occluderMeasurementIds: [],
+      fontFamilyFingerprint: "font",
+      fontSize: 14,
+      lineHeight: 20,
+      backingScaleFactor: 2,
+      fontsReady: true,
+      contentFingerprint: "content",
+      graphemeCount: 7,
+      geometryValid: true,
+      measurementIdentityValid: true,
+      paintOrderValid: true,
+      fullDisplayPass: true,
+      rawContentReturned: false,
+      frameMatches: true,
+      backingScaleMatches: true,
+    };
+    const candidate = {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.text",
+      command: "text.measure",
+      classification: "ok",
+      proofMode: "fit",
+      requestedTarget: { selector: { type: "main" } },
+      target: { automationId: "main", bounds: { x: 0, y: 0, width: 800, height: 600 } },
+      transaction: proofTransaction(),
+      textSummary: { inputLength: 7, inputFingerprint: "fixture" },
+      rows: [{ semanticId: "input:notes-editor", textLength: 7, fingerprint: "fixture" }],
+      textFits: [fit],
+      missingPrimitives: [],
+      warnings: [],
+      errors: [],
+    };
+    expect(prepareValidatedReceipt("devtools.text.measure", candidate).exitCode).toBe(0);
+    for (const forged of [
+      { ...fit, glyphBounds: { ...fit.glyphBounds, width: 0 } },
+      { ...fit, visibleRatio: 0 },
+      { ...fit, occluderMeasurementIds: ["overlay"] },
+      { ...fit, fontsReady: false },
+      { ...fit, fontFamilyFingerprint: null },
+      { ...fit, contentFingerprint: null },
+      { ...fit, geometryValid: false },
+      { ...fit, measurementIdentityValid: false },
+      { ...fit, paintOrderValid: false },
+      { ...fit, rawContentReturned: true },
+    ]) {
+      expect(prepareValidatedReceipt("devtools.text.measure", {
+        ...candidate,
+        textFits: [forged],
+      }).exitCode).not.toBe(0);
+    }
   });
 });

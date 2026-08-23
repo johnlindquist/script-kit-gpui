@@ -68,6 +68,55 @@ describe("privacy-safe shaped text fit", () => {
     expect(fit.fullDisplayPass).toBe(false);
   });
 
+  test("missing, zero-area, non-finite, and negative glyph geometry never proves display", () => {
+    for (const unionPaintBounds of [
+      undefined,
+      { x: 10, y: 12, width: 0, height: 0 },
+      { x: 10, y: 12, width: NaN, height: 16 },
+      { x: 10, y: 12, width: 80, height: -1 },
+    ]) {
+      const fit = textFitMeasurements(layout([{ ...line, unionPaintBounds }]), 2)[0];
+      expect(fit.geometryValid).toBe(false);
+      expect(fit.fullDisplayPass).toBe(false);
+    }
+  });
+
+  test("raw private content cannot be labeled a passing full-display measurement", () => {
+    const fit = textFitMeasurements(layout([{
+      ...line,
+      metadata: { ...line.metadata, rawContentReturned: true },
+    }]), 2)[0];
+
+    expect(fit.rawContentReturned).toBe(true);
+    expect(fit.fullDisplayPass).toBe(false);
+  });
+
+  test("visible bounds and clip bounds independently constrain rendered glyphs", () => {
+    const fit = textFitMeasurements(layout([{
+      ...line,
+      visibleBounds: { x: 10, y: 12, width: 40, height: 16 },
+      clipBounds: { x: 10, y: 10, width: 180, height: 20 },
+    }]), 2)[0];
+
+    expect(fit.visibleRatio).toBe(0.5);
+    expect(fit.fullDisplayPass).toBe(false);
+  });
+
+  test("real measurement identity, glyph fingerprint, fonts, and paint order are mandatory", () => {
+    for (const candidate of [
+      { ...line, textHash: null },
+      { ...line, paintOrder: undefined },
+      { ...line, metadata: { ...line.metadata, measurementId: null } },
+      { ...line, metadata: { ...line.metadata, semanticId: null } },
+      { ...line, metadata: { ...line.metadata, fontFamilyFingerprint: null } },
+      { ...line, metadata: { ...line.metadata, fontSize: 0 } },
+      { ...line, metadata: { ...line.metadata, graphemeCount: undefined } },
+    ]) {
+      const fit = textFitMeasurements(layout([candidate]), 2)[0];
+      expect(fit.fullDisplayPass).toBe(false);
+    }
+  });
+
   test("fit classification requires measurements from one completed frame", () => {
     const rows = textRows([{ semanticId: "input:notes-editor", content: { kind: "userContent", charLength: 7, byteLength: 7, lineCount: 1, fingerprint: "f", rawContentReturned: false } }]);
     const fit = textFitMeasurements(layout([line]));

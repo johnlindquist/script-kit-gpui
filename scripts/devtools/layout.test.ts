@@ -57,6 +57,79 @@ describe("model/rendered measurement joins", () => {
     expect(stale.classification).toBe("NotComparable");
   });
 
+  test("duplicate paint measurements cannot hide a later drifting or clipped renderer", () => {
+    const duplicate = buildMeasurementJoins([
+      node(),
+      node({ measurementProvenance: "paint-time" }),
+      node({
+        measurementProvenance: "paint-time",
+        bounds: { ...bounds, x: 50 },
+      }),
+    ])[0];
+
+    expect(duplicate.comparability).toBe("DuplicateMeasurement");
+    expect(duplicate.classification).toBe("NotComparable");
+  });
+
+  test("different semantic owners and missing coordinate spaces are never comparable", () => {
+    const wrongOwner = buildMeasurementJoins([
+      node(),
+      node({ measurementProvenance: "paint-time", semanticId: "row:other" }),
+    ])[0];
+    const missingSpace = buildMeasurementJoins([
+      node({ coordinateSpace: undefined }),
+      node({ measurementProvenance: "paint-time", coordinateSpace: undefined }),
+    ])[0];
+
+    expect(wrongOwner.comparability).toBe("SemanticMismatch");
+    expect(missingSpace.comparability).toBe("CoordinateSpaceMismatch");
+    expect(wrongOwner.classification).toBe("NotComparable");
+    expect(missingSpace.classification).toBe("NotComparable");
+  });
+
+  test("missing, zero-area, negative, and non-finite geometry cannot produce a Match", () => {
+    for (const rendered of [
+      node({ measurementProvenance: "paint-time", bounds: { ...bounds, x: NaN } }),
+      node({ measurementProvenance: "paint-time", bounds: { ...bounds, width: Infinity } }),
+      node({ measurementProvenance: "paint-time", bounds: { ...bounds, width: 0 } }),
+      node({ measurementProvenance: "paint-time", bounds: { ...bounds, height: -1 } }),
+      node({ measurementProvenance: "paint-time", visibleBounds: null }),
+      node({ measurementProvenance: "paint-time", clipBounds: null }),
+    ]) {
+      const joined = buildMeasurementJoins([node(), rendered])[0];
+      expect(joined.comparability).toBe("InvalidGeometry");
+      expect(joined.classification).toBe("NotComparable");
+    }
+  });
+
+  test("clip bounds remain authoritative even when a producer falsely reports full visibility", () => {
+    const joined = buildMeasurementJoins([
+      node(),
+      node({
+        measurementProvenance: "paint-time",
+        visibleBounds: bounds,
+        clipBounds: { ...bounds, width: 99 },
+      }),
+    ])[0];
+
+    expect(joined.comparability).toBe("Comparable");
+    expect(joined.classification).toBe("Clipped");
+  });
+
+  test("unknown provenance and untyped roles cannot impersonate model truth", () => {
+    const unknown = buildMeasurementJoins([
+      node({ measurementProvenance: "fabricated-observer" }),
+      node({ measurementProvenance: "paint-time" }),
+    ])[0];
+    const untyped = buildMeasurementJoins([
+      node({ role: "other" }),
+      node({ measurementProvenance: "paint-time", role: "other" }),
+    ])[0];
+
+    expect(unknown.comparability).toBe("InvalidProvenance");
+    expect(untyped.comparability).toBe("RoleMismatch");
+  });
+
   test("rendered overlaps are audited independently of the model", () => {
     const layout = {
       windowWidth: 200,

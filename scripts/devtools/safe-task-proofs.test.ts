@@ -250,6 +250,14 @@ describe("catalog-bound offline consistency task proofs", () => {
     expect((result.receipt.catalogBinding as Record<string, unknown>).title).toBe(
       "Name geometry by semantic layer",
     );
+    expect(candidate.productionSources).toEqual([
+      "scripts/devtools/layout.ts",
+      "scripts/devtools/lib/geometry-evidence.ts",
+    ]);
+    expect(candidate.testRun.suiteFiles).toEqual([
+      "scripts/devtools/layout.test.ts",
+      "scripts/devtools/geometry-evidence.test.ts",
+    ]);
     expect((result.receipt.testRun as Record<string, number>).passedTestCount).toBeGreaterThan(0);
     expect((result.receipt.negativeControls as unknown[]).length).toBe(5);
   });
@@ -257,6 +265,7 @@ describe("catalog-bound offline consistency task proofs", () => {
   test("shared task runs report and fingerprint the complete actually executed command", () => {
     const suites = [
       "scripts/devtools/layout.test.ts",
+      "scripts/devtools/geometry-evidence.test.ts",
       "scripts/devtools/coverage.test.ts",
     ];
     const candidate = runSafeTaskProof("GEO-001", {
@@ -273,9 +282,16 @@ describe("catalog-bound offline consistency task proofs", () => {
       "test",
       ...suites.map((path) => `./${path}`),
     ]);
-    expect(candidate.testRun.suiteFiles).toEqual(["scripts/devtools/layout.test.ts"]);
+    expect(candidate.testRun.suiteFiles).toEqual([
+      "scripts/devtools/layout.test.ts",
+      "scripts/devtools/geometry-evidence.test.ts",
+    ]);
     expect(candidate.testRun.executedSuiteFiles).toEqual(suites);
-    expect(Object.keys(candidate.sourceFingerprints)).toEqual(suites);
+    expect(Object.keys(candidate.sourceFingerprints)).toEqual([
+      ...suites,
+      "scripts/devtools/layout.ts",
+      "scripts/devtools/lib/geometry-evidence.ts",
+    ]);
     expect(
       prepareValidatedReceipt("devtools.consistency.safe-task-proof", candidate).exitCode,
     ).toBe(0);

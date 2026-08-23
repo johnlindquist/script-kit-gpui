@@ -15,6 +15,7 @@ import {
   startClock,
 } from "./lib/client.ts";
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { evidenceIntersectionRatio, isValidEvidenceRect } from "./lib/geometry-evidence.ts";
 import { diagnostic } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
@@ -327,8 +328,12 @@ export type MeasurementJoin = {
   comparability:
     | "Comparable"
     | "RoleMismatch"
+    | "SemanticMismatch"
     | "CoordinateSpaceMismatch"
     | "StaleGeneration"
+    | "DuplicateMeasurement"
+    | "InvalidProvenance"
+    | "InvalidGeometry"
     | "ModelOnly"
     | "RenderedOnly";
   delta: Rect | null;
@@ -359,13 +364,6 @@ function rectDelta(model: Rect, rendered: Rect): Rect {
     width: rendered.width - model.width,
     height: rendered.height - model.height,
   };
-}
-
-function rectVisibleRatio(bounds: Rect, visible: Rect): number {
-  const width = Math.max(0, Math.min(right(bounds), right(visible)) - Math.max(bounds.x, visible.x));
-  const height = Math.max(0, Math.min(bottom(bounds), bottom(visible)) - Math.max(bounds.y, visible.y));
-  const area = Math.max(0, bounds.width) * Math.max(0, bounds.height);
-  return area > 0 ? (width * height) / area : 1;
 }
 
 function layerOverlaps(nodes: Array<{ name: unknown; measurementId: string; role: GeometryRole; bounds: Rect; depth: unknown; parent: unknown; hitMetrics: ReturnType<typeof hitMetrics> }>) {
@@ -406,25 +404,60 @@ export function buildMeasurementJoins(nodes: Array<{
     groups.set(node.measurementId, group);
   }
   return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([measurementId, group]) => {
-    const modelNode = group.find((node) => node.measurementProvenance !== "paint-time") ?? null;
-    const renderedNode = group.find((node) => node.measurementProvenance === "paint-time") ?? null;
+    const modelNodes = group.filter((node) => node.measurementProvenance === "model");
+    const renderedNodes = group.filter((node) => node.measurementProvenance === "paint-time");
+    const invalidProvenance = group.some((node) =>
+      node.measurementProvenance !== "model" &&
+      node.measurementProvenance !== "paint-time"
+    );
+    const modelNode = modelNodes[0] ?? null;
+    const renderedNode = renderedNodes[0] ?? null;
     const role = (modelNode?.role ?? renderedNode?.role ?? "other") as GeometryRole;
     const modelGeneration = asNumber(modelNode?.measurementFrameGeneration, -1);
     const renderedGeneration = asNumber(renderedNode?.measurementFrameGeneration, -1);
     const modelSpace = String(modelNode?.coordinateSpace ?? "unknown");
     const renderedSpace = String(renderedNode?.coordinateSpace ?? "unknown");
     let comparability: MeasurementJoin["comparability"];
-    if (!modelNode) comparability = "RenderedOnly";
+    if (invalidProvenance) comparability = "InvalidProvenance";
+    else if (modelNodes.length > 1 || renderedNodes.length > 1) comparability = "DuplicateMeasurement";
+    else if (!modelNode) comparability = "RenderedOnly";
     else if (!renderedNode) comparability = "ModelOnly";
-    else if (modelNode.role !== renderedNode.role) comparability = "RoleMismatch";
-    else if (modelSpace !== renderedSpace) comparability = "CoordinateSpaceMismatch";
-    else if (modelGeneration < 0 || renderedGeneration < 0 || modelGeneration !== renderedGeneration) comparability = "StaleGeneration";
+    else if (modelNode.role !== renderedNode.role || role === "other") comparability = "RoleMismatch";
+    else if (modelNode.semanticId !== renderedNode.semanticId) comparability = "SemanticMismatch";
+    else if (
+      modelSpace === "unknown" ||
+      renderedSpace === "unknown" ||
+      modelSpace.trim().length === 0 ||
+      modelSpace !== renderedSpace
+    ) comparability = "CoordinateSpaceMismatch";
+    else if (
+      !Number.isSafeInteger(modelGeneration) ||
+      !Number.isSafeInteger(renderedGeneration) ||
+      modelGeneration < 0 ||
+      renderedGeneration < 0 ||
+      modelGeneration !== renderedGeneration
+    ) comparability = "StaleGeneration";
+    else if (
+      !isValidEvidenceRect(modelNode.bounds) ||
+      !isValidEvidenceRect(renderedNode.bounds) ||
+      !isValidEvidenceRect(renderedNode.visibleBounds, true) ||
+      !isValidEvidenceRect(renderedNode.clipBounds, true)
+    ) comparability = "InvalidGeometry";
     else comparability = "Comparable";
-    const delta = modelNode && renderedNode ? rectDelta(modelNode.bounds, renderedNode.bounds) : null;
+    const delta = modelNode && renderedNode &&
+      isValidEvidenceRect(modelNode.bounds) && isValidEvidenceRect(renderedNode.bounds)
+      ? rectDelta(modelNode.bounds, renderedNode.bounds)
+      : null;
     const tolerance = { x: 1, y: 1, width: 1, height: 1 };
     const outsideTolerance = delta != null && Object.entries(delta).some(([key, value]) => Math.abs(value) > tolerance[key as keyof Rect]);
-    const renderedVisibleRatio = renderedNode
-      ? rectVisibleRatio(renderedNode.bounds, renderedNode.visibleBounds ?? renderedNode.bounds)
+    const renderedVisibleRatio = renderedNode &&
+      isValidEvidenceRect(renderedNode.bounds) &&
+      isValidEvidenceRect(renderedNode.visibleBounds, true) &&
+      isValidEvidenceRect(renderedNode.clipBounds, true)
+      ? Math.min(
+        evidenceIntersectionRatio(renderedNode.bounds, renderedNode.visibleBounds),
+        evidenceIntersectionRatio(renderedNode.bounds, renderedNode.clipBounds),
+      )
       : 1;
     const classification: MeasurementJoin["classification"] = comparability !== "Comparable"
       ? "NotComparable"
@@ -542,7 +575,7 @@ export function analyzeLayout(layout: JsonObject, targetReceipt: JsonObject) {
   );
   const clippedNodeCount = modelNodes.filter((node) => node.clipped).length;
   const renderedClippedNodeCount = renderedNodes.filter((node) =>
-    rectVisibleRatio(node.bounds, node.visibleBounds ?? node.bounds) < 0.999
+    evidenceIntersectionRatio(node.bounds, node.visibleBounds ?? node.bounds) < 0.999
   ).length;
   const overlapCount = modelOverlaps.length;
   const renderedOverlapCount = renderedOverlaps.length;

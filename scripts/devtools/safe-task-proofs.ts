@@ -73,7 +73,14 @@ export const SAFE_TASK_SPECS: readonly SafeTaskSpec[] = [
     taskId: "GEO-001",
     title: "Name geometry by semantic layer",
     evidenceClass: "UNIT_BEHAVIOR",
-    testFiles: ["scripts/devtools/layout.test.ts"],
+    testFiles: [
+      "scripts/devtools/layout.test.ts",
+      "scripts/devtools/geometry-evidence.test.ts",
+    ],
+    productionSources: [
+      "scripts/devtools/layout.ts",
+      "scripts/devtools/lib/geometry-evidence.ts",
+    ],
   },
   {
     taskId: "GOV-001",

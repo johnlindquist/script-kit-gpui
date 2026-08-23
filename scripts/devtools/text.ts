@@ -13,6 +13,7 @@ import {
   startClock,
 } from "./lib/client.ts";
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
+import { evidenceIntersectionRatio, isValidEvidenceRect } from "./lib/geometry-evidence.ts";
 import { diagnostic, privateReceiptFingerprint } from "./lib/privacy.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
@@ -54,13 +55,6 @@ function bottom(value: Rect) {
 function intersects(left: Rect, rightRect: Rect) {
   return left.x < right(rightRect) && right(left) > rightRect.x &&
     left.y < bottom(rightRect) && bottom(left) > rightRect.y;
-}
-
-function visibleRatio(bounds: Rect, clip: Rect) {
-  const width = Math.max(0, Math.min(right(bounds), right(clip)) - Math.max(bounds.x, clip.x));
-  const height = Math.max(0, Math.min(bottom(bounds), bottom(clip)) - Math.max(bounds.y, clip.y));
-  const area = Math.max(0, bounds.width) * Math.max(0, bounds.height);
-  return area > 0 ? (width * height) / area : 1;
 }
 
 function privateTextFingerprint(value: string) {
@@ -131,6 +125,26 @@ export function textFitMeasurements(
     const clipBounds = rect(node.clipBounds);
     const visibleBounds = rect(node.visibleBounds);
     const nodePaintOrder = asNumber(node.paintOrder, -1);
+    const graphemeCount = metadata.graphemeCount;
+    const glyphsExpected = Number.isSafeInteger(graphemeCount) && Number(graphemeCount) > 0;
+    const geometryValid =
+      isValidEvidenceRect(node.bounds) &&
+      isValidEvidenceRect(node.unionPaintBounds, !glyphsExpected) &&
+      isValidEvidenceRect(node.clipBounds, true) &&
+      isValidEvidenceRect(node.visibleBounds, true);
+    const measurementIdentityValid =
+      typeof metadata.measurementId === "string" && metadata.measurementId.length > 0 &&
+      typeof metadata.semanticId === "string" && metadata.semanticId.length > 0 &&
+      metadata.role === "textLineBox" &&
+      typeof metadata.fontFamilyFingerprint === "string" &&
+      metadata.fontFamilyFingerprint.length > 0 &&
+      typeof metadata.fontSize === "number" &&
+      Number.isFinite(metadata.fontSize) && metadata.fontSize > 0 &&
+      typeof metadata.lineHeight === "number" &&
+      Number.isFinite(metadata.lineHeight) && metadata.lineHeight > 0 &&
+      typeof node.textHash === "string" && node.textHash.length > 0 &&
+      Number.isSafeInteger(graphemeCount) && Number(graphemeCount) >= 0;
+    const paintOrderValid = Number.isSafeInteger(node.paintOrder) && Number(node.paintOrder) >= 0;
     const occluderMeasurementIds = nodes
       .filter((candidate) => candidate !== node)
       .filter((candidate) => asNumber(candidate.paintOrder, -1) > nodePaintOrder)
@@ -139,7 +153,12 @@ export function textFitMeasurements(
         const candidateMetadata = asObject(candidate.metadata);
         return String(candidateMetadata.measurementId ?? candidate.id ?? "unknown");
       });
-    const ratio = visibleRatio(glyphBounds, clipBounds);
+    const ratio = geometryValid
+      ? Math.min(
+        evidenceIntersectionRatio(glyphBounds, clipBounds),
+        evidenceIntersectionRatio(glyphBounds, visibleBounds),
+      )
+      : 0;
     const measurementFrameGeneration = asNumber(node.measurementFrameGeneration, -1);
     const fontsReady = metadata.fontsReady === true;
     const frameMatches = frameGeneration >= 0 && measurementFrameGeneration === frameGeneration;
@@ -153,7 +172,11 @@ export function textFitMeasurements(
       occluderMeasurementIds.length === 0 &&
       fontsReady &&
       frameMatches &&
-      backingScaleMatches;
+      backingScaleMatches &&
+      geometryValid &&
+      measurementIdentityValid &&
+      paintOrderValid &&
+      metadata.rawContentReturned !== true;
 
     return {
       measurementId: metadata.measurementId ?? `text:${String(node.id ?? "unknown")}`,
@@ -168,6 +191,9 @@ export function textFitMeasurements(
       truncationPolicy,
       visibleRatio: ratio,
       occluderMeasurementIds,
+      geometryValid,
+      measurementIdentityValid,
+      paintOrderValid,
       fontFamilyFingerprint: metadata.fontFamilyFingerprint ?? null,
       fontSize: metadata.fontSize ?? null,
       fontWeight: metadata.fontWeight ?? null,
