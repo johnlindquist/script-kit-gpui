@@ -192,6 +192,8 @@ require_clean_source_identity() {
     scripts/agentic/cons-flow-ux/context-lifecycle-probe.ts
     scripts/agentic/cons-flow-ux/final-workflow-audit.ts
     scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts
+    scripts/agentic/cons-proof-gov/story-geometry-proof.mjs
+    scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts
     scripts/agentic/root-search-visual-stability.ts
     scripts/agentic/glass-smoke-study.ts
     scripts/agentic/automation-window.ts
@@ -232,6 +234,10 @@ require_clean_source_identity() {
     kit-init/sdk/menu-syntax.test.ts
     kit-init/types/menu-syntax.test.ts
     docs/ai/contracts/surface-contracts.json
+    design/mockups/tests/story-browser-geometry-harness.mjs
+    design/mockups/stories/stories.json
+    design/mockups/stories/10-conversation-three-modes/story.js
+    design/mockups/stories/11-launcher-flows-and-scripts/story.js
     design/mockups/generated/tokens.json
     design/mockups/generated/tokens.css
   )
@@ -512,6 +518,7 @@ run_phase() {
         ./scripts/agentic/cargo-build-policy.test.ts \
         ./scripts/agentic/macos-input.test.ts \
         ./scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts \
+        ./scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts \
         ./scripts/agentic/cargo-timings-summary.test.ts \
         ./scripts/agentic/quick-ai-latency-bench.test.ts \
         ./scripts/agentic/ai-phase-trace-report.test.ts \

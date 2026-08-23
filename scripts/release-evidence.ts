@@ -113,6 +113,7 @@ const REQUIRED_PROOF_SUITES = [
   "scripts/agentic/cargo-build-policy.test.ts",
   "scripts/agentic/macos-input.test.ts",
   "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
+  "scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts",
   "scripts/agentic/quick-ai-latency-bench.test.ts",
   "tests/sdk/runner-safety.test.ts",
 ] as const;
@@ -201,6 +202,15 @@ const REQUIRED_BUILD_SAFETY_OWNERS = [
 const REQUIRED_WORKFLOW_EVIDENCE_OWNERS = [
   "scripts/agentic/cons-flow-ux/final-workflow-audit.ts",
   "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
+] as const;
+
+const REQUIRED_BROWSER_GEOMETRY_OWNERS = [
+  "scripts/agentic/cons-proof-gov/story-geometry-proof.mjs",
+  "scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts",
+  "design/mockups/tests/story-browser-geometry-harness.mjs",
+  "design/mockups/stories/stories.json",
+  "design/mockups/stories/10-conversation-three-modes/story.js",
+  "design/mockups/stories/11-launcher-flows-and-scripts/story.js",
 ] as const;
 
 const REQUIRED_FOCUSED_FIXTURES = {
@@ -1628,6 +1638,7 @@ function requiredCleanReleaseSourceOwners(repositoryRoot: string): string[] {
     REQUIRED_SDK_SAFETY_OWNERS.every((owner) => owners.includes(owner)) &&
     REQUIRED_BUILD_SAFETY_OWNERS.every((owner) => owners.includes(owner)) &&
     REQUIRED_WORKFLOW_EVIDENCE_OWNERS.every((owner) => owners.includes(owner)) &&
+    REQUIRED_BROWSER_GEOMETRY_OWNERS.every((owner) => owners.includes(owner)) &&
     RELEASE_INTEGRATION_SUITES.every((suite) => owners.includes(`tests/${suite}.rs`)),
   "publishable release evidence has an invalid or incomplete canonical source-owner inventory");
   return owners;
