@@ -110,6 +110,10 @@ require_clean_source_identity() {
     scripts/devtools/layout.test.ts
     scripts/devtools/privacy.test.ts
     scripts/devtools/operator-safety.test.ts
+    scripts/devtools/actions.ts
+    scripts/devtools/agent_chat.ts
+    scripts/devtools/dictation.ts
+    scripts/devtools/events.ts
     scripts/devtools/inspect.ts
     scripts/devtools/notes.ts
     scripts/devtools/target-identity.test.ts
