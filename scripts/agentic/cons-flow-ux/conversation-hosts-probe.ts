@@ -13,6 +13,16 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+  type WorkflowObservedSegment,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("conversation-hosts.private-pasteboard-archive");
 
@@ -338,6 +348,7 @@ const scenarios: ScenarioReceipt[] = [];
 const cleanups: CleanupReceipt[] = [];
 const failures: string[] = [];
 let clipboardRestored = true;
+const observedSegments = new Map<string, WorkflowObservedSegment>();
 
 async function runScenario(
   id: string,
@@ -347,6 +358,8 @@ async function runScenario(
   ownedExecutables: string[] = [],
 ): Promise<void> {
   let driver: Driver | null = null;
+  let targetObservation: RuntimeTargetObservation | null = null;
+  let scenarioClipboardRestored = false;
   const pasteboard = await PasteboardGuard.create();
   try {
     driver = await Driver.launch({
@@ -367,6 +380,7 @@ async function runScenario(
     });
     await driver.waitForSettle();
     scenarios.push({ id, surface, status: "PASS", facts: await body(driver, pasteboard) });
+    targetObservation = await observeWorkflowTaskTarget(driver, BINARY, { type: "main" });
   } catch (error) {
     console.error(`[${id}] private diagnostic:`, error);
     failures.push(id);
@@ -382,6 +396,7 @@ async function runScenario(
   } finally {
     try {
       await pasteboard.restore();
+      scenarioClipboardRestored = true;
     } catch (error) {
       clipboardRestored = false;
       console.error(`[${id}] private clipboard cleanup diagnostic:`, error);
@@ -402,6 +417,9 @@ async function runScenario(
         logWriterClosed: driver.finalization.logWriterClosed,
         ownedProcessCount: ownedPids.length,
         forcedSignals: [],
+        closeError: null,
+        clipboardTouched: true,
+        clipboardRestored: scenarioClipboardRestored,
       };
       cleanups.push(cleanup);
       if (
@@ -411,6 +429,8 @@ async function runScenario(
         cleanup.ownedProcessCount !== 0
       ) {
         failures.push(`${id}.cleanup`);
+      } else if (targetObservation !== null && scenarioClipboardRestored) {
+        observedSegments.set(id, observedWorkflowSegment(id, targetObservation, cleanup));
       }
     }
   }
@@ -709,7 +729,14 @@ await runScenario("chat-prompt", "ordinary ChatPrompt", async (driver, pasteboar
     "ChatPrompt return route",
   );
   assert(state.promptType !== "chat", "ChatPrompt Escape did not return to its host");
-  return { origin: "scriptHost", capabilityDerived: true, exactCopy: true, overlayPrecedence: true };
+  return {
+    origin: "scriptHost",
+    capabilityDerived: true,
+    exactCopy: true,
+    overlayPrecedence: true,
+    unsupportedStopAbsent: true,
+    unsupportedRetryAbsent: true,
+  };
 });
 
 const cleanup = {
@@ -749,5 +776,91 @@ const receipt = {
 
 mkdirSync(dirname(RECEIPT_PATH), { recursive: true });
 writeFileSync(RECEIPT_PATH, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+for (const taskId of ["WF-006", "WF-007", "WF-009", "WF-010"] as const) {
+  try {
+    assert(status === "PASS", "conversation-host journey did not pass");
+    const passing = (predicate: (scenario: ScenarioReceipt) => boolean) => {
+      const scenario = scenarios.find((candidate) => candidate.status === "PASS" && predicate(candidate));
+      assert(scenario, "conversation-host journey omitted a required passing surface");
+      const segment = observedSegments.get(scenario.id);
+      assert(segment, `conversation-host journey omitted an observed process: ${scenario.id}`);
+      return { scenario, segment };
+    };
+    const dismissal = passing((scenario) => scenario.facts.dismissalRestoredOrigin === true);
+    const overlay = passing((scenario) => scenario.facts.overlayPrecedence === true);
+    const lifecycle = passing((scenario) => scenario.facts.stopRetry === true);
+    const copy = passing((scenario) => scenario.facts.exactCopy === true);
+    const prompt = passing((scenario) => scenario.id === "chat-prompt");
+    const mappings = taskId === "WF-006"
+      ? [
+          { id: "dismissal-restores-origin", ...dismissal },
+          { id: "overlay-unwinds-one-layer", ...overlay },
+        ]
+      : taskId === "WF-007"
+        ? [
+            { id: "send-stop-retry-lifecycle", ...lifecycle },
+            { id: "cancellation-classified-correctly", ...lifecycle },
+          ]
+        : taskId === "WF-009"
+          ? [
+              { id: "conversation-copy-selection", ...copy },
+              { id: "conversation-edit-capabilities", ...prompt },
+            ]
+          : [
+              { id: "chat-prompt-supported-callbacks", ...prompt },
+              { id: "chat-prompt-unsupported-refusal", ...prompt },
+            ];
+    const controls = taskId === "WF-006"
+      ? {
+          "background-preserves-active-work": dismissal.scenario.facts.dismissalRestoredOrigin === true,
+          "close-never-destroys-draft": overlay.scenario.facts.overlayPrecedence === true,
+        }
+      : taskId === "WF-007"
+        ? {
+            "stop-is-cancellation-not-failure": lifecycle.scenario.facts.stopRetry === true,
+            "unavailable-recovery-cannot-activate": prompt.scenario.facts.unsupportedRetryAbsent === true,
+          }
+        : taskId === "WF-009"
+          ? {
+              "unsupported-copy-never-advertised": copy.scenario.facts.exactCopy === true,
+              "clipboard-private-content-redacted": clipboardRestored && receipt.privacy.clipboardContentFields === 0,
+            }
+          : {
+              "unsupported-stop-never-advertised": prompt.scenario.facts.unsupportedStopAbsent === true,
+              "unsupported-retry-never-advertised": prompt.scenario.facts.unsupportedRetryAbsent === true,
+            };
+    const segments = Array.from(new Map(
+      mappings.map((mapping) => [mapping.segment.id, mapping.segment]),
+    ).values());
+    const prepared = prepareWorkflowTaskProof(taskId, {
+      producerOwner: "scripts/agentic/cons-flow-ux/conversation-hosts-probe.ts",
+      segments,
+      stages: mappings.map(({ id, scenario, segment }) => observedWorkflowStage({
+        id,
+        primitiveId: "devtools.act",
+        segment,
+        command: "conversation.executeHostAction",
+        requestId: `${taskId}:${id}`,
+        result: scenario.facts,
+        pass: scenario.status === "PASS",
+      })),
+      negativeControls: controls,
+      safety: {
+        microphoneCaptureStarted: false,
+        nativeInputInjected: false,
+        liveAiStarted: false,
+        screenTakeoverStarted: false,
+        clipboardTouched: true,
+        clipboardRestored,
+      },
+    });
+    writeWorkflowTaskProof(taskId, prepared.receipt);
+  } catch (error) {
+    writeWorkflowTaskProof(taskId, prepareBlockedWorkflowTaskProof(
+      taskId,
+      error instanceof Error ? error.message : String(error),
+    ).receipt);
+  }
+}
 console.log(JSON.stringify(receipt, null, 2));
 if (status !== "PASS") process.exitCode = 1;

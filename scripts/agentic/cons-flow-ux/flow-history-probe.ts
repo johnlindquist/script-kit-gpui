@@ -13,6 +13,16 @@ import {
 import { basename, join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+  type WorkflowObservedSegment,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("cons-flow-ux.flow-history");
 
@@ -38,6 +48,7 @@ const holdMarker = join(privateRoot, "hold-flow-persist");
 const failures: string[] = [];
 const scenarios: Json[] = [];
 const cleanup: Json[] = [];
+const observedSegments = new Map<string, WorkflowObservedSegment>();
 
 function assert(condition: unknown, message: string, detail?: unknown): asserts condition {
   if (!condition) {
@@ -413,6 +424,13 @@ async function closeOwned(
 ): Promise<void> {
   if (!driver) return;
   const pid = driver.pid;
+  let targetObservation: RuntimeTargetObservation | null = null;
+  try {
+    targetObservation = await observeWorkflowTaskTarget(driver, binary, { type: "main" });
+  } catch (error) {
+    failures.push(`${scenario}.target-observation`);
+    console.error(`[${scenario}] private target-observation diagnostic:`, error);
+  }
   let closeError: string | null = null;
   try {
     await driver.close();
@@ -423,7 +441,7 @@ async function closeOwned(
   const fixtureOwnedProcessCount = exactExecutablePids(historyEngine).length;
   const clipboardAfter = pasteboardChangeCount();
   const finalization = driver.finalization;
-  cleanup.push({
+  const closeReceipt: Json = {
     scenario,
     pid,
     ...finalization,
@@ -431,13 +449,15 @@ async function closeOwned(
     fixtureOwnedProcessCount,
     forcedTermination: null,
     closeError,
+    clipboardTouched: false,
     clipboard: {
       touched: false,
       changeCountBefore: clipboardBefore,
       changeCountAfter: clipboardAfter,
       restoration: "notApplicable",
     },
-  });
+  };
+  cleanup.push(closeReceipt);
   assert(finalization.processExited, `${scenario}: app process did not exit`);
   assert(finalization.streamsDrained, `${scenario}: streams did not drain`);
   assert(finalization.logWriterClosed, `${scenario}: log writer did not close`);
@@ -447,6 +467,12 @@ async function closeOwned(
     assert(clipboardBefore === clipboardAfter, `${scenario}: clipboard changed during proof`);
   }
   assert(closeError === null, `${scenario}: Driver close failed`, { closeError });
+  if (targetObservation !== null) {
+    observedSegments.set(
+      scenario,
+      observedWorkflowSegment(scenario, targetObservation, closeReceipt),
+    );
+  }
 }
 
 async function lifecycleProcessA(): Promise<void> {
@@ -816,22 +842,67 @@ for (const entry of cleanup) {
 }
 
 writeFileSync(join(receiptDir, "flow-history-receipt.json"), serialized);
-for (const task of ["SAFE-003", "WF-011"]) {
+for (const task of ["SAFE-003", "WF-011"] as const) {
+  let taskReceipt: Json;
+  try {
+    assert(failures.length === 0, "Flow history journey did not pass");
+    const requiredStages = task === "SAFE-003"
+      ? ["core-lifecycle-a", "core-lifecycle-b"]
+      : ["core-lifecycle-a", "core-lifecycle-b", "desk-ready"];
+    const selected = requiredStages.map((id) => {
+      const scenario = scenarios.find((item) => item.name === id);
+      const segment = observedSegments.get(id);
+      assert(scenario?.status === "PASS" && segment, `missing observed Flow lifecycle stage: ${id}`);
+      return { scenario, segment };
+    });
+    const lifecycle = selected.find((item) => item.scenario.name === "core-lifecycle-b")!.scenario;
+    const checkpoints = Array.isArray(lifecycle.checkpoints) ? lifecycle.checkpoints as Json[] : [];
+    const hasCheckpoint = (step: string) => checkpoints.some((checkpoint) => checkpoint.step === step);
+    const controls = task === "SAFE-003"
+      ? {
+          "new-conversation-preserves-history": hasCheckpoint("new-archives-active"),
+          "delete-requires-explicit-confirmation":
+            hasCheckpoint("delete-cancel") && hasCheckpoint("archive-delete-confirm"),
+        }
+      : {
+          "runtime-termination-preserves-history": hasCheckpoint("terminate-idle"),
+          "missing-engine-reports-actionable-state":
+            scenarios.some((scenario) => scenario.name === "desk-missing" && scenario.status === "PASS"),
+        };
+    taskReceipt = prepareWorkflowTaskProof(task, {
+      producerOwner: "scripts/agentic/cons-flow-ux/flow-history-probe.ts",
+      segments: selected.map((item) => item.segment),
+      stages: selected.map(({ scenario, segment }) => observedWorkflowStage({
+        id: String(scenario.name),
+        primitiveId: "devtools.act",
+        segment,
+        command: "flow.executeConversationAction",
+        requestId: `${task}:${String(scenario.name)}`,
+        result: scenario,
+        pass: scenario.status === "PASS",
+      })),
+      negativeControls: controls,
+      safety: {
+        microphoneCaptureStarted: false,
+        nativeInputInjected: false,
+        liveAiStarted: false,
+        screenTakeoverStarted: false,
+        clipboardTouched: false,
+      },
+    }).receipt as Json;
+  } catch (error) {
+    taskReceipt = prepareBlockedWorkflowTaskProof(
+      task,
+      error instanceof Error ? error.message : String(error),
+    ).receipt as Json;
+  }
   const directory = resolve(receiptDir, "..", task);
   mkdirSync(directory, { recursive: true });
   writeFileSync(
     join(directory, "receipt.json"),
-    JSON.stringify({
-      schemaVersion: 1,
-      classification: receipt.classification,
-      task,
-      binary: receipt.binary,
-      scenarioCount: scenarios.length,
-      cleanupCount: cleanup.length,
-      failures,
-      privacy,
-    }, null, 2),
+    JSON.stringify(taskReceipt, null, 2),
   );
+  writeWorkflowTaskProof(task, taskReceipt);
 }
 
 console.log(serialized);

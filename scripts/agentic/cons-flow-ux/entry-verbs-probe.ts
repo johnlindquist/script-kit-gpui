@@ -4,6 +4,16 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+  type WorkflowObservedSegment,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("cons-flow-ux.entry-verbs");
 
@@ -160,6 +170,7 @@ function safeState(state: Json): Json {
 const scenarios: Json[] = [];
 const failures: string[] = [];
 const cleanup: Json[] = [];
+const observedSegments = new Map<string, WorkflowObservedSegment>();
 
 async function runScenario(
   name: string,
@@ -167,6 +178,7 @@ async function runScenario(
   options: { seedAgentAuth?: boolean; env?: Record<string, string> } = {},
 ): Promise<void> {
   let driver: Driver | null = null;
+  let targetObservation: RuntimeTargetObservation | null = null;
   let result: Json = { name, status: "FAILED" };
   try {
     driver = await Driver.launch({
@@ -188,6 +200,7 @@ async function runScenario(
     });
     await driver.waitForSettle();
     result = { name, status: "PASS", ...(await body(driver)) };
+    targetObservation = await observeWorkflowTaskTarget(driver, binary, { type: "main" });
   } catch (error) {
     console.error(`[${name}] private diagnostic:`, error);
     failures.push(name);
@@ -224,6 +237,11 @@ async function runScenario(
         closeReceipt.ownedProcessCount !== 0
       ) {
         failures.push(`${name}.cleanup`);
+      } else if (targetObservation !== null) {
+        observedSegments.set(
+          name,
+          observedWorkflowSegment(name, targetObservation, closeReceipt),
+        );
       }
     }
     scenarios.push(result);
@@ -346,10 +364,66 @@ const receipt: Json = {
   failures,
 };
 
-for (const taskId of ["WF-002", "WF-008"]) {
+for (const taskId of ["WF-002", "WF-008"] as const) {
+  let taskReceipt: Json;
+  try {
+    assert(receipt.classification === "RUNTIME-CONFIRMED", "entry-verb journey did not pass");
+    const stageIds = taskId === "WF-002"
+      ? ["open-draft", "preflight-refusal"]
+      : ["open-draft", "quick-question", "ask-cmd-enter"];
+    const segments = stageIds.map((id) => {
+      const segment = observedSegments.get(id);
+      assert(segment, `entry-verb journey omitted actual observed segment: ${id}`);
+      return segment;
+    });
+    const stages = stageIds.map((id, index) => {
+      const scenario = scenarios.find((entry) => entry.name === id);
+      assert(scenario?.status === "PASS", `entry-verb journey omitted passing stage: ${id}`);
+      return observedWorkflowStage({
+        id,
+        primitiveId: "devtools.act",
+        segment: segments[index]!,
+        command: "agentChat.entryAction",
+        requestId: `${taskId}:${id}`,
+        result: scenario,
+        pass: true,
+      });
+    });
+    const observedControls = receipt.negativeControls as Json;
+    const controls = taskId === "WF-002"
+      ? {
+          "failed-preflight-preserves-source": observedControls.failedPreflightPreservedSource === true,
+          "open-never-submits": observedControls.openDidNotSubmit === true,
+        }
+      : {
+          "open-never-submits": observedControls.openDidNotSubmit === true,
+          "quick-question-never-inherits-context":
+            observedControls.quickQuestionDidNotSubmitOrInheritContext === true,
+          "ask-submits-exactly-once": observedControls.askProducedExactlyOneTurn === true,
+        };
+    taskReceipt = prepareWorkflowTaskProof(taskId, {
+      producerOwner: "scripts/agentic/cons-flow-ux/entry-verbs-probe.ts",
+      segments,
+      stages,
+      negativeControls: controls,
+      safety: {
+        microphoneCaptureStarted: false,
+        nativeInputInjected: false,
+        liveAiStarted: false,
+        screenTakeoverStarted: false,
+        clipboardTouched: false,
+      },
+    }).receipt as Json;
+  } catch (error) {
+    taskReceipt = prepareBlockedWorkflowTaskProof(
+      taskId,
+      error instanceof Error ? error.message : String(error),
+    ).receipt as Json;
+  }
   const taskDir = resolve(runDir, taskId);
   await mkdir(taskDir, { recursive: true });
-  await writeFile(resolve(taskDir, "receipt.json"), `${JSON.stringify({ ...receipt, taskId }, null, 2)}\n`);
+  await writeFile(resolve(taskDir, "receipt.json"), `${JSON.stringify(taskReceipt, null, 2)}\n`);
+  writeWorkflowTaskProof(taskId, taskReceipt);
 }
 
 console.log(JSON.stringify(receipt, null, 2));

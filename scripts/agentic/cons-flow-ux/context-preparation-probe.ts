@@ -4,6 +4,15 @@ import { mkdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("cons-flow-ux.context-preparation");
 
@@ -75,6 +84,7 @@ function assertReceiptIsPrivate(value: unknown): void {
 }
 
 const cleanups: Json[] = [];
+let targetObservation: RuntimeTargetObservation | null = null;
 let receipt: Json = {
   schemaVersion: 1,
   taskId: "SAFE-001",
@@ -168,6 +178,11 @@ try {
     { timeoutMs: 15_000 },
   );
   assertReceiptIsPrivate(elements);
+  targetObservation = await observeWorkflowTaskTarget(driver, binary, {
+    type: "kind",
+    kind: "agentChatDetached",
+    index: 0,
+  });
 
   receipt = {
     ...receipt,
@@ -218,6 +233,8 @@ try {
     logWriterClosed: driver.finalization.logWriterClosed,
     ownedProcessCount: ownedPids.length,
     ownedPids,
+    clipboardTouched: false,
+    closeError: null,
   };
   cleanups.push(cleanup);
   receipt.cleanup = cleanups;
@@ -242,11 +259,72 @@ try {
     };
     serialized = JSON.stringify(receipt, null, 2);
   }
+  try {
+    if (receipt.classification !== "RUNTIME-CONFIRMED" || targetObservation === null) {
+      throw new Error("the actual sanitized-context journey did not complete");
+    }
+    const segment = observedWorkflowSegment(
+      "safe001-context-preparation",
+      targetObservation,
+      cleanup,
+    );
+    const stages = [
+      {
+        id: "accepted-sanitized-context",
+        requestId: "acceptedOversizedJson",
+        result: receipt.accepted,
+      },
+      {
+        id: "failed-primary-blocked",
+        requestId: "missingPrimary",
+        result: receipt.primaryFailure,
+      },
+      {
+        id: "failed-supplemental-preserved",
+        requestId: "missingSupplemental",
+        result: receipt.supplementalFailure,
+      },
+    ].map((stage) => observedWorkflowStage({
+      ...stage,
+      primitiveId: "devtools.inspect.orchestrate",
+      segment,
+      command: "inspectContextPreparation",
+      pass: true,
+    }));
+    const observedControls = asJson(receipt.negativeControls);
+    receipt = prepareWorkflowTaskProof("SAFE-001", {
+      producerOwner: "scripts/agentic/cons-flow-ux/context-preparation-probe.ts",
+      segments: [segment],
+      stages,
+      negativeControls: {
+        "base64-context-redacted": observedControls.base64CanaryAbsentAtModelBoundary === true,
+        "failed-primary-cannot-send": observedControls.zeroResolvedPrimaryCannotSend === true,
+        "no-raw-private-content":
+          observedControls.serializedReceiptsContainNoRawContentOrSourceIdentity === true &&
+          observedControls.visibleAgentChatSemanticsContainNoPreparationCanary === true,
+      },
+      safety: {
+        microphoneCaptureStarted: false,
+        nativeInputInjected: false,
+        liveAiStarted: false,
+        screenTakeoverStarted: false,
+        clipboardTouched: false,
+      },
+    }).receipt as Json;
+  } catch (error) {
+    receipt = prepareBlockedWorkflowTaskProof(
+      "SAFE-001",
+      error instanceof Error ? error.message : String(error),
+    ).receipt as Json;
+  }
+  assertReceiptIsPrivate(receipt);
+  serialized = JSON.stringify(receipt, null, 2);
   await Bun.write(receiptPath, `${serialized}\n`);
+  writeWorkflowTaskProof("SAFE-001", receipt);
 }
 
 console.log(JSON.stringify(receipt, null, 2));
-assert(receipt.classification === "RUNTIME-CONFIRMED", "SAFE-001 runtime proof failed", receipt);
+assert(receipt.disposition === "EVALUABLE_PASS", "SAFE-001 runtime proof failed", receipt);
 assert(cleanups.length === 1);
 assert(cleanups.every((cleanup) => cleanup.processExited === true));
 assert(cleanups.every((cleanup) => cleanup.streamsDrained === true));

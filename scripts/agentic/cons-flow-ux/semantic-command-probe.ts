@@ -5,6 +5,16 @@ import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { openDayPage } from "../day-page-open-helper";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+  type WorkflowObservedSegment,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("cons-flow-ux.semantic-command");
 
@@ -133,6 +143,7 @@ async function waitForTarget(driver: Driver, kind: string, timeoutMs = 15_000): 
 const scenarios: Json[] = [];
 const cleanup: Json[] = [];
 const failures: string[] = [];
+const observedSegments = new Map<string, WorkflowObservedSegment>();
 
 async function runScenario(
   name: string,
@@ -141,6 +152,7 @@ async function runScenario(
   seedAgentAuth = false,
 ): Promise<void> {
   let driver: Driver | null = null;
+  let targetObservation: RuntimeTargetObservation | null = null;
   let result: Json = { name, status: "FAILED" };
   try {
     driver = await Driver.launch({
@@ -162,6 +174,7 @@ async function runScenario(
     });
     await driver.waitForSettle();
     result = { name, status: "PASS", ...(await body(driver)) };
+    targetObservation = await observeWorkflowTaskTarget(driver, binary, { type: "main" });
   } catch (error) {
     console.error(`[${name}] private diagnostic:`, error);
     failures.push(name);
@@ -198,6 +211,11 @@ async function runScenario(
         closeReceipt.ownedProcessCount !== 0
       ) {
         failures.push(`${name}.cleanup`);
+      } else if (targetObservation !== null) {
+        observedSegments.set(
+          name,
+          observedWorkflowSegment(name, targetObservation, closeReceipt),
+        );
       }
     }
     scenarios.push(result);
@@ -327,9 +345,76 @@ const receipt = {
   failures,
 };
 
-await mkdir(join(runDir, "WF-004"), { recursive: true });
-await mkdir(join(runDir, "WF-005"), { recursive: true });
-await writeFile(join(runDir, "WF-004", "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
-await writeFile(join(runDir, "WF-005", "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
+for (const taskId of ["WF-004", "WF-005"] as const) {
+  let taskReceipt: Json;
+  try {
+    assert(classification === "RUNTIME-CONFIRMED", "semantic command journey did not pass");
+    const stageMappings = taskId === "WF-004"
+      ? [
+          { id: "context-role-isolated", scenario: "agent-chat" },
+          { id: "identity-role-isolated", scenario: "agent-chat" },
+          { id: "destination-role-isolated", scenario: "dictation" },
+        ]
+      : [
+          { id: "conversation-command-descriptors", scenario: "agent-chat" },
+          { id: "unsupported-command-refused", scenario: "chat-prompt" },
+        ];
+    const segments = Array.from(new Set(stageMappings.map((stage) => stage.scenario)))
+      .map((name) => {
+        const segment = observedSegments.get(name);
+        assert(segment, `semantic journey omitted actual observed segment: ${name}`);
+        return segment;
+      });
+    const stages = stageMappings.map((stage) => {
+      const segment = observedSegments.get(stage.scenario)!;
+      const scenario = scenarios.find((candidate) => candidate.name === stage.scenario);
+      assert(scenario?.status === "PASS", `semantic journey omitted passing stage: ${stage.id}`);
+      return observedWorkflowStage({
+        id: stage.id,
+        primitiveId: "devtools.elements.snapshot",
+        segment,
+        command: "getElements",
+        requestId: `${taskId}:${stage.id}`,
+        result: scenario,
+        pass: true,
+      });
+    });
+    const dictation = scenarios.find((scenario) => scenario.name === "dictation");
+    const controls = taskId === "WF-004"
+      ? {
+          "context-identity-destination-cannot-interchange":
+            receipt.assertions.exactRoles.length === 3,
+          "passive-inspection-never-mutates-destination":
+            dictation?.selectorInspectionMutatedState === false,
+        }
+      : {
+          "disabled-command-cannot-activate":
+            receipt.assertions.disabledCommandsCarrySafeReasons === true,
+          "destructive-command-requires-confirmation":
+            receipt.assertions.destructiveCommandsRequireConfirmation === true,
+        };
+    taskReceipt = prepareWorkflowTaskProof(taskId, {
+      producerOwner: "scripts/agentic/cons-flow-ux/semantic-command-probe.ts",
+      segments,
+      stages,
+      negativeControls: controls,
+      safety: {
+        microphoneCaptureStarted: false,
+        nativeInputInjected: false,
+        liveAiStarted: false,
+        screenTakeoverStarted: false,
+        clipboardTouched: receipt.assertions.clipboardTouched === true,
+      },
+    }).receipt as Json;
+  } catch (error) {
+    taskReceipt = prepareBlockedWorkflowTaskProof(
+      taskId,
+      error instanceof Error ? error.message : String(error),
+    ).receipt as Json;
+  }
+  await mkdir(join(runDir, taskId), { recursive: true });
+  await writeFile(join(runDir, taskId, "receipt.json"), `${JSON.stringify(taskReceipt, null, 2)}\n`);
+  writeWorkflowTaskProof(taskId, taskReceipt);
+}
 console.log(JSON.stringify(receipt, null, 2));
 if (failures.length > 0) process.exitCode = 1;

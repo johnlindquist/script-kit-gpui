@@ -4,6 +4,16 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
+import type { WorkflowTaskProofId } from "../../devtools/lib/workflow-task-contract.ts";
 
 assertNoninteractiveVisualProbe("cons-flow-ux.context-lifecycle");
 
@@ -183,6 +193,7 @@ let receipt: Json = {
 };
 let driver: Driver | null = null;
 let closeError: string | null = null;
+let targetObservation: RuntimeTargetObservation | null = null;
 
 try {
   driver = await Driver.launch({
@@ -381,6 +392,7 @@ try {
     },
   };
   assertReceiptPrivate(receipt);
+  targetObservation = await observeWorkflowTaskTarget(driver, binary, { type: "main" });
 } catch (error) {
   console.error("C02 private probe diagnostic:", error);
   receipt.error = {
@@ -415,13 +427,76 @@ try {
   }
 
   assertReceiptPrivate(receipt);
-  for (const taskId of ["WF-001", "WF-003"]) {
+  for (const taskId of ["WF-001", "WF-003"] as const) {
+    let taskReceipt: Json;
+    try {
+      if (receipt.classification !== "RUNTIME-CONFIRMED" || targetObservation === null) {
+        throw new Error("the actual staged-context lifecycle journey did not complete");
+      }
+      const segment = observedWorkflowSegment(
+        "context-lifecycle-main",
+        targetObservation,
+        receipt.cleanup,
+      );
+      const details = taskId === "WF-001"
+        ? [
+            { id: "pending-context-provenance", result: receipt.pendingDedupe },
+            { id: "duplicate-context-deduplicated", result: receipt.pendingDedupe },
+          ]
+        : [
+            { id: "partial-accepted-send", result: receipt.partialAcceptedSend },
+            { id: "fresh-thread-clears-context", result: receipt.freshThread },
+            { id: "portal-cancellation-restores-context", result: receipt.portalCancellation },
+          ];
+      const observedControls = receipt.negativeControls as Json;
+      const controls = taskId === "WF-001"
+        ? {
+            "duplicate-context-never-creates-second-chip":
+              observedControls.duplicateContextDidNotCreateSecondChip === true,
+            "raw-source-identity-redacted":
+              observedControls.rawSourceUriAbsent === true &&
+              observedControls.rawMissingPathAbsent === true,
+          }
+        : {
+            "immutable-receipt-cannot-be-removed":
+              observedControls.immutableReceiptNotRemovable === true,
+            "fresh-thread-never-inherits-context":
+              observedControls.freshThreadDidNotInheritContext === true,
+          };
+      taskReceipt = prepareWorkflowTaskProof(taskId, {
+        producerOwner: "scripts/agentic/cons-flow-ux/context-lifecycle-probe.ts",
+        segments: [segment],
+        stages: details.map((stage) => observedWorkflowStage({
+          ...stage,
+          primitiveId: "devtools.inspect.orchestrate",
+          segment,
+          command: "getAgentChatState",
+          requestId: `${taskId}:${stage.id}`,
+          pass: true,
+        })),
+        negativeControls: controls,
+        safety: {
+          microphoneCaptureStarted: false,
+          nativeInputInjected: false,
+          liveAiStarted: false,
+          screenTakeoverStarted: false,
+          clipboardTouched: false,
+        },
+      }).receipt as Json;
+    } catch (error) {
+      taskReceipt = prepareBlockedWorkflowTaskProof(
+        taskId as WorkflowTaskProofId,
+        error instanceof Error ? error.message : String(error),
+      ).receipt as Json;
+    }
+    assertReceiptPrivate(taskReceipt);
     const taskDir = resolve(runDir, taskId);
     await mkdir(taskDir, { recursive: true });
     await writeFile(
       resolve(taskDir, "receipt.json"),
-      `${JSON.stringify({ ...receipt, taskId }, null, 2)}\n`,
+      `${JSON.stringify(taskReceipt, null, 2)}\n`,
     );
+    writeWorkflowTaskProof(taskId, taskReceipt);
   }
 }
 
