@@ -57,6 +57,13 @@ import {
   taskProofPolicy,
   type TaskProofPolicy,
 } from "./lib/task-proof-policy.ts";
+import {
+  WORKFLOW_TASK_PRIMITIVE_ID,
+  WORKFLOW_TASK_PROOF_SPECS,
+  workflowTaskProofErrors,
+  workflowTaskProofSourceOwners,
+  type WorkflowTaskProofId,
+} from "./lib/workflow-task-contract.ts";
 import { validateCompleteFacadeMigrationScope } from "./facade-migrations.ts";
 import {
   GENERATED_BYTE_COMPARE_OUTPUT_PATHS,
@@ -619,6 +626,29 @@ export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentId
       }
     }
   }
+  if (receipt.workflowTaskProof && typeof receipt.workflowTaskProof === "object") {
+    const taskId = typeof receipt.taskId === "string" ? receipt.taskId : "";
+    const expectedOwners = taskId in WORKFLOW_TASK_PROOF_SPECS
+      ? workflowTaskProofSourceOwners(taskId as WorkflowTaskProofId)
+      : [];
+    for (const [path, expected] of Object.entries(asObject(receipt.sourceFingerprints))) {
+      if (
+        !expectedOwners.includes(path) ||
+        path.split("/").includes("..") ||
+        typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected)
+      ) {
+        reasons.push({ code: "stale-workflow-proof-source-owner", detail: `${path} (${entry.path})` });
+        continue;
+      }
+      const actual = current.fileSha256(path);
+      if (actual === null || actual !== expected) {
+        reasons.push({
+          code: actual === null ? "stale-workflow-proof-source-missing" : "stale-workflow-proof-source",
+          detail: `${path} (${entry.path})`,
+        });
+      }
+    }
+  }
   if (receipt.primitiveId === "devtools.consistency.safe-task-proof") {
     const reviewedWorkflowSuite =
       "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts";
@@ -974,6 +1004,25 @@ export function verifyTask(input: VerifyTaskInput): { receipt: JsonObject; exitC
       ) {
         const primitiveId =
           typeof receipt.primitiveId === "string" ? receipt.primitiveId : null;
+        const workflowSpec = WORKFLOW_TASK_PROOF_SPECS[
+          taskId as WorkflowTaskProofId
+        ];
+        if (workflowSpec && primitiveId !== WORKFLOW_TASK_PRIMITIVE_ID) {
+          errors.push({
+            code: "task-workflow-proof-contract-missing",
+            detail:
+              `${taskId} requires its exact observed journey from ${workflowSpec.producerOwner}; ` +
+              `${entry.path} provides ${primitiveId ?? "no registered primitive"}`,
+          });
+        } else if (workflowSpec) {
+          const workflowErrors = workflowTaskProofErrors(receipt);
+          if (workflowErrors.length > 0) {
+            errors.push({
+              code: "task-workflow-proof-contract-invalid",
+              detail: `${taskId}: ${workflowErrors.join("; ")}`,
+            });
+          }
+        }
         const foundationSpec = RUNTIME_TASK_PROOF_SPECS[
           taskId as keyof typeof RUNTIME_TASK_PROOF_SPECS
         ];
@@ -1187,6 +1236,8 @@ export function verifyTask(input: VerifyTaskInput): { receipt: JsonObject; exitC
       "task-evidence-class-not-accepted",
       "task-evidence-observation-invalid",
       "task-runtime-proof-not-registry-validated",
+      "task-workflow-proof-contract-missing",
+      "task-workflow-proof-contract-invalid",
       "task-runtime-primitive-mismatch",
       "task-runtime-proof-mode-mismatch",
       "task-runtime-proof-source-ownership-mismatch",

@@ -49,6 +49,13 @@ import {
   taskProofPolicy,
 } from "./lib/task-proof-policy.ts";
 import {
+  WORKFLOW_TASK_PRIMITIVE_ID,
+  WORKFLOW_TASK_PROOF_MODE,
+  WORKFLOW_TASK_PROOF_SPECS,
+  workflowTaskProofSourceOwners,
+  type WorkflowTaskProofId,
+} from "./lib/workflow-task-contract.ts";
+import {
   attachFacadeMigrationScope,
   auditFacadeMigrationScope,
   CONVERSATION_STYLE_FACADE,
@@ -385,6 +392,85 @@ function passingReceipt(taskId: string, overrides: ReceiptOverrides = {}): Recor
     ...overrides,
   };
   delete (candidate as Record<string, unknown>).producerValidation;
+  const workflowSpec = WORKFLOW_TASK_PROOF_SPECS[taskId as WorkflowTaskProofId];
+  if (workflowSpec) {
+    const owner = "scripts/devtools/lib/workflow-task-proof.ts";
+    const binarySha = createHash("sha256").update(readFileSync(owner)).digest("hex");
+    const sourceOwners = workflowTaskProofSourceOwners(taskId as WorkflowTaskProofId);
+    const transaction = {
+      ...candidate.transaction,
+      binarySha256: binarySha,
+    };
+    const target = {
+      ...candidate.target,
+      pid: transaction.pid,
+      windowInstanceId: transaction.windowInstanceId,
+      targetGeneration: transaction.targetGeneration,
+      surfaceGeneration: transaction.surfaceGeneration,
+      dataGeneration: transaction.dataGeneration,
+    };
+    const cleanup = {
+      processExited: true,
+      streamsDrained: true,
+      logWriterClosed: true,
+      ownedProcessCount: 0,
+      clipboardTouched: false,
+      closeError: null,
+    };
+    return prepareValidatedReceipt(WORKFLOW_TASK_PRIMITIVE_ID, {
+      ...candidate,
+      tool: "script-kit-devtools.workflow-proof",
+      command: "workflow.prove",
+      target,
+      transaction,
+      binary: { path: owner, sha256: binarySha, sourceCommit: HEAD },
+      sourceFingerprints: Object.fromEntries(
+        sourceOwners.map((path) => [
+          path,
+          createHash("sha256").update(readFileSync(path)).digest("hex"),
+        ]),
+      ),
+      workflowTaskProof: {
+        taskId,
+        proofMode: WORKFLOW_TASK_PROOF_MODE,
+        producerOwner: workflowSpec.producerOwner,
+        sourceOwners,
+        observedSegments: [{
+          id: `segment:${taskId}`,
+          runId: transaction.runId,
+          target,
+          transaction,
+          cleanup,
+        }],
+        stages: workflowSpec.stageIds.map((id, index) => ({
+          id,
+          primitiveId: "devtools.act",
+          segmentId: `segment:${taskId}`,
+          runId: transaction.runId,
+          transaction,
+          pass: true,
+          observation: {
+            command: "act.synthetic-fixture",
+            requestId: `${taskId}:${index}`,
+            resultSha256: createHash("sha256").update(id).digest("hex"),
+          },
+        })),
+        safety: {
+          microphoneCaptureStarted: false,
+          nativeInputInjected: false,
+          liveAiStarted: false,
+          screenTakeoverStarted: false,
+          clipboardTouched: false,
+        },
+      },
+      negativeControls: workflowSpec.negativeControlIds.map((id) => ({
+        id,
+        pass: true,
+        executed: true,
+      })),
+      cleanup: { ...candidate.cleanup, ...cleanup },
+    }).receipt as Record<string, unknown>;
+  }
   const foundation = syntheticFoundationReceipt(taskId, candidate);
   const spec = RUNTIME_TASK_PROOF_SPECS[taskId as keyof typeof RUNTIME_TASK_PROOF_SPECS];
   if (spec) {
@@ -664,6 +750,25 @@ describe("verify-task mutations", () => {
     expect(receipt.proofPolicy.requirement).toBe("direct-runtime");
     expect(receipt.disposition).toBe("EVALUABLE_PASS");
     expect(exitCode).toBe(0);
+  });
+
+  test("a registered layout inspection cannot discharge any safety or workflow journey", () => {
+    for (const taskId of CONS_FLOW_UX_IDS) {
+      const tree = setup({ receiptTaskIds: [taskId] });
+      const binding = syntheticCatalogBindings.get(taskId)!;
+      tree.writeReceipt(taskId, "proof.json", passingReceipt("UX-001", {
+        taskId,
+        catalogBinding: {
+          taskId,
+          title: binding.title,
+          sectionSha256: binding.sectionSha256,
+        },
+      }));
+      const { receipt, exitCode } = tree.runTask(taskId);
+      expect(exitCode).toBe(4);
+      expect(receipt.errors.map((error: { code: string }) => error.code))
+        .toContain("task-workflow-proof-contract-missing");
+    }
   });
 
   test("a registered layout inspector cannot falsely satisfy semantic projection", () => {

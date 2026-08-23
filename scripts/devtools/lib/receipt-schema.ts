@@ -16,6 +16,10 @@ import {
 import { classifyReceiptEvidence } from "./evidence-class.ts";
 import { taskProofPolicy } from "./task-proof-policy.ts";
 import { evidenceIntersectionRatio, isValidEvidenceRect } from "./geometry-evidence.ts";
+import {
+  WORKFLOW_TASK_PRIMITIVE_ID,
+  workflowTaskProofErrors,
+} from "./workflow-task-contract.ts";
 
 export const RECEIPT_SCHEMA_VERSION = 2;
 export const RECEIPT_REGISTRY_VERSION = 1;
@@ -699,6 +703,38 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
     description: "Orchestrate a fail-closed target-scoped investigation stack.",
   }),
   schema({
+    primitiveId: WORKFLOW_TASK_PRIMITIVE_ID,
+    tool: "script-kit-devtools.workflow-proof",
+    commands: ["workflow.prove"],
+    requiredPaths: [
+      "taskId",
+      "catalogBinding",
+      "requestedTarget",
+      "target",
+      "binary",
+      "transaction",
+      "workflowTaskProof.taskId",
+      "workflowTaskProof.proofMode",
+      "workflowTaskProof.producerOwner",
+      "workflowTaskProof.sourceOwners",
+      "workflowTaskProof.stages",
+      "workflowTaskProof.observedSegments",
+      "workflowTaskProof.safety",
+      "sourceFingerprints",
+      "negativeControls",
+      "cleanup",
+    ],
+    forbidMissingPrimitivesOnPass: true,
+    activationProof: true,
+    identityPolicy: "declared-transition",
+    predicates: [{
+      id: "exact-observed-safe-workflow-journey",
+      validate: (receipt, disposition) =>
+        disposition === "EVALUABLE_PASS" ? workflowTaskProofErrors(receipt) : [],
+    }],
+    description: "Prove one exact SAFE/WF journey from observed target-bound actions and executed adversarial controls.",
+  }),
+  schema({
     primitiveId: "devtools.coverage.bindings",
     tool: "script-kit-devtools.surfaces",
     commands: ["surfaces.coverage-bindings"],
@@ -934,9 +970,12 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
           (taskId === "GOV-006" && (
             !productionSources.includes("scripts/devtools/consistency.ts") ||
             !productionSources.includes("scripts/devtools/lib/runtime-task-proof.ts") ||
+            !productionSources.includes("scripts/devtools/lib/workflow-task-contract.ts") ||
+            !productionSources.includes("scripts/devtools/lib/workflow-task-proof.ts") ||
             !productionSources.includes(reviewedWorkflowOwner) ||
             !suiteFiles.includes("scripts/devtools/consistency.test.ts") ||
             !suiteFiles.includes("scripts/devtools/runtime-task-proof.test.ts") ||
+            !suiteFiles.includes("scripts/devtools/workflow-task-proof.test.ts") ||
             !suiteFiles.includes(reviewedWorkflowSuite)
           ))
         ) {
@@ -1904,6 +1943,7 @@ const producerFileByTool: Record<string, string> = {
   "script-kit-devtools.notes": "notes.ts",
   "script-kit-devtools.dictation": "dictation.ts",
   "script-kit-devtools.inspect": "inspect.ts",
+  "script-kit-devtools.workflow-proof": "lib/workflow-task-proof.ts",
   "script-kit-devtools.consistency": "consistency.ts",
   "script-kit-devtools.family-fixtures": "family-fixtures.ts",
   "script-kit-devtools.safe-task-proofs": "safe-task-proofs.ts",
@@ -1930,6 +1970,8 @@ const sharedReceiptPolicyOwners = [
   "evidence-class.ts",
   "geometry-evidence.ts",
   "runtime-task-proof.ts",
+  "workflow-task-contract.ts",
+  "workflow-task-proof.ts",
   "task-proof-policy.ts",
 ] as const;
 let cachedReceiptPolicyFingerprint: string | null = null;
