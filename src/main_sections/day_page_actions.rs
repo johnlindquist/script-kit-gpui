@@ -135,6 +135,11 @@ struct DayPageAgentHandoffPacket {
     receipt: serde_json::Value,
 }
 
+struct DayPageAgentHandoffDocument<'a> {
+    date_label: &'a str,
+    canonical_path: Option<&'a str>,
+}
+
 fn save_today_action() -> crate::actions::Action {
     crate::actions::Action::new(
         "day_page:save",
@@ -157,9 +162,10 @@ pub(crate) fn day_page_host_actions_section(
     let viewing_fragment = view.session.is_viewing_fragment();
 
     if let Some(preview) = view.kit_resource_preview.as_ref() {
-        let availability = view
-            .kit_resource_preview_action_availability()
-            .expect("preview action availability exists when preview is open");
+        let Some(availability) = view.kit_resource_preview_action_availability() else {
+            tracing::error!("day_page.preview_actions_unavailable");
+            return actions;
+        };
         if availability.can_add_to_agent_chat {
             actions.push(
                 Action::new(
@@ -438,8 +444,10 @@ impl DayPageView {
         let receipt = self.build_agent_chat_handoff_receipt(
             DayPageAgentHandoffMode::ExplicitWholeDay,
             &scope,
-            &date_label,
-            canonical_path.as_deref(),
+            DayPageAgentHandoffDocument {
+                date_label: &date_label,
+                canonical_path: canonical_path.as_deref(),
+            },
             None,
             &parts,
             cx,
@@ -464,7 +472,10 @@ impl DayPageView {
             &content,
             selection,
         );
-        let mode = if matches!(scope, crate::notes::ai_scope::NotesAiScope::Selection { .. }) {
+        let mode = if matches!(
+            scope,
+            crate::notes::ai_scope::NotesAiScope::Selection { .. }
+        ) {
             DayPageAgentHandoffMode::Selection
         } else {
             DayPageAgentHandoffMode::CurrentLine
@@ -514,8 +525,10 @@ impl DayPageView {
         let receipt = self.build_agent_chat_handoff_receipt(
             mode,
             &scope,
-            &date_label,
-            canonical_path.as_deref(),
+            DayPageAgentHandoffDocument {
+                date_label: &date_label,
+                canonical_path: canonical_path.as_deref(),
+            },
             active_line.as_ref(),
             &parts,
             cx,
@@ -547,8 +560,7 @@ impl DayPageView {
         &self,
         mode: DayPageAgentHandoffMode,
         scope: &crate::notes::ai_scope::NotesAiScope,
-        date_label: &str,
-        canonical_path: Option<&str>,
+        document: DayPageAgentHandoffDocument<'_>,
         active_line: Option<&ActiveDayPageLine<'_>>,
         parts: &[crate::ai::message_parts::AiContextPart],
         cx: &App,
@@ -592,9 +604,9 @@ impl DayPageView {
             "destination": "agentChat",
             "stagingOutcome": "composerOnly",
             "source": mode.source(),
-            "date": date_label,
-            "canonicalPathChars": canonical_path.map(|path| path.chars().count()),
-            "canonicalPathHash": canonical_path.map(day_page_agent_chat_fingerprint),
+            "date": document.date_label,
+            "canonicalPathChars": document.canonical_path.map(|path| path.chars().count()),
+            "canonicalPathHash": document.canonical_path.map(day_page_agent_chat_fingerprint),
             "lineRange": active_line.map(|line| serde_json::json!({
                 "lineNumber": line.line_number,
                 "start": line.byte_range.start,

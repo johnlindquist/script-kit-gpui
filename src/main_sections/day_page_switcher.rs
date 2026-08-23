@@ -206,16 +206,17 @@ impl DayPageView {
     pub(crate) fn handle_day_switcher_key(
         &mut self,
         key: &str,
-        cmd: bool,
-        shift: bool,
-        alt: bool,
-        control: bool,
+        modifiers: gpui::Modifiers,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if !self.note_switcher.is_open() {
             return false;
         }
+        let cmd = modifiers.platform;
+        let shift = modifiers.shift;
+        let alt = modifiers.alt;
+        let control = modifiers.control;
         let exact_plain = !cmd && !shift && !alt && !control;
         if exact_plain && crate::ui_foundation::is_key_escape(key) {
             self.close_day_switcher(window, cx);

@@ -487,11 +487,30 @@ impl DayPageView {
         let editor_scroll = self.editor_state.read(cx).automation_scroll_metrics();
         let task_stats = day_page_task_stats(&input);
         let preview_anchor = self.automation_preview_anchor(&input, cx);
-        let kit_resource_preview = match self.kit_resource_preview.as_ref() {
-            Some(preview) => {
-                let availability = self
-                    .kit_resource_preview_action_availability()
-                    .expect("preview action availability exists when preview is open");
+        let kit_resource_preview = match (
+            self.kit_resource_preview.as_ref(),
+            self.kit_resource_preview_action_availability(),
+        ) {
+            (Some(preview), Some(availability)) => serde_json::json!({
+                "schemaVersion": 1,
+                "active": true,
+                "redacted": true,
+                "title": preview.title,
+                "uri": preview.uri,
+                "mimeType": preview.mime_type,
+                "readOnly": true,
+                "truncated": preview.truncated,
+                "textLength": preview.text.chars().count(),
+                "actionAvailability": {
+                    "addToAgentChat": availability.can_add_to_agent_chat,
+                    "copyUri": availability.can_copy_uri,
+                    "openSource": availability.open_source_target.is_some(),
+                    "openSourceReason": availability.open_source_unavailable_reason,
+                    "closePreview": availability.can_close,
+                },
+            }),
+            (Some(preview), None) => {
+                tracing::error!("day_page.preview_action_availability_missing");
                 serde_json::json!({
                     "schemaVersion": 1,
                     "active": true,
@@ -503,15 +522,15 @@ impl DayPageView {
                     "truncated": preview.truncated,
                     "textLength": preview.text.chars().count(),
                     "actionAvailability": {
-                        "addToAgentChat": availability.can_add_to_agent_chat,
-                        "copyUri": availability.can_copy_uri,
-                        "openSource": availability.open_source_target.is_some(),
-                        "openSourceReason": availability.open_source_unavailable_reason,
-                        "closePreview": availability.can_close,
+                        "addToAgentChat": false,
+                        "copyUri": false,
+                        "openSource": false,
+                        "openSourceReason": "Preview actions are unavailable",
+                        "closePreview": false,
                     },
                 })
             }
-            None => serde_json::json!({
+            (None, _) => serde_json::json!({
                 "schemaVersion": 1,
                 "active": false,
                 "redacted": true,
@@ -722,83 +741,6 @@ impl DayPageView {
     }
 }
 
-fn should_normalize_day_page_references_after_edit(
-    content: &str,
-    previous_len: usize,
-    cursor: usize,
-) -> bool {
-    if content.len() <= previous_len {
-        return false;
-    }
-    let growth = content.len().saturating_sub(previous_len);
-    if growth > 1 {
-        return true;
-    }
-    let mut cursor = cursor.min(content.len());
-    while cursor > 0 && !content.is_char_boundary(cursor) {
-        cursor -= 1;
-    }
-    content[..cursor]
-        .chars()
-        .next_back()
-        .is_some_and(char::is_whitespace)
-}
-
-fn automation_scroll_handle_metrics(
-    handle: &gpui::ScrollHandle,
-    source: &'static str,
-) -> serde_json::Value {
-    let offset = handle.offset();
-    let max_offset = handle.max_offset();
-    let viewport = handle.bounds().size;
-    let max_scroll_top = max_offset.y.as_f32().max(0.0);
-    let max_scroll_left = max_offset.x.as_f32().max(0.0);
-    let scroll_top = (-offset.y.as_f32()).clamp(0.0, max_scroll_top);
-    let scroll_left = (-offset.x.as_f32()).clamp(0.0, max_scroll_left);
-
-    serde_json::json!({
-        "schemaVersion": 1,
-        "source": source,
-        "available": true,
-        "offsetUnit": "logicalPx",
-        "scrollTop": scroll_top,
-        "scrollLeft": scroll_left,
-        "rawOffsetX": offset.x.as_f32(),
-        "rawOffsetY": offset.y.as_f32(),
-        "scrollHeight": viewport.height.as_f32() + max_scroll_top,
-        "scrollWidth": viewport.width.as_f32() + max_scroll_left,
-        "clientHeight": viewport.height.as_f32(),
-        "clientWidth": viewport.width.as_f32(),
-        "maxScrollTop": max_scroll_top,
-        "maxScrollLeft": max_scroll_left,
-        "canScrollY": max_scroll_top > 0.0,
-        "canScrollX": max_scroll_left > 0.0,
-    })
-}
-
-fn day_page_task_stats(content: &str) -> serde_json::Value {
-    let mut total = 0_usize;
-    let mut checked = 0_usize;
-    let mut unchecked = 0_usize;
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("- [ ] ") {
-            total += 1;
-            unchecked += 1;
-        } else if trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ") {
-            total += 1;
-            checked += 1;
-        }
-    }
-
-    serde_json::json!({
-        "schemaVersion": 1,
-        "total": total,
-        "checked": checked,
-        "unchecked": unchecked,
-    })
-}
-
 impl Focusable for DayPageView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -811,7 +753,10 @@ impl Render for DayPageView {
         self.maybe_rebind_after_midnight(window, cx);
         self.maybe_autosave(window, cx);
 
-        let app = self.app.upgrade().expect("DayPageView app entity dropped");
+        let Some(app) = self.app.upgrade() else {
+            tracing::warn!("day_page.render_abandoned_after_host_dropped");
+            return div().into_any_element();
+        };
 
         let app_state = app.read(cx);
         let menu_def = app_state.current_main_menu_theme.def();
@@ -1041,37 +986,41 @@ impl Render for DayPageView {
 
         let preview_availability = self.kit_resource_preview_action_availability();
         let preview_return_label = self.kit_resource_preview_return_label();
-        let mut footer_config = app
-            .read(cx)
-            .main_window_footer_config_with_cx(None)
-            .expect("Day Page owns a main-window footer config");
-        footer_config.buttons = day_page_footer_buttons_for_preview(
-            &app.read(cx),
-            preview_availability,
-            preview_return_label,
-        );
-        let footer_app = app.downgrade();
-        let footer =
-            crate::components::prompt_layout_shell::render_main_window_footer_slot_for_prompt_surface(
-                "day_page",
-                move || {
-                    crate::components::footer_chrome::render_main_window_footer_config_rail(
-                        footer_config,
-                        move |action, window, cx| {
-                            if let Some(app) = footer_app.upgrade() {
-                                app.update(cx, |app, cx| {
-                                    app.dispatch_main_window_footer_action(
-                                        action,
-                                        window,
-                                        cx,
-                                        "gpui_footer_click",
-                                    );
-                                });
-                            }
-                        },
-                    )
-                },
+        let footer = if let Some(mut footer_config) =
+            app.read(cx).main_window_footer_config_with_cx(None)
+        {
+            footer_config.buttons = day_page_footer_buttons_for_preview(
+                app.read(cx),
+                preview_availability,
+                preview_return_label,
             );
+            let footer_app = app.downgrade();
+            Some(
+                crate::components::prompt_layout_shell::render_main_window_footer_slot_for_prompt_surface(
+                    "day_page",
+                    move || {
+                        crate::components::footer_chrome::render_main_window_footer_config_rail(
+                            footer_config,
+                            move |action, window, cx| {
+                                if let Some(app) = footer_app.upgrade() {
+                                    app.update(cx, |app, cx| {
+                                        app.dispatch_main_window_footer_action(
+                                            action,
+                                            window,
+                                            cx,
+                                            "gpui_footer_click",
+                                        );
+                                    });
+                                }
+                            },
+                        )
+                    },
+                ),
+            )
+        } else {
+            tracing::warn!("day_page.footer_config_unavailable");
+            None
+        };
 
         crate::components::main_view_chrome::render_main_view_chrome(
             root,
@@ -1081,7 +1030,7 @@ impl Render for DayPageView {
                 header,
                 divider,
                 main,
-                footer: Some(footer),
+                footer,
                 overlays: Vec::new(),
             },
         )
@@ -1360,27 +1309,20 @@ impl DayPageView {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.key.to_lowercase();
-        self.handle_key_parts(
-            &key,
-            event.keystroke.modifiers.platform,
-            event.keystroke.modifiers.shift,
-            event.keystroke.modifiers.alt,
-            event.keystroke.modifiers.control,
-            window,
-            cx,
-        );
+        self.handle_key_parts(&key, event.keystroke.modifiers, window, cx);
     }
 
     pub(crate) fn handle_key_parts(
         &mut self,
         key: &str,
-        cmd: bool,
-        shift: bool,
-        alt: bool,
-        control: bool,
+        modifiers: gpui::Modifiers,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let cmd = modifiers.platform;
+        let shift = modifiers.shift;
+        let alt = modifiers.alt;
+        let control = modifiers.control;
         let exact_plain = !cmd && !shift && !alt && !control;
         let exact_cmd = cmd && !shift && !alt && !control;
 
@@ -1440,9 +1382,7 @@ impl DayPageView {
             }
         }
 
-        if self.is_day_switcher_open()
-            && self.handle_day_switcher_key(key, cmd, shift, alt, control, window, cx)
-        {
+        if self.is_day_switcher_open() && self.handle_day_switcher_key(key, modifiers, window, cx) {
             return;
         }
 

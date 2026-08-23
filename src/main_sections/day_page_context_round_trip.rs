@@ -14,7 +14,8 @@
 use std::ops::Range;
 
 use crate::components::notes_editor::spine::{
-    context_round_trip_request_for_contract, replace_segment_content, NotesEditorHostSpineContract,
+    context_round_trip_request_for_contract, replace_segment_content,
+    NotesEditorContextRoundTripRequest, NotesEditorHostSpineContract,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +46,13 @@ pub(crate) struct DayPageContextReturn {
     pub segment_hash: String,
 }
 
+struct DayPageRoundTripReceiptSegment<'a> {
+    line_range: &'a Range<usize>,
+    byte_range: &'a Range<usize>,
+    chars: usize,
+    hash: &'a str,
+}
+
 fn day_page_context_round_trip_fingerprint(value: &str) -> String {
     format!(
         "sha256:{}",
@@ -55,10 +63,7 @@ fn day_page_context_round_trip_fingerprint(value: &str) -> String {
 fn day_page_context_round_trip_receipt(
     id: &str,
     status: &str,
-    line_range: &Range<usize>,
-    segment_byte_range: &Range<usize>,
-    segment_chars: usize,
-    segment_hash: &str,
+    segment: DayPageRoundTripReceiptSegment<'_>,
     snapshot: Option<&DayPageHostReturnSnapshot>,
     token: Option<&str>,
     visible_reference: Option<&str>,
@@ -71,17 +76,17 @@ fn day_page_context_round_trip_receipt(
         "id": id,
         "status": status,
         "lineRange": {
-            "start": line_range.start,
-            "end": line_range.end,
+            "start": segment.line_range.start,
+            "end": segment.line_range.end,
             "unit": "utf8ByteOffset",
         },
         "segmentRange": {
-            "start": segment_byte_range.start,
-            "end": segment_byte_range.end,
+            "start": segment.byte_range.start,
+            "end": segment.byte_range.end,
             "unit": "utf8ByteOffset",
         },
-        "segmentChars": segment_chars,
-        "segmentHash": segment_hash,
+        "segmentChars": segment.chars,
+        "segmentHash": segment.hash,
         "hostReturn": snapshot.map(|snapshot| serde_json::json!({
             "entityId": snapshot.entity_id,
             "generation": snapshot.host_return_generation,
@@ -193,13 +198,16 @@ impl DayPageView {
                 .take(12)
                 .collect::<String>()
         );
+        let segment_hash = day_page_context_round_trip_fingerprint(&request.segment_text);
         let receipt = day_page_context_round_trip_receipt(
             &id,
             "pending",
-            &request.line_range,
-            &request.segment_byte_range,
-            request.segment_text.chars().count(),
-            &day_page_context_round_trip_fingerprint(&request.segment_text),
+            DayPageRoundTripReceiptSegment {
+                line_range: &request.line_range,
+                byte_range: &request.segment_byte_range,
+                chars: request.segment_text.chars().count(),
+                hash: &segment_hash,
+            },
             Some(&snapshot),
             None,
             None,
@@ -213,16 +221,7 @@ impl DayPageView {
         );
         window.defer(cx, move |window, cx| {
             app.update(cx, |app, cx| {
-                app.begin_day_page_context_round_trip(
-                    id,
-                    entity,
-                    snapshot,
-                    request.line_range,
-                    request.segment_byte_range,
-                    request.segment_text,
-                    window,
-                    cx,
-                );
+                app.begin_day_page_context_round_trip(id, entity, snapshot, request, window, cx);
             });
         });
         true
@@ -289,8 +288,7 @@ fn day_page_host_return_is_current(
     entity_id: u64,
     host_return_generation: u64,
 ) -> bool {
-    snapshot.entity_id == entity_id
-        && snapshot.host_return_generation == host_return_generation
+    snapshot.entity_id == entity_id && snapshot.host_return_generation == host_return_generation
 }
 
 impl ScriptListApp {
@@ -299,18 +297,17 @@ impl ScriptListApp {
         id: String,
         entity: Entity<DayPageView>,
         snapshot: DayPageHostReturnSnapshot,
-        line_range: Range<usize>,
-        segment_byte_range: Range<usize>,
-        segment_text: String,
+        request: NotesEditorContextRoundTripRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let segment_text = request.segment_text;
         self.day_page_context_return = Some(DayPageContextReturn {
             id,
             entity,
             snapshot,
-            line_range,
-            segment_byte_range,
+            line_range: request.line_range,
+            segment_byte_range: request.segment_byte_range,
             segment_chars: segment_text.chars().count(),
             segment_hash: day_page_context_round_trip_fingerprint(&segment_text),
         });
@@ -355,10 +352,12 @@ impl ScriptListApp {
         let receipt = day_page_context_round_trip_receipt(
             &pending.id,
             "completed",
-            &pending.line_range,
-            &pending.segment_byte_range,
-            pending.segment_chars,
-            &pending.segment_hash,
+            DayPageRoundTripReceiptSegment {
+                line_range: &pending.line_range,
+                byte_range: &pending.segment_byte_range,
+                chars: pending.segment_chars,
+                hash: &pending.segment_hash,
+            },
             Some(&pending.snapshot),
             Some(token),
             Some(&visible_reference),
@@ -404,10 +403,12 @@ impl ScriptListApp {
         let receipt = day_page_context_round_trip_receipt(
             &pending.id,
             "cancelled",
-            &pending.line_range,
-            &pending.segment_byte_range,
-            pending.segment_chars,
-            &pending.segment_hash,
+            DayPageRoundTripReceiptSegment {
+                line_range: &pending.line_range,
+                byte_range: &pending.segment_byte_range,
+                chars: pending.segment_chars,
+                hash: &pending.segment_hash,
+            },
             Some(&pending.snapshot),
             None,
             None,
