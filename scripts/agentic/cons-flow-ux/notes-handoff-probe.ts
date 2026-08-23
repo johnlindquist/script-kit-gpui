@@ -5,6 +5,16 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+  type WorkflowObservedSegment,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("cons-flow-ux.notes-handoff");
 
@@ -19,6 +29,7 @@ const OUT_PATH = join(OUT_DIR, "notes-handoff-receipt.json");
 const NOTES_TARGET: Json = { type: "kind", kind: "notes", index: 0 };
 const DETACHED_TARGET: Json = { type: "kind", kind: "agentChatDetached", index: 0 };
 const runId = `notes-handoff-${Date.now().toString(36)}`;
+const observedSegments = new Map<string, WorkflowObservedSegment>();
 
 type Obj = Record<string, any>;
 type ScenarioReceipt = {
@@ -210,6 +221,7 @@ async function runScenario(
   const facts: Obj = {};
   let driver: Driver | null = null;
   let cleanup: Obj = {};
+  let targetObservation: RuntimeTargetObservation | null = null;
   try {
     driver = await Driver.launch({
       binary: BINARY,
@@ -231,18 +243,27 @@ async function runScenario(
     });
     await driver.waitForSettle();
     await body(driver, dbPath, facts);
+    targetObservation = await observeWorkflowTaskTarget(driver, BINARY, { type: "main" });
   } catch (error) {
     failures.push(error instanceof Error ? error.message : String(error));
   } finally {
     if (driver) {
       await driver.close().catch((error) => failures.push(`driver.close: ${String(error)}`));
-      cleanup = asObj(driver.finalization);
+      cleanup = {
+        ...asObj(driver.finalization),
+        ownedProcessCount: exactExecutablePids(BINARY).length,
+        clipboardTouched: false,
+        closeError: null,
+      };
       if (
         cleanup.processExited !== true ||
         cleanup.streamsDrained !== true ||
-        cleanup.logWriterClosed !== true
+        cleanup.logWriterClosed !== true ||
+        cleanup.ownedProcessCount !== 0
       ) {
         failures.push("incomplete Driver finalization");
+      } else if (targetObservation !== null) {
+        observedSegments.set(id, observedWorkflowSegment(id, targetObservation, cleanup));
       }
     }
     rmSync(databaseRoot, { recursive: true, force: true });
@@ -502,5 +523,49 @@ const receipt = {
 };
 mkdirSync(OUT_DIR, { recursive: true });
 await Bun.write(OUT_PATH, `${JSON.stringify(receipt, null, 2)}\n`);
+try {
+  assert(receipt.pass, "Notes transactional handoff journey did not pass");
+  const selected = ["partial-duplicate-reuse", "primary-failure-atomic", "cart-delete-failure"]
+    .map((id) => {
+      const scenario = scenarios.find((item) => item.id === id);
+      const segment = observedSegments.get(id);
+      assert(scenario?.pass === true && segment, `missing observed Notes handoff stage: ${id}`);
+      return { scenario, segment };
+    });
+  const primary = selected.find(({ scenario }) => scenario.id === "primary-failure-atomic")!.scenario;
+  const partial = selected.find(({ scenario }) => scenario.id === "partial-duplicate-reuse")!.scenario;
+  const prepared = prepareWorkflowTaskProof("WF-016", {
+    producerOwner: "scripts/agentic/cons-flow-ux/notes-handoff-probe.ts",
+    segments: selected.map((item) => item.segment),
+    stages: selected.map(({ scenario, segment }) => observedWorkflowStage({
+      id: scenario.id,
+      primitiveId: "devtools.act",
+      segment,
+      command: "notes.stageAgentChatAttachments",
+      requestId: `WF-016:${scenario.id}`,
+      result: scenario.facts,
+      pass: scenario.pass,
+    })),
+    negativeControls: {
+      "primary-failure-never-consumes-cart":
+        primary.facts.consumed === 0 && primary.facts.cartRowsRetained === 1,
+      "failed-attachment-remains-retryable":
+        Number(partial.facts.failedCartRowsRetained) > 0,
+    },
+    safety: {
+      microphoneCaptureStarted: false,
+      nativeInputInjected: false,
+      liveAiStarted: false,
+      screenTakeoverStarted: false,
+      clipboardTouched: false,
+    },
+  });
+  writeWorkflowTaskProof("WF-016", prepared.receipt);
+} catch (error) {
+  writeWorkflowTaskProof("WF-016", prepareBlockedWorkflowTaskProof(
+    "WF-016",
+    error instanceof Error ? error.message : String(error),
+  ).receipt);
+}
 console.log(JSON.stringify(receipt, null, 2));
 if (!receipt.pass) process.exitCode = 1;

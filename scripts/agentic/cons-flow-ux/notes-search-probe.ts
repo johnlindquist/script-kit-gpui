@@ -14,6 +14,15 @@ import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { openDayPage } from "../day-page-open-helper";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("cons-flow-ux.notes-search");
 
@@ -666,6 +675,7 @@ mkdirSync(join(emptyBrain, "days"), { recursive: true });
 
 let driver: Driver | null = null;
 let emptyDriver: Driver | null = null;
+let targetObservation: RuntimeTargetObservation | null = null;
 let failure: string | null = null;
 
 try {
@@ -769,11 +779,15 @@ try {
     "portal Enter did not attach exactly one note",
     { before: attachOrigin.before, attached },
   );
+  assert(Number(attached.messageCount ?? 0) === 0, "portal Enter silently submitted a message", {
+    messageCount: attached.messageCount,
+  });
   receipt.activation.portalEnter = {
     contextBefore: attachOrigin.before.contextChipCount,
     contextAfter: attached.contextChipCount,
     portalPartCount: enterPortalParts.length,
     attachedExactlyOnce: true,
+    messageCount: Number(attached.messageCount ?? 0),
   };
 
   const pointerOrigin = await openNotesPortalFromAgentChat(driver, portalDraft, "portal-pointer");
@@ -936,6 +950,7 @@ try {
   const emptyLog = await Bun.file(emptyDriver.logPath).text();
   assert(!/panicked at|thread 'main' panicked/i.test(`${appLog}\n${emptyLog}`), "runtime panicked");
   receipt.runtimePanics = 0;
+  targetObservation = await observeWorkflowTaskTarget(driver, BINARY, { type: "main" });
   receipt.status = "PASS";
 } catch (error) {
   console.error("C08 private diagnostic:", error);
@@ -983,6 +998,67 @@ try {
   writeFileSync(RECEIPT_PATH, `${JSON.stringify(receipt, null, 2)}\n`, {
     mode: 0o600,
   });
+  for (const taskId of ["WF-012", "WF-017"] as const) {
+    try {
+      assert(receipt.status === "PASS" && targetObservation !== null, "Notes search journey did not pass");
+      const segment = observedWorkflowSegment(
+        "notes-search-main",
+        targetObservation,
+        { ...receipt.cleanup, clipboardTouched: false, closeError: null },
+      );
+      const details = taskId === "WF-012"
+        ? [
+            { id: "shared-notes-search-results", result: receipt.comparisons },
+            { id: "host-destinations-disclosed", result: receipt.comparisons.destinationVerbs },
+          ]
+        : [
+            { id: "standalone-open", result: receipt.activation.standaloneEnter },
+            { id: "portal-attach", result: receipt.activation.portalEnter },
+            { id: "portal-cancel-restores-origin", result: receipt.portalRestoration },
+          ];
+      const controls = taskId === "WF-012"
+        ? {
+            "failed-refresh-retains-prior-results":
+              receipt.stateMatrix.failed?.notEmpty === true,
+            "no-match-never-pretends-corpus-empty":
+              receipt.stateMatrix.noMatch?.stateKind === "noMatch" &&
+              receipt.stateMatrix.readyEmpty?.stateKind === "readyEmpty",
+          }
+        : {
+            "portal-attachment-never-auto-submits":
+              receipt.activation.portalEnter?.messageCount === 0,
+            "portal-cancellation-restores-draft":
+              receipt.portalRestoration.draftRestored === true &&
+              receipt.portalRestoration.focusRestored === true,
+          };
+      const prepared = prepareWorkflowTaskProof(taskId, {
+        producerOwner: "scripts/agentic/cons-flow-ux/notes-search-probe.ts",
+        segments: [segment],
+        stages: details.map((stage) => observedWorkflowStage({
+          ...stage,
+          primitiveId: "devtools.act",
+          segment,
+          command: "notes.searchHostAction",
+          requestId: `${taskId}:${stage.id}`,
+          pass: true,
+        })),
+        negativeControls: controls,
+        safety: {
+          microphoneCaptureStarted: false,
+          nativeInputInjected: false,
+          liveAiStarted: false,
+          screenTakeoverStarted: false,
+          clipboardTouched: false,
+        },
+      });
+      writeWorkflowTaskProof(taskId, prepared.receipt);
+    } catch (error) {
+      writeWorkflowTaskProof(taskId, prepareBlockedWorkflowTaskProof(
+        taskId,
+        error instanceof Error ? error.message : String(error),
+      ).receipt);
+    }
+  }
 }
 
 console.log(JSON.stringify(receipt, null, 2));

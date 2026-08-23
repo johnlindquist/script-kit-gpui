@@ -13,6 +13,15 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("notes-actions.private-pasteboard-archive");
 
@@ -661,6 +670,7 @@ let pasteboard: PasteboardGuard | null = null;
 let databaseRoot: string | null = null;
 let failureFingerprint: string | null = null;
 let clipboardRestored = false;
+let targetObservation: RuntimeTargetObservation | null = null;
 
 try {
   const hash = Bun.spawnSync(["shasum", "-a", "256", BINARY], {
@@ -1034,6 +1044,7 @@ try {
   receipt.activatedShortcutCount = activatedCanonical.size;
   receipt.allAdvertisedShortcutsActivated = true;
   receipt.runtimePanics = 0;
+  targetObservation = await observeWorkflowTaskTarget(driver, BINARY, NOTES_TARGET);
   receipt.status = "PASS";
 } catch (error) {
   console.error("C07 private diagnostic:", error);
@@ -1071,6 +1082,7 @@ try {
       logWriterClosed: driver.finalization.logWriterClosed,
       ownedProcessCount: ownedPids.length,
       forcedSignals: [],
+      clipboardTouched: true,
       clipboardRestored,
       databaseRemoved: false,
     };
@@ -1093,6 +1105,60 @@ try {
   writeFileSync(RECEIPT_PATH, `${JSON.stringify(receipt, null, 2)}\n`, {
     mode: 0o600,
   });
+  try {
+    assert(receipt.status === "PASS" && targetObservation !== null, "Notes action journey did not pass");
+    const segment = observedWorkflowSegment("notes-actions", targetObservation, receipt.cleanup);
+    const stages = [
+      {
+        id: "shortcut-descriptors-executable",
+        result: {
+          advertised: receipt.advertisedShortcutCount,
+          activated: receipt.activatedShortcutCount,
+          complete: receipt.allAdvertisedShortcutsActivated,
+        },
+      },
+      {
+        id: "destructive-confirmations-enforced",
+        result: receipt.destructiveConfirmations,
+      },
+    ].map((stage) => observedWorkflowStage({
+      ...stage,
+      primitiveId: "devtools.act",
+      segment,
+      command: "notes.activateShortcut",
+      requestId: `SAFE-004:${stage.id}`,
+      pass: true,
+    }));
+    const confirmations = asObj(receipt.destructiveConfirmations);
+    const deletePolicy = asObj(confirmations.delete);
+    const prepared = prepareWorkflowTaskProof("SAFE-004", {
+      producerOwner: "scripts/agentic/cons-flow-ux/notes-actions-probe.ts",
+      segments: [segment],
+      stages,
+      negativeControls: {
+        "unavailable-shortcuts-cannot-activate":
+          receipt.negativeControls.shiftCommandA === "no-action" &&
+          receipt.negativeControls.shiftCommandDelete === "no-action",
+        "destructive-action-requires-confirmation":
+          deletePolicy.openedBeforeMutation === true &&
+          deletePolicy.cancelPreservedCounts === true,
+      },
+      safety: {
+        microphoneCaptureStarted: false,
+        nativeInputInjected: false,
+        liveAiStarted: false,
+        screenTakeoverStarted: false,
+        clipboardTouched: true,
+        clipboardRestored,
+      },
+    });
+    writeWorkflowTaskProof("SAFE-004", prepared.receipt);
+  } catch (error) {
+    writeWorkflowTaskProof("SAFE-004", prepareBlockedWorkflowTaskProof(
+      "SAFE-004",
+      error instanceof Error ? error.message : String(error),
+    ).receipt);
+  }
 }
 
 console.log(JSON.stringify(receipt, null, 2));
