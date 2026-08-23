@@ -1057,6 +1057,15 @@ offline receipts until their real producers are run again.
     release owner. All unsafe identities and policies now fail before any
     preflight or session mutation, stale dead-session markers are rejected,
     and both independently proven sources are mandatory release provenance.
+25. The canonical `scripts/devtools/inspect.ts` orchestrator independently
+    bypassed the newly protected bootstrap: it discarded actual startup/show
+    failures and always emitted an unguarded name-only `session.sh stop`
+    command when `--start` was requested, even for resumed sessions. Its
+    source was also missing from required release ownership. Eighteen pure
+    no-process cases now prove passive/resumed sessions remain borrowed,
+    live `dev-watch` cannot be claimed, failed/unready/mismatched startup is
+    terminal, unsafe names/generations cannot form shell commands, and only
+    a genuinely new process receives exact PID-and-generation cleanup.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1307,12 +1316,14 @@ offline receipts until their real producers are run again.
     explicit `noninteractive: false` options nor replacement environments
     can weaken the real parent's authority; target resolution stays on its
     capture-free hidden-state path even when callers request an interactive
-    override. The standalone operator-safety suite passes **38 cases and
-    245 assertions**, and the separate hidden-target identity suite passes
+    override. The standalone operator-safety suite passes **56 cases and
+    263 assertions**, including 18 pure canonical-inspector ownership cases;
+    the separate hidden-target identity suite passes
     **14 cases and 66 assertions**. Release evidence now fail-closes unless
-    all ten actual safety owners—the direct session shell, shared identity
-    helper, isolated startup, DevTools bootstrap, readiness waiter, Driver,
-    shared client, central policy, target resolver, and status announcer—are
+    all eleven actual safety owners—the direct session shell, shared identity
+    helper, isolated startup, DevTools bootstrap, readiness waiter, canonical
+    inspector, Driver, shared client, central policy, target resolver, and
+    status announcer—are
     tracked and included in the canonical release-source inventory. Real
     failing-then-passing mutations cover each previously omitted owner.
     The independent SDK/custom-script runner now forcibly clears inherited
@@ -1333,7 +1344,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **thirteen direct release-owner/proof-gate cases / 38 assertions** and
+    **fourteen direct release-owner/proof-gate cases / 41 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
