@@ -535,6 +535,160 @@ describe("executable receipt registry", () => {
     expect(leaked.errors.some((error) => error.includes("privacy descriptors"))).toBe(true);
   });
 
+  test("AX receipts independently verify visible native peers and the one real focused owner", () => {
+    const labelSha256 = "b".repeat(64);
+    const peer = {
+      semanticId: "footer-action:run",
+      action: "run",
+      enabled: true,
+      disabledReason: null,
+      expectedSelector: "runFooterAction:",
+      axPeer: {
+        structuralId: "native-footer-run",
+        accessibilityIdentifier: "footer-action:run",
+        role: "AXButton",
+        labelSha256,
+        labelLength: 3,
+        enabled: true,
+        focused: false,
+        accessibilityElement: true,
+        hidden: false,
+        alpha: 1,
+        actionSelector: "runFooterAction:",
+        bounds: { x: 10, y: 10, width: 80, height: 32 },
+      },
+      errors: [],
+      parityPass: true,
+    };
+    const parity = {
+      semanticButtonCount: 1,
+      axNodeCount: 1,
+      peerCount: 1,
+      duplicateAxIds: [],
+      duplicateAxStructuralIds: [],
+      duplicateSemanticIds: [],
+      peers: [peer],
+      complete: true,
+    };
+    const graph = {
+      nodes: [{ semanticId: "input:search", previous: null, next: null }],
+      reciprocal: true,
+      duplicateSemanticIds: [],
+      hiddenFocusableIds: [],
+      focusedSemanticIds: ["input:search"],
+    };
+    const candidate = {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.focus",
+      command: "focus.inspect",
+      classification: "ok",
+      proofMode: "ax",
+      requestedTarget: { selector: { type: "main" } },
+      target: { automationId: "main", bounds: { x: 0, y: 0, width: 800, height: 600 } },
+      transaction: proofTransaction(),
+      windowFocused: true,
+      focusedSemanticId: "input:search",
+      keyboardOwner: { surfaceKind: "ScriptList" },
+      semanticProjection: { quality: "complete", proofAllowed: true },
+      nativeFooter: { axParity: parity },
+      focusGraph: graph,
+      missingPrimitives: [],
+      errors: [],
+    };
+    expect(prepareValidatedReceipt("devtools.focus.inspect", candidate).exitCode).toBe(0);
+
+    for (const [name, axParity, focusGraph] of [
+      ["missing peer", { ...parity, peers: [] }, graph],
+      ["forged count", { ...parity, peerCount: 2 }, graph],
+      ["hidden peer", { ...parity, peers: [{ ...peer, axPeer: { ...peer.axPeer, hidden: true } }] }, graph],
+      ["nonfinite alpha", { ...parity, peers: [{ ...peer, axPeer: { ...peer.axPeer, alpha: NaN } }] }, graph],
+      ["zero geometry", { ...parity, peers: [{ ...peer, axPeer: { ...peer.axPeer, bounds: { ...peer.axPeer.bounds, width: 0 } } }] }, graph],
+      ["forged selector", { ...parity, peers: [{ ...peer, axPeer: { ...peer.axPeer, actionSelector: "deleteEverything:" } }] }, graph],
+      ["duplicate native owners", { ...parity, duplicateAxStructuralIds: ["native-footer-run"] }, graph],
+      ["empty graph", parity, { ...graph, nodes: [], focusedSemanticIds: [] }],
+      ["missing focused owner", parity, { ...graph, focusedSemanticIds: [] }],
+      ["wrong focused owner", parity, { ...graph, focusedSemanticIds: ["input:other"] }],
+      ["forged graph edges", parity, { ...graph, nodes: [{ ...graph.nodes[0], next: "input:other" }] }],
+    ] as Array<[string, Record<string, unknown>, Record<string, unknown>]>) {
+      const prepared = prepareValidatedReceipt("devtools.focus.inspect", {
+        ...candidate,
+        nativeFooter: { axParity },
+        focusGraph,
+      });
+      expect(prepared.exitCode, name).not.toBe(0);
+      expect(prepared.receipt.disposition, name).toBe("INVALID_SCHEMA");
+    }
+  });
+
+  test("scroll receipts independently recompute selected-row identity, clip geometry, and generations", () => {
+    const rowBounds = { x: 0, y: 20, width: 100, height: 20 };
+    const viewportBounds = { x: 0, y: 0, width: 100, height: 100 };
+    const rendered = {
+      required: true,
+      classification: "ok",
+      selectedSemanticId: "row:selected",
+      rowMeasurementId: "layout:row:selected",
+      safeViewportMeasurementId: "layout:main-view-main",
+      rowObservationCount: 1,
+      safeViewportObservationCount: 1,
+      rowBounds,
+      rowVisibleBounds: rowBounds,
+      rowClipBounds: rowBounds,
+      safeViewportBounds: viewportBounds,
+      safeViewportClipBounds: viewportBounds,
+      safeViewportPaintBounds: viewportBounds,
+      coordinateSpace: "window",
+      visibleRatio: 1,
+      withinSafeViewport: true,
+      frameGeneration: 8,
+      viewportFrameGeneration: 8,
+      frameMatches: true,
+      targetDataGeneration: 1,
+      missingPrimitives: [],
+    };
+    const candidate = {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.scroll",
+      command: "scroll.inspect",
+      classification: "ok",
+      requestedTarget: { selector: { type: "main" } },
+      target: { automationId: "main", bounds: { x: 0, y: 0, width: 800, height: 600 } },
+      transaction: proofTransaction(),
+      scroll: { selectedSemanticId: "row:selected", selectedRowWithinSafeViewport: true },
+      resizePressure: { selectedRowOutsideSafeViewport: false },
+      renderedSafeViewport: rendered,
+      missingPrimitives: [],
+      errors: [],
+    };
+    expect(prepareValidatedReceipt("devtools.scroll.inspect", candidate).exitCode).toBe(0);
+
+    for (const [name, forged] of [
+      ["missing row", { ...rendered, rowObservationCount: 0 }],
+      ["duplicate row", { ...rendered, rowObservationCount: 2 }],
+      ["duplicate viewport", { ...rendered, safeViewportObservationCount: 2 }],
+      ["wrong selected owner", { ...rendered, selectedSemanticId: "row:other" }],
+      ["zero-area row", { ...rendered, rowBounds: { ...rowBounds, width: 0 } }],
+      ["negative viewport", { ...rendered, safeViewportBounds: { ...viewportBounds, height: -1 } }],
+      ["hidden row clip", { ...rendered, rowClipBounds: { ...rowBounds, width: 99 } }],
+      ["hidden viewport clip", { ...rendered, safeViewportClipBounds: { ...viewportBounds, width: 99 } }],
+      ["forged visible ratio", { ...rendered, visibleRatio: 0.5 }],
+      ["missing coordinate space", { ...rendered, coordinateSpace: null }],
+      ["fractional frame", { ...rendered, frameGeneration: 8.5, viewportFrameGeneration: 8.5 }],
+      ["mismatched frame", { ...rendered, viewportFrameGeneration: 9 }],
+      ["negative generation", { ...rendered, targetDataGeneration: -1 }],
+      ["wrong transaction generation", { ...rendered, targetDataGeneration: 2 }],
+      ["invented missing primitive", { ...rendered, missingPrimitives: ["paint"] }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const prepared = prepareValidatedReceipt("devtools.scroll.inspect", {
+        ...candidate,
+        renderedSafeViewport: forged,
+      });
+      expect(prepared.exitCode, name).not.toBe(0);
+      expect(["INVALID_SCHEMA", "INVALID_GENERATION"], name)
+        .toContain(prepared.receipt.disposition);
+    }
+  });
+
   test("duplicate keyboard key requires explicit routing priority", () => {
     const receipt = {
       schemaVersion: 2,

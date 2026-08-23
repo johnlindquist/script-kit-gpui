@@ -319,13 +319,65 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
           ? receipt.renderedSafeViewport as JsonObject
           : {};
         if (rendered.required !== true || disposition !== "EVALUABLE_PASS") return [];
+        const scroll = asObject(receipt.scroll);
+        const transaction = asObject(receipt.transaction);
+        const rowBounds = rendered.rowBounds;
+        const rowVisibleBounds = rendered.rowVisibleBounds;
+        const rowClipBounds = rendered.rowClipBounds;
+        const safeViewportBounds = rendered.safeViewportBounds;
+        const safeViewportClipBounds = rendered.safeViewportClipBounds;
+        const safeViewportPaintBounds = rendered.safeViewportPaintBounds;
+        const geometryValid = isValidEvidenceRect(rowBounds) &&
+          isValidEvidenceRect(rowVisibleBounds) &&
+          isValidEvidenceRect(rowClipBounds) &&
+          isValidEvidenceRect(safeViewportBounds) &&
+          isValidEvidenceRect(safeViewportClipBounds) &&
+          isValidEvidenceRect(safeViewportPaintBounds);
+        const actualVisibleRatio = geometryValid
+          ? Math.min(
+              evidenceIntersectionRatio(rowBounds, rowVisibleBounds),
+              evidenceIntersectionRatio(rowBounds, rowClipBounds),
+              evidenceIntersectionRatio(rowBounds, safeViewportBounds),
+              evidenceIntersectionRatio(rowBounds, safeViewportClipBounds),
+              evidenceIntersectionRatio(rowBounds, safeViewportPaintBounds),
+            )
+          : null;
+        const generationsValid = Number.isSafeInteger(rendered.frameGeneration) &&
+          Number(rendered.frameGeneration) >= 0 &&
+          rendered.frameGeneration === rendered.viewportFrameGeneration &&
+          rendered.frameMatches === true &&
+          Number.isSafeInteger(rendered.targetDataGeneration) &&
+          Number(rendered.targetDataGeneration) >= 0 &&
+          rendered.targetDataGeneration === transaction.dataGeneration;
+        if (!generationsValid) {
+          return ["rendered safe-viewport proof requires matching nonnegative frame and target generations"];
+        }
         return rendered.classification === "ok" &&
-            Number(rendered.visibleRatio) >= 0.999 &&
+            rendered.rowObservationCount === 1 &&
+            rendered.safeViewportObservationCount === 1 &&
+            typeof rendered.selectedSemanticId === "string" &&
+            rendered.selectedSemanticId.length > 0 &&
+            rendered.selectedSemanticId === scroll.selectedSemanticId &&
+            typeof rendered.rowMeasurementId === "string" &&
+            rendered.rowMeasurementId.length > 0 &&
+            typeof rendered.safeViewportMeasurementId === "string" &&
+            rendered.safeViewportMeasurementId.length > 0 &&
+            rendered.rowMeasurementId !== rendered.safeViewportMeasurementId &&
+            typeof rendered.coordinateSpace === "string" &&
+            rendered.coordinateSpace.length > 0 &&
+            rendered.coordinateSpace !== "unknown" &&
+            geometryValid &&
+            typeof rendered.visibleRatio === "number" &&
+            Number.isFinite(rendered.visibleRatio) &&
+            actualVisibleRatio != null &&
+            Math.abs(rendered.visibleRatio - actualVisibleRatio) <= 1e-9 &&
+            actualVisibleRatio >= 0.999 &&
             rendered.withinSafeViewport === true &&
-            rendered.frameMatches === true &&
-            typeof rendered.targetDataGeneration === "number"
+            Array.isArray(rendered.missingPrimitives) &&
+            rendered.missingPrimitives.length === 0 &&
+            scroll.selectedRowWithinSafeViewport !== false
           ? []
-          : ["rendered safe-viewport proof requires a same-frame fully visible selected row and target data generation"];
+          : ["rendered safe-viewport proof requires one exact selected owner, independently visible clip geometry, and a bound target"];
       },
     }],
     description: "Measure selected-row and safe-viewport scroll state with optional completed-frame proof.",
@@ -367,9 +419,66 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
         const graph = receipt.focusGraph && typeof receipt.focusGraph === "object"
           ? receipt.focusGraph as JsonObject
           : {};
-        return parity.complete === true && graph.reciprocal === true
+        const peers = Array.isArray(parity.peers) ? parity.peers.map(asObject) : [];
+        const graphNodes = Array.isArray(graph.nodes) ? graph.nodes.map(asObject) : [];
+        const focusedIds = stringArray(graph.focusedSemanticIds);
+        const semanticIds = peers.map((peer) => String(peer.semanticId ?? ""));
+        const structuralIds = peers.map((peer) =>
+          String(asObject(peer.axPeer).structuralId ?? "")
+        );
+        const peersValid = peers.every((peer) => {
+          const native = asObject(peer.axPeer);
+          const semanticId = typeof peer.semanticId === "string" ? peer.semanticId : "";
+          const actionName = /^footer-action:([A-Za-z][A-Za-z0-9_]*)$/.exec(semanticId)?.[1] ?? null;
+          const expectedSelector = actionName == null ? null : `${actionName}FooterAction:`;
+          return expectedSelector != null &&
+            peer.action === actionName &&
+            typeof peer.enabled === "boolean" &&
+            (peer.enabled === true ||
+              (typeof peer.disabledReason === "string" && peer.disabledReason.length > 0)) &&
+            peer.expectedSelector === expectedSelector &&
+            typeof native.structuralId === "string" && native.structuralId.length > 0 &&
+            native.accessibilityIdentifier === semanticId &&
+            native.role === "AXButton" &&
+            /^[a-f0-9]{64}$/.test(String(native.labelSha256 ?? "")) &&
+            Number.isSafeInteger(native.labelLength) && Number(native.labelLength) > 0 &&
+            native.enabled === peer.enabled &&
+            native.accessibilityElement === true &&
+            native.hidden === false &&
+            typeof native.alpha === "number" && Number.isFinite(native.alpha) &&
+            native.alpha > 0 && native.alpha <= 1 &&
+            native.actionSelector === expectedSelector &&
+            isValidEvidenceRect(native.bounds) &&
+            Array.isArray(peer.errors) && peer.errors.length === 0 &&
+            peer.parityPass === true;
+        });
+        const graphIds = graphNodes.map((node) => String(node.semanticId ?? ""));
+        const graphValid = graphNodes.length > 0 &&
+          focusedIds.length === 1 &&
+          focusedIds[0] === receipt.focusedSemanticId &&
+          graphIds.every(Boolean) &&
+          graphIds.includes(focusedIds[0]) &&
+          new Set(graphIds).size === graphIds.length &&
+          graphNodes.every((node, index) =>
+            node.previous === (index === 0 ? null : graphIds[index - 1]) &&
+            node.next === (index + 1 === graphIds.length ? null : graphIds[index + 1])
+          ) &&
+          Array.isArray(graph.duplicateSemanticIds) && graph.duplicateSemanticIds.length === 0 &&
+          Array.isArray(graph.hiddenFocusableIds) && graph.hiddenFocusableIds.length === 0;
+        return parity.complete === true &&
+            Number.isSafeInteger(parity.semanticButtonCount) &&
+            parity.semanticButtonCount === peers.length && peers.length > 0 &&
+            parity.peerCount === peers.length &&
+            Number.isSafeInteger(parity.axNodeCount) &&
+            Number(parity.axNodeCount) >= peers.length &&
+            semanticIds.every(Boolean) && new Set(semanticIds).size === semanticIds.length &&
+            structuralIds.every(Boolean) && new Set(structuralIds).size === structuralIds.length &&
+            Array.isArray(parity.duplicateAxIds) && parity.duplicateAxIds.length === 0 &&
+            Array.isArray(parity.duplicateAxStructuralIds) && parity.duplicateAxStructuralIds.length === 0 &&
+            Array.isArray(parity.duplicateSemanticIds) && parity.duplicateSemanticIds.length === 0 &&
+            peersValid && graph.reciprocal === true && graphValid
           ? []
-          : ["AX proof requires complete semantic peers and a reciprocal focus graph"];
+          : ["AX proof requires independently visible native peers, exact action ownership, and one genuinely focused reciprocal graph"];
       },
     }],
     description: "Inspect focus ownership and optional independent semantic-to-AX parity without claiming activation.",
