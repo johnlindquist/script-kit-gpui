@@ -395,9 +395,13 @@ Evidence in this checkpoint is intentionally time- and source-qualified:
   startup even if a live opt-in is present. The historical unsafe-`--help`
   findings below describe the older committed/worktree snapshots, not the
   current production script.
-- The complete actual noninteractive release proof-contract phase executed
-  **1,402 passing tests across 47 files with 5,519 assertions**, with one
-  bounded compiler/test worker. The release archive coverage
+- The latest completed noninteractive release proof-contract checkpoint
+  executed **1,402 passing tests across 47 files with 5,519 assertions**,
+  with one bounded compiler/test worker. Later MCP discovery and diagnostic
+  fixes have fresh direct 46-case behavior, 261-case shipping, SDK-type,
+  and source-bound offline proof; repeating the broad release phase is
+  intentionally deferred while workstation CPU load exceeds safe capacity.
+  The release archive coverage
   includes one actual macOS `/usr/bin/ditto -c -k --keepParent` ZIP generated
   from an isolated synthetic signed application containing the required
   executable/Pi/SDK/Info.plist, migration and icon resources, a zero-byte
@@ -436,7 +440,8 @@ Evidence in this checkpoint is intentionally time- and source-qualified:
   tightening. That tightening also prevents `session.sh` or an attached
   transport from mutating/hiding an existing operator window; **10 current
   purely in-memory tests and 106 assertions** pass without starting even a
-  subprocess, and the current full release proof lane passes all **1,402 tests**.
+  subprocess, and the latest completed full release proof lane passed all
+  **1,402 tests** before the independently verified MCP follow-up.
   Generated scripts now use exclusive final-byte creation, collision-safe
   actual identities, secret-redacted atomic receipts, and one shared
   precreation shell/slug policy; the shared AI diagnostic vault now suppresses
@@ -889,7 +894,7 @@ Current program status:
 | 06. Execution lifecycle | Partial | Exact owned process groups remain tracked until verified dead, invalid/unowned PID zero cannot be signaled, Codex server replacement cannot orphan a predecessor, and real Quick AI startup reserves its exact generation before side effects and unwinds owned child/group/scratch failures transactionally; same-name command dispatch resolves the exact normalized source; Flow FIFO initialization cannot adopt a colliding project's revision/transcript, follow primary/legacy symlinks, or persist world-readable private turns; transaction traces redact private content, same-process replay is bounded/lossless, and continued batches retain their first failure. Secure cross-process replay and complete command-family receipts remain unproven. |
 | 07. AI consistency | Partial | Actual detached Agent Chat discovers scripts/scriptlets/skills through refreshed launcher snapshots, preserves multiple same-name selected-owner attachments, confirms individual/complete history deletion across all four stores, and protects conversation/prompt/full-transcript attachment files with validated IDs, owner-only `0700`/`0600` no-follow migration, spoof rejection, and atomic writes. Flow, Dictation, AI preflight receipts, current-app automation prompts/recipes, Tab AI intent/generated-source memory/execution receipts, actual screenshot PNGs, exported/handoff prompts, executable handoff wrappers, handoff/export receipts, Claude MCP bearer/API-key config and ownership state, custom agent credential catalogs, private project MRUs, authentication state, model favorites, private user-authored AI system-prompt presets/imports/exports, and real shared/Quick AI traces now share owner-only, no-follow private directory/file ownership and safe legacy repair. Auth-state, favorite, and preset workers serialize actual read/merge/atomic replacement so simultaneous agents cannot erase one another; malformed private state refuses destructive replacement and failed favorite saves surface an honest retry. Provider-declared error facts, empty/missing final responses, exact owned-child cancellation, nonduplicating fallback, and final-only response delivery are behavior-proven without live providers. Private answer/thought/query/diagnostic/prepared-context/prompt/export-path/gist/preset fingerprints use the cryptographically keyed process owner, trace appends remain concurrent-safe without injecting fsync latency, and AI diagnostics never expose private paths/window titles/project names/errors. Actual in-memory Pi and Flow transport paths emit complete private phase milestones and distinguish cancellation from completion. Flow retains exact ID/path SHA-256 identity and one-time legacy adoption. Notes/Todos/Clipboard/Dictation/conversation cold search has generation-fenced launcher-owned refresh. Notes conflict recovery remains private/collision-safe; all success/fallback/failure AI/Notes diagnostics use keyed fingerprints. Existing coverage also proves clean-chat entry, typed recovery, pending-permission safety, accepted-prompt preservation, credential-free Claude argv, and anonymous system prompts. Actual provider-backed transport and live target-scoped recovery remain unproven. |
 | 08. SDK compatibility | Partial | The full isolated suite passes 261/0/0; separate filtered runs prove eight fields date/time/search cases, two hotkey cases, five editor/mini/micro cases, and 46 real socket-free local/remote/stdio MCP transport, private-discovery, complete inventory/failure credential projection, bounded streams, noninteractive child ownership, ordered low-concurrency discovery, hot configuration refresh, and orphan-cleanup cases; nine real Rust capability owners mark implemented prompts supported, mark all 18 genuinely unavailable capabilities unsupported, and enforce explicit native permission/platform boundaries. Generated scripts validate capabilities/topology and shared shell/slug policy, escape hostile JSON template values nonrecursively, and write complete final starter bytes through the original exclusive file handle; real seeded/template scripts declare parseable supported capabilities; Rust behavior plus the four repaired creation-contract cases prove collision/symlink-safe files and receipts. Native prompt/window/permission proof remains absent. |
-| 09. Behavioral proof | Partial | All 15 static/unit/fixture task receipts, the two-façade lifecycle inventory, and protected-source hashes are current; hidden target identity rejects fabricated fallback generations; the actual release proof phase passes 1,402 tests and 5,519 assertions across 47 files; the canonical 75-task catalog and every CLI subcommand resolve the now-committed portable catalog; and the auditor reports 15/75 with no stale/invalid/failed tasks after genuinely rerunning both invalidated governance producers, the real AlphaByte compiler contract, and the façade ledger. The catalog and real library-tested owners are now tracked, but all 60 direct-runtime obligations remain honestly unproven. |
+| 09. Behavioral proof | Partial | All 15 static/unit/fixture task receipts, the two-façade lifecycle inventory, and protected-source hashes are current; hidden target identity rejects fabricated fallback generations; the most recent completed full release phase passed 1,402 tests and 5,519 assertions across 47 files before the directly verified MCP follow-up; the canonical 75-task catalog and every CLI subcommand resolve the now-committed portable catalog; and the auditor reports 15/75 with no stale/invalid/failed tasks after genuinely rerunning both invalidated governance producers, the real AlphaByte compiler contract, and the façade ledger. The catalog and real library-tested owners are now tracked, but all 60 direct-runtime obligations remain honestly unproven and a broad current-source release rerun awaits safe CPU capacity. |
 | 10. Packaged release | Blocked honestly | Current strict Clippy, formatting, 497 real safe Rust behavior cases, 111 app-free integration cases, complete SDK/proof suites, exact generated JSON/CSS byte parity, canonical 54-target validators, packaged-asset byte parity, private AI/screenshot/trace/handoff/credential/auth-state/model-favorite/system-prompt/SQLite storage, truthful provider cancellation/failure/final-output ownership, and symlink rejection pass; version-3 release manifests independently attest every signed archive file/link/mode, the CodeResources envelope, and executable/Pi/SDK/Info.plist, including a real `ditto` framework-symlink archive and app-less Ubuntu verification. Actual packaged journeys, the full direct matrix, signing/notarization, and ratified paint still prevent publication even after the source/catalog are committed. |
 
 Next permitted work: close genuinely provable offline ownership gaps, retain
@@ -1650,9 +1655,10 @@ offline receipts until their real producers are run again.
     verifies both exact compiler trees, binds owned executable/manifest
     bytes, and confirms release profiles still reject the ancestor. The
     complete real `scripts/verify.sh --only proof-contracts` release phase
-    now passes **1,402 cases / 5,519 assertions across 47 files in 32.46s**
-    with one worker; no application, browser, visible window, native input,
-    capture, or live AI provider starts.
+    passed **1,402 cases / 5,519 assertions across 47 files in 32.46s**
+    with one worker; a full rerun after the subsequent directly proven MCP
+    changes is deferred until CPU capacity returns. No application, browser,
+    visible window, native input, capture, or live AI provider starts.
 64. `mcp.listTools()` and AI-driven `mcp.discover()` used an unbounded
     `Promise.all` over every configured server. Six mocked providers all
     started simultaneously even in strict noninteractive mode; the first
