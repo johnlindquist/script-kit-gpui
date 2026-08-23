@@ -3,6 +3,10 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import {
+  assertNoninteractiveSubprocess,
+  NoninteractiveSafetyError,
+} from "../devtools/lib/operator-safety.ts";
 
 export const SCHEMA_VERSION = 4;
 export const NATIVE_SETTLE_MS = 50;
@@ -375,6 +379,7 @@ function hardError(code: "ACCESSIBILITY_DENIED" | "UNKNOWN_KEY" | "KEY_INJECTOR_
 }
 
 async function runProcess(command: string[], env = process.env): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  assertNoninteractiveSubprocess(command, env);
   const child = Bun.spawn(command, { stdout: "pipe", stderr: "pipe", env });
   const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   return { stdout, stderr, exitCode };
@@ -570,6 +575,15 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const ensureFocus = flag("--ensure-focus");
   const emit = (body: any) => console.log(JSON.stringify({ ...body, source: SOURCE_PROVENANCE }, null, 2));
   try {
+    if (
+      process.env.SCRIPT_KIT_NONINTERACTIVE === "1" &&
+      (command === "key" || command === "type" || command === "click")
+    ) {
+      throw new NoninteractiveSafetyError(
+        `macos-input.${command}`,
+        "native keyboard, text, and pointer delivery are forbidden during noninteractive verification",
+      );
+    }
     let focusFields: Partial<InputResult> = {};
     let before: FrontmostApplicationIdentity | null = null;
     let readiness: PassiveKeyboardReadiness | null = null;
@@ -626,7 +640,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     emit({ schemaVersion: SCHEMA_VERSION, status: "ok", command, data: result });
     return result.delivered ? 0 : 1;
   } catch (error: any) {
-    const code = ["ACCESSIBILITY_DENIED", "UNKNOWN_KEY", "KEY_INJECTOR_FAILED", "FOCUS_NOT_CONFIRMED"].includes(error?.code) ? error.code : "KEY_INJECTOR_FAILED";
+    const code = error instanceof NoninteractiveSafetyError
+      ? "NONINTERACTIVE_SAFETY_REFUSED"
+      : ["ACCESSIBILITY_DENIED", "UNKNOWN_KEY", "KEY_INJECTOR_FAILED", "FOCUS_NOT_CONFIRMED"].includes(error?.code)
+        ? error.code
+        : "KEY_INJECTOR_FAILED";
     emit({ schemaVersion: SCHEMA_VERSION, status: "error", command, error: { code, message: error?.message ?? String(error), evidence: error?.evidence ?? null } });
     return 1;
   }

@@ -5,6 +5,7 @@ import {
   evaluateDeliveryEvidence,
   evaluateNonactivation,
   evaluatePassiveKeyboardReadiness,
+  main,
   parseJsonDocuments,
   planInputRoute,
   planNativeKey,
@@ -235,4 +236,53 @@ test("helper source provenance hashes the exact current source bytes", () => {
   const path = realpathSync(new URL("./macos-input.ts", import.meta.url).pathname);
   const sha256 = createHash("sha256").update(readFileSync(path)).digest("hex");
   expect(SOURCE_PROVENANCE).toEqual({ path, sha256 });
+});
+
+describe("noninteractive native-input ownership", () => {
+  test.each([
+    ["key", ["key", "Enter"]],
+    ["type", ["type", "unsafe text"]],
+    ["click", ["click", "10", "20"]],
+  ])("%s cannot reach a native subprocess under strict operator safety", async (_name, argv) => {
+    const originalMode = process.env.SCRIPT_KIT_NONINTERACTIVE;
+    const originalSpawn = Bun.spawn;
+    const originalLog = console.log;
+    const receipts: Record<string, unknown>[] = [];
+    process.env.SCRIPT_KIT_NONINTERACTIVE = "1";
+    Bun.spawn = (() => { throw new Error("native subprocess started"); }) as typeof Bun.spawn;
+    console.log = (value: unknown) => { receipts.push(JSON.parse(String(value))); };
+
+    try {
+      expect(await main(argv!)).toBe(1);
+      expect(receipts.at(-1)).toMatchObject({
+        status: "error",
+        error: { code: "NONINTERACTIVE_SAFETY_REFUSED" },
+      });
+    } finally {
+      Bun.spawn = originalSpawn;
+      console.log = originalLog;
+      if (originalMode === undefined) delete process.env.SCRIPT_KIT_NONINTERACTIVE;
+      else process.env.SCRIPT_KIT_NONINTERACTIVE = originalMode;
+    }
+  });
+
+  test("strict capability inspection stays side-effect-free", async () => {
+    const originalMode = process.env.SCRIPT_KIT_NONINTERACTIVE;
+    const originalSpawn = Bun.spawn;
+    const originalLog = console.log;
+    const receipts: Record<string, unknown>[] = [];
+    process.env.SCRIPT_KIT_NONINTERACTIVE = "1";
+    Bun.spawn = (() => { throw new Error("passive check spawned"); }) as typeof Bun.spawn;
+    console.log = (value: unknown) => { receipts.push(JSON.parse(String(value))); };
+
+    try {
+      expect(await main(["check"])).toBe(0);
+      expect(receipts.at(-1)).toMatchObject({ status: "ok", command: "check" });
+    } finally {
+      Bun.spawn = originalSpawn;
+      console.log = originalLog;
+      if (originalMode === undefined) delete process.env.SCRIPT_KIT_NONINTERACTIVE;
+      else process.env.SCRIPT_KIT_NONINTERACTIVE = originalMode;
+    }
+  });
 });

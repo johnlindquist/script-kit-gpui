@@ -1032,6 +1032,8 @@ describe("noninteractive DevTools operator safety", () => {
     "filterable-surface-matrix",
     "target-thread",
     "scenario",
+    "automation-window",
+    "surface-navigator",
   ])("%s subprocess transport refuses native commands before Bun.spawn", (moduleName) => {
     const result = child(`
       import { runTool } from "./scripts/agentic/${moduleName}.ts";
@@ -1044,6 +1046,54 @@ describe("noninteractive DevTools operator safety", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toContain("only the reviewed bash scripts/agentic/session.sh");
     expect(result.stdout.toString()).not.toContain("unsafe native subprocess started");
+  });
+
+  test.each([
+    ["key", ["key", "Enter"]],
+    ["type", ["type", "unsafe typing"]],
+    ["click", ["click", "10", "20"]],
+  ])("direct macOS %s helper refuses before any real input subprocess", (_kind, args) => {
+    const result = child(`
+      import { main } from "./scripts/agentic/macos-input.ts";
+      Bun.spawn = (() => { throw new Error("unsafe macOS input was delivered"); });
+      const status = await main(${JSON.stringify(args)});
+      console.log("exit=" + status);
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("NONINTERACTIVE_SAFETY_REFUSED");
+    expect(result.stdout.toString()).toContain("exit=1");
+    expect(result.stdout.toString()).not.toContain("unsafe macOS input was delivered");
+  });
+
+  test("direct macOS input capability check remains passive and available", () => {
+    const result = child(`
+      import { main } from "./scripts/agentic/macos-input.ts";
+      Bun.spawn = (() => { throw new Error("passive capability check spawned a process"); });
+      const status = await main(["check"]);
+      console.log("exit=" + status);
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain('"status": "ok"');
+    expect(result.stdout.toString()).toContain("exit=0");
+    expect(result.stdout.toString()).not.toContain("passive capability check spawned");
+  });
+
+  test.each([
+    ["focus", ["focus"]],
+    ["capture", ["capture", "/tmp/script-kit-never-capture.png"]],
+    ["status", ["status"]],
+  ])("direct window %s refuses before AppleScript, Swift, or screen capture", (_kind, args) => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("unsafe native window subprocess started"); });
+      process.argv = ["bun", "scripts/agentic/window.ts", ...${JSON.stringify(args)}];
+      await import("./scripts/agentic/window.ts");
+    `);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout.toString()).toContain("NONINTERACTIVE_SAFETY_REFUSED");
+    expect(result.stdout.toString()).not.toContain("unsafe native window subprocess started");
   });
 
   test("filterable matrix cleanup forwards exact owned identity and protects resumed sessions", () => {

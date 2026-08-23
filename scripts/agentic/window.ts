@@ -16,6 +16,10 @@
  */
 
 import { existsSync, statSync } from "fs";
+import {
+  assertNoninteractiveSubprocess,
+  NoninteractiveSafetyError,
+} from "../devtools/lib/operator-safety.ts";
 
 const SCHEMA_VERSION = 2;
 const APP_NAME = "Script Kit";
@@ -158,7 +162,9 @@ function errorEnvelope(
 }
 
 async function runOsascript(script: string): Promise<string> {
-  const proc = Bun.spawn(["osascript", "-e", script], {
+  const command = ["osascript", "-e", script];
+  assertNoninteractiveSubprocess(command);
+  const proc = Bun.spawn(command, {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -186,6 +192,7 @@ async function runCommand(
   cmd: string[],
   label: string
 ): Promise<string> {
+  assertNoninteractiveSubprocess(cmd);
   const proc = Bun.spawn(cmd, {
     stdout: "pipe",
     stderr: "pipe",
@@ -282,8 +289,10 @@ function isFooterOverlayRecord(w: QuartzWindowRecord): boolean {
  */
 async function runSwiftWindowQuery(): Promise<QuartzWindowRecord[]> {
   try {
+    const command = ["swift", MACOS_WINDOW_QUERY_SWIFT, "--owner", QUARTZ_OWNER_NAME];
+    assertNoninteractiveSubprocess(command);
     const proc = Bun.spawn(
-      ["swift", MACOS_WINDOW_QUERY_SWIFT, "--owner", QUARTZ_OWNER_NAME],
+      command,
       { stdout: "pipe", stderr: "pipe" }
     );
     const stdout = await new Response(proc.stdout).text();
@@ -709,7 +718,9 @@ async function captureWindow(
 
     // Try screencapture with window ID
     if (windowId > 0) {
-      const proc = Bun.spawn(["screencapture", "-l", String(windowId), path], {
+      const command = ["screencapture", "-l", String(windowId), path];
+      assertNoninteractiveSubprocess(command);
+      const proc = Bun.spawn(command, {
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -739,7 +750,9 @@ async function captureWindow(
 
     // Fallback: full-screen capture (non-interactive)
     if (attempt === retryCount) {
-      const proc2 = Bun.spawn(["screencapture", "-o", "-x", path], {
+      const command = ["screencapture", "-o", "-x", path];
+      assertNoninteractiveSubprocess(command);
+      const proc2 = Bun.spawn(command, {
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -833,6 +846,16 @@ function emit(data: Envelope<any>) {
 }
 
 try {
+  if (
+    process.env.SCRIPT_KIT_NONINTERACTIVE === "1" &&
+    command !== "help" &&
+    command !== "--help"
+  ) {
+    throw new NoninteractiveSafetyError(
+      `window.${command}`,
+      "native window focus, AppleScript, Swift discovery, and screen capture are forbidden during noninteractive verification",
+    );
+  }
   switch (command) {
     case "list": {
       const result = await listSurfaces(titleSubstr);
@@ -933,7 +956,9 @@ Remediation:
       process.exit(1);
   }
 } catch (e: any) {
-  const code = e.code ?? "UNKNOWN_ERROR";
+  const code = e instanceof NoninteractiveSafetyError
+    ? "NONINTERACTIVE_SAFETY_REFUSED"
+    : e.code ?? "UNKNOWN_ERROR";
   let message = e.message ?? String(e);
 
   if (code === "ACCESSIBILITY_DENIED") {
