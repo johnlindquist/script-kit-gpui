@@ -123,6 +123,9 @@ require_clean_source_identity() {
     scripts/devtools/glass-observers.ts
     scripts/devtools/spotlight-sync-filmstrip.ts
     scripts/devtools/main-window-native-drag.ts
+    scripts/devtools/act.ts
+    scripts/devtools/devtools.ts
+    scripts/devtools/perf.ts
     scripts/devtools/inspect.ts
     scripts/devtools/notes.ts
     scripts/devtools/target-identity.test.ts
@@ -164,6 +167,9 @@ require_clean_source_identity() {
     scripts/devtools/test-status.ts
     scripts/agent-check.sh
     scripts/agentic/session.sh
+    scripts/agentic/index.ts
+    scripts/agentic/flow-composer-multiline-probe.ts
+    scripts/agentic/cons-flow-ux/dictation-history-probe.ts
     scripts/agentic/automation-window.ts
     scripts/agentic/verify-shot.ts
     scripts/agentic/window.ts
