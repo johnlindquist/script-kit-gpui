@@ -409,6 +409,27 @@ describe("authoritative non-GUI generated-token byte comparison", () => {
     );
   });
 
+  test.each([
+    "src/design_contract/bundle_header.rs",
+    "src/design_contract/bundle_notes.rs",
+    "src/design_contract/bundle_settings_day.rs",
+    "src/design_contract/bundle_agent_chat.rs",
+    "src/design_contract/bundle_prompts.rs",
+  ])("an extracted design-token owner cannot escape source freshness: %s", (sourcePath) => {
+    const sandbox = fixture();
+    const receipt = sandbox.run();
+
+    expect(receipt.sourceFingerprints[sourcePath]).toMatch(/^[a-f0-9]{64}$/);
+    sandbox.files.set(
+      resolve(repositoryRoot, sourcePath),
+      Buffer.from("stale extracted design-token owner"),
+    );
+
+    expect(
+      validateGeneratedByteCompareReceipt(receipt, currentIdentity(sandbox)).errors,
+    ).toContain("stale exporter source fingerprint: " + sourcePath);
+  });
+
   test("one generated output or a forged matching flag cannot satisfy byte proof", () => {
     const sandbox = fixture();
     const receipt = sandbox.run();

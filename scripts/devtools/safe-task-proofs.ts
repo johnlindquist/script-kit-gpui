@@ -114,6 +114,7 @@ export const SAFE_TASK_SPECS: readonly SafeTaskSpec[] = [
       "src/ai/agent_chat/ui/popup_automation.rs",
       "src/prompts/chat/render_turns.rs",
       "src/design_contract/mod.rs",
+      "src/design_contract/bundle_agent_chat.rs",
       "src/menu_syntax/object_selector.rs",
       "design/mockups/generated/tokens.json",
     ],

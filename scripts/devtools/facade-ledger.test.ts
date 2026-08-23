@@ -91,6 +91,9 @@ describe("real conversation-style compatibility facade migration", () => {
     expect(ledger.sourceCorpus.canonicalProductionConsumers).toContain(
       "src/prompts/chat/render_turns.rs",
     );
+    expect(ledger.sourceCorpus.canonicalProductionConsumers).toContain(
+      "src/design_contract/bundle_agent_chat.rs",
+    );
     expect(ledger.sourceCorpus.canonicalTestConsumers.length).toBeGreaterThan(0);
     expect(ledger.persistedNames.canonicalTokenCount).toBeGreaterThan(0);
     expect(ledger.persistedNames.legacyTokenIds).toEqual([]);

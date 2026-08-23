@@ -26,7 +26,7 @@ export const PERSISTED_CONVERSATION_CONTRACT =
 const requiredProductionConsumers = [
   "src/ai/agent_chat/ui/components/transcript.rs",
   "src/prompts/chat/render_turns.rs",
-  "src/design_contract/mod.rs",
+  "src/design_contract/bundle_agent_chat.rs",
   "src/components/conversation_text.rs",
 ] as const;
 
@@ -38,6 +38,7 @@ export const CANONICAL_MIGRATION_SOURCE_PATHS: readonly string[] = [
   ...new Set([
     ...REQUIRED_FACADE_SOURCE_PATHS,
     ...requiredProductionConsumers,
+    "src/design_contract/mod.rs",
     "src/bin/export_design_tokens.rs",
   ]),
 ].sort((left, right) => left.localeCompare(right));

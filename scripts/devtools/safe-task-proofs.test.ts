@@ -178,6 +178,9 @@ describe("catalog-bound offline consistency task proofs", () => {
     );
     expect(migration.productionSources).toContain("src/components/conversation_style.rs");
     expect(migration.productionSources).toContain(
+      "src/design_contract/bundle_agent_chat.rs",
+    );
+    expect(migration.productionSources).toContain(
       "src/components/inline_popup_window.rs",
     );
     expect(migration.productionSources).toContain(
