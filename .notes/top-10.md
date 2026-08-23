@@ -1338,6 +1338,63 @@ offline receipts until their real producers are run again.
     mutations / 337 assertions** reject missing actual owners or omitted
     directly executed behavior. No application, Cargo compiler, browser,
     native input, clipboard, screen capture, or live provider is started.
+43. The exact same false-green interchangeability remained open across the
+    entire independent **28-task SAFE/WF lane**: a registered generic layout
+    inspection with a forged matching catalog binding returned
+    `EVALUABLE_PASS` for AI-context privacy, destructive conversation actions,
+    Notes attachment, Dictation delivery, and every other multi-step journey.
+    A real red regression observed exit **0** where exit **4** was required.
+    The new `workflow-task-contract.ts` defines one exact executable owner,
+    irreducible observed stage set, and task-specific actually executed
+    adversarial controls for all **four SAFE** and **24 WF** obligations.
+    `workflow-task-proof.ts` then binds every segment to its genuinely
+    observed process, hidden/visible target, exact window instance and all
+    generations, current source/binary bytes, unique registered command
+    observations, private-result fingerprints, clean owned-process exit,
+    restored clipboard, and explicit no-microphone/native-input/live-AI/
+    screen-takeover policy. A composed Notes/Today journey additionally
+    fingerprints the real child owner, not merely the parent script. The
+    receipt registry and completion auditor independently reject missing,
+    swapped, duplicated, stale, unexecuted, or unsafe facts; **all 28
+    canonical synthetic journeys pass their actual final auditor** only in
+    self-cleaning temporary directories. **14 direct workflow-contract cases
+    / 348 assertions** cover exact task ownership, full journey coverage,
+    cross-task forgery, process/target/generation drift, missing controls,
+    private result redaction, typed blocked outcomes, cleanup, and stale
+    producer or child bytes.
+44. All **15 real workflow runtime owners** now participate in that exact
+    shared contract: every actual SAFE-001–SAFE-004 and WF-001–WF-024
+    producer emits its own authoritative canonical task receipt or an honest
+    typed block instead of an unusable ad-hoc `RUNTIME-CONFIRMED` object.
+    Independent Dictation scenarios retain their own original app PID and
+    target transaction; Flow conversation deletion requires a real cancelled
+    confirmation; Notes attachment now explicitly proves **zero submitted
+    turns**; Dictation transcript-copy recovery verifies the exact original
+    clipboard bytes after restoration; and the Dictation dismissal producer
+    no longer sleeps for or captures either popup or full-screen screenshots.
+    The prior four-scenario Notes/Today matrix never executed Today `@`
+    parity at all. Its fifth scenario now runs the actual Day Page context
+    round trip, and every composed Notes, Today-context, scoped-handoff, and
+    Today-return child exposes source-bound target/process evidence only after
+    successful exact cleanup. All four direct child entrypoints fail closed
+    before touching credentials, output, native processes, or the user's
+    application. Operator protection passes **173 cases / 641 assertions**;
+    no app, browser, clipboard, screen, microphone, provider, native input,
+    or Cargo compiler ran during these synthetic checks.
+45. Shipping and offline governance now require the actual workflow contract,
+    canonical producer adapter, directly executed journey suite, and all
+    four real Notes/Today child owners. GOV-006 fingerprints and executes
+    both the foundation and workflow adapters; dropping either workflow
+    source or its actual suite fails closed. Shared receipt-policy
+    fingerprints invalidate pre-contract evidence automatically, and the
+    standalone release gate independently rejects each omitted workflow or
+    child owner. The complete nonintrusive semantic/geometry/foundation/
+    workflow lane now passes **277 cases / 1,668 assertions across 15
+    files**. The focused release-owner/proof gate passes **115 cases /
+    359 assertions** without invoking Cargo or launching the application.
+    Synthetic journey successes never become authoritative runtime artifacts:
+    until real safely isolated target observations exist, program acceptance
+    remains honestly **15 / 75**, with **60 real-runtime tasks outstanding**.
 
 ### Ten implemented improvements and their verification contracts
 
