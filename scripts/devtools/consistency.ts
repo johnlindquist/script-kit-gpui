@@ -598,13 +598,19 @@ export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentId
     }
   }
   if (receipt.primitiveId === "devtools.consistency.safe-task-proof") {
+    const reviewedWorkflowSuite =
+      "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts";
+    const reviewedWorkflowOwner =
+      "scripts/agentic/cons-flow-ux/final-workflow-audit.ts";
     for (const [path, expected] of Object.entries(asObject(receipt.sourceFingerprints))) {
       if (
         !(
           path.startsWith("src/") ||
           path.startsWith("scripts/devtools/") ||
           path.startsWith("crates/sk-protocol/src/") ||
-          path.startsWith("design/mockups/generated/")
+          path.startsWith("design/mockups/generated/") ||
+          path === reviewedWorkflowSuite ||
+          (receipt.taskId === "GOV-006" && path === reviewedWorkflowOwner)
         ) ||
         path.split("/").includes("..") ||
         typeof expected !== "string" ||

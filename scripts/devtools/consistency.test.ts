@@ -596,6 +596,38 @@ describe("verify-task mutations", () => {
     expect(unowned.map((reason) => reason.code)).toContain("stale-proof-source-owner");
   });
 
+  test("shared workflow suite is fresh for offline tasks but its production owner belongs only to GOV-006", () => {
+    const tree = setup();
+    const reviewedSuite = "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts";
+    const reviewedOwner = "scripts/agentic/cons-flow-ux/final-workflow-audit.ts";
+    const suiteHash = tree.current.fileSha256(reviewedSuite)!;
+    const ownerHash = tree.current.fileSha256(reviewedOwner)!;
+    const entry = (taskId: string, sourceFingerprints: Record<string, string>) => ({
+      path: "synthetic-proof.json",
+      disposition: "EVALUABLE_PASS" as const,
+      archived: false,
+      receipt: {
+        primitiveId: "devtools.consistency.safe-task-proof",
+        taskId,
+        sourceFingerprints,
+      },
+    });
+
+    expect(receiptStaleReasons(entry("GEO-001", {
+      [reviewedSuite]: suiteHash,
+    }), tree.current)).toEqual([]);
+    expect(receiptStaleReasons(entry("GOV-006", {
+      [reviewedSuite]: suiteHash,
+      [reviewedOwner]: ownerHash,
+    }), tree.current)).toEqual([]);
+    expect(receiptStaleReasons(entry("GEO-001", {
+      [reviewedOwner]: ownerHash,
+    }), tree.current).map((reason) => reason.code)).toContain("stale-proof-source-owner");
+    expect(receiptStaleReasons(entry("GOV-006", {
+      "scripts/agentic/macos-input.test.ts": "a".repeat(64),
+    }), tree.current).map((reason) => reason.code)).toContain("stale-proof-source-owner");
+  });
+
   test("stale implementation fingerprint is detected on a re-read aggregate", () => {
     const tree = setup();
     const { receipt } = tree.runTask("GOV-002");
