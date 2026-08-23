@@ -1136,6 +1136,21 @@ offline receipts until their real producers are run again.
     synthetic glass classification, and Spotlight `--grade-only` remain fully
     usable. All nine actual owners are mandatory release provenance; the
     locked motion calibration and fixtures remain unchanged.
+33. Flow multiline created its output directory and read the operator's
+    clipboard before its later Driver guard; Dictation History independently
+    ran `/usr/bin/pbpaste` before launching its guarded session. Disposable
+    fake-process regressions reproduced both actual privacy violations
+    without reading or changing the real clipboard. The central agentic
+    interface also could not load even `help --json`: one stale named import
+    referenced a deleted optional scenario, disabling all 127 commands.
+    Both clipboard owners now fail before filesystem or pasteboard access;
+    the restored orchestrator exposes all 127 commands, refuses the one
+    missing recipe with a truthful typed error, and validates every child
+    before spawn. Central DevTools activation/start/open/profiling and
+    direct `xctrace` recording/export independently fail before native
+    effects; passive inventories and help remain available. The activation
+    owner, both clipboard probes, both central dispatchers, and the profiler
+    are six newly mandatory release sources.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1386,18 +1401,20 @@ offline receipts until their real producers are run again.
     explicit `noninteractive: false` options nor replacement environments
     can weaken the real parent's authority; target resolution stays on its
     capture-free hidden-state path even when callers request an interactive
-    override. The standalone operator-safety suite passes **123 cases and
-    466 assertions**, including pure canonical-inspector ownership, immutable
+    override. The standalone operator-safety suite passes **138 cases and
+    518 assertions**, including pure canonical-inspector ownership, immutable
     subprocess policy, Notes/matrix/scenario cleanup, mocked native-spawn
     cases, default/render/fallback screenshot refusal, exact session lifecycle,
     independent consumer/Actions child-authority refusal, and eight
-    fail-closed native visual entrypoints; the separate
+    fail-closed native visual entrypoints, clipboard privacy, all 127 restored
+    agentic commands, truthful optional-scenario refusal, central dispatch,
+    and direct profiler isolation; the separate
     direct native-input suite passes **43 cases and 89
     assertions** without touching a keyboard, pointer, window, or screen;
     the separate hidden-target identity suite passes
     **14 cases and 66 assertions**, and six pure locked-glass suites pass
     **114 cases and 357 assertions** without visual capture. Release evidence
-    now fail-closes unless all thirty-five actual safety owners—the direct
+    now fail-closes unless all forty-one actual safety owners—the direct
     session shell, shared
     identity helper, isolated startup, DevTools bootstrap, readiness waiter,
     canonical inspector, main inspector, Actions, Agent Chat, Dictation,
@@ -1406,8 +1423,9 @@ offline receipts until their real producers are run again.
     filterable matrix, both navigators, exact
     target thread, scenario runner, automation-window owner, dedicated
     screenshot verifier, native window owner, native-input owner and behavior
-    suite, Driver, shared client, central policy, target resolver, and status
-    announcer—are
+    suite, activation owner, both pre-Driver clipboard probes, central
+    agentic/DevTools dispatchers, profiler, Driver, shared client, central
+    policy, target resolver, and status announcer—are
     tracked and included in the canonical release-source inventory. Real
     failing-then-passing mutations cover each previously omitted owner.
     The independent SDK/custom-script runner now forcibly clears inherited
@@ -1428,7 +1446,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **thirty-eight direct release-owner/proof-gate cases / 114 assertions** and
+    **forty-four direct release-owner/proof-gate cases / 132 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
