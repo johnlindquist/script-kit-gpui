@@ -464,6 +464,7 @@ function makeFixture(): ReleaseFixture {
     "scripts/devtools/focus.test.ts:",
     "scripts/devtools/scroll.test.ts:",
     "scripts/devtools/receipt-schema.test.ts:",
+    "scripts/devtools/runtime-task-proof.test.ts:",
     "scripts/devtools/family-fixtures.test.ts:",
     "scripts/devtools/alpha-byte-contract.test.ts:",
     "scripts/devtools/generated-byte-compare.test.ts:",
@@ -957,6 +958,7 @@ describe("fail-closed release evidence", () => {
       "scripts/devtools/focus.test.ts",
       "scripts/devtools/scroll.test.ts",
       "scripts/devtools/receipt-schema.test.ts",
+      "scripts/devtools/runtime-task-proof.test.ts",
       "scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts",
     ]) {
       writeFileSync(resultPath, valid.replace(`${suite}:`, ""));
@@ -2282,6 +2284,8 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/devtools/scroll.test.ts",
     "scripts/devtools/lib/receipt-schema.ts",
     "scripts/devtools/receipt-schema.test.ts",
+    "scripts/devtools/lib/runtime-task-proof.ts",
+    "scripts/devtools/runtime-task-proof.test.ts",
     "scripts/devtools/actions.ts",
     "scripts/devtools/agent_chat.ts",
     "scripts/devtools/dictation.ts",

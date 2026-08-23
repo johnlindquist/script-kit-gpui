@@ -105,6 +105,7 @@ require_clean_source_identity() {
     scripts/devtools/elements.ts
     scripts/devtools/layout.ts
     scripts/devtools/lib/geometry-evidence.ts
+    scripts/devtools/lib/runtime-task-proof.ts
     scripts/devtools/text.ts
     scripts/devtools/focus.ts
     scripts/devtools/scroll.ts
@@ -117,6 +118,7 @@ require_clean_source_identity() {
     scripts/devtools/geometry-evidence.test.ts
     scripts/devtools/text.test.ts
     scripts/devtools/scroll.test.ts
+    scripts/devtools/runtime-task-proof.test.ts
     scripts/devtools/privacy.test.ts
     scripts/devtools/operator-safety.test.ts
     scripts/devtools/actions.ts
@@ -516,6 +518,7 @@ run_phase() {
         ./scripts/devtools/__tests__/client-lib.test.ts \
         ./scripts/devtools/receipt-output.test.ts \
         ./scripts/devtools/receipt-schema.test.ts \
+        ./scripts/devtools/runtime-task-proof.test.ts \
         ./scripts/devtools/coverage.test.ts \
         ./scripts/devtools/runtime-coverage.test.ts \
         ./scripts/devtools/performance-contract.test.ts \
