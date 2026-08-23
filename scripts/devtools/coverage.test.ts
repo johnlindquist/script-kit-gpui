@@ -19,7 +19,28 @@ describe("fail-closed coverage ownership registry", () => {
     expect(mainProfile().sourceFiles).toEqual([
       "src/main_sections/render_impl.rs",
       "src/main_sections/app_state.rs",
+      "src/main_entry/app_run_setup.rs",
+      "src/main_entry/app_run_setup_startup_helpers.rs",
       "src/render_script_list/mod.rs",
+      "src/app_execute/builtin_execution.rs",
+      "src/app_execute/builtin_execution_support.rs",
+      "src/app_execute/builtin_execution_ai_capture.rs",
+      "src/app_impl/ui_window.rs",
+      "src/app_impl/ui_window_footer_helpers.rs",
+      "src/app_impl/ui_window_context_chips.rs",
+      "src/app_impl/ui_window_interaction_helpers.rs",
+      "src/footer_popup.rs",
+      "src/footer_popup_fidelity.rs",
+      "src/footer_popup_glass_geometry.rs",
+      "src/footer_popup_native_dispatch.rs",
+      "src/footer_popup_native_layout.rs",
+      "src/platform/secondary_window_config.rs",
+      "src/platform/secondary_window_glass_animation.rs",
+      "src/platform/secondary_window_glass_backdrop.rs",
+      "src/platform/secondary_window_glass_lifecycle.rs",
+      "src/platform/secondary_window_glass_style.rs",
+      "src/platform/secondary_window_resize_policy.rs",
+      "src/platform/secondary_window_vibrancy_impl.rs",
     ]);
     expect(coverageProfileById("dictation-history")?.sourceFiles).toContain(
       "src/mcp_resources/mod.rs",
@@ -68,6 +89,58 @@ describe("fail-closed coverage ownership registry", () => {
     });
     expect(errors).toContain(
       "profile main references missing source owner: src/render_script_list/mod.rs",
+    );
+  });
+
+  test("Flow and Notes ownership inventories include extracted runtime, persistence, and automation", () => {
+    for (const profileId of ["flow-ux-view", "flow-session-view"]) {
+      expect(coverageProfileById(profileId)?.sourceFiles).toEqual(
+        expect.arrayContaining([
+          "src/render_builtins/flow_ux_session_runtime.rs",
+          "src/render_builtins/flow_ux_session_navigation.rs",
+          "src/flows/session_persistence.rs",
+          "src/app_layout/collect_elements_flow_surfaces.rs",
+          "src/app_layout/collect_elements_projection_primitives.rs",
+        ]),
+      );
+    }
+
+    expect(coverageProfileById("notes")?.sourceFiles).toEqual(
+      expect.arrayContaining([
+        "src/notes/window/window_ops_automation.rs",
+        "src/notes/window/window_ops_mcp.rs",
+      ]),
+    );
+  });
+
+  test("Agent Chat ownership includes reliability, context, branching, and fixture state", () => {
+    expect(coverageProfileById("agent-chat")?.sourceFiles).toEqual(
+      expect.arrayContaining([
+        "src/ai/agent_chat/ui/thread.rs",
+        "src/ai/agent_chat/ui/thread_recovery.rs",
+        "src/ai/agent_chat/ui/thread_context_resolution.rs",
+        "src/ai/agent_chat/ui/thread_fork_models.rs",
+        "src/ai/agent_chat/ui/thread_fixtures.rs",
+        "src/ai/agent_chat/ui/view_automation_geometry.rs",
+        "src/ai/agent_chat/ui/view_footer_ownership.rs",
+        "src/ai/agent_chat/ui/view_focused_text_variations.rs",
+        "src/ai/agent_chat/ui/view_history_navigation.rs",
+        "src/ai/agent_chat/ui/view_permission_actions.rs",
+        "src/ai/agent_chat/ui/view_spine_rich_results.rs",
+        "src/ai/agent_chat/ui/view_recovery_and_transient.rs",
+        "src/app_layout/collect_elements_projection_primitives.rs",
+      ]),
+    );
+  });
+
+  test("Dictation ownership includes visual state, recovery actions, and automation layout", () => {
+    expect(coverageProfileById("dictation")?.sourceFiles).toEqual(
+      expect.arrayContaining([
+        "src/dictation/window.rs",
+        "src/dictation/window_visual_primitives.rs",
+        "src/dictation/window_actions.rs",
+        "src/dictation/window_automation.rs",
+      ]),
     );
   });
 
@@ -137,6 +210,8 @@ describe("fail-closed coverage ownership registry", () => {
       expect(profile?.sourceFiles).toEqual([
         renderer,
         "src/app_layout/collect_elements.rs",
+        "src/app_layout/collect_elements_surface_rows.rs",
+        "src/app_layout/collect_elements_projection_primitives.rs",
         "src/app_layout/build_layout_info.rs",
       ]);
       expect(profile?.bindingSelectors).toContainEqual({
