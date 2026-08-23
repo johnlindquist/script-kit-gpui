@@ -1686,6 +1686,27 @@ offline receipts until their real producers are run again.
     The exact single-worker shipping gate now passes **261 authoring
     behaviors / zero failures / zero skips**, including **46 real isolated
     MCP journeys**.
+66. An installed, apparently healthy sccache daemon still produced no
+    compiler-cache hits for sandboxed agent builds: `sccache --show-stats`
+    succeeded, but the exact `sccache rustc -vV` preflight failed with
+    `Operation not permitted`; the identical read-only compiler query passed
+    with approved outside-sandbox permissions. The original build receipt
+    recorded a warm target directory but silently omitted whether compiler
+    caching was active, unavailable, disabled, or externally supplied.
+    Seven fake-Cargo mutations independently reproduced the missing state,
+    unclear recovery warning, and three malformed cache-policy bypasses.
+    Cache policy now accepts only `0`, `1`, or `auto`; every real build
+    receipt includes `compiler_cache_backend` and `compiler_cache_required`;
+    automatic fallback explains the exact permission/fail-closed remedy; and
+    required-cache mode still refuses before Cargo when unavailable.
+    The real approved, **offline metadata-only** wrapper invocation with
+    `SCRIPT_KIT_AGENT_USE_SCCACHE=1` completed in **0 seconds**, kept free
+    disk unchanged at **31 GiB**, and emitted
+    `{"compiler_cache_backend":"sccache","compiler_cache_required":true}`.
+    This proves cache activation and a reproducible recovery path without
+    compiling, opening an application, or contacting the network. The
+    [upstream sccache configuration reference](https://github.com/mozilla/sccache/blob/main/docs/Configuration.md)
+    documents its client/server and local-cache environment controls.
 
 ### Ten implemented improvements and their verification contracts
 
