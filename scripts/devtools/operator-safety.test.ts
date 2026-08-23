@@ -1096,6 +1096,38 @@ describe("noninteractive DevTools operator safety", () => {
     expect(result.stdout.toString()).not.toContain("unsafe native window subprocess started");
   });
 
+  test.each([
+    ["default OS capture", ["--skip-state", "--skip-probe", "--out", "/tmp/script-kit-never-capture.png"]],
+    ["render capture", ["--skip-state", "--skip-probe", "--visual-source", "render", "--target-json", '{"type":"id","id":"fake"}', "--out", "/tmp/script-kit-never-render.png"]],
+    ["automatic fallback", ["--skip-state", "--skip-probe", "--visual-source", "auto", "--out", "/tmp/script-kit-never-fallback.png"]],
+  ])("verify-shot refuses %s before session show, MCP, or screenshot spawn", (_kind, args) => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("unsafe screenshot subprocess started"); });
+      globalThis.fetch = (() => { throw new Error("unsafe screenshot MCP network contacted"); });
+      process.argv = ["bun", "scripts/agentic/verify-shot.ts", ...${JSON.stringify(args)}];
+      await import("./scripts/agentic/verify-shot.ts");
+    `);
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout.toString()).toContain("NONINTERACTIVE_SAFETY_REFUSED");
+    expect(result.stdout.toString()).not.toContain("unsafe screenshot subprocess started");
+    expect(result.stdout.toString()).not.toContain("unsafe screenshot MCP network contacted");
+  });
+
+  test("verify-shot skip-screenshot remains a genuinely passive receipt", () => {
+    const result = child(`
+      Bun.spawn = (() => { throw new Error("passive screenshot proof started a subprocess"); });
+      globalThis.fetch = (() => { throw new Error("passive screenshot proof contacted MCP"); });
+      process.argv = ["bun", "scripts/agentic/verify-shot.ts", "--skip-screenshot", "--skip-state", "--skip-probe", "--out", "/tmp/script-kit-never-write.png"];
+      await import("./scripts/agentic/verify-shot.ts");
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain('"status": "pass"');
+    expect(result.stdout.toString()).toContain('"screenshot": null');
+    expect(result.stdout.toString()).not.toContain("passive screenshot proof");
+  });
+
   test("filterable matrix cleanup forwards exact owned identity and protects resumed sessions", () => {
     const result = child(`
       process.env.SCRIPT_KIT_NONINTERACTIVE = "0";

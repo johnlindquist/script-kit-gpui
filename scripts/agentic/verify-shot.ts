@@ -66,9 +66,18 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { inflateSync } from "node:zlib";
+import {
+  assertNoninteractiveSubprocess,
+  NoninteractiveSafetyError,
+} from "../devtools/lib/operator-safety.ts";
 
 const SCHEMA_VERSION = 3;
 const PROJECT_ROOT = resolve(import.meta.dir, "../..");
+
+function guardedSpawn(command: string[]) {
+  assertNoninteractiveSubprocess(command);
+  return Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -397,10 +406,7 @@ async function sendSessionCommand(
   cmd: string
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   const sessionScript = join(PROJECT_ROOT, "scripts/agentic/session.sh");
-  const proc = Bun.spawn(["bash", sessionScript, "send", session, cmd], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const proc = guardedSpawn(["bash", sessionScript, "send", session, cmd]);
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const code = await proc.exited;
@@ -432,6 +438,12 @@ async function callMcpTool(
   name: string,
   args: Record<string, unknown>
 ): Promise<Record<string, any>> {
+  if (process.env.SCRIPT_KIT_NONINTERACTIVE === "1") {
+    throw new NoninteractiveSafetyError(
+      `mcp.${name}`,
+      "native-window and render capture may not contact MCP during noninteractive verification",
+    );
+  }
   const server = readMcpServer();
   if (!server) {
     throw new Error("MCP discovery file is unavailable");
@@ -741,20 +753,14 @@ async function captureScreenRectFromInspection(
     await Bun.sleep(settleMs);
   }
 
-  const proc = Bun.spawn(
-    [
-      "screencapture",
-      "-x",
-      "-o",
-      "-R",
-      `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`,
-      outPath,
-    ],
-    {
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  );
+  const proc = guardedSpawn([
+    "screencapture",
+    "-x",
+    "-o",
+    "-R",
+    `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`,
+    outPath,
+  ]);
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const code = await proc.exited;
@@ -1105,23 +1111,17 @@ async function queryAgentChatState(
   }
   const cmd = JSON.stringify(payload);
 
-  const proc = Bun.spawn(
-    [
-      "bash",
-      sessionScript,
-      "rpc",
-      session,
-      cmd,
-      "--expect",
-      "agent_chatStateResult",
-      "--timeout",
-      "3000",
-    ],
-    {
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  );
+  const proc = guardedSpawn([
+    "bash",
+    sessionScript,
+    "rpc",
+    session,
+    cmd,
+    "--expect",
+    "agent_chatStateResult",
+    "--timeout",
+    "3000",
+  ]);
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const code = await proc.exited;
@@ -1189,23 +1189,17 @@ async function queryAgentChatTestProbe(
   }
   const cmd = JSON.stringify(payload);
 
-  const proc = Bun.spawn(
-    [
-      "bash",
-      sessionScript,
-      "rpc",
-      session,
-      cmd,
-      "--expect",
-      "agent_chatTestProbeResult",
-      "--timeout",
-      "3000",
-    ],
-    {
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  );
+  const proc = guardedSpawn([
+    "bash",
+    sessionScript,
+    "rpc",
+    session,
+    cmd,
+    "--expect",
+    "agent_chatTestProbeResult",
+    "--timeout",
+    "3000",
+  ]);
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const code = await proc.exited;
@@ -1271,23 +1265,17 @@ async function queryInspection(
   }
   const cmd = JSON.stringify(payload);
 
-  const proc = Bun.spawn(
-    [
-      "bash",
-      sessionScript,
-      "rpc",
-      session,
-      cmd,
-      "--expect",
-      "automationInspectResult",
-      "--timeout",
-      "5000",
-    ],
-    {
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  );
+  const proc = guardedSpawn([
+    "bash",
+    sessionScript,
+    "rpc",
+    session,
+    cmd,
+    "--expect",
+    "automationInspectResult",
+    "--timeout",
+    "5000",
+  ]);
   const stdout = await new Response(proc.stdout).text();
   const code = await proc.exited;
 
@@ -1372,10 +1360,7 @@ async function getImageDimensions(
   filePath: string
 ): Promise<{ width: number | null; height: number | null }> {
   try {
-    const proc = Bun.spawn(
-      ["sips", "-g", "pixelWidth", "-g", "pixelHeight", filePath],
-      { stdout: "pipe", stderr: "pipe" }
-    );
+    const proc = guardedSpawn(["sips", "-g", "pixelWidth", "-g", "pixelHeight", filePath]);
     const out = await new Response(proc.stdout).text();
     await proc.exited;
     const wMatch = out.match(/pixelWidth:\s*(\d+)/);
@@ -1757,13 +1742,7 @@ async function captureScreenshot(
     if (requestedOsWindowId && requestedOsWindowId > 0) {
       captureArgs.push("--window-id", String(requestedOsWindowId));
     }
-    const proc = Bun.spawn(
-      captureArgs,
-      {
-        stdout: "pipe",
-        stderr: "pipe",
-      }
-    );
+    const proc = guardedSpawn(captureArgs);
     stdout = await new Response(proc.stdout).text();
     stderr = await new Response(proc.stderr).text();
     code = await proc.exited;
@@ -2860,6 +2839,22 @@ Exit 0 = all assertions pass. Exit 1 = assertion failure. Exit 2 = infra error.`
   process.exit(0);
 }
 
+if (
+  process.env.SCRIPT_KIT_NONINTERACTIVE === "1" &&
+  opts.skipScreenshot !== true
+) {
+  console.log(JSON.stringify({
+    schemaVersion: SCHEMA_VERSION,
+    status: "error",
+    error: {
+      code: "NONINTERACTIVE_SAFETY_REFUSED",
+      message:
+        "OS screenshots, app-render readback, window activation, and MCP capture are forbidden during noninteractive verification; pass --skip-screenshot for passive proof.",
+    },
+  }, null, 2));
+  process.exit(2);
+}
+
 const startTime = Date.now();
 const session = String(opts.session ?? "default");
 const label = String(opts.label ?? "verify");
@@ -2903,7 +2898,7 @@ if (opts.out) {
   outPath = resolve(String(opts.out));
 } else {
   const screenshotDir = join(PROJECT_ROOT, ".test-screenshots");
-  if (!existsSync(screenshotDir)) {
+  if (!skipScreenshot && !existsSync(screenshotDir)) {
     mkdirSync(screenshotDir, { recursive: true });
   }
   outPath = join(
