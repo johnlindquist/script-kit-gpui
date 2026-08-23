@@ -4,7 +4,6 @@ import * as os from 'node:os';
 import * as fs from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import { spawn as spawnChildProcess } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
 
 // =============================================================================
 // SDK Benchmarking - for hotkey → chat latency analysis
@@ -9802,7 +9801,11 @@ globalThis.batch = async function batch(
 };
 
 const MCP_PROTOCOL_VERSION = '2024-11-05';
-let cachedScriptKitConfig: { path: string; result: Promise<Config | null> } | null = null;
+let cachedScriptKitConfig: {
+  path: string;
+  ownerFingerprint: string;
+  result: Promise<Config | null>;
+} | null = null;
 
 type McpJsonRpcId = number | string;
 type McpJsonRpcSuccess = {
@@ -9849,20 +9852,51 @@ function normalizeMcpConfig(config: unknown): McpConfig {
 
 async function loadScriptKitConfig(): Promise<Config | null> {
   const configPath = nodePath.join(activeScriptKitRoot(), 'config.ts');
-  if (!cachedScriptKitConfig || cachedScriptKitConfig.path !== configPath) {
+  let ownerFingerprint: string;
+  try {
+    const owner = await fs.stat(configPath, { bigint: true });
+    ownerFingerprint = [owner.dev, owner.ino, owner.size, owner.mtimeNs, owner.ctimeNs].join(':');
+  } catch {
+    if (cachedScriptKitConfig?.path === configPath) cachedScriptKitConfig = null;
+    return null;
+  }
+  if (
+    !cachedScriptKitConfig ||
+    cachedScriptKitConfig.path !== configPath ||
+    cachedScriptKitConfig.ownerFingerprint !== ownerFingerprint
+  ) {
     const result = (async () => {
-      try {
-        await fs.access(configPath, fsConstants.F_OK);
-      } catch {
-        return null;
+      const source = await fs.readFile(configPath, 'utf8');
+      const transpiler = new Bun.Transpiler({ loader: 'ts' });
+      let executableSource: string;
+      if (transpiler.scanImports(source).length === 0) {
+        executableSource = transpiler.transformSync(source);
+      } else {
+        const built = await Bun.build({
+          entrypoints: [configPath],
+          target: 'bun',
+          format: 'esm',
+          splitting: false,
+          write: false,
+        });
+        if (!built.success || built.outputs.length !== 1) {
+          throw new Error(`Script Kit configuration could not resolve its imports: ${configPath}`);
+        }
+        executableSource = await built.outputs[0]!.text();
       }
-
-      const moduleUrl = `${pathToFileURL(configPath).href}?t=${Date.now()}`;
-      const imported = await import(moduleUrl);
+      const moduleUrl = URL.createObjectURL(new Blob([executableSource], {
+        type: 'application/javascript',
+      }));
+      let imported: Record<string, unknown>;
+      try {
+        imported = await import(moduleUrl) as Record<string, unknown>;
+      } finally {
+        URL.revokeObjectURL(moduleUrl);
+      }
       const config = (imported.default ?? imported) as Config;
       return config ?? null;
     })();
-    cachedScriptKitConfig = { path: configPath, result };
+    cachedScriptKitConfig = { path: configPath, ownerFingerprint, result };
   }
 
   return cachedScriptKitConfig.result;
@@ -9964,14 +9998,64 @@ function getEnabledMcpServerEntries(config: McpConfig): Array<[string, McpServer
   return Object.entries(config.servers ?? {}).filter(([, server]) => isServerEnabled(server));
 }
 
+function isMcpCredential(name: string, value: string): boolean {
+  return /authorization|token|api[-_]?key|password|passwd|secret|cookie|credential|private[-_]?key|access[-_]?key/i.test(name)
+    || /\b(?:Bearer|Basic)\s+\S/i.test(value);
+}
+
 function publicMcpServerMetadata(values: Record<string, string> = {}): Record<string, string> {
   return Object.fromEntries(Object.entries(values).map(([name, value]) => [
     name,
-    /authorization|token|api[-_]?key|password|passwd|secret|cookie|credential|private[-_]?key|access[-_]?key/i.test(name)
-      || /\b(?:Bearer|Basic)\s+\S/i.test(value)
-      ? '[REDACTED]'
-      : value,
+    isMcpCredential(name, value) ? '[REDACTED]' : value,
   ]));
+}
+
+function publicMcpServerArguments(args: readonly string[] = []): string[] {
+  let redactFollowingValue = false;
+  return args.map((argument) => {
+    if (redactFollowingValue) {
+      redactFollowingValue = false;
+      return '[REDACTED]';
+    }
+    const delimiter = argument.indexOf('=');
+    const name = delimiter < 0 ? argument : argument.slice(0, delimiter);
+    if (isMcpCredential(name, argument)) {
+      if (delimiter >= 0) return `${name}=[REDACTED]`;
+      if (name.startsWith('-') && !/\b(?:Bearer|Basic)\s+\S/i.test(argument)) {
+        redactFollowingValue = true;
+        return argument;
+      }
+      return '[REDACTED]';
+    }
+    return argument;
+  });
+}
+
+function publicMcpServerEndpoint(endpoint: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    return isMcpCredential('', endpoint) ? '[REDACTED]' : endpoint;
+  }
+
+  let redacted = false;
+  if (parsed.username || parsed.password) {
+    parsed.username = '';
+    parsed.password = '';
+    redacted = true;
+  }
+  for (const [name, value] of parsed.searchParams) {
+    if (isMcpCredential(name, value)) {
+      parsed.searchParams.set(name, '[REDACTED]');
+      redacted = true;
+    }
+  }
+  if (parsed.hash) {
+    parsed.hash = '';
+    redacted = true;
+  }
+  return redacted ? parsed.toString() : endpoint;
 }
 
 function toMcpServerInfo(id: string, server: McpServerConfig): McpServerInfo {
@@ -9983,7 +10067,7 @@ function toMcpServerInfo(id: string, server: McpServerConfig): McpServerInfo {
       name: server.name,
       description: server.description,
       command: server.command,
-      args: server.args ?? [],
+      args: publicMcpServerArguments(server.args),
       env: publicMcpServerMetadata(server.env),
       cwd: server.cwd,
     };
@@ -9995,7 +10079,7 @@ function toMcpServerInfo(id: string, server: McpServerConfig): McpServerInfo {
     enabled: isServerEnabled(server),
     name: server.name,
     description: server.description,
-    endpoint: server.endpoint,
+    endpoint: publicMcpServerEndpoint(server.endpoint),
     headers: publicMcpServerMetadata(server.headers),
   };
 }

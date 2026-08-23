@@ -8,7 +8,9 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -88,6 +90,21 @@ writeFileSync(join(fixtureDirectory, "config.ts"), `export default ${JSON.string
           OPAQUE_HINT: "Bearer opaque-stdio-credential",
         },
       },
+      stdioPrivateArgs: {
+        transport: "stdio",
+        command: process.execPath,
+        args: [
+          stdioServerPath,
+          "healthy",
+          "--token",
+          privateToken,
+          "--api-key=argv-private-key",
+          "--region",
+          "fixture-region",
+          "--header",
+          "Authorization: Bearer header-argv-secret",
+        ],
+      },
       stdioUnsafe: {
         transport: "stdio",
         command: process.execPath,
@@ -121,6 +138,10 @@ writeFileSync(join(fixtureDirectory, "config.ts"), `export default ${JSON.string
           "x-region": "fixture-region",
           "x-opaque-hint": "Bearer opaque-http-credential",
         },
+      },
+      remotePrivateEndpoint: {
+        transport: "http",
+        endpoint: "https://private-user:url-private-password@configured-remote.example/rpc?api_key=query-private-token&region=fixture-region&opaque=Bearer%20opaque-query-secret",
       },
       stdioOwned: {
         transport: "stdio",
@@ -255,6 +276,110 @@ try {
       throw new Error("Public MCP server lookup discarded safe HTTP metadata");
     }
     return { privateHeadersRedacted: true, safeMetadataPreserved: true };
+  });
+
+  await check("mcp-public-server-inventory-never-discloses-private-stdio-arguments", async () => {
+    const server = await mcp.getServer("stdioPrivateArgs");
+    if (!server) throw new Error("Configured private-argument fixture is missing");
+    const serialized = JSON.stringify(server);
+    for (const secret of [privateToken, "argv-private-key", "header-argv-secret"]) {
+      if (serialized.includes(secret)) {
+        throw new Error("Public MCP server inventory disclosed a private stdio argument");
+      }
+    }
+    if (!server.args?.includes("fixture-region")) {
+      throw new Error("Public MCP server inventory discarded safe stdio arguments");
+    }
+    return { privateArgumentsRedacted: true, safeArgumentsPreserved: true };
+  });
+
+  await check("mcp-public-server-lookup-never-discloses-private-endpoint-credentials", async () => {
+    const server = await mcp.getServer("remotePrivateEndpoint");
+    if (!server?.endpoint) throw new Error("Configured private-endpoint fixture is missing");
+    for (const secret of ["private-user", "url-private-password", "query-private-token", "opaque-query-secret"]) {
+      if (server.endpoint.includes(secret)) {
+        throw new Error("Public MCP server lookup disclosed a private endpoint credential");
+      }
+    }
+    if (new URL(server.endpoint).searchParams.get("region") !== "fixture-region") {
+      throw new Error("Public MCP server lookup discarded safe endpoint metadata");
+    }
+    return { privateEndpointValuesRedacted: true, safeMetadataPreserved: true };
+  });
+
+  await check("mcp-same-workspace-config-refreshes-after-equal-size-backdated-edit", async () => {
+    const path = join(fixtureDirectory, "config.ts");
+    const original = readFileSync(path, "utf8");
+    const before = statSync(path);
+    const updated = original.replace('"stdioHealthy":', '"stdioRenewed":');
+    if (updated === original || updated.length !== original.length) {
+      throw new Error("Private MCP config fixture did not preserve its original byte length");
+    }
+    try {
+      writeFileSync(path, updated, { mode: 0o600 });
+      utimesSync(path, before.atime, before.mtime);
+      if (await mcp.getServer("stdioHealthy")) {
+        throw new Error("Edited MCP workspace retained its stale server configuration");
+      }
+      if (!(await mcp.getServer("stdioRenewed"))) {
+        throw new Error("Edited MCP workspace did not load its current server configuration");
+      }
+    } finally {
+      writeFileSync(path, original, { mode: 0o600 });
+    }
+    if (!(await mcp.getServer("stdioHealthy"))) {
+      throw new Error("Restored MCP workspace did not refresh its server configuration");
+    }
+    return { sameWorkspaceRefreshed: true, equalBytes: true, originalMtimeRestored: true };
+  });
+
+  await check("mcp-same-workspace-observes-config-creation-and-deletion", async () => {
+    const alternate = join(fixtureDirectory, "appearing-workspace");
+    const path = join(alternate, "config.ts");
+    mkdirSync(alternate, { recursive: true });
+    process.env.SK_PATH = alternate;
+    try {
+      if ((await mcp.listServers()).length !== 0) {
+        throw new Error("Missing MCP config inherited another workspace's server definitions");
+      }
+      writeFileSync(path, `export default ${JSON.stringify({
+        mcp: { servers: { appeared: { transport: "stdio", command: process.execPath } } },
+      })};\n`, { mode: 0o600 });
+      if (!(await mcp.getServer("appeared"))) {
+        throw new Error("New MCP config was hidden by a cached missing-file result");
+      }
+      rmSync(path);
+      if ((await mcp.listServers()).length !== 0) {
+        throw new Error("Removed MCP config retained stale configured server definitions");
+      }
+    } finally {
+      process.env.SK_PATH = fixtureDirectory;
+    }
+    return { newlyCreatedConfigObserved: true, deletedConfigInvalidated: true };
+  });
+
+  await check("mcp-config-refresh-preserves-relative-typescript-imports", async () => {
+    const alternate = join(fixtureDirectory, "imported-workspace");
+    mkdirSync(alternate, { recursive: true });
+    writeFileSync(join(alternate, "server.ts"), `export const owner = ${JSON.stringify({
+      transport: "stdio",
+      command: process.execPath,
+      name: "relative-owner",
+    })};\n`, { mode: 0o600 });
+    writeFileSync(
+      join(alternate, "config.ts"),
+      'import { owner } from "./server"; export default { mcp: { servers: { imported: owner } } };\n',
+      { mode: 0o600 },
+    );
+    process.env.SK_PATH = alternate;
+    try {
+      if ((await mcp.getServer("imported"))?.name !== "relative-owner") {
+        throw new Error("Refreshed MCP config lost its relative TypeScript import");
+      }
+    } finally {
+      process.env.SK_PATH = fixtureDirectory;
+    }
+    return { relativeTypeScriptImportPreserved: true };
   });
 
   await check("mcp-workspace-cache-never-reuses-another-SK_PATH-configuration", async () => {
