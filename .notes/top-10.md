@@ -1473,7 +1473,7 @@ offline receipts until their real producers are run again.
     group; timeout cleanup first terminates that exact owned group, escalates
     if necessary, and independently drains all pipes before returning. The
     reproduced grandchild now exits in approximately **one second**, with
-    no survivor. **35 SDK process/ownership cases / 103 assertions** pass;
+    no survivor. **49 SDK process/ownership cases / 145 assertions** pass;
     all **215 actual authoring behaviors across 40 SDK script files** pass
     with exactly two bounded workers in approximately **1.7 seconds**,
     including the **25 editor, hotkey, field/date, and synthetic
@@ -1493,7 +1493,7 @@ offline receipts until their real producers are run again.
     contradictory transcript exits nonzero while preserving the original
     diagnostic. The exact same release-bound custom-script matrix still runs
     all **215/215 real SDK cases**, and its independent adversarial suite
-    remains green at **35/35 cases / 103 assertions**.
+    remains green at **49/49 cases / 145 assertions**.
 52. Fast application-test reuse decided freshness only by comparing source
     modification timestamps against the cached harness. A real disposable
     regression edited a Rust source, backdated its timestamp, and watched the
@@ -1505,6 +1505,32 @@ offline receipts until their real producers are run again.
     dirtiness before trusting timestamps, and fails before any test process
     starts when proof is impossible. All **14 fake-harness ownership cases /
     39 assertions** pass with no Rust compiler or real application.
+53. Automatic SDK discovery still validated only a discovered symlink's
+    basename, not its canonical owner: a disposable `test-*.ts` link inside
+    `tests/sdk` successfully executed an arbitrary script outside the
+    repository. Six more genuine false greens accepted or silently discarded
+    missing test names/statuses, malformed result JSON, invalid timestamps,
+    negative durations, and skips carrying real errors. Script stdout/stderr
+    could also grow without bound until the ordinary timeout, risking memory
+    contention on an already loaded workstation. Both explicit selection and
+    discovery now execute only canonical reviewed paths; structurally invalid
+    result-like messages become terminal failures; both child streams default
+    to independent **1-MiB** budgets with an explicit **8-MiB** ceiling and
+    immediate owned-process-group cleanup. The complete custom-script suite
+    remains **215/215 across 40 actual SDK files**, and **49 adversarial
+    cases / 145 assertions** independently prove the expanded contract.
+54. The bounded Cargo owner still accepted `--manifest-path`, Cargo's `-C`
+    workspace relocation, `--workspace` / `--all` test expansion, and
+    unreviewed package selections whenever `--lib` or the reviewed exporter
+    name was present. Eleven disposable fake-Cargo regressions proved that
+    foreign manifests, an unreviewed helper, mixed safe/foreign packages, and
+    a foreign package exporting the same binary all reached the compiler
+    boundary. Noninteractive Cargo now rejects workspace relocation before
+    creating a pool and permits execution only for the explicit
+    `script-kit-gpui`, `sk-clipboard`, `sk-protocol`, and `sk-storage`
+    package owners; named app integrations and the non-GUI exporter remain
+    valid. The scoped fake-build/provenance/process lane passes **58 cases /
+    177 assertions**, with no Cargo, Rust, Swift, application, or GUI launch.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1681,7 +1707,10 @@ offline receipts until their real producers are run again.
    only the non-GUI `export_design_tokens` owner; application binaries and
    live benchmarks are refused. Browser-opening documentation, built-in
    Cargo aliases, repo-local aliases, and arbitrary external subcommands
-   cannot escape those reviewed command owners. Existing actual ignored system-input,
+   cannot escape those reviewed command owners. Foreign `--manifest-path`
+   overrides, `-C` relocations, workspace-wide execution, unreviewed or mixed
+   package selections, and same-named foreign exporters also fail before
+   creating a build pool. Existing actual ignored system-input,
    clipboard, Settings, and paid-provider tests can therefore never be
    activated accidentally. Named reviewed integrations, library filters,
    domain packages, and the standalone exporter remain behavior-proven.
@@ -1814,11 +1843,14 @@ offline receipts until their real producers are run again.
     Its noninteractive worker pool defaults to two while preserving an
     intentional caller override; malformed concurrency and timeout settings
     fail before spawning a child or entering a busy scheduler loop. Both
-    explicit script selection and automatic discovery resolve canonical file
-    owners, so a harmless-looking symlink cannot bypass the system-input
-    exclusion. All three SDK safety owners, including the actual negative
-    fixture, are mandatory release sources. The isolated SDK safety suite
-    passes **19 cases and 57 assertions**; the actual two-worker SDK runner
+    explicit script selection and automatic discovery resolve canonical
+    reviewed-repository owners, so a harmless-looking symlink cannot bypass
+    either the system-input exclusion or execute an external script. Each
+    child has independently bounded stdout/stderr, and malformed result-like
+    messages, invalid timing metadata, or error-carrying skips fail closed.
+    All three SDK safety owners, including the actual negative fixture, are
+    mandatory release sources. The isolated SDK safety suite passes
+    **49 cases and 145 assertions**; the actual two-worker SDK runner
     separately passes **215 cases, zero failures, and zero skips**.
     At the preceding committed checkpoint, the full nonintrusive release
     lane executed **763 passing tests, zero failures, and 2,965 assertions
@@ -3224,9 +3256,12 @@ with the same runtime command contract.
    Keep the executable SDK verifier restricted to reviewed `tests/sdk`
    descendants; reject malformed noninteractive authority, unsupported
    flags, timer overflow, unbounded workers, and ambiguous filters before a
-   child starts. Run every child in its own owned process group and prove
-   that timeout cleanup terminates grandchildren without touching unrelated
-   operator processes.
+   child starts. Resolve both explicit paths and discovered `test-*.ts`
+   files to reviewed canonical owners, enforce bounded stdout/stderr,
+   reject malformed result identities/timestamps/durations and passing or
+   skipped outcomes with errors, and run every child in its own owned
+   process group. Prove timeout/output-budget cleanup terminates descendants
+   without touching unrelated operator processes.
 2. Inventory every SDK export, prompt, action, metadata field, permission,
    dependency, message shape, and command schema consumed by the Rust host.
 3. Reconcile SDK exports, generated SDK references, starter templates,
