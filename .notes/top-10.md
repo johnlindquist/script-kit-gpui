@@ -1028,6 +1028,16 @@ offline receipts until their real producers are run again.
     identities, symlinked staging directories, and symlinked global build logs
     could start work or overwrite external files before failing. The builder
     itself was absent from mandatory release ownership.
+22. Both isolated-session launchers captured `$?` after `if ! command`, which
+    records the successful negation instead of the actual child failure. Real
+    readiness timeout **41** and empty-log failure **42** therefore became exit
+    **0**, letting the canonical DevTools receipt falsely claim `ready: true`;
+    post-build preflight failures **11 / 12 / 13** also collapsed into generic
+    error **10**. Successful startup leaked intermediate status JSON onto
+    stdout before its promised single final envelope, and neither shell owner
+    was mandatory release provenance. Seven disposable fake-script cases
+    reproduced the actual false-green/failure-classification routes and now
+    prove exact exit ownership plus one authoritative stdout receipt.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1169,7 +1179,7 @@ offline receipts until their real producers are run again.
    state, pool, exit status, elapsed seconds, and before/after free space.
    Direct, inline, and file-based `--config` overrides fail before pool
    creation because they can replace effective job counts and target
-   ownership. The fake-Cargo behavior suite passes **113 cases and 433
+   ownership. The fake-Cargo behavior suite passes **120 cases and 450
    assertions** without invoking Cargo or building the application. Its one
    real `rustc` call compiles only an isolated **~1-MiB `build.rs` policy
    harness**; every fake workspace, external fixture, and standalone harness
@@ -1216,6 +1226,11 @@ offline receipts until their real producers are run again.
    launch, and symlinked runtime/source/manifest/log destinations fail closed
    without truncating external files. A successful disposable build still
    stages its expected binary and manifest.
+   The isolated startup and DevTools bootstrap preserve the real **41 / 42**
+   readiness failures plus all **11 / 12 / 13** post-build preflight failures;
+   a failed or empty session can never masquerade as `ready: true`.
+   Intermediate session diagnostics remain on stderr, while stdout contains
+   exactly one complete machine-readable success or error envelope.
 10. **Lock the contract into real behavior and release gates.** Dedicated
     low-cost Bun cases operate disposable fake pools, live/incomplete leases,
     missing/unusable sccache, disk starvation, stale/current harnesses,
@@ -1238,7 +1253,8 @@ offline receipts until their real producers are run again.
     five exact child commands and every inherited safety setting.
     Publication additionally refuses a missing/untracked
     `agent-check.sh`, `agent-cargo.sh`, `cargo-cache-locks.sh`,
-    `reuse-rust-test-binary.sh`, `build-isolated-binary.sh`, or
+    `reuse-rust-test-binary.sh`, `build-isolated-binary.sh`,
+    `start-isolated.sh`, `devtools-session.sh`, or
     `cargo-build-policy.test.ts`; a
     green-looking proof receipt that omits
     the directly executed build-resource suite is rejected as incomplete.
@@ -1264,8 +1280,9 @@ offline receipts until their real producers are run again.
     override. The standalone operator-safety suite passes **38 cases and
     245 assertions**, and the separate hidden-target identity suite passes
     **14 cases and 66 assertions**. Release evidence now fail-closes unless
-    all six actual safety owners—the direct session shell, Driver, shared
-    client, central policy, target resolver, and status announcer—are
+    all eight actual safety owners—the direct session shell, isolated startup,
+    DevTools bootstrap, Driver, shared client, central policy, target
+    resolver, and status announcer—are
     tracked and included in the canonical release-source inventory. Real
     failing-then-passing mutations cover each previously omitted owner.
     The independent SDK/custom-script runner now forcibly clears inherited
@@ -1285,8 +1302,8 @@ offline receipts until their real producers are run again.
     across 37 files in 16.39s**, without the previous repository scan or load
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
-    separately passes all **113 fake-Cargo cases / 433 assertions** plus
-    **nine direct release-owner/proof-gate cases / 26 assertions**. The
+    separately passes all **120 fake-Cargo cases / 450 assertions** plus
+    **eleven direct release-owner/proof-gate cases / 32 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
     suite and actual application/Cargo compiler were deliberately not rerun
