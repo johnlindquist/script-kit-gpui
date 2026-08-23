@@ -27,6 +27,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if ! session_name_valid "$SESSION"; then
+  echo "[start-isolated] unsafe session identity: ${SESSION}" >&2
+  exit 64
+fi
+if session_is_borrowed "$SESSION"; then
+  echo "[start-isolated] refusing to claim the borrowed operator session: ${SESSION}" >&2
+  exit 64
+fi
+if ! session_positive_integer "$WAIT_SEC"; then
+  echo "[start-isolated] readiness timeout must be a positive whole number: ${WAIT_SEC}" >&2
+  exit 64
+fi
+
 bash "${SCRIPT_DIR}/preflight-isolated.sh" --mode isolated
 
 export SCRIPT_KIT_SESSION_DIR="${SCRIPT_KIT_SESSION_DIR:-/tmp/sk-agentic-sessions}"

@@ -21,6 +21,15 @@ if [[ -z "$SESSION" ]]; then
   exit 2
 fi
 
+if ! session_name_valid "$SESSION"; then
+  echo "[wait-session-ready] unsafe session identity: ${SESSION}" >&2
+  exit 64
+fi
+if ! session_positive_integer "$TIMEOUT_SEC"; then
+  echo "[wait-session-ready] timeout must be a positive whole number: ${TIMEOUT_SEC}" >&2
+  exit 64
+fi
+
 SDIR="$(session_sdir "$SESSION")"
 LOG="${SDIR}/app.log"
 BUS="${SDIR}/protocol-responses.ndjson"
@@ -38,6 +47,12 @@ ready_marker=""
 echo "[wait-session-ready] session=${SESSION} timeout=${TIMEOUT_SEC}s log=${LOG}" >&2
 
 while [[ $(date +%s) -lt $deadline ]]; do
+  if ! bash "${DEVTOOLS_SESSION_REPO_ROOT}/scripts/agentic/session.sh" status "$SESSION" 2>/dev/null | grep -q '"alive":true'; then
+    echo "[wait-session-ready] app process not alive" >&2
+    bash "${DEVTOOLS_SESSION_REPO_ROOT}/scripts/agentic/session.sh" status "$SESSION" >&2 || true
+    exit 1
+  fi
+
   if grep -Fq "STARTUP_READY " "$LOG" 2>/dev/null; then
     ready_marker="startup_ready"
     echo "[wait-session-ready] ok: STARTUP_READY in app.log" >&2
@@ -66,12 +81,6 @@ while [[ $(date +%s) -lt $deadline ]]; do
     tail -n 3 "$LOG" 2>/dev/null | sed 's/^/[wait-session-ready] log> /' >&2 || true
   else
     stall_loops=$((stall_loops + 1))
-  fi
-
-  if ! bash "${DEVTOOLS_SESSION_REPO_ROOT}/scripts/agentic/session.sh" status "$SESSION" 2>/dev/null | grep -q '"alive":true'; then
-    echo "[wait-session-ready] app process not alive" >&2
-    bash "${DEVTOOLS_SESSION_REPO_ROOT}/scripts/agentic/session.sh" status "$SESSION" >&2 || true
-    exit 1
   fi
 
   if [[ "$stall_loops" -ge 15 && "$size" -eq 0 ]]; then

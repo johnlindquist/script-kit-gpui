@@ -32,9 +32,27 @@ detect_dev_watch_healthy() {
   [[ "$status" == *'"healthy":true'* ]] || [[ "$status" == *'"alive":true'* && "$status" == *'"forwarderAlive":true'* ]]
 }
 
+session_name_valid() {
+  local name="$1"
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+session_positive_integer() {
+  local value="$1"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]]
+}
+
+session_is_borrowed() {
+  [[ "$1" == "dev-watch" ]]
+}
+
 session_sdir() {
   local name="$1"
   local base="${SCRIPT_KIT_SESSION_DIR:-/tmp/sk-agentic-sessions}"
+  if ! session_name_valid "$name"; then
+    printf '[devtools-session] unsafe session identity: %s\n' "$name" >&2
+    return 64
+  fi
   printf '%s/%s' "$base" "$name"
 }
 

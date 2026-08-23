@@ -1225,7 +1225,7 @@ describe("isolated session readiness ownership", () => {
     );
     writeFileSync(
       join(localScripts, "session.sh"),
-      '#!/bin/bash\nprintf "%s:%s\\n" "$1" "${2:-}" >> "$CARGO_POLICY_CAPTURE"\nif [[ "$1" == "status" ]]; then printf \'{"alive":true,"healthy":true,"pid":4242}\\n\'; fi\n',
+      '#!/bin/bash\nprintf "%s:%s" "$1" "${2:-}" >> "$CARGO_POLICY_CAPTURE"\nfor arg in "${@:3}"; do printf " %s" "$arg" >> "$CARGO_POLICY_CAPTURE"; done\nprintf "\\n" >> "$CARGO_POLICY_CAPTURE"\nif [[ "$1" == "start" ]]; then\n  mkdir -p "$SCRIPT_KIT_SESSION_DIR/$2"\n  printf "4242\\n" > "$SCRIPT_KIT_SESSION_DIR/$2/pid"\n  if [[ "${SESSION_FAKE_MISSING_GENERATION:-0}" != "1" ]]; then printf "%s\\n" "${SESSION_FAKE_GENERATION:-fake-generation}" > "$SCRIPT_KIT_SESSION_DIR/$2/generation"; fi\nfi\nif [[ "$1" == "status" ]]; then printf \'{"alive":%s,"healthy":%s,"pid":4242}\\n\' "${SESSION_FAKE_ALIVE:-true}" "${SESSION_FAKE_ALIVE:-true}"; fi\n',
     );
     writeFileSync(
       join(localScripts, "build-isolated-binary.sh"),
@@ -1327,7 +1327,364 @@ describe("isolated session readiness ownership", () => {
       session: "reviewed-session",
       ready: true,
       pid: 4242,
+      ownership: { created: true, pid: 4242, generation: "fake-generation" },
+      cleanup: {
+        createdSession: true,
+        command: "bash scripts/agentic/session.sh stop reviewed-session --expected-pid 4242 --expected-generation fake-generation",
+      },
     });
+  });
+
+  test("borrowed dev-watch attachment never provides a destructive cleanup command", () => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "dev-watch", "--mode", "reuse-dev-watch", "--build", "never"],
+      { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "ok",
+      mode: "reuse-dev-watch",
+      session: "dev-watch",
+      ownership: { created: false },
+      cleanup: { createdSession: false, command: null },
+    });
+    expect(readFileSync(workspace.capture, "utf8")).not.toContain("stop:");
+  });
+
+  test("cleanup refuses the borrowed operator session before any stop command", () => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "cleanup", "--session", "dev-watch", "--expected-pid", "4242", "--expected-generation", "fake-generation"],
+      { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(64);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "error",
+      phase: "cleanup",
+      error: { code: "borrowed_session_protected" },
+    });
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("cleanup refuses a name-only stop without exact ownership evidence", () => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "cleanup", "--session", "reviewed-session"],
+      { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(64);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "error",
+      phase: "cleanup",
+      error: { code: "session_ownership_required" },
+    });
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("owned cleanup forwards the exact PID and generation to the strict session stop", () => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "cleanup", "--session", "reviewed-session", "--expected-pid", "4242", "--expected-generation", "fake-generation"],
+      { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "ok",
+      phase: "cleanup",
+      ownership: { pid: 4242, generation: "fake-generation" },
+    });
+    expect(readFileSync(workspace.capture, "utf8")).toBe(
+      "stop:reviewed-session --expected-pid 4242 --expected-generation fake-generation\n",
+    );
+  });
+
+  test("agy cleanup propagates exact owned identity without exposing name-only stop", () => {
+    const workspace = sessionFixture();
+    copyFileSync(join(scripts, "agy-devtools.sh"), join(workspace.localScripts, "agy-devtools.sh"));
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "agy-devtools.sh"), "cleanup", "--session", "reviewed-session", "--expected-pid", "4242", "--expected-generation", "fake-generation"],
+      {
+        cwd: workspace.root,
+        env: workspace.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "ok",
+      ownership: { pid: 4242, generation: "fake-generation" },
+    });
+    expect(readFileSync(workspace.capture, "utf8")).toContain(
+      "stop:reviewed-session --expected-pid 4242 --expected-generation fake-generation\n",
+    );
+  });
+
+  test("agy cleanup without owned identity cannot stop an unrelated named session", () => {
+    const workspace = sessionFixture();
+    copyFileSync(join(scripts, "agy-devtools.sh"), join(workspace.localScripts, "agy-devtools.sh"));
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "agy-devtools.sh"), "cleanup", "--session", "reviewed-session"],
+      {
+        cwd: workspace.root,
+        env: workspace.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(64);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      error: { code: "session_ownership_required" },
+    });
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test.each([".", "..", "../dev-watch", "owned/child", "unsafe name", "-option"])(
+    "DevTools refuses unsafe session identity %s before preflight or mutation",
+    (session) => {
+      const workspace = sessionFixture();
+      const result = Bun.spawnSync(
+        ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", session!, "--mode", "isolated", "--build", "never"],
+        { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+      );
+
+      expect(result.exitCode).toBe(64);
+      expect(JSON.parse(result.stdout.toString())).toMatchObject({
+        status: "error",
+        error: { code: "invalid_session_name" },
+      });
+      expect(existsSync(workspace.capture)).toBe(false);
+      expect(existsSync(workspace.env.SESSION_PREFLIGHT_CAPTURE)).toBe(false);
+    },
+  );
+
+  test.each(["dev-watch", "..", "../dev-watch", "unsafe name"])(
+    "direct isolated startup rejects reserved or unsafe identity %s before preflight",
+    (session) => {
+      const workspace = sessionFixture();
+      const result = Bun.spawnSync(
+        ["/bin/bash", join(workspace.localScripts, "start-isolated.sh"), session!],
+        { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+      );
+
+      expect(result.exitCode).toBe(64);
+      expect(existsSync(workspace.capture)).toBe(false);
+      expect(existsSync(workspace.env.SESSION_PREFLIGHT_CAPTURE)).toBe(false);
+    },
+  );
+
+  test("isolated DevTools cannot claim the reserved borrowed dev-watch identity", () => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "dev-watch", "--mode", "isolated", "--build", "never", "--cleanup-on-fail"],
+      { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(64);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "error",
+      error: { code: "borrowed_session_protected" },
+    });
+    expect(existsSync(workspace.capture)).toBe(false);
+    expect(existsSync(workspace.env.SESSION_PREFLIGHT_CAPTURE)).toBe(false);
+  });
+
+  test.each(["0", "-1", "1.5", "abc"])(
+    "DevTools rejects invalid readiness timeout %s before preflight",
+    (timeout) => {
+      const workspace = sessionFixture();
+      const result = Bun.spawnSync(
+        ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "reviewed-session", "--mode", "isolated", "--build", "never", "--ready-timeout-sec", timeout!],
+        { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+      );
+
+      expect(result.exitCode).toBe(64);
+      expect(JSON.parse(result.stdout.toString())).toMatchObject({
+        status: "error",
+        error: { code: "invalid_timeout" },
+      });
+      expect(existsSync(workspace.env.SESSION_PREFLIGHT_CAPTURE)).toBe(false);
+    },
+  );
+
+  test.each(["0", "-1", "1.5", "abc"])(
+    "DevTools rejects invalid RPC timeout %s before preflight",
+    (timeout) => {
+      const workspace = sessionFixture();
+      const result = Bun.spawnSync(
+        ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "reviewed-session", "--mode", "isolated", "--build", "never", "--rpc-timeout-ms", timeout!],
+        { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+      );
+
+      expect(result.exitCode).toBe(64);
+      expect(JSON.parse(result.stdout.toString())).toMatchObject({
+        error: { code: "invalid_timeout" },
+      });
+      expect(existsSync(workspace.env.SESSION_PREFLIGHT_CAPTURE)).toBe(false);
+    },
+  );
+
+  test.each([
+    ["--mode", "unexpected", "invalid_mode"],
+    ["--build", "unexpected", "invalid_build_policy"],
+    ["--rust-changed", "unexpected", "invalid_rust_change_policy"],
+  ])("DevTools rejects unknown %s policy before preflight", (option, value, errorCode) => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "reviewed-session", option!, value!],
+      { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(64);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      error: { code: errorCode },
+    });
+    expect(existsSync(workspace.env.SESSION_PREFLIGHT_CAPTURE)).toBe(false);
+  });
+
+  test.each(["0", "-1", "1.5", "abc"])(
+    "direct isolated startup rejects invalid readiness timeout %s before preflight",
+    (timeout) => {
+      const workspace = sessionFixture();
+      const result = Bun.spawnSync(
+        ["/bin/bash", join(workspace.localScripts, "start-isolated.sh"), "reviewed-session", "--wait-sec", timeout!],
+        { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+      );
+
+      expect(result.exitCode).toBe(64);
+      expect(existsSync(workspace.env.SESSION_PREFLIGHT_CAPTURE)).toBe(false);
+    },
+  );
+
+  test("cleanup-on-failure strictly stops only the newly created exact session", () => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "reviewed-session", "--mode", "isolated", "--build", "never", "--cleanup-on-fail"],
+      { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(41);
+    expect(readFileSync(workspace.capture, "utf8")).toContain(
+      "stop:reviewed-session --expected-pid 4242 --expected-generation fake-generation\n",
+    );
+  });
+
+  test("cleanup-on-failure never stops a preexisting borrowed named session", () => {
+    const workspace = sessionFixture();
+    const existing = join(workspace.env.SCRIPT_KIT_SESSION_DIR, "reviewed-session");
+    mkdirSync(existing, { recursive: true });
+    writeFileSync(join(existing, "pid"), "4242\n");
+    writeFileSync(join(existing, "generation"), "preexisting-generation\n");
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "reviewed-session", "--mode", "isolated", "--build", "never", "--cleanup-on-fail"],
+      { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(41);
+    expect(readFileSync(workspace.capture, "utf8")).not.toContain("stop:");
+  });
+
+  test("successful borrowed named-session reuse does not authorize cleanup", () => {
+    const workspace = sessionFixture();
+    const existing = join(workspace.env.SCRIPT_KIT_SESSION_DIR, "reviewed-session");
+    mkdirSync(existing, { recursive: true });
+    writeFileSync(join(existing, "pid"), "4242\n");
+    writeFileSync(join(existing, "generation"), "preexisting-generation\n");
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "reviewed-session", "--mode", "isolated", "--build", "never"],
+      {
+        env: { ...workspace.env, SESSION_FAKE_READY_STATUS: "0" },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "ok",
+      ownership: { created: false },
+      cleanup: { createdSession: false, command: null },
+    });
+  });
+
+  test("successful readiness fails closed when the owned session lacks a generation", () => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "reviewed-session", "--mode", "isolated", "--build", "never"],
+      {
+        env: { ...workspace.env, SESSION_FAKE_READY_STATUS: "0", SESSION_FAKE_MISSING_GENERATION: "1" },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(64);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "error",
+      error: { code: "session_ownership_missing" },
+    });
+  });
+
+  test.each(["0", "-1", "1.5", "abc"])(
+    "standalone readiness waiter rejects invalid timeout %s before inspecting a session",
+    (timeout) => {
+      const workspace = sessionFixture();
+      copyFileSync(join(scripts, "wait-session-ready.sh"), join(workspace.localScripts, "wait-session-ready.sh"));
+      const result = Bun.spawnSync(
+        ["/bin/bash", join(workspace.localScripts, "wait-session-ready.sh"), "reviewed-session", timeout!],
+        { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+      );
+
+      expect(result.exitCode).toBe(64);
+      expect(existsSync(workspace.capture)).toBe(false);
+    },
+  );
+
+  test.each([
+    ["startup", "STARTUP_READY stale-generation\n", ""],
+    ["app", "APP_READY|stale-generation\n", ""],
+    ["protocol", "", '{"responseType":"stateResult"}\n'],
+  ])("standalone readiness refuses a stale %s marker from a dead session", (_kind, log, bus) => {
+    const workspace = sessionFixture();
+    copyFileSync(join(scripts, "wait-session-ready.sh"), join(workspace.localScripts, "wait-session-ready.sh"));
+    const session = join(workspace.env.SCRIPT_KIT_SESSION_DIR, "reviewed-session");
+    mkdirSync(session, { recursive: true });
+    writeFileSync(join(session, "app.log"), log!);
+    writeFileSync(join(session, "protocol-responses.ndjson"), bus!);
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "wait-session-ready.sh"), "reviewed-session", "1"],
+      {
+        env: { ...workspace.env, SESSION_FAKE_ALIVE: "false" },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("not alive");
+  });
+
+  test("standalone readiness still accepts a current marker from a live owned session", () => {
+    const workspace = sessionFixture();
+    copyFileSync(join(scripts, "wait-session-ready.sh"), join(workspace.localScripts, "wait-session-ready.sh"));
+    const session = join(workspace.env.SCRIPT_KIT_SESSION_DIR, "reviewed-session");
+    mkdirSync(session, { recursive: true });
+    writeFileSync(join(session, "app.log"), "STARTUP_READY live-generation\n");
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "wait-session-ready.sh"), "reviewed-session", "1"],
+      { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr.toString()).toContain("STARTUP_READY");
+    expect(readFileSync(workspace.capture, "utf8")).toContain("status:reviewed-session\n");
   });
 });
 

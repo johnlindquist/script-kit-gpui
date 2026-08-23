@@ -6,7 +6,7 @@
 #   devtools-session.sh verify-script --script PATH [--timeout-sec 5]
 #   devtools-session.sh start --session NAME [--mode auto|...] [--build auto|always|never] [--ready-timeout-sec 60] [--rpc-timeout-ms 10000] [--notes-sandbox] [--cleanup-on-fail] [--prove]
 #   devtools-session.sh prove --session NAME [--rpc-timeout-ms 10000]
-#   devtools-session.sh cleanup --session NAME
+#   devtools-session.sh cleanup --session NAME --expected-pid PID --expected-generation GENERATION
 #
 # stdout: one final JSON envelope per subcommand
 # stderr: progress NDJSON
@@ -29,6 +29,8 @@ VERIFY_TIMEOUT_SEC=5
 NOTES_SANDBOX=0
 CLEANUP_ON_FAIL=0
 DO_PROVE=0
+EXPECTED_PID=""
+EXPECTED_GENERATION=""
 NOTES_FLAG=()
 
 json_emit() {
@@ -43,6 +45,21 @@ json_error() {
   json_emit "$(printf '{"schemaVersion":1,"tool":"devtools-session","status":"error","phase":"%s","session":"%s","mode":"%s","error":{"code":"%s","message":"%s","next":"%s"}}\n' \
     "$phase" "$(json_escape "${SESSION:-}")" "$(json_escape "${MODE:-}")" \
     "$code" "$(json_escape "$message")" "$(json_escape "$next")")"
+}
+
+read_session_ownership() {
+  local session_dir="$1"
+  SESSION_OWNER_PID=""
+  SESSION_OWNER_GENERATION=""
+  if [[ -L "$session_dir" || -L "${session_dir}/pid" || -L "${session_dir}/generation" ]]; then
+    return 1
+  fi
+  if [[ ! -f "${session_dir}/pid" || ! -f "${session_dir}/generation" ]]; then
+    return 1
+  fi
+  SESSION_OWNER_PID="$(tr -d '\r\n' < "${session_dir}/pid")"
+  SESSION_OWNER_GENERATION="$(tr -d '\r\n' < "${session_dir}/generation")"
+  session_positive_integer "$SESSION_OWNER_PID" && session_name_valid "$SESSION_OWNER_GENERATION"
 }
 
 classify_mode() {
@@ -135,18 +152,26 @@ cmd_verify_script() {
 }
 
 cmd_cleanup() {
-  progress cleanup "stopping session"
   if [[ -z "$SESSION" ]]; then
     json_error cleanup usage_error "cleanup requires --session NAME" ""
     exit 2
   fi
-  local stop_cmd="bash scripts/agentic/session.sh stop ${SESSION}"
-  if ! bash scripts/agentic/session.sh stop "$SESSION" >/dev/null 2>&1; then
+  if session_is_borrowed "$SESSION"; then
+    json_error cleanup borrowed_session_protected "The existing operator session is borrowed and must never be stopped by DevTools cleanup." "Detach without stopping dev-watch."
+    exit 64
+  fi
+  if ! session_positive_integer "$EXPECTED_PID" || ! session_name_valid "$EXPECTED_GENERATION"; then
+    json_error cleanup session_ownership_required "Cleanup requires the exact PID and generation from the isolated-start receipt." "Pass --expected-pid PID --expected-generation GENERATION."
+    exit 64
+  fi
+  progress cleanup "stopping exactly owned session"
+  local stop_cmd="bash scripts/agentic/session.sh stop ${SESSION} --expected-pid ${EXPECTED_PID} --expected-generation ${EXPECTED_GENERATION}"
+  if ! bash scripts/agentic/session.sh stop "$SESSION" --expected-pid "$EXPECTED_PID" --expected-generation "$EXPECTED_GENERATION" >/dev/null 2>&1; then
     json_error cleanup cleanup_failed "session.sh stop failed for ${SESSION}" "Run: ${stop_cmd}"
     exit 60
   fi
-  json_emit "$(printf '{"schemaVersion":1,"tool":"devtools-session","status":"ok","phase":"cleanup","session":"%s","cleanup":{"command":"%s"}}\n' \
-    "$(json_escape "$SESSION")" "$(json_escape "$stop_cmd")")"
+  json_emit "$(printf '{"schemaVersion":1,"tool":"devtools-session","status":"ok","phase":"cleanup","session":"%s","ownership":{"pid":%s,"generation":"%s"},"cleanup":{"createdSession":true,"command":"%s"}}\n' \
+    "$(json_escape "$SESSION")" "$EXPECTED_PID" "$(json_escape "$EXPECTED_GENERATION")" "$(json_escape "$stop_cmd")")"
 }
 
 cmd_prove() {
@@ -177,6 +202,11 @@ cmd_start() {
   progress start "resolving mode"
   MODE="$(classify_mode "$MODE")"
 
+  if [[ "$MODE" != "reuse-dev-watch" ]] && session_is_borrowed "$SESSION"; then
+    json_error start borrowed_session_protected "The existing operator session cannot be claimed as an isolated DevTools session." "Use --mode reuse-dev-watch to attach without cleanup authority."
+    exit 64
+  fi
+
   if [[ "$MODE" == "script-only" ]]; then
     json_error start usage_error "start cannot run in script-only mode" "Use verify-script or classify with --mode script-only."
     exit 2
@@ -185,6 +215,10 @@ cmd_start() {
   export SCRIPT_KIT_SESSION_DIR="${SCRIPT_KIT_SESSION_DIR:-/tmp/sk-agentic-sessions}"
   local sdir
   sdir="$(session_sdir "$SESSION")"
+  local session_preexisting=false
+  if [[ -e "$sdir" || -L "$sdir" ]]; then
+    session_preexisting=true
+  fi
   local app_log="${sdir}/app.log"
   local bus="${sdir}/protocol-responses.ndjson"
   local build_log="/tmp/sk-isolated-build-${SCRIPT_KIT_AGENT_ID:-dt-agent-build}.log"
@@ -244,7 +278,7 @@ cmd_start() {
         proof_get_state="timeout"
       fi
     fi
-    json_emit "$(printf '{"schemaVersion":1,"tool":"devtools-session","status":"ok","phase":"complete","mode":"reuse-dev-watch","session":"dev-watch","ready":true,"readyMarker":"existing_session","timeouts":{"verifySec":%s,"buildSec":120,"readySec":%s,"rpcMs":%s},"paths":{"appLog":"%s","protocolResponses":"%s","buildLog":"%s"},"proof":{"getState":"%s","responseType":"%s"},"cleanup":{"command":"bash scripts/agentic/session.sh stop dev-watch"}}\n' \
+    json_emit "$(printf '{"schemaVersion":1,"tool":"devtools-session","status":"ok","phase":"complete","mode":"reuse-dev-watch","session":"dev-watch","ready":true,"readyMarker":"existing_session","timeouts":{"verifySec":%s,"buildSec":120,"readySec":%s,"rpcMs":%s},"paths":{"appLog":"%s","protocolResponses":"%s","buildLog":"%s"},"proof":{"getState":"%s","responseType":"%s"},"ownership":{"created":false},"cleanup":{"createdSession":false,"command":null}}\n' \
       "$VERIFY_TIMEOUT_SEC" "$READY_TIMEOUT_SEC" "$RPC_TIMEOUT_MS" \
       "$(json_escape "$(session_sdir dev-watch)/app.log")" \
       "$(json_escape "$(session_sdir dev-watch)/protocol-responses.ndjson")" \
@@ -317,8 +351,11 @@ PY
     :
   else
     start_status=$?
-    if [[ "$CLEANUP_ON_FAIL" -eq 1 ]]; then
-      bash scripts/agentic/session.sh stop "$SESSION" >/dev/null 2>&1 || true
+    if [[ "$CLEANUP_ON_FAIL" -eq 1 && "$session_preexisting" == false ]] \
+      && read_session_ownership "$sdir"; then
+      bash scripts/agentic/session.sh stop "$SESSION" \
+        --expected-pid "$SESSION_OWNER_PID" \
+        --expected-generation "$SESSION_OWNER_GENERATION" >/dev/null 2>&1 || true
     fi
     case "$start_status" in
       41) json_error wait-ready ready_timeout "Session did not reach STARTUP_READY/APP_READY/stateResult before timeout." "Stop stale sessions and retry."; exit 41 ;;
@@ -332,6 +369,10 @@ PY
   local status_json
   status_json="$(bash scripts/agentic/session.sh status "$SESSION" 2>/dev/null || true)"
   pid="$(printf '%s' "$status_json" | sed -nE 's/.*"pid":([0-9]+).*/\1/p' | head -1)"
+  if ! read_session_ownership "$sdir" || [[ "$pid" != "$SESSION_OWNER_PID" ]]; then
+    json_error start session_ownership_missing "The ready session does not expose one matching, safe PID and generation." "Inspect the isolated-session registry before attempting cleanup."
+    exit 64
+  fi
 
   local proof_get_state="skipped"
   local proof_response_type=""
@@ -351,12 +392,21 @@ PY
     fi
   fi
 
-  local cleanup_cmd="bash scripts/agentic/session.sh stop ${SESSION}"
-  json_emit "$(printf '{"schemaVersion":1,"tool":"devtools-session","status":"ok","phase":"complete","mode":"isolated","session":"%s","sessionDir":"%s","pid":%s,"ready":true,"readyMarker":"startup_ready","timeouts":{"verifySec":%s,"buildSec":120,"readySec":%s,"rpcMs":%s},"paths":{"appLog":"%s","protocolResponses":"%s","buildLog":"%s","binary":"%s"},"proof":{"getState":"%s","responseType":"%s"},"cleanup":{"command":"%s"}}\n' \
+  local cleanup_json
+  local created_session=true
+  if [[ "$session_preexisting" == true ]]; then
+    created_session=false
+    cleanup_json='{"createdSession":false,"command":null}'
+  else
+    local cleanup_cmd="bash scripts/agentic/session.sh stop ${SESSION} --expected-pid ${SESSION_OWNER_PID} --expected-generation ${SESSION_OWNER_GENERATION}"
+    cleanup_json="$(printf '{"createdSession":true,"command":"%s"}' "$(json_escape "$cleanup_cmd")")"
+  fi
+  json_emit "$(printf '{"schemaVersion":1,"tool":"devtools-session","status":"ok","phase":"complete","mode":"isolated","session":"%s","sessionDir":"%s","pid":%s,"ready":true,"readyMarker":"startup_ready","timeouts":{"verifySec":%s,"buildSec":120,"readySec":%s,"rpcMs":%s},"paths":{"appLog":"%s","protocolResponses":"%s","buildLog":"%s","binary":"%s"},"proof":{"getState":"%s","responseType":"%s"},"ownership":{"created":%s,"pid":%s,"generation":"%s"},"cleanup":%s}\n' \
     "$(json_escape "$SESSION")" "$(json_escape "$sdir")" "${pid:-0}" \
     "$VERIFY_TIMEOUT_SEC" "$READY_TIMEOUT_SEC" "$RPC_TIMEOUT_MS" \
     "$(json_escape "$app_log")" "$(json_escape "$bus")" "$(json_escape "$build_log")" "$(json_escape "$DEVTOOLS_SESSION_BINARY")" \
-    "$proof_get_state" "$proof_response_type" "$(json_escape "$cleanup_cmd")")"
+    "$proof_get_state" "$proof_response_type" "$created_session" \
+    "$SESSION_OWNER_PID" "$(json_escape "$SESSION_OWNER_GENERATION")" "$cleanup_json")"
 }
 
 usage() {
@@ -366,7 +416,7 @@ Usage:
   devtools-session.sh verify-script --script PATH [--timeout-sec 5]
   devtools-session.sh start --session NAME [options]
   devtools-session.sh prove --session NAME [--rpc-timeout-ms 10000]
-  devtools-session.sh cleanup --session NAME
+  devtools-session.sh cleanup --session NAME --expected-pid PID --expected-generation GENERATION
 EOF
   exit 2
 }
@@ -384,6 +434,8 @@ while [[ $# -gt 0 ]]; do
     --ready-timeout-sec) READY_TIMEOUT_SEC="${2:-60}"; shift 2 ;;
     --rpc-timeout-ms) RPC_TIMEOUT_MS="${2:-10000}"; shift 2 ;;
     --timeout-sec) VERIFY_TIMEOUT_SEC="${2:-5}"; shift 2 ;;
+    --expected-pid) EXPECTED_PID="${2:-}"; shift 2 ;;
+    --expected-generation) EXPECTED_GENERATION="${2:-}"; shift 2 ;;
     --notes-sandbox) NOTES_SANDBOX=1; shift ;;
     --cleanup-on-fail) CLEANUP_ON_FAIL=1; shift ;;
     --prove) DO_PROVE=1; shift ;;
@@ -398,6 +450,38 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
   esac
+done
+
+if [[ -n "$SESSION" ]] && ! session_name_valid "$SESSION"; then
+  json_error "${SUBCMD:-start}" invalid_session_name "Session identity must be one safe registry child." "Use only letters, digits, dots, underscores, and hyphens; start with a letter or digit."
+  exit 64
+fi
+case "$MODE" in
+  auto|script-only|reuse-dev-watch|isolated) ;;
+  *)
+    json_error "${SUBCMD:-start}" invalid_mode "Unrecognized DevTools session mode: ${MODE}" "Use auto, script-only, reuse-dev-watch, or isolated."
+    exit 64
+    ;;
+esac
+case "$BUILD_POLICY" in
+  auto|always|never) ;;
+  *)
+    json_error "${SUBCMD:-start}" invalid_build_policy "Unrecognized DevTools build policy: ${BUILD_POLICY}" "Use auto, always, or never."
+    exit 64
+    ;;
+esac
+case "$RUST_CHANGED" in
+  auto|yes|no) ;;
+  *)
+    json_error "${SUBCMD:-start}" invalid_rust_change_policy "Unrecognized Rust-change policy: ${RUST_CHANGED}" "Use auto, yes, or no."
+    exit 64
+    ;;
+esac
+for timeout_value in "$READY_TIMEOUT_SEC" "$RPC_TIMEOUT_MS" "$VERIFY_TIMEOUT_SEC"; do
+  if ! session_positive_integer "$timeout_value"; then
+    json_error "${SUBCMD:-start}" invalid_timeout "Session timeouts must be positive whole numbers." "Provide a nonzero integer number of seconds or milliseconds."
+    exit 64
+  fi
 done
 
 case "$SUBCMD" in
