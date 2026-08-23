@@ -60,7 +60,7 @@ The app maintains a command shim at `~/.scriptkit/bin/scriptkit` that reads `ser
 ~/.scriptkit/bin/scriptkit mcp call kit/trigger_builtin '{"builtinId":"builtin/clipboard-history"}'
 ```
 
-It requires the app to be running and also accepts `SCRIPT_KIT_MCP_ENDPOINT` / `SCRIPT_KIT_MCP_TOKEN` overrides. If `SK_PATH` selects a custom Script Kit workspace, the CLI and SDK read that workspace's `server.json` and `config.ts` instead of another account directory.
+It requires the app to be running and also accepts `SCRIPT_KIT_MCP_ENDPOINT` / `SCRIPT_KIT_MCP_TOKEN` overrides. If `SK_PATH` selects a custom Script Kit workspace, including a `~`, `$VARIABLE`, or `${VARIABLE}` path, the CLI and SDK read that workspace's `server.json` and `config.ts` instead of another account directory.
 
 The app-owned MCP endpoint is always local: only `localhost`, `127.0.0.1`, or `[::1]` with the exact `/rpc` path can receive its discovery bearer token. Discovery must be an owner-only regular file, redirects never forward credentials, and errors never print bearer values. The SDK and CLI validate the exact JSON-RPC request ID and report provider failures rather than treating HTTP 200 as success.
 
@@ -102,6 +102,8 @@ const result = await mcp.call("localTools", "create_event", { title: "Standup" }
 ```
 
 The local-only restriction applies to the app's own discovery token, not to explicitly configured external HTTP servers. Remote MCP servers remain supported when their endpoint and credentials are deliberately defined under the active workspace's `mcp.servers` configuration.
+
+`mcp.listServers()` and `mcp.getServer(id)` expose safe server metadata, not private credentials: authorization headers, API keys, tokens, passwords, cookies, and bearer-like values are returned as `[REDACTED]`. The original configured credentials remain private and are still used for actual server requests. In noninteractive verification, configured stdio servers cannot disable noninteractive mode, enable native/system input, emit operator test-status notifications, or override another desktop permission.
 
 ## Agent Chat Context
 
