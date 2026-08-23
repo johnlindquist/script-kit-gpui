@@ -420,6 +420,7 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
     
     // Parse JSONL results from stdout
     const lines = stdout.split('\n').filter(line => line.trim());
+    const terminalResults = new Map<string, TestResult['status']>();
     for (const line of lines) {
       try {
         const result = JSON.parse(line) as TestResult;
@@ -434,6 +435,35 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
             });
             log(`  ❌ ${result.test} - Unrecognized test status: ${String(result.status)}`);
             continue;
+          }
+
+          const terminalStatus = terminalResults.get(result.test);
+          if (terminalStatus) {
+            const failureLabel = result.status === 'running'
+              ? 'post-terminal transition'
+              : 'duplicate terminal result';
+            tests.push({
+              test: `${result.test} [${failureLabel}]`,
+              status: 'fail',
+              timestamp: new Date().toISOString(),
+              error:
+                `SDK result ${result.test} already completed as ${terminalStatus}; ` +
+                `a later ${result.status} result cannot replace it.`,
+              duration_ms: result.duration_ms,
+            });
+            continue;
+          }
+          if (result.status === 'pass' && result.error != null) {
+            tests.push({
+              ...result,
+              status: 'fail',
+              error: `A passing SDK result cannot carry an error: ${String(result.error)}`,
+            });
+            terminalResults.set(result.test, 'fail');
+            continue;
+          }
+          if (result.status !== 'running') {
+            terminalResults.set(result.test, result.status);
           }
 
           tests.push(result);

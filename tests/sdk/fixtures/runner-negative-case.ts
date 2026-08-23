@@ -37,6 +37,17 @@ switch (mode) {
   case "missing-terminal":
     result("never-completed", "running");
     break;
+  case "fail-then-pass":
+    result("contradictory-terminal", "fail", "first real failure");
+    result("contradictory-terminal", "pass");
+    break;
+  case "terminal-then-running":
+    result("reopened-terminal", "pass");
+    result("reopened-terminal", "running");
+    break;
+  case "pass-with-error":
+    result("false-green-with-error", "pass", "actual hidden failure");
+    break;
   case "safety-env": {
     const safe =
       process.env.SDK_TEST_AUTOSUBMIT === "1" &&

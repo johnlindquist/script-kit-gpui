@@ -149,6 +149,35 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
     );
   });
 
+  test("a later passing message cannot erase the same script's real prior failure", async () => {
+    const result = await runFixture("fail-then-pass");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.summary?.total_failed).toBeGreaterThan(0);
+    expect(result.summary?.files[0]?.tests).toContainEqual(
+      expect.objectContaining({
+        test: expect.stringContaining("contradictory-terminal"),
+        status: "fail",
+      }),
+    );
+  });
+
+  test("a terminal script receipt cannot be reopened as running", async () => {
+    const result = await runFixture("terminal-then-running");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.summary?.files[0]?.tests).toContainEqual(
+      expect.objectContaining({
+        test: expect.stringContaining("reopened-terminal"),
+        status: "fail",
+      }),
+    );
+  });
+
+  test("a passing script receipt cannot carry a real error payload", async () => {
+    const result = await runFixture("pass-with-error");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.summary?.total_failed).toBeGreaterThan(0);
+  });
+
   test("noninteractive mode refuses system input before child execution", async () => {
     const result = await runFixture("safety-env", ["--include-system"]);
     expect(result.exitCode).not.toBe(0);
