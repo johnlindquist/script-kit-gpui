@@ -1395,6 +1395,67 @@ offline receipts until their real producers are run again.
     Synthetic journey successes never become authoritative runtime artifacts:
     until real safely isolated target observations exist, program acceptance
     remains honestly **15 / 75**, with **60 real-runtime tasks outstanding**.
+46. The supposedly source-current runtime foundation independently hashed an
+    existing executable and then assigned `currentGitHead()` to it without
+    observing when or from which source it had actually been built. Exported
+    APFS artifact clones had **no provenance manifest at all**; the isolated
+    builder's version-one manifest omitted binary bytes and size. Therefore
+    every PF-004–PF-008 and all 28 SAFE/WF obligations could have accepted an
+    older, substituted, or dirty-source executable as if it were current.
+    Both owned build/export paths now atomically publish version-two manifests
+    containing the exact repository-relative binary, SHA-256, byte size,
+    original build commit, reviewed compiler-input fingerprint, profile,
+    exact-commit policy, dirty-source state, and pool identity. Source commit
+    and ownership are observed before and after the fake/real build; missing
+    Git identity, mid-build commit changes, traversal, foreign/symlinked
+    manifests, ambiguous manifests, substituted bytes, dirty compiler inputs,
+    and false release provenance fail closed. Runtime observation now reads
+    the actual manifest before querying an application, both foundation and
+    workflow producers independently validate it, and final auditing detects
+    manifest drift after receipt publication. **33 compiler-free fake-build
+    ownership cases / 105 assertions** pass without executing Cargo, rustc,
+    Swift, an application, or a GUI.
+47. Simply requiring the binary's original build commit to equal every newer
+    documentation commit would have recreated the exact **67-second harness
+    relink** the local build-script fix deliberately removed. The new tracked
+    `scripts/agentic/compiler-input-paths.txt` inventories the true compiled
+    closure: app/domain Rust, **2,593 vendored tracked sources**, bundled
+    assets, the complete `kit-init` embedded tree, `scripts/kit-sdk.ts`,
+    Cargo configuration/manifests/lockfile, build script, and toolchain.
+    An existing debug binary survives a later documentation/tool-only commit
+    only when its original commit is an ancestor, both independent Git trees
+    have the identical exact SHA-256, current compiled inputs are clean,
+    and the original build commit remains visible in its receipt. Release
+    profiles, hosted CI, and explicit `SCRIPT_KIT_TRACK_GIT_HEAD=1` still
+    require the exact actual build commit. Both the real runtime producer and
+    the independent final auditor pass an ancestor-based source-equivalence
+    regression and reject a release binary in the same scenario. Governance,
+    receipt schemas, the workflow source contract, and standalone release
+    ownership require the actual tracked compiler-input list.
+48. The canonical consistency auditor memoized every path's SHA-256 forever,
+    including `null` for a missing file. A file appearing after its first
+    lookup remained permanently absent, and a rewritten file at the same path
+    remained falsely current throughout the audit. A reproduced regression
+    received `null` after creating a real file; a second rewrote equal-length
+    bytes and restored the original modification timestamp. Cache entries now
+    bind device, inode, byte length, nanosecond mtime, and nanosecond ctime;
+    missing entries are never retained, and a file changing during hashing is
+    retried rather than accepted. Both adversarial same-path transitions now
+    pass without rescanning unrelated build trees.
+49. The previous single-shot offline producer always executed the AlphaByte
+    suite, which invokes `rustc` five times, even while the workstation owner
+    explicitly prohibited compilation. One new capability-aware execution plan
+    runs all **13 genuinely compiler-free offline obligations** in a single
+    shared Bun process, omits GOV-003 explicitly, and never rewrites its
+    historical compiler receipt as current evidence. Use
+    `bun scripts/devtools/safe-task-proofs.ts --all --without-compilers` while
+    compilation is disallowed; the returned program total must honestly show
+    GOV-003 as stale/missing until its actual four compiler-contract cases are
+    rerun. The full nonintrusive proof lane now passes **284 cases / 1,695
+    assertions across 15 suites**; the exact standalone publication gate
+    independently rejects every omitted owner in **116 cases / 362
+    assertions**. No application, browser, Cargo/rustc, Swift, native input,
+    clipboard, screenshots, microphone, or live AI is started.
 
 ### Ten implemented improvements and their verification contracts
 
