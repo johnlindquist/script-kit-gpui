@@ -334,6 +334,7 @@ use root_search_store::RootSearchStore;
 include!("main_sections/day_page_markdown_refs.rs");
 include!("main_sections/day_page_spine.rs");
 include!("main_sections/day_page_layout.rs");
+include!("main_sections/day_page_view_helpers.rs");
 include!("main_sections/day_page_view.rs");
 include!("main_sections/day_page_switcher.rs");
 include!("main_sections/day_page_actions.rs");
