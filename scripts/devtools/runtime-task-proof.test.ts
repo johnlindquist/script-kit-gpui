@@ -25,6 +25,7 @@ import {
 import {
   prepareBlockedRuntimeTaskProof,
   prepareRuntimeTaskProof,
+  reviewedCompilerInputFingerprint,
   runtimeTaskProofSourceOwners,
   verifyRuntimeBinaryProvenance,
 } from "./lib/runtime-task-proof.ts";
@@ -74,6 +75,9 @@ function syntheticBinary(unsigned = false): Obj {
     binarySha256: binarySha,
     sizeBytes: executableBytes.byteLength,
     gitHead,
+    compilerInputSha256: reviewedCompilerInputFingerprint(gitHead),
+    profile: "debug",
+    requiresExactGitHead: false,
     rustDirty: false,
     builtAt: new Date().toISOString(),
   });
@@ -85,6 +89,10 @@ function syntheticBinary(unsigned = false): Obj {
     provenance: {
       path: relative(process.cwd(), manifestPath),
       sha256: createHash("sha256").update(manifestBytes).digest("hex"),
+      builtGitHead: gitHead,
+      compilerInputSha256: reviewedCompilerInputFingerprint(gitHead),
+      profile: "debug",
+      requiresExactGitHead: false,
     },
   };
 }
@@ -418,6 +426,10 @@ describe("canonical direct runtime task receipts", () => {
         manifest.sizeBytes = Number(manifest.sizeBytes) + 1;
         writeFileSync(manifestPath, JSON.stringify(manifest));
       }, "exact owned executable bytes"],
+      ["different compiler inputs", (_binary, manifest, manifestPath) => {
+        manifest.compilerInputSha256 = "0".repeat(64);
+        writeFileSync(manifestPath, JSON.stringify(manifest));
+      }, "current reviewed compiler-input tree"],
       ["ambiguous manifests", (_binary, manifest, manifestPath) => {
         writeFileSync(join(manifestPath, "..", "manifest.json"), JSON.stringify(manifest));
       }, "exactly one"],
@@ -438,6 +450,63 @@ describe("canonical direct runtime task receipts", () => {
       mutateManifest(binary, manifest, manifestPath);
       expect(() => verifyRuntimeBinaryProvenance(binary.path as string), name).toThrow(expected);
     }
+  });
+
+  test("documentation-only commits reuse an independently identical reviewed compiler tree", () => {
+    const previousCommit = Bun.spawnSync(["git", "rev-parse", "HEAD^"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    }).stdout.toString().trim();
+    const compilerPaths = readFileSync("scripts/agentic/compiler-input-paths.txt", "utf8")
+      .trim()
+      .split("\n");
+    const sourceTree = Bun.spawnSync(["git", "ls-tree", "-r", gitHead, "--", ...compilerPaths], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(sourceTree.exitCode).toBe(0);
+    const binary = syntheticBinary();
+    const manifestPath = (binary.provenance as Obj).path as string;
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.gitHead = previousCommit;
+    manifest.compilerInputSha256 = createHash("sha256").update(sourceTree.stdout).digest("hex");
+    const manifestBytes = JSON.stringify(manifest);
+    writeFileSync(manifestPath, manifestBytes);
+    (binary.provenance as Obj).sha256 = createHash("sha256").update(manifestBytes).digest("hex");
+    (binary.provenance as Obj).builtGitHead = previousCommit;
+
+    expect(verifyRuntimeBinaryProvenance(binary.path as string, binary)).toMatchObject({
+      sourceCommit: gitHead,
+      provenance: {
+        builtGitHead: previousCommit,
+        compilerInputSha256: manifest.compilerInputSha256,
+      },
+    });
+
+    const taskId = "PF-004";
+    const candidate = candidateFor(taskId);
+    candidate.binary = binary;
+    const prepared = prepareRuntimeTaskProof(taskId, candidate, controls(taskId));
+    const directory = mkdtempSync(join(tmpdir(), "runtime-task-equivalent-source-"));
+    temporaryDirectories.push(directory);
+    const taskDirectory = join(directory, taskId);
+    mkdirSync(taskDirectory, { recursive: true });
+    writeFileSync(join(taskDirectory, "observed.json"), JSON.stringify(prepared.receipt));
+    const progressText = `### ${taskId} — ${catalog.byId.get(taskId)!.title}\n`;
+    expect(verifyTask({
+      taskId,
+      scope: "cons-proof-gov",
+      receiptsRoot: directory,
+      catalog,
+      progress: parseProgressSections(progressText),
+      current: currentIdentity(),
+    }).exitCode).toBe(0);
+
+    manifest.profile = "release";
+    manifest.requiresExactGitHead = true;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    expect(() => verifyRuntimeBinaryProvenance(binary.path as string))
+      .toThrow("release, CI, and explicit Git tracking require the exact build commit");
   });
 
   test.each(Object.keys(RUNTIME_TASK_PROOF_SPECS) as RuntimeTaskProofId[])(

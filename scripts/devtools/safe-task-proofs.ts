@@ -27,6 +27,7 @@ export interface SafeTaskSpec {
   evidenceClass: EvidenceClass;
   testFiles: string[];
   productionSources?: string[];
+  requiresCompiler?: boolean;
 }
 
 export const SAFE_TASK_SPECS: readonly SafeTaskSpec[] = [
@@ -122,6 +123,7 @@ export const SAFE_TASK_SPECS: readonly SafeTaskSpec[] = [
     title: "Introduce explicit authored alpha-byte typing",
     evidenceClass: "UNIT_BEHAVIOR",
     testFiles: ["scripts/devtools/alpha-byte-contract.test.ts"],
+    requiresCompiler: true,
     productionSources: [
       "src/theme/alpha.rs",
       "src/theme/types.rs",
@@ -154,6 +156,7 @@ export const SAFE_TASK_SPECS: readonly SafeTaskSpec[] = [
     productionSources: [
       "scripts/devtools/consistency.ts",
       "scripts/devtools/lib/runtime-task-proof.ts",
+      "scripts/agentic/compiler-input-paths.txt",
       "scripts/devtools/lib/workflow-task-contract.ts",
       "scripts/devtools/lib/workflow-task-proof.ts",
       "scripts/agentic/cons-flow-ux/final-workflow-audit.ts",
@@ -305,7 +308,8 @@ export function runSafeTaskProof(
       !(path.startsWith("src/") || path.startsWith("scripts/devtools/") ||
         path.startsWith("crates/sk-protocol/src/") ||
         path.startsWith("design/mockups/generated/") ||
-        (taskId === "GOV-006" && path === reviewedWorkflowOwner)) ||
+        (taskId === "GOV-006" &&
+          (path === reviewedWorkflowOwner || path === "scripts/agentic/compiler-input-paths.txt"))) ||
       path.includes("..")
     ) {
       throw new Error(`offline proof production source is missing or outside its reviewed owner: ${path}`);
@@ -429,10 +433,30 @@ export function runSafeTaskProof(
   };
 }
 
-export function runAllSafeTaskProofs() {
-  const suites = [...new Set(
-    SAFE_TASK_SPECS.flatMap((spec) => spec.testFiles),
-  )];
+export interface SafeTaskExecutionOptions {
+  allowCompilers?: boolean;
+  runTests?: (
+    testFiles: readonly string[],
+    environment: Record<string, string | undefined>,
+  ) => { output: string; exitCode: number };
+}
+
+export function safeTaskExecutionPlan(options: Pick<SafeTaskExecutionOptions, "allowCompilers"> = {}) {
+  const allowCompilers = options.allowCompilers !== false;
+  const eligible = SAFE_TASK_SPECS.filter((spec) => allowCompilers || spec.requiresCompiler !== true);
+  return {
+    allowCompilers,
+    taskIds: eligible.map((spec) => spec.taskId),
+    omittedTaskIds: SAFE_TASK_SPECS
+      .filter((spec) => !eligible.includes(spec))
+      .map((spec) => spec.taskId),
+    suiteFiles: [...new Set(eligible.flatMap((spec) => spec.testFiles))],
+  };
+}
+
+export function runAllSafeTaskProofs(options: SafeTaskExecutionOptions = {}) {
+  const plan = safeTaskExecutionPlan(options);
+  const suites = plan.suiteFiles;
   const environment = {
     ...process.env,
     SCRIPT_KIT_NONINTERACTIVE: "1",
@@ -443,21 +467,25 @@ export function runAllSafeTaskProofs() {
     SCRIPT_KIT_ALLOW_NATIVE_INPUT: "0",
     SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: "0",
   };
-  const result = Bun.spawnSync(
-    [process.execPath, "test", ...suites.map((path) => `./${path}`)],
-    {
-    cwd: process.cwd(),
-    env: environment,
-    stdout: "pipe",
-    stderr: "pipe",
-    },
-  );
-  const shared = {
-    output: `${result.stdout.toString()}\n${result.stderr.toString()}`,
-    exitCode: result.exitCode,
-  };
-  return SAFE_TASK_SPECS.map((spec) =>
-    runSafeTaskProof(spec.taskId, {
+  const shared = options.runTests
+    ? options.runTests(suites, environment)
+    : (() => {
+        const result = Bun.spawnSync(
+          [process.execPath, "test", ...suites.map((path) => `./${path}`)],
+          {
+            cwd: process.cwd(),
+            env: environment,
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
+        return {
+          output: `${result.stdout.toString()}\n${result.stderr.toString()}`,
+          exitCode: result.exitCode,
+        };
+      })();
+  return plan.taskIds.map((taskId) =>
+    runSafeTaskProof(taskId, {
       executedTestFiles: suites,
       runTests: () => shared,
     })
@@ -468,7 +496,7 @@ if (import.meta.main) {
   const argv = process.argv.slice(2);
   if (argv.includes("--help") || argv.includes("-h")) {
     console.log(
-      "Usage: bun scripts/devtools/safe-task-proofs.ts <TASK-ID> [--out <receipt.json>] | --list | --all",
+      "Usage: bun scripts/devtools/safe-task-proofs.ts <TASK-ID> [--out <receipt.json>] | --list | --all [--without-compilers]",
     );
   } else if (argv.includes("--list")) {
     console.log(JSON.stringify({
@@ -477,11 +505,17 @@ if (import.meta.main) {
       doesNotProveRuntimeBehavior: true,
     }, null, 2));
   } else if (argv.includes("--all")) {
-    for (const receipt of runAllSafeTaskProofs()) {
+    const plan = safeTaskExecutionPlan({ allowCompilers: !argv.includes("--without-compilers") });
+    for (const receipt of runAllSafeTaskProofs({ allowCompilers: plan.allowCompilers })) {
       emitValidatedReceipt(
         "devtools.consistency.safe-task-proof",
         receipt,
         join(".artifacts/consistency", receipt.taskId, "offline-behavior.json"),
+      );
+    }
+    if (plan.omittedTaskIds.length > 0) {
+      console.error(
+        `SAFE_TASK_PROOFS omitted compiler-required tasks without inventing proof: ${plan.omittedTaskIds.join(", ")}`,
       );
     }
   } else {

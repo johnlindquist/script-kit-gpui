@@ -596,6 +596,54 @@ function asObject(value: unknown): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonObject) : {};
 }
 
+function equivalentReviewedCompilerTree(
+  builtCommit: unknown,
+  currentCommit: string | null,
+  expectedFingerprint: unknown,
+): boolean {
+  if (
+    typeof builtCommit !== "string" || !/^[a-f0-9]{40}$/.test(builtCommit) ||
+    currentCommit === null || !/^[a-f0-9]{40}$/.test(currentCommit) ||
+    typeof expectedFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(expectedFingerprint)
+  ) {
+    return false;
+  }
+  if (builtCommit === currentCommit) return true;
+  let paths: string[];
+  try {
+    paths = readFileSync("scripts/agentic/compiler-input-paths.txt", "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean);
+  } catch {
+    return false;
+  }
+  if (
+    paths.length === 0 || new Set(paths).size !== paths.length ||
+    paths.some((path) => path.startsWith("/") || path.split("/").includes(".."))
+  ) {
+    return false;
+  }
+  const ancestor = Bun.spawnSync([
+    "git", "-C", process.cwd(), "merge-base", "--is-ancestor", builtCommit, currentCommit,
+  ], { stdout: "pipe", stderr: "pipe" });
+  if (ancestor.exitCode !== 0) return false;
+  for (const commit of [builtCommit, currentCommit]) {
+    const tree = Bun.spawnSync([
+      "git", "-C", process.cwd(), "ls-tree", "-r", commit, "--", ...paths,
+    ], { stdout: "pipe", stderr: "pipe" });
+    if (
+      tree.exitCode !== 0 || tree.stdout.byteLength === 0 ||
+      sha256(tree.stdout) !== expectedFingerprint
+    ) {
+      return false;
+    }
+  }
+  const clean = Bun.spawnSync([
+    "git", "-C", process.cwd(), "status", "--porcelain", "--untracked-files=all", "--", ...paths,
+  ], { stdout: "pipe", stderr: "pipe" });
+  return clean.exitCode === 0 && clean.stdout.byteLength === 0;
+}
+
 export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentIdentity): StaleReason[] {
   const reasons: StaleReason[] = [];
   const receipt = entry.receipt;
@@ -623,7 +671,8 @@ export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentId
     for (const [path, expected] of Object.entries(sourceFingerprints)) {
       if (
         !(path.startsWith("scripts/devtools/") ||
-          path.startsWith("scripts/agentic/cons-proof-gov/")) ||
+          path.startsWith("scripts/agentic/cons-proof-gov/") ||
+          path === "scripts/agentic/compiler-input-paths.txt") ||
         path.split("/").includes("..") ||
         typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected)
       ) {
@@ -675,7 +724,8 @@ export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentId
           path.startsWith("crates/sk-protocol/src/") ||
           path.startsWith("design/mockups/generated/") ||
           path === reviewedWorkflowSuite ||
-          (receipt.taskId === "GOV-006" && path === reviewedWorkflowOwner)
+          (receipt.taskId === "GOV-006" &&
+            (path === reviewedWorkflowOwner || path === "scripts/agentic/compiler-input-paths.txt"))
         ) ||
         path.split("/").includes("..") ||
         typeof expected !== "string" ||
@@ -733,8 +783,17 @@ export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentId
           manifest.binaryPath !== binaryPath ||
           manifest.binarySha256 !== binary.sha256 ||
           manifest.rustDirty !== false ||
-          manifest.gitHead !== binary.sourceCommit ||
-          current.headCommit !== null && manifest.gitHead !== current.headCommit
+          manifest.gitHead !== provenance.builtGitHead ||
+          manifest.compilerInputSha256 !== provenance.compilerInputSha256 ||
+          manifest.profile !== provenance.profile ||
+          manifest.requiresExactGitHead !== provenance.requiresExactGitHead ||
+          (manifest.profile === "release" || manifest.requiresExactGitHead === true) &&
+            manifest.gitHead !== current.headCommit ||
+          !equivalentReviewedCompilerTree(
+            manifest.gitHead,
+            current.headCommit,
+            manifest.compilerInputSha256,
+          )
         ) {
           reasons.push({ code: "stale-binary-provenance-identity", detail: manifestPath });
         }
@@ -1106,6 +1165,7 @@ export function verifyTask(input: VerifyTaskInput): { receipt: JsonObject; exitC
           const sourceFingerprints = asObject(receipt.sourceFingerprints);
           const expectedOwners = [
             "scripts/devtools/lib/runtime-task-proof.ts",
+            "scripts/agentic/compiler-input-paths.txt",
             "scripts/devtools/lib/receipt-schema.ts",
             foundationSpec.productionOwner,
             foundationSpec.runtimeProducer,

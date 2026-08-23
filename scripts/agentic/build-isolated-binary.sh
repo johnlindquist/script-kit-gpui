@@ -108,6 +108,27 @@ emit_build_json() {
 
 echo "[build-isolated] agent_id=${SCRIPT_KIT_AGENT_ID} pool=${POOL} mode=${TARGET_MODE} timeout=${TIMEOUT_SEC}s log=${LOG}" >&2
 
+compiler_input_owner="${SCRIPT_DIR}/compiler-input-paths.txt"
+if [[ ! -f "$compiler_input_owner" || -L "$compiler_input_owner" ]]; then
+  echo "[build-isolated] fail: canonical reviewed compiler-input owner is missing" >&2
+  emit_build_json error build source_unavailable "canonical compiler-input owner is missing" 0
+  exit 33
+fi
+compiler_input_paths=()
+while IFS= read -r compiler_input_path || [[ -n "$compiler_input_path" ]]; do
+  if [[ -z "$compiler_input_path" || "$compiler_input_path" == /* || "$compiler_input_path" == *".."* ]]; then
+    echo "[build-isolated] fail: compiler-input owner contains an invalid repository-relative path" >&2
+    emit_build_json error build source_unavailable "compiler-input owner contains an invalid path" 0
+    exit 33
+  fi
+  compiler_input_paths+=("$compiler_input_path")
+done < "$compiler_input_owner"
+if (( ${#compiler_input_paths[@]} == 0 )); then
+  echo "[build-isolated] fail: canonical reviewed compiler-input owner is empty" >&2
+  emit_build_json error build source_unavailable "canonical compiler-input owner is empty" 0
+  exit 33
+fi
+
 build_git_head="$(git -C "$DEVTOOLS_SESSION_REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
 if [[ ! "$build_git_head" =~ ^[a-f0-9]{40}$ ]]; then
   echo "[build-isolated] fail: an isolated binary requires an independently observed Git source commit" >&2
@@ -115,11 +136,24 @@ if [[ ! "$build_git_head" =~ ^[a-f0-9]{40}$ ]]; then
   exit 33
 fi
 build_source_changes="$(git -C "$DEVTOOLS_SESSION_REPO_ROOT" status --porcelain --untracked-files=all -- \
-  src crates assets .cargo Cargo.toml Cargo.lock build.rs rust-toolchain rust-toolchain.toml 2>/dev/null)" || {
+  "${compiler_input_paths[@]}" 2>/dev/null)" || {
   echo "[build-isolated] fail: isolated binary compiler-input cleanliness could not be observed" >&2
   emit_build_json error build source_unavailable "isolated binary compiler-input cleanliness unavailable" 0
   exit 33
 }
+build_compiler_sha="$(
+  git -C "$DEVTOOLS_SESSION_REPO_ROOT" ls-tree -r "$build_git_head" -- "${compiler_input_paths[@]}" \
+    | shasum -a 256 | awk '{print $1}'
+)" || {
+  echo "[build-isolated] fail: isolated binary compiler-input tree could not be observed" >&2
+  emit_build_json error build source_unavailable "isolated binary compiler-input tree unavailable" 0
+  exit 33
+}
+if [[ ! "$build_compiler_sha" =~ ^[a-f0-9]{64}$ ]]; then
+  echo "[build-isolated] fail: isolated binary compiler-input fingerprint is invalid" >&2
+  emit_build_json error build source_unavailable "isolated binary compiler-input fingerprint invalid" 0
+  exit 33
+fi
 
 # A background pipeline normally shares the parent's process group, so killing
 # only its shell leaves Cargo/rustc running. Give this exact owned pipeline its
@@ -179,7 +213,7 @@ if [[ "$git_head" != "$build_git_head" ]]; then
   exit 33
 fi
 final_source_changes="$(git -C "$DEVTOOLS_SESSION_REPO_ROOT" status --porcelain --untracked-files=all -- \
-  src crates assets .cargo Cargo.toml Cargo.lock build.rs rust-toolchain rust-toolchain.toml 2>/dev/null)" || {
+  "${compiler_input_paths[@]}" 2>/dev/null)" || {
   echo "[build-isolated] fail: isolated binary compiler-input cleanliness could not be observed" >&2
   emit_build_json error stage source_unavailable "isolated binary compiler-input cleanliness unavailable" "$elapsed"
   exit 33
@@ -197,10 +231,14 @@ mv -f "$tmp" "$DST"
 
 binary_sha="$(shasum -a 256 "$DST" | awk '{print $1}')"
 binary_size="$(wc -c < "$DST" | tr -d '[:space:]')"
+requires_exact_git=false
+if [[ -n "${GITHUB_SHA:-}" || "${SCRIPT_KIT_TRACK_GIT_HEAD:-0}" == "1" ]]; then
+  requires_exact_git=true
+fi
 manifest_tmp="${MANIFEST}.tmp.$$"
-printf '{"schemaVersion":2,"pool":"%s","source":"%s","binaryPath":"%s","binarySha256":"%s","sizeBytes":%s,"gitHead":"%s","rustDirty":%s,"builtAt":"%s"}\n' \
+printf '{"schemaVersion":2,"pool":"%s","source":"%s","binaryPath":"%s","binarySha256":"%s","sizeBytes":%s,"gitHead":"%s","compilerInputSha256":"%s","profile":"debug","requiresExactGitHead":%s,"rustDirty":%s,"builtAt":"%s"}\n' \
   "$POOL" "${SRC#${DEVTOOLS_SESSION_REPO_ROOT}/}" "${DST#${DEVTOOLS_SESSION_REPO_ROOT}/}" \
-  "$binary_sha" "$binary_size" "$git_head" "$rust_dirty" \
+  "$binary_sha" "$binary_size" "$git_head" "$build_compiler_sha" "$requires_exact_git" "$rust_dirty" \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$manifest_tmp"
 mv -f "$manifest_tmp" "$MANIFEST"
 

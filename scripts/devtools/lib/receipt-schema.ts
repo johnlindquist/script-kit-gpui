@@ -934,7 +934,8 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
               path.startsWith("scripts/devtools/") ||
               path.startsWith("crates/sk-protocol/src/") ||
               path.startsWith("design/mockups/generated/") ||
-              (taskId === "GOV-006" && path === reviewedWorkflowOwner)
+              (taskId === "GOV-006" &&
+                (path === reviewedWorkflowOwner || path === "scripts/agentic/compiler-input-paths.txt"))
             ) ||
             path.split("/").includes("..") ||
             !/^[a-f0-9]{64}$/.test(String(hashes[path] ?? "")) ||
@@ -970,6 +971,7 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
           (taskId === "GOV-006" && (
             !productionSources.includes("scripts/devtools/consistency.ts") ||
             !productionSources.includes("scripts/devtools/lib/runtime-task-proof.ts") ||
+            !productionSources.includes("scripts/agentic/compiler-input-paths.txt") ||
             !productionSources.includes("scripts/devtools/lib/workflow-task-contract.ts") ||
             !productionSources.includes("scripts/devtools/lib/workflow-task-proof.ts") ||
             !productionSources.includes(reviewedWorkflowOwner) ||

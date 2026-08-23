@@ -207,6 +207,7 @@ const REQUIRED_SDK_SAFETY_OWNERS = [
 const REQUIRED_BUILD_SAFETY_OWNERS = [
   "scripts/agent-check.sh",
   "scripts/agentic/agent-cargo.sh",
+  "scripts/agentic/compiler-input-paths.txt",
   "scripts/agentic/cargo-cache-locks.sh",
   "scripts/agentic/cargo-build-policy.test.ts",
   "scripts/agentic/reuse-rust-test-binary.sh",

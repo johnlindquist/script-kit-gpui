@@ -157,6 +157,7 @@ const fingerprint = (value: unknown): boolean =>
 export function workflowTaskProofSourceOwners(taskId: WorkflowTaskProofId): string[] {
   return [
     "scripts/devtools/lib/receipt-schema.ts",
+    "scripts/agentic/compiler-input-paths.txt",
     "scripts/devtools/lib/runtime-task-proof.ts",
     "scripts/devtools/lib/workflow-task-contract.ts",
     "scripts/devtools/lib/workflow-task-proof.ts",
@@ -211,7 +212,14 @@ export function workflowTaskProofErrors(receipt: JsonObject): string[] {
       binaryPath.startsWith("target-agent/runtime/")) ||
     binaryPath.split("/").includes("..") ||
     !(manifestPath === `${binaryPath}.provenance.json` || manifestPath === isolatedManifest) ||
-    !fingerprint(provenance.sha256)
+    !fingerprint(provenance.sha256) ||
+    !fingerprint(provenance.compilerInputSha256) ||
+    typeof provenance.builtGitHead !== "string" ||
+    !/^[a-f0-9]{40}$/.test(provenance.builtGitHead) ||
+    typeof provenance.profile !== "string" ||
+    typeof provenance.requiresExactGitHead !== "boolean" ||
+    (provenance.profile === "release" || provenance.requiresExactGitHead === true) &&
+      provenance.builtGitHead !== binary.sourceCommit
   ) {
     errors.push("workflow proof requires one exact source-bound binary, reviewed build provenance, and root transaction");
   }

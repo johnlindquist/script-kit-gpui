@@ -19,6 +19,9 @@ import {
   type WorkflowTaskProofId,
 } from "./lib/workflow-task-contract.ts";
 import {
+  reviewedCompilerInputFingerprint,
+} from "./lib/runtime-task-proof.ts";
+import {
   observedWorkflowSegment,
   observedWorkflowStage,
   prepareBlockedWorkflowTaskProof,
@@ -59,6 +62,9 @@ function syntheticBinary(unsigned = false): JsonObject {
     binarySha256: binarySha,
     sizeBytes: executableBytes.byteLength,
     gitHead: head,
+    compilerInputSha256: reviewedCompilerInputFingerprint(head),
+    profile: "debug",
+    requiresExactGitHead: false,
     rustDirty: false,
     builtAt: new Date().toISOString(),
   });
@@ -70,6 +76,10 @@ function syntheticBinary(unsigned = false): JsonObject {
     provenance: {
       path: relative(process.cwd(), manifestPath),
       sha256: createHash("sha256").update(manifestBytes).digest("hex"),
+      builtGitHead: head,
+      compilerInputSha256: reviewedCompilerInputFingerprint(head),
+      profile: "debug",
+      requiresExactGitHead: false,
     },
   };
 }

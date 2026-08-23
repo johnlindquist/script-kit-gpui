@@ -52,6 +52,66 @@ function currentGitHead(): string {
   return head;
 }
 
+const COMPILER_INPUT_PATH_OWNER = "scripts/agentic/compiler-input-paths.txt";
+const compilerTreeCache = new Map<string, string>();
+
+function reviewedCompilerInputPaths(): string[] {
+  const paths = readFileSync(COMPILER_INPUT_PATH_OWNER, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean);
+  if (
+    paths.length === 0 ||
+    new Set(paths).size !== paths.length ||
+    paths.some((path) => path.startsWith("/") || path.split("/").includes(".."))
+  ) {
+    throw new Error("verified build provenance requires one valid reviewed compiler-input owner");
+  }
+  return paths;
+}
+
+/** Git tree objects are immutable; identical reviewed trees safely survive docs-only commits. */
+export function reviewedCompilerInputFingerprint(commit = currentGitHead()): string {
+  if (!/^[a-f0-9]{40}$/.test(commit)) {
+    throw new Error("reviewed compiler-input tree requires one exact Git commit");
+  }
+  const ownerHash = sha256File(COMPILER_INPUT_PATH_OWNER);
+  const key = `${commit}:${ownerHash}`;
+  const cached = compilerTreeCache.get(key);
+  if (cached) return cached;
+  const result = Bun.spawnSync([
+    "git",
+    "-C",
+    process.cwd(),
+    "ls-tree",
+    "-r",
+    commit,
+    "--",
+    ...reviewedCompilerInputPaths(),
+  ], { stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0 || result.stdout.byteLength === 0) {
+    throw new Error("verified build provenance cannot independently resolve its reviewed compiler-input tree");
+  }
+  const fingerprint = createHash("sha256").update(result.stdout).digest("hex");
+  compilerTreeCache.set(key, fingerprint);
+  return fingerprint;
+}
+
+function requireCleanCompilerInputs() {
+  const result = Bun.spawnSync([
+    "git",
+    "-C",
+    process.cwd(),
+    "status",
+    "--porcelain",
+    "--untracked-files=all",
+    "--",
+    ...reviewedCompilerInputPaths(),
+  ], { stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0 || result.stdout.byteLength !== 0) {
+    throw new Error("verified build provenance rejects uncommitted current compiler-input sources");
+  }
+}
+
 /** Bind one actual executable to the manifest written by its owned build/export. */
 export function verifyRuntimeBinaryProvenance(binaryPath: string, expected: Obj = {}): Obj {
   const repositoryRoot = realpathSync(process.cwd());
@@ -99,6 +159,11 @@ export function verifyRuntimeBinaryProvenance(binaryPath: string, expected: Obj 
     manifest.binaryPath !== repositoryRelative ||
     manifest.binarySha256 !== binaryHash ||
     manifest.sizeBytes !== binaryStat.size ||
+    typeof manifest.compilerInputSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(manifest.compilerInputSha256) ||
+    typeof manifest.profile !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(manifest.profile) ||
+    typeof manifest.requiresExactGitHead !== "boolean" ||
+    manifest.profile === "release" && manifest.requiresExactGitHead !== true ||
     typeof manifest.pool !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(manifest.pool) ||
     typeof manifest.source !== "string" ||
     !(manifest.source.startsWith("target-agent/pools/") ||
@@ -112,8 +177,32 @@ export function verifyRuntimeBinaryProvenance(binaryPath: string, expected: Obj 
     throw new Error("verified build provenance rejects uncommitted compiler-input sources");
   }
   const head = currentGitHead();
+  if (manifest.compilerInputSha256 !== reviewedCompilerInputFingerprint(head)) {
+    throw new Error("verified build provenance executable was not built from the current reviewed compiler-input tree");
+  }
+  requireCleanCompilerInputs();
   if (manifest.gitHead !== head) {
-    throw new Error("verified build provenance executable was not built from the current source commit");
+    if (manifest.requiresExactGitHead === true) {
+      throw new Error("release, CI, and explicit Git tracking require the exact build commit");
+    }
+    if (typeof manifest.gitHead !== "string" || !/^[a-f0-9]{40}$/.test(manifest.gitHead)) {
+      throw new Error("verified build provenance executable was not built from a valid source commit");
+    }
+    const ancestor = Bun.spawnSync([
+      "git",
+      "-C",
+      process.cwd(),
+      "merge-base",
+      "--is-ancestor",
+      manifest.gitHead,
+      head,
+    ], { stdout: "pipe", stderr: "pipe" });
+    if (
+      ancestor.exitCode !== 0 ||
+      reviewedCompilerInputFingerprint(manifest.gitHead) !== manifest.compilerInputSha256
+    ) {
+      throw new Error("verified build provenance executable was not built from an equivalent current source commit");
+    }
   }
 
   const manifestRelative = relative(repositoryRoot, manifestPath);
@@ -121,13 +210,20 @@ export function verifyRuntimeBinaryProvenance(binaryPath: string, expected: Obj 
   if (
     (expected.path !== undefined && expected.path !== repositoryRelative) ||
     (expected.sha256 !== undefined && expected.sha256 !== binaryHash) ||
-    (expected.sourceCommit !== undefined && expected.sourceCommit !== manifest.gitHead)
+    (expected.sourceCommit !== undefined && expected.sourceCommit !== head)
   ) {
     throw new Error("verified build provenance identity does not match the observed executable");
   }
   if (Object.keys(expected).length > 0) {
     const declaredManifest = asObject(expected.provenance);
-    if (declaredManifest.path !== manifestRelative || declaredManifest.sha256 !== manifestHash) {
+    if (
+      declaredManifest.path !== manifestRelative ||
+      declaredManifest.sha256 !== manifestHash ||
+      declaredManifest.builtGitHead !== manifest.gitHead ||
+      declaredManifest.compilerInputSha256 !== manifest.compilerInputSha256 ||
+      declaredManifest.profile !== manifest.profile ||
+      declaredManifest.requiresExactGitHead !== manifest.requiresExactGitHead
+    ) {
       throw new Error("verified build provenance manifest identity does not match its observed receipt");
     }
   }
@@ -137,13 +233,17 @@ export function verifyRuntimeBinaryProvenance(binaryPath: string, expected: Obj 
     sha256: binaryHash,
     sizeBytes: binaryStat.size,
     modifiedAt: new Date(binaryStat.mtimeMs).toISOString(),
-    sourceCommit: manifest.gitHead,
+    sourceCommit: head,
     pinned: Boolean(process.env.SCRIPT_KIT_GPUI_BINARY),
     provenance: {
       path: manifestRelative,
       sha256: manifestHash,
       schemaVersion: manifest.schemaVersion,
       pool: manifest.pool,
+      builtGitHead: manifest.gitHead,
+      compilerInputSha256: manifest.compilerInputSha256,
+      profile: manifest.profile,
+      requiresExactGitHead: manifest.requiresExactGitHead,
       rustDirty: false,
     },
   };
@@ -170,6 +270,7 @@ export function runtimeTaskProofSourceOwners(taskId: RuntimeTaskProofId): string
   const spec = RUNTIME_TASK_PROOF_SPECS[taskId];
   return [
     "scripts/devtools/lib/runtime-task-proof.ts",
+    COMPILER_INPUT_PATH_OWNER,
     "scripts/devtools/lib/receipt-schema.ts",
     spec.productionOwner,
     spec.runtimeProducer,

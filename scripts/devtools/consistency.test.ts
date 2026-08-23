@@ -101,6 +101,9 @@ function signedSyntheticBinary(): Record<string, unknown> {
     binarySha256: binarySha,
     sizeBytes: binaryBytes.byteLength,
     gitHead: HEAD,
+    compilerInputSha256: "f".repeat(64),
+    profile: "debug",
+    requiresExactGitHead: false,
     rustDirty: false,
     builtAt: new Date().toISOString(),
   });
@@ -112,6 +115,10 @@ function signedSyntheticBinary(): Record<string, unknown> {
     provenance: {
       path: relative(process.cwd(), manifestPath),
       sha256: createHash("sha256").update(manifestBytes).digest("hex"),
+      builtGitHead: HEAD,
+      compilerInputSha256: "f".repeat(64),
+      profile: "debug",
+      requiresExactGitHead: false,
     },
   };
   return { ...ownedSyntheticBinary };
@@ -523,6 +530,7 @@ function passingReceipt(taskId: string, overrides: ReceiptOverrides = {}): Recor
   if (spec) {
     const sourceOwners = [
       "scripts/devtools/lib/runtime-task-proof.ts",
+      "scripts/agentic/compiler-input-paths.txt",
       "scripts/devtools/lib/receipt-schema.ts",
       spec.productionOwner,
       spec.runtimeProducer,

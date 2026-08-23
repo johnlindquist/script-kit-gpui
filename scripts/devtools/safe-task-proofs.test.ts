@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   observeBunTestRun,
+  runAllSafeTaskProofs,
   runSafeTaskProof,
+  safeTaskExecutionPlan,
   SAFE_TASK_SPECS,
   safeTaskSpec,
 } from "./safe-task-proofs.ts";
@@ -74,6 +76,33 @@ describe("catalog-bound offline consistency task proofs", () => {
     expect(receipts.map((receipt) =>
       prepareValidatedReceipt("devtools.consistency.safe-task-proof", receipt).exitCode
     )).toEqual(new Array(SAFE_TASK_SPECS.length).fill(0));
+  });
+
+  test("compiler-free bulk proof schedules one shared run and explicitly omits Rust-only ownership", () => {
+    const plan = safeTaskExecutionPlan({ allowCompilers: false });
+    expect(plan.omittedTaskIds).toEqual(["GOV-003"]);
+    expect(plan.taskIds).not.toContain("GOV-003");
+    expect(plan.suiteFiles).not.toContain("scripts/devtools/alpha-byte-contract.test.ts");
+    let executionCount = 0;
+    const receipts = runAllSafeTaskProofs({
+      allowCompilers: false,
+      runTests: (suites, environment) => {
+        executionCount += 1;
+        expect(environment.SCRIPT_KIT_NONINTERACTIVE).toBe("1");
+        expect(suites).toEqual(plan.suiteFiles);
+        return {
+          output:
+            `${suites.map((path) => `${path}:`).join("\n")}\n` +
+            " 5 pass\n 0 fail\n 11 expect() calls\n",
+          exitCode: 0,
+        };
+      },
+    });
+    expect(executionCount).toBe(1);
+    expect(receipts.map((receipt) => receipt.taskId)).toEqual(plan.taskIds);
+    expect(receipts.every((receipt) =>
+      !receipt.testRun.executedSuiteFiles.includes("scripts/devtools/alpha-byte-contract.test.ts")
+    )).toBe(true);
   });
 
   test("production governance behavior carries the actual owning source fingerprints", () => {
@@ -188,6 +217,7 @@ describe("catalog-bound offline consistency task proofs", () => {
     expect(completion.productionSources).toEqual([
       "scripts/devtools/consistency.ts",
       "scripts/devtools/lib/runtime-task-proof.ts",
+      "scripts/agentic/compiler-input-paths.txt",
       "scripts/devtools/lib/workflow-task-contract.ts",
       "scripts/devtools/lib/workflow-task-proof.ts",
       "scripts/agentic/cons-flow-ux/final-workflow-audit.ts",

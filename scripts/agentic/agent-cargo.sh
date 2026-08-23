@@ -490,18 +490,43 @@ release_lock() {
 
 artifact_source_commit=""
 artifact_source_dirty=false
+artifact_source_compiler_sha=""
 artifact_observed_commit=""
 artifact_observed_dirty=false
+artifact_observed_compiler_sha=""
+compiler_input_paths=()
+
+load_compiler_input_paths() {
+  local owner="${SCRIPT_ROOT}/compiler-input-paths.txt" path
+  [[ -f "$owner" && ! -L "$owner" ]] \
+    || worker_failure "exported artifact requires the canonical reviewed compiler-input owner"
+  while IFS= read -r path || [[ -n "$path" ]]; do
+    [[ -n "$path" && "$path" != /* && "$path" != *".."* ]] \
+      || worker_failure "compiler-input owner contains an invalid repository-relative path"
+    compiler_input_paths+=("$path")
+  done < "$owner"
+  (( ${#compiler_input_paths[@]} > 0 )) \
+    || worker_failure "exported artifact requires a nonempty reviewed compiler-input owner"
+}
 
 observe_artifact_source() {
   local changed
+  if (( ${#compiler_input_paths[@]} == 0 )); then
+    load_compiler_input_paths
+  fi
   artifact_observed_commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)" \
     || worker_failure "exported artifact requires an independently observed Git source commit"
   [[ "$artifact_observed_commit" =~ ^[a-f0-9]{40}$ ]] \
     || worker_failure "exported artifact requires a full 40-character Git source commit"
   changed="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- \
-    src crates assets .cargo Cargo.toml Cargo.lock build.rs rust-toolchain rust-toolchain.toml 2>/dev/null)" \
+    "${compiler_input_paths[@]}" 2>/dev/null)" \
     || worker_failure "exported artifact requires independently observed compiler-input cleanliness"
+  artifact_observed_compiler_sha="$(
+    git -C "$REPO_ROOT" ls-tree -r "$artifact_observed_commit" -- "${compiler_input_paths[@]}" \
+      | shasum -a 256 | awk '{print $1}'
+  )" || worker_failure "exported artifact requires an independently observed compiler-input tree"
+  [[ "$artifact_observed_compiler_sha" =~ ^[a-f0-9]{64}$ ]] \
+    || worker_failure "exported artifact requires a complete SHA-256 compiler-input fingerprint"
   artifact_observed_dirty=false
   [[ -z "$changed" ]] || artifact_observed_dirty=true
 }
@@ -543,13 +568,18 @@ export_artifacts() {
   observe_artifact_source
   [[ "$artifact_observed_commit" == "$artifact_source_commit" ]] \
     || worker_failure "Git source commit changed during the build; refusing misleading artifact provenance"
+  [[ "$artifact_observed_compiler_sha" == "$artifact_source_compiler_sha" ]] \
+    || worker_failure "reviewed compiler inputs changed during the build; refusing misleading artifact provenance"
   if [[ "$artifact_observed_dirty" == "true" ]]; then
     artifact_source_dirty=true
   fi
 
   local artifact_dir="${REPO_ROOT}/target-agent/artifacts/${artifact_name}"
   mkdir -p "$artifact_dir"
-  local bin src dest tmp manifest manifest_tmp binary_sha binary_size
+  local bin src dest tmp manifest manifest_tmp binary_sha binary_size requires_exact_git=false
+  if [[ "$profile_dir" == "release" || -n "${GITHUB_SHA:-}" || "${SCRIPT_KIT_TRACK_GIT_HEAD:-0}" == "1" ]]; then
+    requires_exact_git=true
+  fi
   for bin in "${bins[@]}"; do
     [[ "$bin" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] \
       || worker_failure "exported binary must name one owned artifact child; got ${bin}"
@@ -570,9 +600,10 @@ export_artifacts() {
     fi
     binary_sha="$(shasum -a 256 "$tmp" | awk '{print $1}')"
     binary_size="$(wc -c < "$tmp" | tr -d '[:space:]')"
-    printf '{"schemaVersion":2,"pool":"%s","source":"%s","binaryPath":"%s","binarySha256":"%s","sizeBytes":%s,"gitHead":"%s","rustDirty":%s,"builtAt":"%s"}\n' \
+    printf '{"schemaVersion":2,"pool":"%s","source":"%s","binaryPath":"%s","binarySha256":"%s","sizeBytes":%s,"gitHead":"%s","compilerInputSha256":"%s","profile":"%s","requiresExactGitHead":%s,"rustDirty":%s,"builtAt":"%s"}\n' \
       "$pool" "${src#${REPO_ROOT}/}" "${dest#${REPO_ROOT}/}" \
-      "$binary_sha" "$binary_size" "$artifact_source_commit" "$artifact_source_dirty" \
+      "$binary_sha" "$binary_size" "$artifact_source_commit" "$artifact_source_compiler_sha" \
+      "$profile_dir" "$requires_exact_git" "$artifact_source_dirty" \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$manifest_tmp"
     mv -f "$tmp" "$dest"
     mv -f "$manifest_tmp" "$manifest"
@@ -622,6 +653,7 @@ if [[ -n "$validated_artifact_name" && "${cargo_args[0]:-}" == "build" ]]; then
   observe_artifact_source
   artifact_source_commit="$artifact_observed_commit"
   artifact_source_dirty="$artifact_observed_dirty"
+  artifact_source_compiler_sha="$artifact_observed_compiler_sha"
 fi
 
 set +e

@@ -233,6 +233,7 @@ require_clean_source_identity() {
     scripts/agentic/devtools-session.sh
     scripts/agentic/wait-session-ready.sh
     scripts/agentic/agent-cargo.sh
+    scripts/agentic/compiler-input-paths.txt
     scripts/agentic/cargo-cache-locks.sh
     scripts/agentic/cargo-build-policy.test.ts
     scripts/agentic/reuse-rust-test-binary.sh

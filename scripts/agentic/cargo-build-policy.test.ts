@@ -118,6 +118,7 @@ function installFakeGit(workspace: ReturnType<typeof fixture>) {
   writeFileSync(
     join(workspace.bin, "git"),
     `#!/bin/bash
+if [[ -n "\${CARGO_POLICY_GIT_ARGS_CAPTURE:-}" ]]; then printf '%s\\n' "$*" >> "$CARGO_POLICY_GIT_ARGS_CAPTURE"; fi
 if [[ "$1" == "-C" ]]; then shift 2; fi
 case "$1" in
   rev-parse)
@@ -132,6 +133,9 @@ case "$1" in
   status)
     if [[ "\${CARGO_POLICY_GIT_DIRTY:-0}" == "1" ]]; then printf ' M src/example.rs\\n'; fi
     ;;
+  ls-tree)
+    printf '100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\tsrc/example.rs\\n'
+    ;;
   diff)
     if [[ "\${CARGO_POLICY_GIT_DIRTY:-0}" == "1" ]]; then printf 'src/example.rs\\n'; fi
     ;;
@@ -142,16 +146,20 @@ esac
   chmodSync(join(workspace.bin, "git"), 0o755);
 }
 
-function fakeBuiltBinary(workspace: ReturnType<typeof fixture>, name = "export_design_tokens") {
+function fakeBuiltBinary(
+  workspace: ReturnType<typeof fixture>,
+  name = "export_design_tokens",
+  profile = "debug",
+) {
   const binary = join(
     workspace.root,
     "target-agent",
     "pools",
     "agent-debug",
-    "debug",
+    profile,
     name,
   );
-  mkdirSync(join(workspace.root, "target-agent", "pools", "agent-debug", "debug"), {
+  mkdirSync(join(workspace.root, "target-agent", "pools", "agent-debug", profile), {
     recursive: true,
   });
   writeFileSync(binary, "#!/bin/sh\nprintf 'real-exporter\\n'\n");
@@ -749,8 +757,11 @@ describe("bounded Cargo builds", () => {
       binarySha256: createHash("sha256").update(readFileSync(exported)).digest("hex"),
       sizeBytes: readFileSync(exported).byteLength,
       gitHead: "a".repeat(40),
+      profile: "debug",
+      requiresExactGitHead: false,
       rustDirty: false,
     });
+    expect(manifest.compilerInputSha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
   test("marks dirty compiler inputs explicitly instead of claiming a committed build", () => {
@@ -775,6 +786,59 @@ describe("bounded Cargo builds", () => {
     );
     expect(result.status).toBe(0);
     expect(JSON.parse(readFileSync(manifestPath, "utf8")).rustDirty).toBe(true);
+  });
+
+  test("source fingerprints include vendored Rust and every real embedded SDK asset", () => {
+    const workspace = fixture();
+    installFakeGit(workspace);
+    fakeBuiltBinary(workspace);
+    const capture = join(workspace.root, "reviewed-compiler-paths.txt");
+    const result = run(
+      "agent-cargo.sh",
+      ["build", "--bin", "export_design_tokens"],
+      {
+        ...workspace.env,
+        SCRIPT_KIT_AGENT_ARTIFACT_NAME: "complete-source-tree",
+        CARGO_POLICY_GIT_ARGS_CAPTURE: capture,
+      },
+    );
+    expect(result.status).toBe(0);
+    const observed = readFileSync(capture, "utf8");
+    for (const owner of ["src", "crates", "vendor", "assets", "kit-init", "scripts/kit-sdk.ts"]) {
+      expect(observed).toContain(owner);
+    }
+  });
+
+  test.each([
+    ["release profile", ["build", "--release", "--bin", "export_design_tokens"], {}, "release"],
+    ["hosted CI", ["build", "--bin", "export_design_tokens"], { GITHUB_SHA: "ci-commit" }, "debug"],
+    [
+      "explicit source tracking",
+      ["build", "--bin", "export_design_tokens"],
+      { SCRIPT_KIT_TRACK_GIT_HEAD: "1" },
+      "debug",
+    ],
+  ])("%s retains exact build-commit provenance", (_label, args, overrides, profile) => {
+    const workspace = fixture();
+    installFakeGit(workspace);
+    fakeBuiltBinary(workspace, "export_design_tokens", profile as string);
+    const result = run("agent-cargo.sh", args as string[], {
+      ...workspace.env,
+      ...(overrides as Record<string, string>),
+      SCRIPT_KIT_AGENT_ARTIFACT_NAME: "exact-source",
+    });
+    const manifestPath = join(
+      workspace.root,
+      "target-agent",
+      "artifacts",
+      "exact-source",
+      "export_design_tokens.provenance.json",
+    );
+    expect(result.status).toBe(0);
+    expect(JSON.parse(readFileSync(manifestPath, "utf8"))).toMatchObject({
+      profile,
+      requiresExactGitHead: true,
+    });
   });
 
   test("refuses an exported build before Cargo when its Git source cannot be observed", () => {
@@ -1158,6 +1222,7 @@ describe("isolated build process ownership", () => {
     installFakeGit(workspace);
     const localScripts = join(workspace.root, "scripts", "agentic");
     copyFileSync(join(scripts, "build-isolated-binary.sh"), join(localScripts, "build-isolated-binary.sh"));
+    copyFileSync(join(scripts, "compiler-input-paths.txt"), join(localScripts, "compiler-input-paths.txt"));
     copyFileSync(join(scripts, "devtools-session-lib.sh"), join(localScripts, "devtools-session-lib.sh"));
     writeFileSync(join(localScripts, "agent-cargo.sh"), builder);
     chmodSync(join(localScripts, "agent-cargo.sh"), 0o755);
@@ -1301,8 +1366,11 @@ describe("isolated build process ownership", () => {
       binarySha256: createHash("sha256").update(binary).digest("hex"),
       sizeBytes: binary.byteLength,
       gitHead: "a".repeat(40),
+      profile: "debug",
+      requiresExactGitHead: false,
       rustDirty: false,
     });
+    expect(manifest.compilerInputSha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
   test("marks isolated builds from dirty compiler inputs without claiming source purity", () => {
