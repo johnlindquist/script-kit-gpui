@@ -61,6 +61,12 @@ case "$noninteractive_mode" in
 esac
 export SCRIPT_KIT_NONINTERACTIVE="$noninteractive_mode"
 
+use_sccache="${SCRIPT_KIT_AGENT_USE_SCCACHE:-auto}"
+case "$use_sccache" in
+  0|1|auto) ;;
+  *) worker_failure "SCRIPT_KIT_AGENT_USE_SCCACHE must be 0, 1, or auto; got ${use_sccache}" ;;
+esac
+
 if [[ "$noninteractive_mode" == "1" ]]; then
   for unsafe_setting in \
     SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER \
@@ -379,7 +385,6 @@ if [[ -z "${CARGO_INCREMENTAL:-}" ]]; then
 fi
 
 rustc_wrapper_state="none"
-use_sccache="${SCRIPT_KIT_AGENT_USE_SCCACHE:-auto}"
 if [[ -n "${RUSTC_WRAPPER:-}" ]]; then
   rustc_wrapper_state="existing:${RUSTC_WRAPPER}"
 elif [[ "$use_sccache" == "1" || "$use_sccache" == "auto" ]]; then
@@ -398,12 +403,24 @@ elif [[ "$use_sccache" == "1" || "$use_sccache" == "auto" ]]; then
     else
       unset RUSTC_WRAPPER
       rustc_wrapper_state="unavailable"
-      echo "AGENT_CARGO warning: sccache cannot execute rustc in this sandbox; continuing without compiler caching" >&2
+      echo "AGENT_CARGO warning: sccache cannot execute rustc in this sandbox; use approved sandbox permissions or set SCRIPT_KIT_AGENT_USE_SCCACHE=1 to refuse uncached builds; continuing without compiler caching" >&2
     fi
   elif [[ "$use_sccache" == "1" ]]; then
     echo "AGENT_CARGO error: SCRIPT_KIT_AGENT_USE_SCCACHE=1 but sccache is unavailable; install the official prebuilt package or use auto" >&2
     exit 69
   fi
+fi
+
+case "$rustc_wrapper_state" in
+  sccache) compiler_cache_backend="sccache" ;;
+  existing:*) compiler_cache_backend="external" ;;
+  unavailable) compiler_cache_backend="unavailable" ;;
+  none) compiler_cache_backend="disabled" ;;
+  *) worker_failure "unknown compiler cache backend: ${rustc_wrapper_state}" ;;
+esac
+compiler_cache_required="false"
+if [[ "$use_sccache" == "1" ]]; then
+  compiler_cache_required="true"
 fi
 
 free_disk_kb() {
@@ -717,11 +734,12 @@ fi
 elapsed_seconds="$(( $(date +%s) - started_epoch ))"
 free_after_gb="$(( $(free_disk_kb) / 1024 / 1024 ))"
 receipt_path="${SCRIPT_KIT_AGENT_BUILD_RECEIPT_PATH:-${REPO_ROOT}/target-agent/build-receipts.jsonl}"
-printf '{"started_epoch":%s,"elapsed_seconds":%s,"status":%s,"pool":"%s","cache":"%s","jobs":%s,"test_threads":%s,"free_before_gb":%s,"free_after_gb":%s,"command":"%s","timings":%s}\n' \
+printf '{"started_epoch":%s,"elapsed_seconds":%s,"status":%s,"pool":"%s","cache":"%s","jobs":%s,"test_threads":%s,"free_before_gb":%s,"free_after_gb":%s,"command":"%s","timings":%s,"compiler_cache_backend":"%s","compiler_cache_required":%s}\n' \
   "$started_epoch" "$elapsed_seconds" "$status" "$pool" "$cache_state" "$CARGO_BUILD_JOBS" "$RUST_TEST_THREADS" \
   "$free_before_gb" "$free_after_gb" "${cargo_args[0]:-unknown}" "${SCRIPT_KIT_AGENT_TIMINGS:-0}" \
+  "$compiler_cache_backend" "$compiler_cache_required" \
   >> "$receipt_path" 2>/dev/null || true
-echo "AGENT_CARGO result status=${status} elapsed=${elapsed_seconds}s cache=${cache_state} free=${free_before_gb}G->${free_after_gb}G receipt=${receipt_path}" >&2
+echo "AGENT_CARGO result status=${status} elapsed=${elapsed_seconds}s cache=${cache_state} compiler_cache=${compiler_cache_backend} free=${free_before_gb}G->${free_after_gb}G receipt=${receipt_path}" >&2
 
 if [[ "$status" -eq 0 ]]; then
   export_artifacts "$@"

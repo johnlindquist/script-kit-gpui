@@ -378,6 +378,8 @@ describe("bounded Cargo builds", () => {
       cache: "cold",
       jobs: 2,
       test_threads: 2,
+      compiler_cache_backend: "disabled",
+      compiler_cache_required: false,
       command: "test",
       timings: 1,
     });
@@ -980,6 +982,11 @@ describe("bounded Cargo builds", () => {
     expect(readFileSync(workspace.capture, "utf8")).toContain(
       "wrapper=/existing/controlled-wrapper\n",
     );
+    const receipt = JSON.parse(
+      readFileSync(join(workspace.root, "target-agent", "build-receipts.jsonl"), "utf8"),
+    );
+    expect(receipt.compiler_cache_backend).toBe("external");
+    expect(receipt.compiler_cache_required).toBe(false);
   });
 
   test("enables a healthy compiler cache through a workspace-owned Unix socket", () => {
@@ -996,6 +1003,11 @@ describe("bounded Cargo builds", () => {
     expect(invocation).toContain(
       `socket=${join(workspace.root, "target-agent", "shared", "sccache.sock")}\n`,
     );
+    const receipt = JSON.parse(
+      readFileSync(join(workspace.root, "target-agent", "build-receipts.jsonl"), "utf8"),
+    );
+    expect(receipt.compiler_cache_backend).toBe("sccache");
+    expect(receipt.compiler_cache_required).toBe(true);
   });
 
   test("explicitly falls back when sandboxing allows cache statistics but blocks rustc", () => {
@@ -1008,8 +1020,29 @@ describe("bounded Cargo builds", () => {
 
     expect(result.status).toBe(0);
     expect(result.stderr).toContain("sccache cannot execute rustc in this sandbox");
+    expect(result.stderr).toContain("SCRIPT_KIT_AGENT_USE_SCCACHE=1");
+    expect(result.stderr).toContain("sandbox permissions");
     expect(readFileSync(workspace.capture, "utf8")).toContain("wrapper=\n");
+    const receipt = JSON.parse(
+      readFileSync(join(workspace.root, "target-agent", "build-receipts.jsonl"), "utf8"),
+    );
+    expect(receipt.compiler_cache_backend).toBe("unavailable");
+    expect(receipt.compiler_cache_required).toBe(false);
   });
+
+  test.each(["true", "2", "enabled"])(
+    "rejects malformed compiler-cache policy %s before invoking Cargo",
+    (policy) => {
+      const workspace = fixture();
+      const result = run("agent-cargo.sh", ["check", "--lib"], {
+        ...workspace.env,
+        SCRIPT_KIT_AGENT_USE_SCCACHE: policy,
+      });
+      expect(result.status).toBe(64);
+      expect(result.stderr).toContain("SCRIPT_KIT_AGENT_USE_SCCACHE must be 0, 1, or auto");
+      expect(existsSync(workspace.capture)).toBe(false);
+    },
+  );
 
   test("fails closed when a required compiler cache cannot execute rustc", () => {
     const workspace = fixture();
