@@ -146,6 +146,12 @@ describe("canonical workflow completion audit", () => {
     expect(options.receiptsRoot).toBe("/tmp/reviewed");
   });
 
+  test("source-current workflow receipts never rewrite the tracked historical marker", () => {
+    expect(parseWorkflowAuditArgs([]).outputPath).toBe(
+      ".artifacts/consistency/cons-flow-ux/final-audit/current/lane-receipt.json",
+    );
+  });
+
   test("unknown arguments and missing paths fail before auditing", () => {
     expect(() => parseWorkflowAuditArgs(["--launch-app"])).toThrow(WorkflowAuditError);
     expect(() => parseWorkflowAuditArgs(["--out"])).toThrow("--out requires a path");

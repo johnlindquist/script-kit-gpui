@@ -17,7 +17,7 @@ const root = resolve(import.meta.dir, "../../..");
 const DEFAULT_RECEIPTS_ROOT = ".artifacts/consistency";
 const DEFAULT_PROGRESS_PATH = ".notes/CONSISTENCY-PROGRESS.md";
 const DEFAULT_OUTPUT_PATH =
-  ".artifacts/consistency/cons-flow-ux/final-audit/lane-receipt.json";
+  ".artifacts/consistency/cons-flow-ux/final-audit/current/lane-receipt.json";
 
 export interface WorkflowAuditOptions {
   catalogPath: string;
