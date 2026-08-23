@@ -84,8 +84,7 @@ mod shortcut_recorder;
 mod shortcuts_hud_grid;
 #[path = "simulate_key_dispatch.rs"]
 mod simulate_key_dispatch;
-/// Core ScriptListApp implementation: startup, event handling, UI wiring, and state management.
-
+// Core ScriptListApp implementation: startup, event handling, UI wiring, and state management.
 #[path = "startup.rs"]
 mod startup;
 #[path = "submit_diagnostics.rs"]

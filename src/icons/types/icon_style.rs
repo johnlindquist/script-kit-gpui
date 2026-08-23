@@ -22,14 +22,14 @@ pub enum IconSize {
 
 impl IconSize {
     /// Convert to pixel value
-    pub fn to_px(&self) -> f32 {
+    pub fn to_px(self) -> f32 {
         match self {
             Self::XSmall => 12.0,
             Self::Small => 14.0,
             Self::Medium => 16.0,
             Self::Large => 20.0,
             Self::XLarge => 24.0,
-            Self::Custom(px) => *px,
+            Self::Custom(px) => px,
         }
     }
 }

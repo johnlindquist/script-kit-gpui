@@ -25,6 +25,10 @@ pub const MAIN_MENU_METADATA_BADGE_RADIUS: f32 = 3.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "InfoBar-prefixed public theme variants are an established design-token contract"
+)]
 pub enum MainMenuThemeVariant {
     #[default]
     InfoBarBase = 1,
