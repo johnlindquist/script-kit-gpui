@@ -1020,6 +1020,14 @@ offline receipts until their real producers are run again.
     search/storage stress corpora. Ten fake-binary cases reproduced every
     route, while a release mutation proved its owning script was absent from
     mandatory release provenance.
+21. `build-isolated-binary.sh` timed out by killing only its background shell,
+    not the Cargo/compiler process group; a disposable 30-second child was
+    demonstrably still alive after the command returned a timeout receipt.
+    `set -e` also exited on a failed child before emitting its promised
+    structured JSON. Zero/negative/fractional timeouts, `..` pool/agent/session
+    identities, symlinked staging directories, and symlinked global build logs
+    could start work or overwrite external files before failing. The builder
+    itself was absent from mandatory release ownership.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1161,7 +1169,7 @@ offline receipts until their real producers are run again.
    state, pool, exit status, elapsed seconds, and before/after free space.
    Direct, inline, and file-based `--config` overrides fail before pool
    creation because they can replace effective job counts and target
-   ownership. The fake-Cargo behavior suite passes **101 cases and 395
+   ownership. The fake-Cargo behavior suite passes **113 cases and 433
    assertions** without invoking Cargo or building the application. Its one
    real `rustc` call compiles only an isolated **~1-MiB `build.rs` policy
    harness**; every fake workspace, external fixture, and standalone harness
@@ -1200,6 +1208,14 @@ offline receipts until their real producers are run again.
    clipboard, Settings, and paid-provider tests can therefore never be
    activated accidentally. Named reviewed integrations, library filters,
    domain packages, and the standalone exporter remain behavior-proven.
+   The isolated binary builder owns one dedicated process group and now
+   terminates every Cargo/compiler descendant on timeout; fake-process
+   evidence checks that the actual child PID is gone before acceptance.
+   Failed builds retain a structured typed JSON receipt, positive-whole
+   timeout and owned-child pool/agent/session identities are validated before
+   launch, and symlinked runtime/source/manifest/log destinations fail closed
+   without truncating external files. A successful disposable build still
+   stages its expected binary and manifest.
 10. **Lock the contract into real behavior and release gates.** Dedicated
     low-cost Bun cases operate disposable fake pools, live/incomplete leases,
     missing/unusable sccache, disk starvation, stale/current harnesses,
@@ -1222,7 +1238,8 @@ offline receipts until their real producers are run again.
     five exact child commands and every inherited safety setting.
     Publication additionally refuses a missing/untracked
     `agent-check.sh`, `agent-cargo.sh`, `cargo-cache-locks.sh`,
-    `reuse-rust-test-binary.sh`, or `cargo-build-policy.test.ts`; a
+    `reuse-rust-test-binary.sh`, `build-isolated-binary.sh`, or
+    `cargo-build-policy.test.ts`; a
     green-looking proof receipt that omits
     the directly executed build-resource suite is rejected as incomplete.
     Every real explicit Bun test invocation now roots its paths with `./`,
@@ -1268,8 +1285,8 @@ offline receipts until their real producers are run again.
     across 37 files in 16.39s**, without the previous repository scan or load
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
-    separately passes all **101 fake-Cargo cases / 395 assertions** plus
-    **eight direct release-owner/proof-gate cases / 23 assertions**. The
+    separately passes all **113 fake-Cargo cases / 433 assertions** plus
+    **nine direct release-owner/proof-gate cases / 26 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
     suite and actual application/Cargo compiler were deliberately not rerun
