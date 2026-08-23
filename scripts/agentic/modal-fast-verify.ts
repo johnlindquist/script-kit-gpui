@@ -127,6 +127,8 @@ function assertNoMissingOrForbidden(
 
 const files = [
   "src/confirm/window.rs",
+  "src/components/confirm_modal_shell.rs",
+  "src/components/footer_chrome.rs",
   "src/platform/secondary_window_config.rs",
   "src/app_layout/build_layout_info.rs",
   "src/app_layout/collect_elements.rs",
@@ -148,6 +150,11 @@ const checks: Check[] = [
       "let handle = cx.open_window(",
       "move |_window, cx|",
     );
+    const actionsConfig = sliceBetween(
+      platform,
+      "pub unsafe fn configure_actions_popup_window(window: id, is_dark: bool)",
+      "#[cfg(not(target_os = \"macos\"))]",
+    );
     const confirmConfig = sliceBetween(
       platform,
       "pub unsafe fn configure_confirm_popup_window(window: id, is_dark: bool)",
@@ -167,11 +174,17 @@ const checks: Check[] = [
         "orderFrontRegardless",
       ]).concat(
         requireContains(confirmOptions, ["focus: false"]),
+        requireContains(actionsConfig, [
+          "configure_attached_popup_window(",
+          "GlassMorphVariant::ContentLayer",
+        ]),
         requireContains(confirmConfig, [
-          "configure_actions_popup_window(window, is_dark)",
+          "configure_attached_popup_window(",
+          "GlassMorphVariant::ContentLayer",
         ]),
         requireContains(footerConfig, [
-          "configure_actions_popup_window(window, is_dark)",
+          "configure_attached_popup_window(",
+          "GlassMorphVariant::FadeOnly",
           "setIgnoresMouseEvents: true",
           "setHasShadow: false",
           "setCornerRadius: 0.0_f64",
@@ -189,13 +202,15 @@ const checks: Check[] = [
     return {
       windowKind: "WindowKind::PopUp",
       windowFocus: "confirm opens focus:false and avoids native makeKeyWindow promotion",
-      nativeBackground: "confirm delegates to actions popup config",
-      footerException: "footer owns no-shadow/no-corner flush strip",
+      nativeBackground: "confirm and actions share attached-popup material and content-layer motion",
+      footerException: "footer owns the fade-only no-shadow/no-corner flush strip",
     };
   }),
 
   runCheck("confirm-popup-reuses-footer-button-contract", () => {
     const confirm = sources["src/confirm/window.rs"];
+    const shell = sources["src/components/confirm_modal_shell.rs"];
+    const footer = sources["src/components/footer_chrome.rs"];
     const renderBlock = braceBlock(confirm, "impl Render for ConfirmPopupWindow");
     assertNoMissingOrForbidden(
       requireContains(confirm, [
@@ -203,8 +218,8 @@ const checks: Check[] = [
         "footer_button_height",
         "current_main_menu_footer_height",
         "current_main_menu_footer_metrics().item_gap_px",
-        "render_footer_hint_action_button_frame",
-        "FooterHintActionButtonFrameSpec",
+        "modal_action_row",
+        "ModalActionRowButton",
         "FooterHintButtonLayoutOverrides",
         "FooterActionSlot::Close",
         "FooterActionSlot::Run",
@@ -218,8 +233,17 @@ const checks: Check[] = [
           "label: self.confirm_text.clone()",
           "key: \"↵\".into()",
           "slot_width_px: confirm_slot_width",
+          "modal_action_row(",
+        ]),
+        requireContains(shell, [
+          "render_footer_hint_action_button_frame(",
+          "FooterHintActionButtonFrameSpec",
           "key_first: false",
           "FooterHintContentJustify::Center",
+        ]),
+        requireContains(footer, [
+          "pub(crate) fn render_footer_hint_action_button_frame(",
+          "pub(crate) struct FooterHintActionButtonFrameSpec",
         ]),
       ),
       requireAbsent(renderBlock, [
@@ -338,7 +362,9 @@ const checks: Check[] = [
         "sdk_confirm_runtime_proof_uses_real_script_run_route",
         "FooterActionSlot::Close",
         "FooterActionSlot::Run",
-        "configure_actions_popup_window(window, is_dark)",
+        "configure_attached_popup_window(",
+        "GlassMorphVariant::ContentLayer",
+        "GlassMorphVariant::FadeOnly",
         "SCRIPT_KIT_DISABLE_AUTOMATIC_UPDATE_CHECK",
       ]),
       [],

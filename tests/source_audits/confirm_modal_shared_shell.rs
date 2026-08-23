@@ -200,6 +200,11 @@ fn confirm_popup_native_background_matches_actions_popup_not_footer_flush_strip(
         .nth(1)
         .and_then(|tail| tail.split("};").next())
         .expect("actions popup WindowOptions should be present");
+    let actions_config = platform
+        .split("pub unsafe fn configure_actions_popup_window(window: id, is_dark: bool)")
+        .nth(1)
+        .and_then(|tail| tail.split("#[cfg(not(target_os = \"macos\"))]").next())
+        .expect("macOS actions popup config should be present");
     let confirm_config = platform
         .split("pub unsafe fn configure_confirm_popup_window(window: id, is_dark: bool)")
         .nth(1)
@@ -217,17 +222,21 @@ fn confirm_popup_native_background_matches_actions_popup_not_footer_flush_strip(
         "confirm and actions popup must stay on the same native GPUI WindowKind::PopUp surface"
     );
     assert!(
-        confirm_config.contains("configure_actions_popup_window(window, is_dark)")
+        actions_config.contains("configure_attached_popup_window(")
+            && actions_config.contains("GlassMorphVariant::ContentLayer")
+            && confirm_config.contains("configure_attached_popup_window(")
+            && confirm_config.contains("GlassMorphVariant::ContentLayer")
             && !confirm_config.contains("setHasShadow: false")
             && !confirm_config.contains("setCornerRadius: 0.0_f64"),
-        "centered confirm popup must keep the same native background/depth configuration as actions popup"
+        "centered confirm and actions popups must share the attached-popup owner and calibrated content-layer motion"
     );
     assert!(
-        footer_config.contains("configure_actions_popup_window(window, is_dark)")
+        footer_config.contains("configure_attached_popup_window(")
+            && footer_config.contains("GlassMorphVariant::FadeOnly")
             && footer_config.contains("setIgnoresMouseEvents: true")
             && footer_config.contains("setHasShadow: false")
             && footer_config.contains("setCornerRadius: 0.0_f64"),
-        "flush footer picker owns the no-shadow/no-corner exception instead of confirm popup"
+        "flush footer picker must use the same attached-popup owner while preserving its fade-only, no-shadow/no-corner exception"
     );
 }
 
