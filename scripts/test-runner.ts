@@ -69,7 +69,7 @@
  */
 
 import { readdir, realpath } from 'node:fs/promises';
-import { basename, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import { spawn } from 'bun';
 
@@ -113,20 +113,65 @@ interface RunnerSummary {
 const PROJECT_ROOT = resolve(import.meta.dir, '..');
 const SDK_PATH = join(PROJECT_ROOT, 'scripts', 'kit-sdk.ts');
 const TESTS_DIR = join(PROJECT_ROOT, 'tests', 'sdk');
+const RUNNER_ARGUMENTS = process.argv.slice(2);
+
+function refuseRunner(message: string): never {
+  console.error(`[sdk-tests] REFUSED ${message}`);
+  process.exit(78);
+}
+
+function validateRunnerArguments(): void {
+  let specificTests = 0;
+  let filterCount = 0;
+  for (let index = 0; index < RUNNER_ARGUMENTS.length; index += 1) {
+    const argument = RUNNER_ARGUMENTS[index]!;
+    if (argument === '--filter') {
+      filterCount += 1;
+      const pattern = RUNNER_ARGUMENTS[index + 1];
+      if (!pattern || pattern.startsWith('-')) {
+        refuseRunner('--filter requires one non-option pattern');
+      }
+      if (filterCount > 1) {
+        refuseRunner('--filter may be provided only once');
+      }
+      index += 1;
+      continue;
+    }
+    if (argument === '--json' || argument === '--parallel' || argument === '--include-system') {
+      continue;
+    }
+    if (argument.startsWith('-')) {
+      refuseRunner(`unknown SDK test-runner option: ${argument}`);
+    }
+    specificTests += 1;
+    if (specificTests > 1) {
+      refuseRunner('only one reviewed SDK test path may be provided');
+    }
+  }
+}
+
+validateRunnerArguments();
 
 function positiveSafeInteger(name: string, fallback: number): number {
   const configured = process.env[name];
   if (configured === undefined || configured === '') return fallback;
   const parsed = Number(configured);
   if (!/^[1-9][0-9]*$/.test(configured) || !Number.isSafeInteger(parsed)) {
-    console.error(`[sdk-tests] REFUSED ${name} must be a positive safe integer`);
-    process.exit(78);
+    refuseRunner(`${name} must be a positive safe integer`);
   }
   return parsed;
 }
 
-const NONINTERACTIVE = process.env.SCRIPT_KIT_NONINTERACTIVE === '1';
-const TIMEOUT_MS = positiveSafeInteger('SDK_TEST_TIMEOUT', 5) * 1000;
+const NONINTERACTIVE_AUTHORITY = process.env.SCRIPT_KIT_NONINTERACTIVE ?? '0';
+if (NONINTERACTIVE_AUTHORITY !== '0' && NONINTERACTIVE_AUTHORITY !== '1') {
+  refuseRunner('SCRIPT_KIT_NONINTERACTIVE must be 0 or 1');
+}
+const NONINTERACTIVE = NONINTERACTIVE_AUTHORITY === '1';
+const TIMEOUT_SECONDS = positiveSafeInteger('SDK_TEST_TIMEOUT', 5);
+if (TIMEOUT_SECONDS > Math.floor(0x7fffffff / 1000)) {
+  refuseRunner('SDK_TEST_TIMEOUT exceeds the supported timer range');
+}
+const TIMEOUT_MS = TIMEOUT_SECONDS * 1000;
 const VERBOSE = process.env.SDK_TEST_VERBOSE === 'true';
 const JSON_ONLY = process.argv.includes('--json');
 const PARALLEL = process.argv.includes('--parallel');
@@ -135,6 +180,9 @@ const CONCURRENCY = positiveSafeInteger(
   'SDK_TEST_CONCURRENCY',
   NONINTERACTIVE ? 2 : 4,
 );
+if (CONCURRENCY > 8) {
+  refuseRunner('SDK_TEST_CONCURRENCY exceeds the eight-worker safety ceiling');
+}
 
 if (NONINTERACTIVE && INCLUDE_SYSTEM) {
   console.error(
@@ -264,6 +312,7 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
     // SDK_TEST_AUTOSUBMIT=1 enables auto-resolution of prompts for CI testing
     const proc = spawn({
       cmd: ['bun', 'run', '--preload', SDK_PATH, filePath],
+      detached: true,
       cwd: PROJECT_ROOT,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -334,8 +383,28 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
         timeoutPromise,
       ]);
     } catch (error) {
-      proc.kill();
-      await Promise.allSettled([stdoutReader, stderrReader, proc.exited]);
+      try {
+        process.kill(-proc.pid, 'SIGTERM');
+      } catch {
+        proc.kill();
+      }
+      const closed = Promise.allSettled([stdoutReader, stderrReader, proc.exited]);
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      const drained = await Promise.race([
+        closed.then(() => true),
+        new Promise<boolean>((resolveGrace) => {
+          graceTimer = setTimeout(() => resolveGrace(false), 150);
+        }),
+      ]);
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+      if (!drained) {
+        try {
+          process.kill(-proc.pid, 'SIGKILL');
+        } catch {
+          proc.kill();
+        }
+      }
+      await closed;
       timeoutError ??= error instanceof Error ? error : new Error(String(error));
       logVerbose(`Process killed: ${timeoutError.message}`);
     } finally {
@@ -488,6 +557,20 @@ async function findTestFiles(specificTest?: string): Promise<string[]> {
       throw new Error(
         `Refusing system-input test ${protectedOwner} without --include-system.`,
       );
+    }
+
+    if (NONINTERACTIVE) {
+      const canonicalTest = await realpath(testPath);
+      const canonicalRoot = await realpath(TESTS_DIR);
+      const owner = relative(canonicalRoot, canonicalTest);
+      if (
+        owner === '' ||
+        owner === '..' ||
+        owner.startsWith(`..${sep}`) ||
+        isAbsolute(owner)
+      ) {
+        throw new Error('Noninteractive SDK tests require a reviewed tests/sdk owner.');
+      }
     }
 
     return [testPath];

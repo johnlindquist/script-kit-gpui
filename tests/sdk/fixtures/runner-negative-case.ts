@@ -13,6 +13,19 @@ switch (mode) {
     result("incomplete-before-timeout", "running");
     await new Promise((resolve) => setTimeout(resolve, 10_000));
     break;
+  case "grandchild-timeout": {
+    const child = Bun.spawn({
+      cmd: ["/bin/sleep", "3"],
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const pidPath = process.env.SDK_RUNNER_DESCENDANT_PID_PATH;
+    if (!pidPath) throw new Error("owned descendant PID fixture path is required");
+    await Bun.write(pidPath, String(child.pid));
+    result("owned-descendant-before-timeout", "running");
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    break;
+  }
   case "nonzero":
     result("completed-before-exit", "pass");
     process.exit(9);

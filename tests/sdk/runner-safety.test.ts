@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { copyFileSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -81,6 +89,37 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
     );
   });
 
+  test("a timed-out SDK script terminates its entire owned subprocess group", async () => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-sdk-descendant-"));
+    const pidPath = join(root, "child.pid");
+    let descendant = 0;
+    try {
+      const started = performance.now();
+      const result = await runFixture("grandchild-timeout", [], fixturePath, {
+        SDK_RUNNER_DESCENDANT_PID_PATH: pidPath,
+      });
+      const elapsed = performance.now() - started;
+      descendant = Number.parseInt(readFileSync(pidPath, "utf8"), 10);
+      let alive = true;
+      try {
+        process.kill(descendant, 0);
+      } catch {
+        alive = false;
+      }
+      expect(result.exitCode).not.toBe(0);
+      expect(elapsed).toBeLessThan(2_300);
+      expect(alive).toBe(false);
+    } finally {
+      if (!descendant && existsSync(pidPath)) {
+        descendant = Number.parseInt(readFileSync(pidPath, "utf8"), 10);
+      }
+      if (descendant > 0) {
+        try { process.kill(descendant, "SIGKILL"); } catch {}
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a nonzero exit cannot become a green partial pass", async () => {
     const result = await runFixture("nonzero");
     expect(result.exitCode).not.toBe(0);
@@ -117,6 +156,18 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
     expect(result.stderr).toContain("SCRIPT_KIT_NONINTERACTIVE=1 prohibits real system input");
   });
 
+  test.each(["", "2", "true", "-1"])(
+    "malformed noninteractive authority %s refuses before any SDK script can execute",
+    async (mode) => {
+      const result = await runFixture("safety-env", [], fixturePath, {
+        SCRIPT_KIT_NONINTERACTIVE: mode,
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("SCRIPT_KIT_NONINTERACTIVE must be 0 or 1");
+    },
+  );
+
   test("an explicit test filename cannot bypass the system-input exclusion", async () => {
     const result = await runFixture(
       "safety-env",
@@ -142,6 +193,25 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
       expect(result.exitCode).not.toBe(0);
       expect(result.stdout).toBe("");
       expect(result.stderr).toContain("Refusing system-input test test-system.ts");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreviewed absolute external script cannot execute in noninteractive mode", async () => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-sdk-external-owner-"));
+    const external = join(root, "ordinary-sdk-case.ts");
+    const sentinel = join(root, "executed.txt");
+    writeFileSync(
+      external,
+      `await Bun.write(${JSON.stringify(sentinel)}, "executed");\n` +
+      'console.log(JSON.stringify({test:"foreign-owner",status:"pass"}));\n',
+    );
+    try {
+      const result = await runFixture("safety-env", [], external);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("reviewed tests/sdk owner");
+      expect(existsSync(sentinel)).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -197,4 +267,42 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
       );
     },
   );
+
+  test.each(["2147484", "9007199254740991"])(
+    "overflowing SDK timeout %s refuses before JavaScript can truncate its timer",
+    async (timeout) => {
+      const result = await runFixture("safety-env", [], fixturePath, {
+        SDK_TEST_TIMEOUT: timeout,
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("SDK_TEST_TIMEOUT exceeds the supported timer range");
+    },
+  );
+
+  test.each(["9", "64", "9007199254740991"])(
+    "unbounded SDK worker count %s refuses before any script can start",
+    async (concurrency) => {
+      const result = await runFixture("safety-env", [], fixturePath, {
+        SDK_TEST_CONCURRENCY: concurrency,
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("SDK_TEST_CONCURRENCY exceeds the eight-worker safety ceiling");
+    },
+  );
+
+  test("a missing filter value fails closed instead of expanding into an unrequested suite", async () => {
+    const result = await runFixture("safety-env", ["--filter", "--parallel"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("--filter requires one non-option pattern");
+  });
+
+  test("unknown runner flags fail before script discovery", async () => {
+    const result = await runFixture("safety-env", ["--quietly-expand-every-script"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("unknown SDK test-runner option");
+  });
 });
