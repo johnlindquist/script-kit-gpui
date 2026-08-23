@@ -1210,6 +1210,35 @@ offline receipts until their real producers are run again.
     `final-audit/current/` directory and cannot dirty or invalidate their own
     checkout. The full program remains honestly **15/75 accepted,
     60 runtime tasks missing**.
+37. Historical progress called PF-012's browser-pixel story proof **Complete**,
+    but its producer actually read two arbitrary `/tmp` JSON files, trusted
+    self-declared `headed: true`, invented most adversarial controls, omitted
+    current source/catalog identity, and emitted an **unregistered primitive**
+    the canonical completion auditor could never accept. The underlying
+    comparator also accepted an empty selector set, unexpected selectors,
+    `NaN`/infinite/omitted tolerances, string-coerced coordinates, and
+    geometrically impossible rectangles. No approved browser dependency is
+    installed in the repository. The replacement producer defaults to a
+    genuinely passive fixture/dependency inventory; real runtime explicitly
+    requires both `SCRIPT_KIT_NONINTERACTIVE=0` and
+    `SCRIPT_KIT_ALLOW_VISIBLE_PROBES=1`, and strict mode refuses before
+    dependency discovery, output mutation, network, or browser startup.
+    An actual future Playwright/Puppeteer execution captures both exact story
+    assertions in one owner-bound headed-browser transaction, enforces a
+    **1280×720 / DPR 1** observed viewport, loaded top-level and iframe
+    fonts, stopped autoplay, settled frame pairs, exact chapter/selector
+    identities, zero-pixel comparisons, current Git/story fixture hashes,
+    and **twelve executed adversarial controls**. Network requests stay on the
+    exact reviewed loopback origin; encoded traversal and symlinked external
+    assets fail closed. A registered runtime-only receipt schema rejects
+    synthetic/noninteractive, hidden-browser, partial-story, stale-fixture,
+    forged-backend, missing-asset, or unclosed-browser claims. **19 isolated
+    geometry cases / 87 assertions** and **139 combined completion/schema
+    cases / 750 assertions** pass without starting a browser. Both producer
+    owners, their executable suite, the story manifest, and both story
+    definitions are mandatory release provenance; the actual Node story
+    suite still correctly reports **two pixel proofs pending**. PF-012 remains
+    missing until approved visible runtime observation genuinely exists.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1503,6 +1532,11 @@ offline receipts until their real producers are run again.
     directly executes and fingerprints both completion-auditor sources.
     Three pure canonical-governance suites pass **88 cases / 533 assertions**,
     including **18 workflow anti-forgery cases / 31 assertions**.
+    The browser-pixel foundation adds **19 isolated cases / 87 assertions**;
+    its combined schema/workflow/completion lane passes **139 cases / 750
+    assertions** without a browser. Publication also requires the exact
+    geometry producer, executable suite, shared harness, story manifest, and
+    both story definitions; no synthetic rectangle can satisfy PF-012.
     The independent SDK/custom-script runner now forcibly clears inherited
     screen-takeover, visible-probe, native-input, screen-capture, live-AI,
     application-launch, and notification permissions in every test child.
@@ -1521,7 +1555,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **sixty-eight direct release-owner/proof-gate cases / 205 assertions** and
+    **seventy-four direct release-owner/proof-gate cases / 224 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
