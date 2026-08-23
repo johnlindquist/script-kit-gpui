@@ -31,11 +31,18 @@ interface RunnerResult {
 async function runFixture(
   mode: string,
   extraArgs: string[] = [],
-  selectedFixture = fixturePath,
+  selectedFixture: string | null = fixturePath,
   environmentOverrides: Record<string, string> = {},
 ): Promise<RunnerResult> {
   const child = Bun.spawn({
-    cmd: ["bun", "run", runnerPath, "--json", ...extraArgs, selectedFixture],
+    cmd: [
+      "bun",
+      "run",
+      runnerPath,
+      "--json",
+      ...extraArgs,
+      ...(selectedFixture ? [selectedFixture] : []),
+    ],
     cwd: projectRoot,
     stdout: "pipe",
     stderr: "pipe",
@@ -178,6 +185,22 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
     expect(result.summary?.total_failed).toBeGreaterThan(0);
   });
 
+  test.each([
+    ["missing-result-name", "nonempty test name"],
+    ["missing-result-status", "recognized status"],
+    ["malformed-result-json", "malformed SDK result"],
+    ["invalid-result-timestamp", "valid timestamp"],
+    ["invalid-result-duration", "nonnegative safe duration"],
+    ["skip-with-error", "cannot carry an error"],
+  ])("malformed script outcome %s cannot disappear behind a genuine pass", async (mode, diagnostic) => {
+    const result = await runFixture(mode);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.summary?.total_failed).toBeGreaterThan(0);
+    expect(result.summary?.files[0]?.tests).toContainEqual(
+      expect.objectContaining({ status: "fail", error: expect.stringContaining(diagnostic) }),
+    );
+  });
+
   test("noninteractive mode refuses system input before child execution", async () => {
     const result = await runFixture("safety-env", ["--include-system"]);
     expect(result.exitCode).not.toBe(0);
@@ -244,6 +267,69 @@ describe("SDK runner fail-closed and noninteractive contracts", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("automatic discovery refuses an SDK-shaped symlink to an unreviewed external script", async () => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-sdk-discovery-owner-"));
+    const external = join(root, "foreign-owner.ts");
+    const sentinel = join(root, "executed.txt");
+    const discoveredName = `test-unreviewed-owner-${process.pid}-${Date.now()}.ts`;
+    const discoveredPath = join(import.meta.dir, discoveredName);
+    writeFileSync(
+      external,
+      `await Bun.write(${JSON.stringify(sentinel)}, "executed");\n` +
+      'console.log(JSON.stringify({test:"foreign-owner",status:"pass",timestamp:new Date().toISOString()}));\n',
+    );
+    symlinkSync(external, discoveredPath);
+    try {
+      const result = await runFixture("safety-env", ["--filter", discoveredName], null);
+      expect(result.exitCode).not.toBe(0);
+      expect(existsSync(sentinel)).toBe(false);
+      expect(result.stderr).toContain("reviewed tests/sdk owner");
+    } finally {
+      rmSync(discoveredPath, { force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each(["stdout-flood", "stderr-flood"])(
+    "unbounded %s cannot consume memory or outlive the reviewed output budget",
+    async (mode) => {
+      const started = performance.now();
+      const result = await runFixture(mode, [], fixturePath, {
+        SDK_TEST_MAX_OUTPUT_BYTES: "1024",
+        SDK_TEST_TIMEOUT: "5",
+      });
+      expect(performance.now() - started).toBeLessThan(2_000);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.summary?.files[0]?.tests).toContainEqual(
+        expect.objectContaining({
+          status: "fail",
+          error: expect.stringContaining("exceeds the 1024-byte safety budget"),
+        }),
+      );
+    },
+  );
+
+  test.each(["0", "-1", "1.5", "9007199254740992"])(
+    "invalid SDK output budget %s refuses before starting any child",
+    async (budget) => {
+      const result = await runFixture("safety-env", [], fixturePath, {
+        SDK_TEST_MAX_OUTPUT_BYTES: budget,
+      });
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("SDK_TEST_MAX_OUTPUT_BYTES must be a positive safe integer");
+    },
+  );
+
+  test("oversized SDK output budgets refuse before starting any child", async () => {
+    const result = await runFixture("safety-env", [], fixturePath, {
+      SDK_TEST_MAX_OUTPUT_BYTES: "8388609",
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("SDK_TEST_MAX_OUTPUT_BYTES exceeds the eight-megabyte safety ceiling");
   });
 
   test("runner overrides inherited screen, input, and live-AI opt-ins", async () => {

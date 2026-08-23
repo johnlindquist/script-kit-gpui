@@ -17,6 +17,7 @@
  *   SDK_TEST_TIMEOUT=10    # Max seconds per test (default: 5)
  *   SDK_TEST_VERBOSE=true  # Extra debug output
  *   SDK_TEST_CONCURRENCY=4 # Max workers (default: 2 noninteractive, 4 otherwise)
+ *   SDK_TEST_MAX_OUTPUT_BYTES=1048576 # Per-stream child-output safety budget
  *   SCRIPT_KIT_NONINTERACTIVE=1 # Refuse system-input tests before starting children
  * 
  * =============================================================================
@@ -172,6 +173,10 @@ if (TIMEOUT_SECONDS > Math.floor(0x7fffffff / 1000)) {
   refuseRunner('SDK_TEST_TIMEOUT exceeds the supported timer range');
 }
 const TIMEOUT_MS = TIMEOUT_SECONDS * 1000;
+const MAX_OUTPUT_BYTES = positiveSafeInteger('SDK_TEST_MAX_OUTPUT_BYTES', 1024 * 1024);
+if (MAX_OUTPUT_BYTES > 8 * 1024 * 1024) {
+  refuseRunner('SDK_TEST_MAX_OUTPUT_BYTES exceeds the eight-megabyte safety ceiling');
+}
 const VERBOSE = process.env.SDK_TEST_VERBOSE === 'true';
 const JSON_ONLY = process.argv.includes('--json');
 const PARALLEL = process.argv.includes('--parallel');
@@ -325,6 +330,7 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
         SDK_TEST_FILE_FIXTURES: fileName === 'test-file-search.ts' ? '1' : '0',
         SDK_TEST_MENU_FIXTURES: fileName === 'test-menu-bar-api.ts' ? '1' : '0',
         SDK_TEST_CONCURRENCY: String(CONCURRENCY),
+        SDK_TEST_MAX_OUTPUT_BYTES: String(MAX_OUTPUT_BYTES),
         SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: '0',
         SCRIPT_KIT_ALLOW_VISIBLE_PROBES: '0',
         SCRIPT_KIT_ALLOW_NATIVE_INPUT: '0',
@@ -342,11 +348,13 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
     
     // Create a timeout promise
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-    let timeoutError: Error | undefined;
+    let processFailure: Error | undefined;
+    let processFailureLabel = 'process failure';
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutHandle = setTimeout(() => {
-        timeoutError = new Error(`Test timed out after ${TIMEOUT_MS}ms`);
-        reject(timeoutError);
+        processFailure = new Error(`Test timed out after ${TIMEOUT_MS}ms`);
+        processFailureLabel = 'process timeout';
+        reject(processFailure);
       }, TIMEOUT_MS);
     });
     
@@ -354,27 +362,47 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
     const stdoutReader = (async () => {
       const reader = proc.stdout.getReader();
       const decoder = new TextDecoder();
+      let outputBytes = 0;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        stdout += decoder.decode(value);
+        const remaining = MAX_OUTPUT_BYTES - outputBytes;
+        if (value.byteLength > remaining) {
+          if (remaining > 0) {
+            stdout += decoder.decode(value.subarray(0, remaining), { stream: true });
+          }
+          throw new Error(`SDK stdout exceeds the ${MAX_OUTPUT_BYTES}-byte safety budget`);
+        }
+        outputBytes += value.byteLength;
+        stdout += decoder.decode(value, { stream: true });
       }
+      stdout += decoder.decode();
     })();
     
     // Read stderr in chunks
     const stderrReader = (async () => {
       const reader = proc.stderr.getReader();
       const decoder = new TextDecoder();
+      let outputBytes = 0;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value);
+        const remaining = MAX_OUTPUT_BYTES - outputBytes;
+        if (value.byteLength > remaining) {
+          if (remaining > 0) {
+            stderr += decoder.decode(value.subarray(0, remaining), { stream: true });
+          }
+          throw new Error(`SDK stderr exceeds the ${MAX_OUTPUT_BYTES}-byte safety budget`);
+        }
+        outputBytes += value.byteLength;
+        const chunk = decoder.decode(value, { stream: true });
         stderr += chunk;
         if (VERBOSE) {
           // Print stderr in real-time for debugging
           process.stderr.write(chunk);
         }
       }
+      stderr += decoder.decode();
     })();
     
     try {
@@ -405,8 +433,11 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
         }
       }
       await closed;
-      timeoutError ??= error instanceof Error ? error : new Error(String(error));
-      logVerbose(`Process killed: ${timeoutError.message}`);
+      processFailure ??= error instanceof Error ? error : new Error(String(error));
+      if (processFailure.message.includes('-byte safety budget')) {
+        processFailureLabel = 'output limit';
+      }
+      logVerbose(`Process killed: ${processFailure.message}`);
     } finally {
       if (timeoutHandle !== undefined) {
         clearTimeout(timeoutHandle);
@@ -421,67 +452,114 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
     // Parse JSONL results from stdout
     const lines = stdout.split('\n').filter(line => line.trim());
     const terminalResults = new Map<string, TestResult['status']>();
-    for (const line of lines) {
+    for (const [lineIndex, line] of lines.entries()) {
+      let parsed: unknown;
       try {
-        const result = JSON.parse(line) as TestResult;
-        if (result.test && result.status) {
-          if (!['running', 'pass', 'fail', 'skip'].includes(result.status)) {
-            tests.push({
-              test: `${result.test} [invalid status]`,
-              status: 'fail',
-              timestamp: new Date().toISOString(),
-              error: `Unrecognized test status: ${String(result.status)}`,
-              duration_ms: result.duration_ms,
-            });
-            log(`  ❌ ${result.test} - Unrecognized test status: ${String(result.status)}`);
-            continue;
-          }
-
-          const terminalStatus = terminalResults.get(result.test);
-          if (terminalStatus) {
-            const failureLabel = result.status === 'running'
-              ? 'post-terminal transition'
-              : 'duplicate terminal result';
-            tests.push({
-              test: `${result.test} [${failureLabel}]`,
-              status: 'fail',
-              timestamp: new Date().toISOString(),
-              error:
-                `SDK result ${result.test} already completed as ${terminalStatus}; ` +
-                `a later ${result.status} result cannot replace it.`,
-              duration_ms: result.duration_ms,
-            });
-            continue;
-          }
-          if (result.status === 'pass' && result.error != null) {
-            tests.push({
-              ...result,
-              status: 'fail',
-              error: `A passing SDK result cannot carry an error: ${String(result.error)}`,
-            });
-            terminalResults.set(result.test, 'fail');
-            continue;
-          }
-          if (result.status !== 'running') {
-            terminalResults.set(result.test, result.status);
-          }
-
-          tests.push(result);
-          
-          // Print result in human-readable format
-          const icon = result.status === 'pass' ? '✅' : 
-                       result.status === 'fail' ? '❌' : 
-                       result.status === 'skip' ? '⏭️' : '🔄';
-          const duration = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
-          const error = result.error ? ` - ${result.error}` : '';
-          
-          if (result.status !== 'running') {
-            log(`  ${icon} ${result.test}${duration}${error}`);
-          }
-        }
+        parsed = JSON.parse(line);
       } catch {
-        // Not JSON, might be other output
+        if (/^\s*\{/.test(line) && /"(?:test|status)"\s*:/.test(line)) {
+          tests.push({
+            test: `${fileName} [malformed result ${lineIndex + 1}]`,
+            status: 'fail',
+            timestamp: new Date().toISOString(),
+            error: 'malformed SDK result JSON cannot be ignored',
+          });
+          continue;
+        }
         logVerbose(`Non-JSON line: ${line.substring(0, 80)}...`);
+        continue;
+      }
+
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        continue;
+      }
+      const rawResult = parsed as Record<string, unknown>;
+      if (!Object.hasOwn(rawResult, 'test') && !Object.hasOwn(rawResult, 'status')) {
+        continue;
+      }
+
+      const malformedResult = (message: string) => {
+        const resultName = typeof rawResult.test === 'string' && rawResult.test.trim()
+          ? rawResult.test
+          : fileName;
+        tests.push({
+          test: `${resultName} [invalid result ${lineIndex + 1}]`,
+          status: 'fail',
+          timestamp: new Date().toISOString(),
+          error: message,
+        });
+      };
+
+      if (typeof rawResult.test !== 'string' || rawResult.test.trim() === '') {
+        malformedResult('SDK result requires a nonempty test name');
+        continue;
+      }
+      if (typeof rawResult.status !== 'string') {
+        malformedResult('SDK result requires a recognized status');
+        continue;
+      }
+      if (!['running', 'pass', 'fail', 'skip'].includes(rawResult.status)) {
+        tests.push({
+          test: `${rawResult.test} [invalid status]`,
+          status: 'fail',
+          timestamp: new Date().toISOString(),
+          error: `Unrecognized test status: ${String(rawResult.status)}`,
+        });
+        log(`  ❌ ${rawResult.test} - Unrecognized test status: ${String(rawResult.status)}`);
+        continue;
+      }
+      if (typeof rawResult.timestamp !== 'string' || Number.isNaN(Date.parse(rawResult.timestamp))) {
+        malformedResult('SDK result requires a valid timestamp');
+        continue;
+      }
+      if (
+        rawResult.duration_ms !== undefined &&
+        (!Number.isSafeInteger(rawResult.duration_ms) || Number(rawResult.duration_ms) < 0)
+      ) {
+        malformedResult('SDK result requires a nonnegative safe duration');
+        continue;
+      }
+
+      const result = rawResult as unknown as TestResult;
+      const terminalStatus = terminalResults.get(result.test);
+      if (terminalStatus) {
+        const failureLabel = result.status === 'running'
+          ? 'post-terminal transition'
+          : 'duplicate terminal result';
+        tests.push({
+          test: `${result.test} [${failureLabel}]`,
+          status: 'fail',
+          timestamp: new Date().toISOString(),
+          error:
+            `SDK result ${result.test} already completed as ${terminalStatus}; ` +
+            `a later ${result.status} result cannot replace it.`,
+          duration_ms: result.duration_ms,
+        });
+        continue;
+      }
+      if ((result.status === 'pass' || result.status === 'skip') && result.error != null) {
+        tests.push({
+          ...result,
+          status: 'fail',
+          error: `A ${result.status === 'pass' ? 'passing' : 'skipped'} SDK result cannot carry an error: ${String(result.error)}`,
+        });
+        terminalResults.set(result.test, 'fail');
+        continue;
+      }
+      if (result.status !== 'running') {
+        terminalResults.set(result.test, result.status);
+      }
+
+      tests.push(result);
+
+      const icon = result.status === 'pass' ? '✅' :
+                   result.status === 'fail' ? '❌' :
+                   result.status === 'skip' ? '⏭️' : '🔄';
+      const duration = result.duration_ms ? ` (${result.duration_ms}ms)` : '';
+      const error = result.error ? ` - ${result.error}` : '';
+
+      if (result.status !== 'running') {
+        log(`  ${icon} ${result.test}${duration}${error}`);
       }
     }
 
@@ -500,15 +578,15 @@ async function runTestFile(filePath: string): Promise<TestFileResult> {
       }
     }
 
-    if (timeoutError) {
+    if (processFailure) {
       tests.push({
-        test: `${fileName} [process timeout]`,
+        test: `${fileName} [${processFailureLabel}]`,
         status: 'fail',
         timestamp: new Date().toISOString(),
-        error: timeoutError.message,
+        error: processFailure.message,
         duration_ms: Date.now() - startTime,
       });
-      log(`  ❌ ${fileName} - ${timeoutError.message}`);
+      log(`  ❌ ${fileName} - ${processFailure.message}`);
     } else if (exitCode !== 0) {
       tests.push({
         test: `${fileName} [process exit]`,
@@ -574,6 +652,20 @@ async function protectedSystemInputOwner(testPath: string): Promise<string | nul
   return SYSTEM_INPUT_TESTS.has(canonicalName) ? canonicalName : null;
 }
 
+async function canonicalReviewedSdkTest(testPath: string, canonicalRoot: string): Promise<string> {
+  const canonicalTest = await realpath(testPath);
+  const owner = relative(canonicalRoot, canonicalTest);
+  if (
+    owner === '' ||
+    owner === '..' ||
+    owner.startsWith(`..${sep}`) ||
+    isAbsolute(owner)
+  ) {
+    throw new Error('Noninteractive SDK tests require a reviewed tests/sdk owner.');
+  }
+  return canonicalTest;
+}
+
 async function findTestFiles(specificTest?: string): Promise<string[]> {
   if (specificTest) {
     const testPath = specificTest.startsWith('/')
@@ -590,17 +682,8 @@ async function findTestFiles(specificTest?: string): Promise<string[]> {
     }
 
     if (NONINTERACTIVE) {
-      const canonicalTest = await realpath(testPath);
       const canonicalRoot = await realpath(TESTS_DIR);
-      const owner = relative(canonicalRoot, canonicalTest);
-      if (
-        owner === '' ||
-        owner === '..' ||
-        owner.startsWith(`..${sep}`) ||
-        isAbsolute(owner)
-      ) {
-        throw new Error('Noninteractive SDK tests require a reviewed tests/sdk owner.');
-      }
+      return [await canonicalReviewedSdkTest(testPath, canonicalRoot)];
     }
 
     return [testPath];
@@ -612,6 +695,7 @@ async function findTestFiles(specificTest?: string): Promise<string[]> {
     let testFiles = files
       .filter(f => f.startsWith('test-') && f.endsWith('.ts'))
       .sort();
+    let canonicalPaths = new Map<string, string>();
 
     // Exclude tests that send real system input (keystrokes, clipboard)
     // unless --include-system is passed
@@ -631,16 +715,26 @@ async function findTestFiles(specificTest?: string): Promise<string[]> {
       }
     }
 
+    if (NONINTERACTIVE) {
+      const canonicalRoot = await realpath(TESTS_DIR);
+      canonicalPaths = new Map(await Promise.all(
+        testFiles.map(async (file) => [
+          file,
+          await canonicalReviewedSdkTest(join(TESTS_DIR, file), canonicalRoot),
+        ] as const),
+      ));
+    }
+
     // Apply filter pattern if specified
     if (FILTER_PATTERN) {
       testFiles = testFiles.filter(f => FILTER_PATTERN!.test(f));
       logVerbose(`Filter pattern matched ${testFiles.length} files`);
     }
     
-    return testFiles.map(f => join(TESTS_DIR, f));
-  } catch {
-    log(`Warning: Could not read ${TESTS_DIR}`);
-    return [];
+    return testFiles.map(f => canonicalPaths.get(f) ?? join(TESTS_DIR, f));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`SDK test discovery failed: ${detail}`);
   }
 }
 

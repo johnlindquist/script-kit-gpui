@@ -48,6 +48,40 @@ switch (mode) {
   case "pass-with-error":
     result("false-green-with-error", "pass", "actual hidden failure");
     break;
+  case "missing-result-name":
+    result("valid-before-hidden-failure", "pass");
+    console.log(JSON.stringify({ test: "", status: "fail", timestamp: new Date().toISOString() }));
+    break;
+  case "missing-result-status":
+    result("valid-before-hidden-failure", "pass");
+    console.log(JSON.stringify({ test: "hidden-failure", error: "actual failure", timestamp: new Date().toISOString() }));
+    break;
+  case "malformed-result-json":
+    result("valid-before-hidden-failure", "pass");
+    console.log('{"test":"hidden-failure","status":"fail"');
+    break;
+  case "invalid-result-timestamp":
+    result("valid-before-hidden-failure", "pass");
+    console.log(JSON.stringify({ test: "forged-timestamp", status: "pass", timestamp: "not-a-date" }));
+    break;
+  case "invalid-result-duration":
+    result("valid-before-hidden-failure", "pass");
+    console.log(JSON.stringify({ test: "forged-duration", status: "pass", timestamp: new Date().toISOString(), duration_ms: -1 }));
+    break;
+  case "skip-with-error":
+    result("valid-before-hidden-failure", "pass");
+    result("hidden-failed-skip", "skip", "actual hidden failure");
+    break;
+  case "stdout-flood":
+    result("valid-before-output-flood", "pass");
+    process.stdout.write("x".repeat(65_536));
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    break;
+  case "stderr-flood":
+    result("valid-before-output-flood", "pass");
+    process.stderr.write("x".repeat(65_536));
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    break;
   case "safety-env": {
     const safe =
       process.env.SDK_TEST_AUTOSUBMIT === "1" &&
