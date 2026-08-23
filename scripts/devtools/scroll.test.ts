@@ -9,7 +9,7 @@ import {
   normalizeScriptListScrollMeasurement,
   renderedSafeViewportMeasurement,
 } from "./scroll.ts";
-import { ProtocolCore, type Json } from "./driver.ts";
+import { gpuiScrollWheelCommand, ProtocolCore, type Json } from "./driver.ts";
 
 const completeAffordance = {
   atTop: true,
@@ -197,14 +197,12 @@ class CapturingProtocol extends ProtocolCore {
   async close(): Promise<void> {}
 }
 
-test("typed scroll-wheel helper emits the exact pixel-only phased wire event", async () => {
-  const protocol = new CapturingProtocol();
-  await protocol.simulateGpuiScrollWheel(
+test("typed scroll-wheel helper emits the exact pixel-only phased wire event without injecting input", () => {
+  const command = gpuiScrollWheelCommand(
     { x: 12.5, y: 48, deltaX: 0, deltaY: 36, phase: "moved" },
-    { target: { type: "main" } },
+    { type: "main" },
   );
 
-  const command = protocol.writes[0];
   expect(command.type).toBe("simulateGpuiEvent");
   expect(command.target).toEqual({ type: "main" });
   expect(command.event).toEqual({
@@ -218,11 +216,10 @@ test("typed scroll-wheel helper emits the exact pixel-only phased wire event", a
   expect(command.event.deltaMode).toBeUndefined();
 });
 
-test("typed scroll-wheel helper preserves direct and momentum lifecycle fields", async () => {
-  const protocol = new CapturingProtocol();
+test("typed scroll-wheel helper preserves direct and momentum lifecycle fields without a transport", () => {
   const phases = ["began", "changed", "ended"] as const;
-  for (const [index, phase] of phases.entries()) {
-    await protocol.simulateGpuiScrollWheel({
+  const commands = [...phases.entries()].map(([index, phase]) =>
+    gpuiScrollWheelCommand({
       x: 10,
       y: 20,
       deltaX: 0,
@@ -231,12 +228,46 @@ test("typed scroll-wheel helper preserves direct and momentum lifecycle fields",
       directPhase: phase,
       momentumPhase: phase,
       timestampSeconds: 100.5 + index,
-    });
+    })
+  );
+  expect(commands.map((command) => command.event.directPhase)).toEqual(phases);
+  expect(commands.map((command) => command.event.momentumPhase)).toEqual(phases);
+  expect(commands[1].event.deltaY).toBe(3.25);
+  expect(commands[2].event.timestampSeconds).toBe(102.5);
+});
+
+test("invalid wheel geometry, line-mode injection, lifecycle, and timestamps fail before transport", () => {
+  const valid = { x: 10, y: 20, deltaX: 0, deltaY: 1, phase: "moved" as const };
+  for (const invalid of [
+    { ...valid, x: NaN },
+    { ...valid, deltaY: Infinity },
+    { ...valid, deltaMode: "lines" },
+    { ...valid, phase: "unreviewed" },
+    { ...valid, directPhase: "unreviewed" },
+    { ...valid, momentumPhase: "unreviewed" },
+    { ...valid, timestampSeconds: -1 },
+  ]) {
+    expect(() => gpuiScrollWheelCommand(invalid as any)).toThrow();
   }
-  expect(protocol.writes.map((command) => command.event.directPhase)).toEqual(phases);
-  expect(protocol.writes.map((command) => command.event.momentumPhase)).toEqual(phases);
-  expect(protocol.writes[1].event.deltaY).toBe(3.25);
-  expect(protocol.writes[2].event.timestampSeconds).toBe(102.5);
+});
+
+test("strict operator safety refuses a real scroll transport before its first write", () => {
+  const original = process.env.SCRIPT_KIT_NONINTERACTIVE;
+  process.env.SCRIPT_KIT_NONINTERACTIVE = "1";
+  try {
+    const protocol = new CapturingProtocol();
+    expect(() => protocol.simulateGpuiScrollWheel({
+      x: 10,
+      y: 20,
+      deltaX: 0,
+      deltaY: 1,
+      phase: "moved",
+    })).toThrow("NONINTERACTIVE=1 refused simulateGpuiEvent");
+    expect(protocol.writes).toEqual([]);
+  } finally {
+    if (original === undefined) delete process.env.SCRIPT_KIT_NONINTERACTIVE;
+    else process.env.SCRIPT_KIT_NONINTERACTIVE = original;
+  }
 });
 
 test("typed active-list helper reads the canonical state field", async () => {

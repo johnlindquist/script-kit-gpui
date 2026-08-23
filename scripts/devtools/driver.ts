@@ -140,6 +140,56 @@ export interface GpuiScrollWheelEvent {
   timestampSeconds?: number;
 }
 
+/** Pure, fail-closed encoder for GPUI's exact pixel-only wheel protocol. */
+export function gpuiScrollWheelCommand(event: GpuiScrollWheelEvent, target?: Json): Json {
+  const required = ["x", "y", "deltaX", "deltaY"] as const;
+  if (required.some((field) =>
+    typeof event[field] !== "number" || !Number.isFinite(event[field])
+  )) {
+    throw new Error("GPUI scroll-wheel coordinates and deltas must be finite CSS pixels");
+  }
+  if (!["started", "moved", "ended"].includes(event.phase)) {
+    throw new Error("GPUI scroll-wheel phase must be started, moved, or ended");
+  }
+  const allowedKeys = new Set([
+    "x", "y", "deltaX", "deltaY", "phase", "directPhase", "momentumPhase", "timestampSeconds",
+  ]);
+  if (Object.keys(event).some((field) => !allowedKeys.has(field))) {
+    throw new Error("GPUI scroll-wheel events allow only reviewed pixel-delta protocol fields");
+  }
+  const lifecyclePhases = new Set([
+    "none", "mayBegin", "began", "changed", "stationary", "ended", "cancelled",
+  ]);
+  for (const field of ["directPhase", "momentumPhase"] as const) {
+    if (event[field] !== undefined && !lifecyclePhases.has(event[field]!)) {
+      throw new Error(`GPUI scroll-wheel ${field} is not a supported lifecycle phase`);
+    }
+  }
+  if (
+    event.timestampSeconds !== undefined &&
+    (!Number.isFinite(event.timestampSeconds) || event.timestampSeconds < 0)
+  ) {
+    throw new Error("GPUI scroll-wheel timestamps must be finite nonnegative seconds");
+  }
+
+  const command: Json = {
+    type: "simulateGpuiEvent",
+    event: {
+      type: "scrollWheel",
+      x: event.x,
+      y: event.y,
+      deltaX: event.deltaX,
+      deltaY: event.deltaY,
+      phase: event.phase,
+      ...(event.directPhase === undefined ? {} : { directPhase: event.directPhase }),
+      ...(event.momentumPhase === undefined ? {} : { momentumPhase: event.momentumPhase }),
+      ...(event.timestampSeconds === undefined ? {} : { timestampSeconds: event.timestampSeconds }),
+    },
+  };
+  if (target !== undefined) command.target = target;
+  return command;
+}
+
 /** Stable semantic + viewport contract emitted for the currently active native list. */
 export interface ActiveListScrollReceipt extends Json {
   surface: string;
@@ -482,7 +532,10 @@ export abstract class ProtocolCore {
     event: GpuiScrollWheelEvent,
     opts: { target?: Json; timeoutMs?: number } = {},
   ): Promise<Json> {
-    return this.simulateGpuiEvent({ ...event, type: "scrollWheel" }, opts);
+    return this.request(gpuiScrollWheelCommand(event, opts.target), {
+      expect: "simulateGpuiEventResult",
+      timeoutMs: opts.timeoutMs ?? this.defaultTimeoutMs,
+    });
   }
 
   async simulateGpuiClick(
