@@ -1112,6 +1112,17 @@ offline receipts until their real producers are run again.
     seven child routes cross the immutable shared guard, MCP refuses before
     discovery, and fully skipped/help paths remain genuinely passive. The
     actual screenshot owner is mandatory release provenance.
+31. The shared target resolver and the independent Actions, Dictation, Agent
+    Chat, and Events consumers ignored failed, unready, foreign, or ownership-
+    ambiguous session-start receipts; four also ignored failed window-show
+    receipts and continued into further inspection. The target resolver alone
+    feeds eight additional surface clients. Actions additionally forwarded
+    unchecked child-environment overrides, and all four independent consumer
+    sources were absent from mandatory release provenance. One shared exact
+    lifecycle contract now validates status, session identity, readiness, and
+    explicit resumed/new ownership before any follow-up; failed show halts
+    immediately, Actions inherits immutable subprocess authority, and all
+    four real owners are mandatory release sources.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1362,17 +1373,19 @@ offline receipts until their real producers are run again.
     explicit `noninteractive: false` options nor replacement environments
     can weaken the real parent's authority; target resolution stays on its
     capture-free hidden-state path even when callers request an interactive
-    override. The standalone operator-safety suite passes **90 cases and
-    357 assertions**, including pure canonical-inspector ownership, immutable
+    override. The standalone operator-safety suite passes **112 cases and
+    416 assertions**, including pure canonical-inspector ownership, immutable
     subprocess policy, Notes/matrix/scenario cleanup, mocked native-spawn
-    cases, and default/render/fallback screenshot refusal; the separate
+    cases, default/render/fallback screenshot refusal, exact session lifecycle,
+    and independent consumer/Actions child-authority refusal; the separate
     direct native-input suite passes **43 cases and 89
     assertions** without touching a keyboard, pointer, window, or screen;
     the separate hidden-target identity suite passes
     **14 cases and 66 assertions**. Release evidence now fail-closes unless
-    all twenty-two actual safety owners—the direct session shell, shared
+    all twenty-six actual safety owners—the direct session shell, shared
     identity helper, isolated startup, DevTools bootstrap, readiness waiter,
-    canonical inspector, Notes, filterable matrix, both navigators, exact
+    canonical inspector, Actions, Agent Chat, Dictation, Events, Notes,
+    filterable matrix, both navigators, exact
     target thread, scenario runner, automation-window owner, dedicated
     screenshot verifier, native window owner, native-input owner and behavior
     suite, Driver, shared client, central policy, target resolver, and status
@@ -1397,7 +1410,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **twenty-five direct release-owner/proof-gate cases / 75 assertions** and
+    **twenty-nine direct release-owner/proof-gate cases / 87 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
