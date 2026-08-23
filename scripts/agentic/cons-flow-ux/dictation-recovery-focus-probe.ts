@@ -4,6 +4,17 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+  type WorkflowObservedSegment,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import { WORKFLOW_TASK_PROOF_SPECS } from "../../devtools/lib/workflow-task-contract.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("cons-flow-ux.dictation-recovery-focus");
 
@@ -16,6 +27,7 @@ const ACTIONS_TARGET: Json = { type: "kind", kind: "actionsDialog", index: 0 };
 
 type Obj = Record<string, any>;
 type Scenario = { id: string; pass: boolean; failures: string[]; facts: Obj; cleanup: Obj };
+const observedSegments = new Map<string, WorkflowObservedSegment>();
 const asObj = (value: unknown): Obj => value && typeof value === "object" && !Array.isArray(value) ? value as Obj : {};
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 function assert(condition: unknown, message: string, detail?: unknown): asserts condition {
@@ -97,6 +109,7 @@ async function chooseVisibleAction(driver: Driver, query: string): Promise<void>
 }
 async function runScenario(id: string, body: (driver: Driver, facts: Obj) => Promise<void>, extraEnv: Record<string, string> = {}): Promise<Scenario> {
   const failures: string[] = []; const facts: Obj = {}; let cleanup: Obj = {}; let driver: Driver | null = null;
+  let targetObservation: RuntimeTargetObservation | null = null;
   try {
     driver = await Driver.launch({
       binary: BINARY, sessionName: `cons-flow-c13-${id}`, sandboxHome: true, sharedModels: false,
@@ -108,12 +121,23 @@ async function runScenario(id: string, body: (driver: Driver, facts: Obj) => Pro
       },
     });
     await driver.waitForSettle(); await body(driver, facts);
+    targetObservation = await observeWorkflowTaskTarget(driver, BINARY, { type: "main" });
   } catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
   finally {
     if (driver) {
       await driver.close().catch((error) => failures.push(`driver.close: ${String(error)}`));
-      cleanup = asObj(driver.finalization);
-      if (cleanup.processExited !== true || cleanup.streamsDrained !== true || cleanup.logWriterClosed !== true) failures.push("incomplete Driver finalization");
+      cleanup = {
+        ...asObj(driver.finalization),
+        ownedProcessCount: exactExecutablePids(BINARY).length,
+        closeError: null,
+        clipboardTouched: id === "stale-copy-history",
+        clipboardRestored: id !== "stale-copy-history" || facts.clipboardRestored === true,
+      };
+      if (cleanup.processExited !== true || cleanup.streamsDrained !== true || cleanup.logWriterClosed !== true || cleanup.ownedProcessCount !== 0) {
+        failures.push("incomplete Driver finalization");
+      } else if (targetObservation !== null) {
+        observedSegments.set(id, observedWorkflowSegment(id, targetObservation, cleanup));
+      }
     }
   }
   return { id, pass: failures.length === 0, failures, facts, cleanup };
@@ -140,7 +164,21 @@ scenarios.push(await runScenario("stale-copy-history", async (driver, facts) => 
     assert(sha256(copied) === sha256(transcript), "Copy Transcript did not copy the preserved bytes");
     assert((await windows(driver)).some((item) => item.kind === "actionsDialog"), "Recovery Actions did not remain available after Copy");
   } finally {
-    Bun.spawnSync(["/usr/bin/pbcopy"], { stdin: previousClipboard, stdout: "pipe", stderr: "pipe" });
+    const restored = Bun.spawnSync(["/usr/bin/pbcopy"], {
+      stdin: previousClipboard,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    assert(restored.exitCode === 0, "Copy Transcript could not restore the previous clipboard");
+    const afterRestore = Bun.spawnSync(["/usr/bin/pbpaste"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    assert(
+      afterRestore.exitCode === 0 && sha256(afterRestore.stdout) === sha256(previousClipboard),
+      "Copy Transcript did not restore the exact original clipboard bytes",
+    );
+    facts.clipboardRestored = true;
   }
   const afterCopy = asObj((await dictation(driver)).recovery);
   assert(afterCopy.transcriptId === recovery.transcriptId && afterCopy.historyEntryId === recovery.historyEntryId, "Copy changed preservation identity", afterCopy);
@@ -231,5 +269,62 @@ const receipt = {
 };
 mkdirSync(OUT_DIR, { recursive: true });
 await Bun.write(OUT_PATH, `${JSON.stringify(receipt, null, 2)}\n`);
+for (const taskId of ["WF-022", "WF-023"] as const) {
+  try {
+    assert(receipt.pass, "Dictation recovery/focus journey did not pass");
+    const selected = WORKFLOW_TASK_PROOF_SPECS[taskId].stageIds.map((id) => {
+      const scenario = scenarios.find((item) => item.id === id);
+      const segment = observedSegments.get(id);
+      assert(scenario?.pass === true && segment, `missing observed Dictation recovery stage: ${id}`);
+      return { scenario, segment };
+    });
+    const recovery = scenarios.find((scenario) => scenario.id === "stale-copy-history");
+    const focus = scenarios.find((scenario) => scenario.id === "microphone-picker-restores-overlay");
+    const controls = taskId === "WF-022"
+      ? {
+          "failed-delivery-retains-transcript":
+            typeof recovery?.facts.transcriptId === "string" &&
+            typeof recovery?.facts.historyEntryId === "string",
+          "unsupported-recovery-never-advertised":
+            Array.isArray(recovery?.facts.visibleActionIds) &&
+            recovery.facts.visibleActionIds.every((id: unknown) =>
+              typeof id === "string" && id.startsWith("dictation_recovery:")
+            ),
+        }
+      : {
+          "stale-focus-generation-never-restored": focus?.facts.generationValidated === true,
+          "dismissal-never-starts-microphone": receipt.safety.microphoneCaptureStarted === false,
+        };
+    const clipboardTouched = selected.some(({ scenario }) => scenario.id === "stale-copy-history");
+    const prepared = prepareWorkflowTaskProof(taskId, {
+      producerOwner: "scripts/agentic/cons-flow-ux/dictation-recovery-focus-probe.ts",
+      segments: selected.map((item) => item.segment),
+      stages: selected.map(({ scenario, segment }) => observedWorkflowStage({
+        id: scenario.id,
+        primitiveId: "devtools.act",
+        segment,
+        command: "dictation.executeRecoveryAction",
+        requestId: `${taskId}:${scenario.id}`,
+        result: scenario.facts,
+        pass: scenario.pass,
+      })),
+      negativeControls: controls,
+      safety: {
+        microphoneCaptureStarted: false,
+        nativeInputInjected: false,
+        liveAiStarted: false,
+        screenTakeoverStarted: false,
+        clipboardTouched,
+        clipboardRestored: !clipboardTouched || recovery?.facts.clipboardRestored === true,
+      },
+    });
+    writeWorkflowTaskProof(taskId, prepared.receipt);
+  } catch (error) {
+    writeWorkflowTaskProof(taskId, prepareBlockedWorkflowTaskProof(
+      taskId,
+      error instanceof Error ? error.message : String(error),
+    ).receipt);
+  }
+}
 console.log(JSON.stringify(receipt, null, 2));
 if (!receipt.pass) process.exitCode = 1;

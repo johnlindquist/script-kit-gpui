@@ -4,6 +4,17 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+  type WorkflowObservedSegment,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import { WORKFLOW_TASK_PROOF_SPECS } from "../../devtools/lib/workflow-task-contract.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("cons-flow-ux.dictation-delivery");
 
@@ -13,6 +24,7 @@ const OUT_DIR = join(ROOT, ".test-output", "cons-flow-c12");
 const OUT_PATH = join(OUT_DIR, "dictation-delivery-receipt.json");
 type Obj = Record<string, any>;
 type Scenario = { id: string; pass: boolean; failures: string[]; facts: Obj; cleanup: Obj };
+const observedSegments = new Map<string, WorkflowObservedSegment>();
 const asObj = (value: unknown): Obj => value && typeof value === "object" && !Array.isArray(value) ? value as Obj : {};
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 function assert(condition: unknown, message: string, detail?: unknown): asserts condition {
@@ -77,6 +89,7 @@ async function deliverFrozenRefusal(driver: Driver, target: string, transcript: 
 }
 async function runScenario(id: string, body: (driver: Driver, facts: Obj) => Promise<void>): Promise<Scenario> {
   const failures: string[] = []; const facts: Obj = {}; let cleanup: Obj = {}; let driver: Driver | null = null;
+  let targetObservation: RuntimeTargetObservation | null = null;
   try {
     driver = await Driver.launch({
       binary: BINARY, sessionName: `cons-flow-c12-${id}`, sandboxHome: true, sharedModels: false,
@@ -88,12 +101,22 @@ async function runScenario(id: string, body: (driver: Driver, facts: Obj) => Pro
       },
     });
     await driver.waitForSettle(); await body(driver, facts);
+    targetObservation = await observeWorkflowTaskTarget(driver, BINARY, { type: "main" });
   } catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
   finally {
     if (driver) {
       await driver.close().catch((error) => failures.push(`driver.close: ${String(error)}`));
-      cleanup = asObj(driver.finalization);
-      if (cleanup.processExited !== true || cleanup.streamsDrained !== true || cleanup.logWriterClosed !== true) failures.push("incomplete Driver finalization");
+      cleanup = {
+        ...asObj(driver.finalization),
+        ownedProcessCount: exactExecutablePids(BINARY).length,
+        clipboardTouched: false,
+        closeError: null,
+      };
+      if (cleanup.processExited !== true || cleanup.streamsDrained !== true || cleanup.logWriterClosed !== true || cleanup.ownedProcessCount !== 0) {
+        failures.push("incomplete Driver finalization");
+      } else if (targetObservation !== null) {
+        observedSegments.set(id, observedWorkflowSegment(id, targetObservation, cleanup));
+      }
     }
   }
   return { id, pass: failures.length === 0, failures, facts, cleanup };
@@ -241,5 +264,62 @@ const receipt = {
 };
 mkdirSync(OUT_DIR, { recursive: true });
 await Bun.write(OUT_PATH, `${JSON.stringify(receipt, null, 2)}\n`);
+for (const taskId of ["WF-020", "WF-021"] as const) {
+  try {
+    assert(receipt.pass, "Dictation delivery journey did not pass");
+    const selected = WORKFLOW_TASK_PROOF_SPECS[taskId].stageIds.map((id) => {
+      const scenario = scenarios.find((item) => item.id === id);
+      const segment = observedSegments.get(id);
+      assert(scenario?.pass === true && segment, `missing observed Dictation delivery stage: ${id}`);
+      return { scenario, segment };
+    });
+    const stale = scenarios.filter((scenario) => scenario.id.includes("stale-"));
+    const unknown = scenarios.find((scenario) => scenario.id === "unknown-target-refuses");
+    const delivered = selected
+      .map(({ scenario }) => asObj(scenario.facts.receipt))
+      .filter((candidate) => Object.keys(candidate).length > 0);
+    const controls = taskId === "WF-020"
+      ? {
+          "stale-destination-never-mutates":
+            stale.length === 3 && stale.every((scenario) => scenario.facts.destinationAttemptCount === 0),
+          "stale-destination-never-falls-back":
+            stale.length === 3 && stale.every((scenario) => scenario.facts.noFallback === true),
+        }
+      : {
+          "delivery-occurs-exactly-once":
+            delivered.length > 0 && delivered.every((result) =>
+              result.destinationAttemptCount === 1 && result.mutationCount === 1
+            ),
+          "unknown-destination-never-falls-back": unknown?.facts.noFallback === true,
+        };
+    const prepared = prepareWorkflowTaskProof(taskId, {
+      producerOwner: "scripts/agentic/cons-flow-ux/dictation-delivery-probe.ts",
+      segments: selected.map((item) => item.segment),
+      stages: selected.map(({ scenario, segment }) => observedWorkflowStage({
+        id: scenario.id,
+        primitiveId: "devtools.dictation.deliverFixture",
+        segment,
+        command: "pushDictationResult",
+        requestId: `${taskId}:${scenario.id}`,
+        result: scenario.facts,
+        pass: scenario.pass,
+      })),
+      negativeControls: controls,
+      safety: {
+        microphoneCaptureStarted: false,
+        nativeInputInjected: false,
+        liveAiStarted: false,
+        screenTakeoverStarted: false,
+        clipboardTouched: false,
+      },
+    });
+    writeWorkflowTaskProof(taskId, prepared.receipt);
+  } catch (error) {
+    writeWorkflowTaskProof(taskId, prepareBlockedWorkflowTaskProof(
+      taskId,
+      error instanceof Error ? error.message : String(error),
+    ).receipt);
+  }
+}
 console.log(JSON.stringify(receipt, null, 2));
 if (!receipt.pass) process.exitCode = 1;

@@ -4,6 +4,15 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observedWorkflowSegment,
+  observedWorkflowStage,
+  observeWorkflowTaskTarget,
+  prepareBlockedWorkflowTaskProof,
+  prepareWorkflowTaskProof,
+  writeWorkflowTaskProof,
+} from "../../devtools/lib/workflow-task-proof.ts";
+import type { RuntimeTargetObservation } from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("dictation-history.system-clipboard");
 
@@ -16,6 +25,7 @@ const ACTIONS_TARGET: Json = { type: "kind", kind: "actionsDialog", index: 0 };
 
 type Obj = Record<string, any>;
 type Scenario = { id: string; pass: boolean; failures: string[]; facts: Obj; cleanup: Obj };
+const targetObservations = new Map<string, RuntimeTargetObservation>();
 const asObj = (value: unknown): Obj => value && typeof value === "object" && !Array.isArray(value) ? value as Obj : {};
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 function assert(condition: unknown, message: string, detail?: unknown): asserts condition {
@@ -131,12 +141,23 @@ async function runScenario(id: string, body: (driver: Driver, facts: Obj) => Pro
       },
     });
     await driver.waitForSettle(); await body(driver, facts);
+    targetObservations.set(
+      id,
+      await observeWorkflowTaskTarget(driver, BINARY, { type: "main" }),
+    );
   } catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
   finally {
     if (driver) {
       await driver.close().catch((error) => failures.push(`driver.close: ${String(error)}`));
-      cleanup = asObj(driver.finalization);
-      if (cleanup.processExited !== true || cleanup.streamsDrained !== true || cleanup.logWriterClosed !== true) failures.push("incomplete Driver finalization");
+      cleanup = {
+        ...asObj(driver.finalization),
+        ownedProcessCount: exactExecutablePids(BINARY).length,
+        closeError: null,
+        clipboardTouched: id === "paging-actions-portals-delete",
+      };
+      if (cleanup.processExited !== true || cleanup.streamsDrained !== true || cleanup.logWriterClosed !== true || cleanup.ownedProcessCount !== 0) {
+        failures.push("incomplete Driver finalization");
+      }
       if (existsSync(driver.sessionDir)) rmSync(driver.sessionDir, { recursive: true, force: true });
     }
   }
@@ -300,5 +321,57 @@ const receipt = {
   privacy: { rawTranscriptPresent: false, clipboardContentPresent: false, externalAppLabelPresent: false },
 };
 writeFileSync(OUT_PATH, `${JSON.stringify(receipt, null, 2)}\n`);
+try {
+  assert(receipt.pass, "Dictation history journey did not pass");
+  const selected = ["paging-actions-portals-delete", "typed-load-failure-with-prior"]
+    .map((id) => {
+      const scenario = scenarios.find((item) => item.id === id);
+      const observation = targetObservations.get(id);
+      assert(scenario?.pass === true && observation, `missing observed Dictation History stage: ${id}`);
+      const segment = observedWorkflowSegment(id, observation, {
+        ...scenario.cleanup,
+        clipboardRestored,
+      });
+      return { scenario, segment };
+    });
+  const paging = selected[0]!.scenario.facts;
+  const failure = selected[1]!.scenario.facts;
+  const prepared = prepareWorkflowTaskProof("WF-024", {
+    producerOwner: "scripts/agentic/cons-flow-ux/dictation-history-probe.ts",
+    segments: selected.map((item) => item.segment),
+    stages: selected.map(({ scenario, segment }) => observedWorkflowStage({
+      id: scenario.id,
+      primitiveId: "devtools.act",
+      segment,
+      command: "dictationHistory.activateAction",
+      requestId: `WF-024:${scenario.id}`,
+      result: scenario.facts,
+      pass: scenario.pass,
+    })),
+    negativeControls: {
+      "delete-requires-explicit-confirmation":
+        paging.deletion?.confirmationRequired === true &&
+        paging.deletion?.cancelledRowPreserved === true,
+      "load-failure-retains-prior-history":
+        failure.failureState?.typed === "Failed" &&
+        failure.failureState?.renderedAsEmpty === false &&
+        Number(failure.failureState?.priorTotal) > 0,
+    },
+    safety: {
+      microphoneCaptureStarted: false,
+      nativeInputInjected: false,
+      liveAiStarted: false,
+      screenTakeoverStarted: false,
+      clipboardTouched: true,
+      clipboardRestored,
+    },
+  });
+  writeWorkflowTaskProof("WF-024", prepared.receipt);
+} catch (error) {
+  writeWorkflowTaskProof("WF-024", prepareBlockedWorkflowTaskProof(
+    "WF-024",
+    error instanceof Error ? error.message : String(error),
+  ).receipt);
+}
 console.log(JSON.stringify(receipt, null, 2));
 if (!receipt.pass) process.exit(1);
