@@ -1038,6 +1038,25 @@ offline receipts until their real producers are run again.
     was mandatory release provenance. Seven disposable fake-script cases
     reproduced the actual false-green/failure-classification routes and now
     prove exact exit ownership plus one authoritative stdout receipt.
+23. Reusing the live operator-owned `dev-watch` session returned the literal
+    cleanup command `session.sh stop dev-watch`; direct DevTools cleanup also
+    stopped any named session without proving ownership. Isolated startup
+    could claim `dev-watch`, failure cleanup could stop a preexisting borrowed
+    session, and successful receipts omitted the PID/generation identity that
+    the underlying session shell already supports. Disposable fake processes
+    reproduced every destructive route. Borrowed sessions now return no
+    cleanup command, new sessions emit exact identity-bound cleanup, direct
+    cleanup requires both ownership values, and failure cleanup can stop only
+    a newly created matching PID/generation.
+24. Session names accepted `.` / `..`, traversal components, spaces, and
+    option-shaped identifiers; zero, negative, fractional, and nonnumeric
+    timeouts plus unrecognized mode/build policies reached preflight. The
+    standalone waiter accepted stale startup/app/protocol markers from a
+    dead session before checking whether its process was alive. Neither the
+    shared identity helper nor the actual readiness waiter was a required
+    release owner. All unsafe identities and policies now fail before any
+    preflight or session mutation, stale dead-session markers are rejected,
+    and both independently proven sources are mandatory release provenance.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1179,7 +1198,7 @@ offline receipts until their real producers are run again.
    state, pool, exit status, elapsed seconds, and before/after free space.
    Direct, inline, and file-based `--config` overrides fail before pool
    creation because they can replace effective job counts and target
-   ownership. The fake-Cargo behavior suite passes **120 cases and 450
+   ownership. The fake-Cargo behavior suite passes **164 cases and 574
    assertions** without invoking Cargo or building the application. Its one
    real `rustc` call compiles only an isolated **~1-MiB `build.rs` policy
    harness**; every fake workspace, external fixture, and standalone harness
@@ -1231,6 +1250,16 @@ offline receipts until their real producers are run again.
    a failed or empty session can never masquerade as `ready: true`.
    Intermediate session diagnostics remain on stderr, while stdout contains
    exactly one complete machine-readable success or error envelope.
+   Existing `dev-watch` and preexisting named sessions remain borrowed:
+   their receipts contain no cleanup command. Only a newly created session
+   receives an exact PID-and-generation stop command; explicit cleanup
+   requires the same identity, and failed-start cleanup never targets a
+   borrowed or replacement process. Unsafe session names, malformed
+   timeouts, and unknown bootstrap policies fail before preflight. The
+   readiness waiter rejects every old startup/app/protocol marker unless the
+   session process is still alive. A separate five-case ownership suite
+   proves real disposable sentinel processes survive identity mismatch and
+   only the exact owned process is stopped (**27 assertions**).
 10. **Lock the contract into real behavior and release gates.** Dedicated
     low-cost Bun cases operate disposable fake pools, live/incomplete leases,
     missing/unusable sccache, disk starvation, stale/current harnesses,
@@ -1254,7 +1283,8 @@ offline receipts until their real producers are run again.
     Publication additionally refuses a missing/untracked
     `agent-check.sh`, `agent-cargo.sh`, `cargo-cache-locks.sh`,
     `reuse-rust-test-binary.sh`, `build-isolated-binary.sh`,
-    `start-isolated.sh`, `devtools-session.sh`, or
+    `devtools-session-lib.sh`, `start-isolated.sh`, `devtools-session.sh`,
+    `wait-session-ready.sh`, or
     `cargo-build-policy.test.ts`; a
     green-looking proof receipt that omits
     the directly executed build-resource suite is rejected as incomplete.
@@ -1280,9 +1310,9 @@ offline receipts until their real producers are run again.
     override. The standalone operator-safety suite passes **38 cases and
     245 assertions**, and the separate hidden-target identity suite passes
     **14 cases and 66 assertions**. Release evidence now fail-closes unless
-    all eight actual safety owners—the direct session shell, isolated startup,
-    DevTools bootstrap, Driver, shared client, central policy, target
-    resolver, and status announcer—are
+    all ten actual safety owners—the direct session shell, shared identity
+    helper, isolated startup, DevTools bootstrap, readiness waiter, Driver,
+    shared client, central policy, target resolver, and status announcer—are
     tracked and included in the canonical release-source inventory. Real
     failing-then-passing mutations cover each previously omitted owner.
     The independent SDK/custom-script runner now forcibly clears inherited
@@ -1302,8 +1332,9 @@ offline receipts until their real producers are run again.
     across 37 files in 16.39s**, without the previous repository scan or load
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
-    separately passes all **120 fake-Cargo cases / 450 assertions** plus
-    **eleven direct release-owner/proof-gate cases / 32 assertions**. The
+    separately passes all **164 fake-Cargo cases / 574 assertions** plus
+    **thirteen direct release-owner/proof-gate cases / 38 assertions** and
+    **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
     suite and actual application/Cargo compiler were deliberately not rerun
