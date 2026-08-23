@@ -15,6 +15,7 @@ import {
 } from "./lib/client.ts";
 import { emitValidatedReceipt } from "./lib/receipt-schema.ts";
 import { diagnostic, privateReceiptFingerprint } from "./lib/privacy.ts";
+import { isValidEvidenceRect } from "./lib/geometry-evidence.ts";
 import { maybeStartAndShow, resolveTargetReceipt } from "./lib/target-identity.ts";
 
 function usage() {
@@ -77,6 +78,11 @@ export function semanticAxParity(state: JsonObject, layout: JsonObject) {
     const expectedSelector = footerActionSelector(button.action);
     const enabled = button.enabled === true;
     const disabledReason = button.actionDisabled ?? null;
+    const observedAlpha = peer?.alpha;
+    const visibilityObserved = peer != null &&
+      typeof peer.hidden === "boolean" &&
+      typeof observedAlpha === "number" && Number.isFinite(observedAlpha) &&
+      observedAlpha > 0 && observedAlpha <= 1;
     const errors = [
       semanticId == null || semanticId.length === 0 ? "missingSemanticIdentity" : "",
       typeof button.action !== "string" || button.action.length === 0
@@ -90,8 +96,18 @@ export function semanticAxParity(state: JsonObject, layout: JsonObject) {
       peer && peer.accessibilityEnabled !== enabled ? "enabledMismatch" : "",
       peer && peer.actionSelector !== expectedSelector ? "actionMismatch" : "",
       peer && peer.accessibilityElement !== true ? "notAccessibilityElement" : "",
-      peer && (peer.hidden === true || Number(peer.alpha ?? 1) <= 0) ? "hiddenAxPeer" : "",
-      !enabled && disabledReason == null ? "missingDisabledReason" : "",
+      peer && !visibilityObserved ? "invalidAxVisibility" : "",
+      peer && (peer.hidden === true ||
+        (typeof observedAlpha === "number" && observedAlpha <= 0)) ? "hiddenAxPeer" : "",
+      peer && !isValidEvidenceRect(peer.screenshotFrame) ? "invalidAxGeometry" : "",
+      peer && (Object.prototype.hasOwnProperty.call(peer, "accessibilityLabel") ||
+        Object.prototype.hasOwnProperty.call(peer, "rawAccessibilityLabel"))
+        ? "rawAccessibilityLabelReturned"
+        : "",
+      typeof button.enabled !== "boolean" ? "missingEnabledObservation" : "",
+      !enabled && (typeof disabledReason !== "string" || disabledReason.length === 0)
+        ? "missingDisabledReason"
+        : "",
     ].filter(Boolean);
     return {
       semanticId,
@@ -121,16 +137,22 @@ export function semanticAxParity(state: JsonObject, layout: JsonObject) {
     .map((node) => String(node.accessibilityIdentifier ?? ""))
     .filter(Boolean)
     .filter((id, index, ids) => ids.indexOf(id) !== index);
+  const duplicateAxStructuralIds = axNodes
+    .map((node) => typeof node.id === "string" ? node.id : "")
+    .filter(Boolean)
+    .filter((id, index, ids) => ids.indexOf(id) !== index);
   return {
     semanticButtonCount: semanticButtons.length,
     axNodeCount: axNodes.length,
     peerCount: peers.filter((peer) => peer.axPeer != null).length,
     duplicateAxIds,
+    duplicateAxStructuralIds,
     duplicateSemanticIds,
     peers,
     complete: semanticButtons.length > 0 &&
       peers.every((peer) => peer.parityPass) &&
       duplicateAxIds.length === 0 &&
+      duplicateAxStructuralIds.length === 0 &&
       duplicateSemanticIds.length === 0,
   };
 }
@@ -145,7 +167,8 @@ export function semanticFocusGraph(nodes: JsonObject[]) {
     .map((node) => String(node.semanticId ?? ""))
     .filter(Boolean);
   const focusable = candidates.filter((node) =>
-    node.hidden !== true && node.visible !== false && typeof node.semanticId === "string" && node.semanticId.length > 0
+    node.hidden !== true && node.visible !== false && node.focusable !== false &&
+      typeof node.semanticId === "string" && node.semanticId.length > 0
   );
   const ids = focusable.map((node) => String(node.semanticId));
   const duplicateSemanticIds = ids.filter((id, index) => ids.indexOf(id) !== index);
@@ -157,9 +180,10 @@ export function semanticFocusGraph(nodes: JsonObject[]) {
     previous: index > 0 ? String(focusable[index - 1].semanticId) : null,
     next: index + 1 < focusable.length ? String(focusable[index + 1].semanticId) : null,
   }));
-  const reciprocal = duplicateSemanticIds.length === 0 &&
+  const reciprocal = edges.length > 0 &&
+    duplicateSemanticIds.length === 0 &&
     hiddenFocusableIds.length === 0 &&
-    focusedSemanticIds.length <= 1 &&
+    focusedSemanticIds.length === 1 &&
     focusedSemanticIds.every((id) => ids.includes(id)) &&
     edges.every((edge) => {
     const previous = edge.previous == null ? null : edges.find((candidate) => candidate.semanticId === edge.previous);
@@ -183,21 +207,31 @@ export function nativeFooterActivationProof(
   expectDisabledRefusal = false,
 ) {
   const activation = asObject(result.nativeFooterActivation);
+  const actionName = /^footer-action:([A-Za-z][A-Za-z0-9_]*)$/.exec(expectedSemanticId)?.[1] ?? null;
+  const expectedSelector = actionName == null ? null : `${actionName}FooterAction:`;
   const errors = [
+    expectedSelector == null ? "invalidExpectedSemanticId" : "",
     result.host !== "NativeFooter" ? "wrongHost" : "",
     result.actionId !== expectedSemanticId ? "wrongSemanticId" : "",
     activation.semanticId !== expectedSemanticId ? "wrongNativePeer" : "",
     activation.accessibilityRole !== "AXButton" ? "wrongAxRole" : "",
-    activation.actionSelector !== activation.expectedActionSelector ? "wrongAction" : "",
+    expectedSelector == null || activation.actionSelector !== expectedSelector ||
+      activation.expectedActionSelector !== expectedSelector ? "wrongAction" : "",
     expectDisabledRefusal
-      ? (activation.refusedDisabled !== true || activation.dispatched !== false || result.errorCode !== "action_disabled"
+      ? (activation.refusedDisabled !== true || activation.dispatched !== false ||
+          activation.descriptorEnabled !== false || activation.appkitEnabled !== false ||
+          activation.errorCode !== "action_disabled" || result.ok !== false ||
+          result.errorCode !== "action_disabled"
         ? "disabledActivationNotRefused"
         : "")
       : (activation.descriptorEnabled !== true || activation.appkitEnabled !== true ||
-          activation.dispatched !== true || result.ok !== true
+          activation.dispatched !== true || activation.refusedDisabled === true ||
+          result.ok !== true
         ? "enabledActivationNotDispatched"
         : ""),
-    !postconditionObserved ? (expectDisabledRefusal ? "disabledPostconditionChanged" : "missingPostcondition") : "",
+    postconditionObserved !== true
+      ? (expectDisabledRefusal ? "disabledPostconditionChanged" : "missingPostcondition")
+      : "",
   ].filter(Boolean);
   return {
     expectedSemanticId,

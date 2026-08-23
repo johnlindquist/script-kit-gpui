@@ -33,6 +33,8 @@ const layout = {
         accessibilityFocused: false,
         accessibilityElement: true,
         actionSelector: "runFooterAction:",
+        hidden: false,
+        alpha: 1,
         screenshotFrame: { x: 600, y: 450, width: 80, height: 32 },
       }],
     },
@@ -69,6 +71,45 @@ describe("semantic to AppKit accessibility parity", () => {
     expect(parity.complete).toBe(false);
     expect(parity.peers[0].errors).toContain("hiddenAxPeer");
     expect(parity.peers[0].errors).toContain("notAccessibilityElement");
+  });
+
+  test("requires explicitly observed finite visibility and positive native geometry", () => {
+    const variants: Array<[string, Record<string, unknown>, string]> = [
+      ["missing alpha", { alpha: undefined }, "invalidAxVisibility"],
+      ["NaN alpha", { alpha: NaN }, "invalidAxVisibility"],
+      ["infinite alpha", { alpha: Infinity }, "invalidAxVisibility"],
+      ["negative alpha", { alpha: -1 }, "invalidAxVisibility"],
+      ["over-opaque alpha", { alpha: 2 }, "invalidAxVisibility"],
+      ["missing hidden observation", { hidden: undefined }, "invalidAxVisibility"],
+      ["missing bounds", { screenshotFrame: undefined }, "invalidAxGeometry"],
+      ["zero-area bounds", { screenshotFrame: { x: 1, y: 2, width: 0, height: 32 } }, "invalidAxGeometry"],
+      ["negative-area bounds", { screenshotFrame: { x: 1, y: 2, width: 80, height: -1 } }, "invalidAxGeometry"],
+    ];
+
+    for (const [name, overrides, reason] of variants) {
+      const candidate = structuredClone(layout);
+      Object.assign(candidate.fidelity.appKit.nodes[0], overrides);
+      const parity = semanticAxParity(state, candidate);
+      expect(parity.complete, name).toBe(false);
+      expect(parity.peers[0].errors, name).toContain(reason);
+    }
+  });
+
+  test("rejects duplicate native structural owners and raw accessibility labels", () => {
+    const duplicate = structuredClone(layout);
+    duplicate.fidelity.appKit.nodes.push({
+      ...structuredClone(duplicate.fidelity.appKit.nodes[0]),
+      accessibilityIdentifier: "footer-action:other",
+    });
+    const ambiguous = semanticAxParity(state, duplicate);
+    expect(ambiguous.complete).toBe(false);
+    expect(ambiguous.duplicateAxStructuralIds).toEqual(["script-kit-footer-button-run"]);
+
+    const exposed = structuredClone(layout);
+    Object.assign(exposed.fidelity.appKit.nodes[0], { accessibilityLabel: "Run" });
+    const privateLabel = semanticAxParity(state, exposed);
+    expect(privateLabel.complete).toBe(false);
+    expect(privateLabel.peers[0].errors).toContain("rawAccessibilityLabelReturned");
   });
 
   test("disabled semantics require a reason and a disabled AX peer", () => {
@@ -149,6 +190,23 @@ test("focus graph rejects multiple owners or a focused non-focusable node", () =
   expect(inaccessible.reciprocal).toBe(false);
 });
 
+test("focus graph requires one actual visible focused owner", () => {
+  const empty = semanticFocusGraph([]);
+  expect(empty.nodes).toEqual([]);
+  expect(empty.reciprocal).toBe(false);
+
+  const unowned = semanticFocusGraph([
+    { semanticId: "input:filter", type: "input", selectable: true },
+  ]);
+  expect(unowned.focusedSemanticIds).toEqual([]);
+  expect(unowned.reciprocal).toBe(false);
+
+  const explicitlyUnfocusable = semanticFocusGraph([
+    { semanticId: "input:filter", type: "input", focusable: false, focused: true },
+  ]);
+  expect(explicitlyUnfocusable.reciprocal).toBe(false);
+});
+
 describe("native footer activation proof", () => {
   const enabledResult = {
     host: "NativeFooter",
@@ -193,5 +251,37 @@ describe("native footer activation proof", () => {
     expect(nativeFooterActivationProof(disabled, "footer-action:actions", true, true).errors).toContain(
       "disabledActivationNotRefused",
     );
+  });
+
+  test("cannot trust missing or self-consistently forged native selectors", () => {
+    const missing = structuredClone(enabledResult);
+    delete (missing.nativeFooterActivation as Record<string, unknown>).actionSelector;
+    delete (missing.nativeFooterActivation as Record<string, unknown>).expectedActionSelector;
+    expect(nativeFooterActivationProof(missing, "footer-action:actions", true).errors)
+      .toContain("wrongAction");
+
+    const forged = structuredClone(enabledResult);
+    forged.nativeFooterActivation.actionSelector = "unreviewedDangerousAction:";
+    forged.nativeFooterActivation.expectedActionSelector = "unreviewedDangerousAction:";
+    expect(nativeFooterActivationProof(forged, "footer-action:actions", true).errors)
+      .toContain("wrongAction");
+
+    const empty = structuredClone(enabledResult);
+    empty.actionId = "";
+    empty.nativeFooterActivation.semanticId = "";
+    expect(nativeFooterActivationProof(empty, "", true).errors)
+      .toContain("invalidExpectedSemanticId");
+  });
+
+  test("disabled refusal requires both owners to be disabled and an unsuccessful dispatch", () => {
+    const disguised = structuredClone(enabledResult);
+    Object.assign(disguised, { errorCode: "action_disabled" });
+    Object.assign(disguised.nativeFooterActivation, {
+      refusedDisabled: true,
+      dispatched: false,
+      errorCode: "action_disabled",
+    });
+    expect(nativeFooterActivationProof(disguised, "footer-action:actions", true, true).errors)
+      .toContain("disabledActivationNotRefused");
   });
 });
