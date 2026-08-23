@@ -113,6 +113,7 @@ const REQUIRED_PROOF_SUITES = [
   "scripts/devtools/scroll.test.ts",
   "scripts/devtools/receipt-schema.test.ts",
   "scripts/devtools/runtime-task-proof.test.ts",
+  "scripts/devtools/workflow-task-proof.test.ts",
   "scripts/devtools/family-fixtures.test.ts",
   "scripts/devtools/alpha-byte-contract.test.ts",
   "scripts/devtools/generated-byte-compare.test.ts",
@@ -146,6 +147,10 @@ const REQUIRED_OPERATOR_SAFETY_OWNERS = [
   "scripts/agentic/cons-flow-ux/notes-handoff-probe.ts",
   "scripts/agentic/cons-flow-ux/notes-agent-chat-return-probe.ts",
   "scripts/agentic/cons-flow-ux/context-lifecycle-probe.ts",
+  "scripts/agentic/notes-spine-host-wiring-probe.ts",
+  "scripts/agentic/day-page-context-roundtrip-probe.ts",
+  "scripts/agentic/day-page-agent-chat-handoff-scope-probe.ts",
+  "scripts/agentic/day-agent-chat-return-probe.ts",
   "scripts/agentic/root-search-visual-stability.ts",
   "scripts/agentic/glass-smoke-study.ts",
   "scripts/agentic/automation-window.ts",
@@ -209,6 +214,9 @@ const REQUIRED_BUILD_SAFETY_OWNERS = [
 ] as const;
 
 const REQUIRED_WORKFLOW_EVIDENCE_OWNERS = [
+  "scripts/devtools/lib/workflow-task-contract.ts",
+  "scripts/devtools/lib/workflow-task-proof.ts",
+  "scripts/devtools/workflow-task-proof.test.ts",
   "scripts/agentic/cons-flow-ux/final-workflow-audit.ts",
   "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
 ] as const;
