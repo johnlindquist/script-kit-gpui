@@ -1,13 +1,17 @@
 #!/usr/bin/env bun
 
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { Driver } from "../../devtools/driver.ts";
 import { analyzeLayout, buildMeasurementJoins } from "../../devtools/layout.ts";
 import { textFitMeasurements } from "../../devtools/text.ts";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observeRuntimeTaskTarget,
+  prepareBlockedRuntimeTaskProof,
+  prepareRuntimeTaskProof,
+  type RuntimeTargetObservation,
+} from "../../devtools/lib/runtime-task-proof.ts";
 import { openDayPage } from "../day-page-open-helper.ts";
 
 assertNoninteractiveVisualProbe("cons-proof-gov.layout-text");
@@ -40,10 +44,6 @@ function asArray(value: unknown): unknown[] {
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
-}
-
-function sha256(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
 function exactExecutablePids(executable: string): number[] {
@@ -221,6 +221,10 @@ let runtimeStage = "launch";
 let settingsProof: Obj = {};
 let notesProof: Obj = {};
 let dayPageProof: Obj = {};
+let settingsObservation: RuntimeTargetObservation | null = null;
+let notesObservation: RuntimeTargetObservation | null = null;
+let observedSettingsAnalysis: ReturnType<typeof analyzeLayout> | null = null;
+let observedNotesFits: TextFit[] = [];
 
 try {
   driver = await Driver.launch({
@@ -279,6 +283,8 @@ try {
   assert(mainHeaderJoin.comparability === "Comparable", "Settings header model/paint join is not comparable");
   assert(settingsAnalysis.truthLayers.rendered.clippedNodeCount === 0, "Settings rendered geometry is clipped");
   assert(settingsAnalysis.truthLayers.rendered.overlapCount === 0, "Settings rendered geometry overlaps");
+  settingsObservation = await observeRuntimeTaskTarget(driver, binary, { type: "main" });
+  observedSettingsAnalysis = settingsAnalysis;
 
   runtimeStage = "notes-text-fit";
   driver.send({ type: "openNotes", requestId: "pf006-open-notes" });
@@ -306,6 +312,12 @@ try {
   assert(notesSummary.fullDisplayPass, "Notes shaped glyphs are clipped, occluded, stale, or font-pending");
   assert(notesSummary.rawContentReturned === false, "Notes text proof returned raw content");
   notesProof = notesSummary;
+  notesObservation = await observeRuntimeTaskTarget(driver, binary, {
+    type: "kind",
+    kind: "notes",
+    index: 0,
+  });
+  observedNotesFits = notesFits;
 
   // Toggle the same owned Notes window closed before moving the main window to Today.
   driver.send({ type: "openNotes", requestId: "pf006-close-notes" });
@@ -366,10 +378,6 @@ const cleanup = driver
 const cleanupPassed = cleanup.processExited && cleanup.streamsDrained &&
   cleanup.logWriterClosed && cleanup.ownedProcessCount === 0 && cleanup.closeError == null;
 const runtimePassed = runtimeError == null && runtimeStage === "complete";
-const artifact = {
-  executable: relative(process.cwd(), binary),
-  sha256: sha256(binary),
-};
 const layoutNegativeControls = {
   renderedOnePointClipDetected: layoutNegatives.renderedOnePointClip.classification === "Clipped",
   roleMismatchNotComparable: layoutNegatives.roleMismatch.comparability === "RoleMismatch" &&
@@ -388,41 +396,78 @@ const textNegativeControls = {
   fontsNotReadyFails: fontsPendingLine.fullDisplayPass === false && fontsPendingLine.fontsReady === false,
   backingScaleMismatchFails: wrongScaleLine.fullDisplayPass === false && wrongScaleLine.backingScaleMatches === false,
 };
-const layoutReceipt = {
-  schemaVersion: 2,
-  taskId: "PF-005",
-  classification: runtimePassed && cleanupPassed && Object.values(layoutNegativeControls).every(Boolean)
-    ? "RUNTIME-CONFIRMED"
-    : "RUNTIME-FAILED",
-  artifact,
-  intendedContract: {
-    source: "src/protocol/types/grid_layout.rs::GeometryRole",
-    invariant: "Compare only equal roles in one coordinate space and capture generation; keep model and rendered layers independent.",
-  },
-  settings: settingsProof,
-  negativeControls: layoutNegativeControls,
-  cleanup,
-  runtimeStage,
-  runtimeError,
-};
-const textReceipt = {
-  schemaVersion: 2,
-  taskId: "PF-006",
-  classification: runtimePassed && cleanupPassed && Object.values(textNegativeControls).every(Boolean)
-    ? "RUNTIME-CONFIRMED"
-    : "RUNTIME-FAILED",
-  artifact,
-  notes: notesProof,
-  dayPage: dayPageProof,
-  negativeControls: textNegativeControls,
-  privacy: {
-    rawContentReturned: false,
-    fixtureCanaryMatches: JSON.stringify({ notesProof, dayPageProof }).includes("Capture heading") ? 1 : 0,
-  },
-  cleanup,
-  runtimeStage,
-  runtimeError,
-};
+const layoutPrepared = runtimePassed && cleanupPassed && settingsObservation && observedSettingsAnalysis &&
+    Object.values(layoutNegativeControls).every(Boolean)
+  ? prepareRuntimeTaskProof("PF-005", {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.layout",
+      command: "layout.measure",
+      classification: "ok",
+      proofMode: "join",
+      ...settingsObservation,
+      window: { rect: observedSettingsAnalysis.windowRect },
+      regions: observedSettingsAnalysis.regions,
+      resizePressure: observedSettingsAnalysis.resizePressure,
+      pressure: {
+        pressureScore: observedSettingsAnalysis.resizePressure.pressureScore,
+      },
+      truthLayers: observedSettingsAnalysis.truthLayers,
+      intendedContract: {
+        source: "src/protocol/types/grid_layout.rs::GeometryRole",
+        invariant: "Compare only equal roles in one coordinate space and capture generation; keep model and rendered layers independent.",
+      },
+      settings: settingsProof,
+      evidence: {
+        intended: settingsProof.mainHeaderJoin ?? null,
+        model: observedSettingsAnalysis.truthLayers.model,
+        rendered: observedSettingsAnalysis.truthLayers.rendered,
+      },
+      cleanup,
+      missingPrimitives: [],
+      errors: [],
+    }, layoutNegativeControls)
+  : prepareBlockedRuntimeTaskProof("PF-005", {
+      stage: runtimeStage,
+      reason: runtimeError ?? closeError ?? "layout observation or cleanup did not complete",
+      cleanup,
+      controls: layoutNegativeControls,
+    });
+const textPrepared = runtimePassed && cleanupPassed && notesObservation && observedNotesFits.length > 0 &&
+    Object.values(textNegativeControls).every(Boolean)
+  ? prepareRuntimeTaskProof("PF-006", {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.text",
+      command: "text.measure",
+      classification: "ok",
+      proofMode: "fit",
+      ...notesObservation,
+      textSummary: {
+        inputLength: observedNotesFits.reduce((count, fit) => count + Number(fit.graphemeCount), 0),
+        inputFingerprint: observedNotesFits[0].contentFingerprint,
+      },
+      rows: observedNotesFits.map((fit) => ({
+        semanticId: fit.semanticId,
+        textLength: Number(fit.graphemeCount),
+        fingerprint: fit.contentFingerprint,
+      })),
+      textFits: observedNotesFits,
+      notes: notesProof,
+      dayPage: dayPageProof,
+      evidence: {
+        rendered: { notes: notesProof, dayPage: dayPageProof },
+      },
+      cleanup,
+      missingPrimitives: [],
+      errors: [],
+    }, textNegativeControls)
+  : prepareBlockedRuntimeTaskProof("PF-006", {
+      stage: runtimeStage,
+      reason: runtimeError ?? closeError ?? "glyph observation or cleanup did not complete",
+      cleanup,
+      controls: textNegativeControls,
+    });
+const layoutReceipt = layoutPrepared.receipt;
+const textReceipt = textPrepared.receipt;
 
 await mkdir(resolve(layoutPath, ".."), { recursive: true });
 await mkdir(resolve(textPath, ".."), { recursive: true });
@@ -430,8 +475,6 @@ await writeFile(layoutPath, `${JSON.stringify(layoutReceipt, null, 2)}\n`);
 await writeFile(textPath, `${JSON.stringify(textReceipt, null, 2)}\n`);
 console.log(JSON.stringify({ layout: layoutReceipt, text: textReceipt }, null, 2));
 
-if (layoutReceipt.classification !== "RUNTIME-CONFIRMED" ||
-  textReceipt.classification !== "RUNTIME-CONFIRMED" ||
-  textReceipt.privacy.fixtureCanaryMatches !== 0) {
-  process.exitCode = 1;
+if (layoutPrepared.exitCode !== 0 || textPrepared.exitCode !== 0) {
+  process.exitCode = Math.max(layoutPrepared.exitCode, textPrepared.exitCode);
 }

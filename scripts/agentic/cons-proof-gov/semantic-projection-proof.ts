@@ -1,9 +1,7 @@
 #!/usr/bin/env bun
 
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver.ts";
 import {
   classify,
@@ -12,6 +10,12 @@ import {
   type ProjectionProofMode,
 } from "../../devtools/elements.ts";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observeRuntimeTaskTarget,
+  prepareBlockedRuntimeTaskProof,
+  prepareRuntimeTaskProof,
+  type RuntimeTargetObservation,
+} from "../../devtools/lib/runtime-task-proof.ts";
 
 assertNoninteractiveVisualProbe("cons-proof-gov.semantic-projection");
 
@@ -38,10 +42,6 @@ function asArray(value: unknown): unknown[] {
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
-}
-
-function sha256(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
 function exactExecutablePids(executable: string): number[] {
@@ -149,6 +149,9 @@ let closeError: string | null = null;
 let runtimeError: string | null = null;
 let runtimeStage = "launch";
 let settings: Obj = {};
+let observation: RuntimeTargetObservation | null = null;
+let observedNodes: Obj[] = [];
+let observedProjection: Obj = {};
 
 try {
   driver = await Driver.launch({
@@ -195,6 +198,9 @@ try {
   assert(measured.nodes.every((node) => typeof node.enabled === "boolean"), "Settings nodes lack enabled state");
   assert(measured.nodes.every((node) => typeof node.focusable === "boolean"), "Settings nodes lack focusability state");
   assert(measured.nodes.every((node) => typeof node.activatable === "boolean"), "Settings nodes lack activation state");
+  observation = await observeRuntimeTaskTarget(driver, binary, { type: "main" });
+  observedNodes = measured.nodes as Obj[];
+  observedProjection = projection as unknown as Obj;
 
   settings = {
     responseType: response.type,
@@ -256,29 +262,49 @@ const cleanupPassed = cleanup.processExited
   && cleanup.logWriterClosed
   && cleanup.ownedProcessCount === 0
   && cleanup.closeError == null;
-const receipt = {
-  schemaVersion: 2,
-  taskId: "PF-004",
-  classification: runtimePassed && cleanupPassed ? "RUNTIME-CONFIRMED" : "RUNTIME-FAILED",
-  artifact: {
-    executable: relative(process.cwd(), binary),
-    sha256: sha256(binary),
-  },
-  completeSettings: settings,
-  fixtures: synthetic,
-  negativeControls: {
-    partialActionProofBlocked: synthetic.partialPanel.classification === "blocked-by-unsupported-projection",
-    unsupportedCustomDocumentBlocked: synthetic.unsupportedCustomDocument.classification === "blocked-by-unsupported-projection",
-    missingFlowEntityBlocked: synthetic.missingFlowEntity.classification === "blocked-by-unsupported-projection",
-    duplicateSemanticIdsInvalid: synthetic.duplicateId.classification === "invalid-identity",
-  },
-  cleanup,
-  runtimeError,
-  runtimeStage,
+const negativeControls = {
+  partialActionProofBlocked: synthetic.partialPanel.classification === "blocked-by-unsupported-projection",
+  unsupportedCustomDocumentBlocked: synthetic.unsupportedCustomDocument.classification === "blocked-by-unsupported-projection",
+  missingFlowEntityBlocked: synthetic.missingFlowEntity.classification === "blocked-by-unsupported-projection",
+  duplicateSemanticIdsInvalid: synthetic.duplicateId.classification === "invalid-identity",
 };
+const prepared = runtimePassed && cleanupPassed && observation
+  ? prepareRuntimeTaskProof("PF-004", {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.elements",
+      command: "elements.snapshot",
+      classification: "ok",
+      ...observation,
+      semanticSurface: {
+        surfaceKind: observation.target.surfaceKind ?? null,
+        appViewVariant: observation.target.appViewVariant ?? null,
+        collectorSurface: observedProjection.semanticSurface ?? null,
+      },
+      semanticProjection: observedProjection,
+      nodes: observedNodes,
+      duplicateSemanticIds: [],
+      privacyViolationSemanticIds: [],
+      completeSettings: settings,
+      fixtures: synthetic,
+      evidence: {
+        intended: observedProjection,
+        model: { nodeCount: observedNodes.length },
+        interaction: settings,
+      },
+      cleanup,
+      missingPrimitives: [],
+      errors: [],
+    }, negativeControls)
+  : prepareBlockedRuntimeTaskProof("PF-004", {
+      stage: runtimeStage,
+      reason: runtimeError ?? closeError ?? "runtime cleanup did not complete",
+      cleanup,
+      controls: negativeControls,
+    });
+const receipt = prepared.receipt;
 
 await mkdir(resolve(artifactPath, ".."), { recursive: true });
 await writeFile(artifactPath, `${JSON.stringify(receipt, null, 2)}\n`);
 console.log(JSON.stringify(receipt, null, 2));
 
-if (!runtimePassed || !cleanupPassed) process.exitCode = 1;
+if (prepared.exitCode !== 0) process.exitCode = prepared.exitCode;

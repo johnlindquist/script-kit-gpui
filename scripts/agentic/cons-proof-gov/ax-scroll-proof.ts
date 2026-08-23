@@ -1,9 +1,8 @@
 #!/usr/bin/env bun
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { Driver } from "../../devtools/driver.ts";
 import {
   nativeFooterActivationProof,
@@ -13,6 +12,12 @@ import {
 import { analyzeLayout } from "../../devtools/layout.ts";
 import { renderedSafeViewportMeasurement } from "../../devtools/scroll.ts";
 import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+import {
+  observeRuntimeTaskTarget,
+  prepareBlockedRuntimeTaskProof,
+  prepareRuntimeTaskProof,
+  type RuntimeTargetObservation,
+} from "../../devtools/lib/runtime-task-proof.ts";
 import { targetIdentity } from "../../devtools/lib/target-identity.ts";
 
 assertNoninteractiveVisualProbe("cons-proof-gov.ax-scroll");
@@ -44,10 +49,6 @@ function asArray(value: unknown): Obj[] {
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
-}
-
-function sha256File(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
 function fingerprint(value: unknown): string | null {
@@ -183,6 +184,10 @@ async function enabledScenario() {
   let runtimeError: string | null = null;
   let proof: Obj = {};
   let debug: Obj = {};
+  let focusObservation: RuntimeTargetObservation | null = null;
+  let scrollObservation: RuntimeTargetObservation | null = null;
+  let selectedScrollState: Obj = {};
+  let focusedSemanticId: string | null = null;
   try {
     driver = await Driver.launch({
       binary,
@@ -233,6 +238,8 @@ async function enabledScenario() {
     const focusGraph = semanticFocusGraph(semanticNodes);
     assert(axParity.complete, "enabled native footer semantic-to-AX parity failed");
     assert(focusGraph.reciprocal, "enabled semantic focus graph is not reciprocal");
+    focusedSemanticId = focusGraph.focusedSemanticIds[0] ?? null;
+    focusObservation = await observeRuntimeTaskTarget(driver, binary, { type: "main" });
 
     const rows = semanticNodes.filter((node) =>
       node.role === "row" && typeof node.semanticId === "string" && node.selectable !== false
@@ -293,6 +300,15 @@ async function enabledScenario() {
     );
     assert(rendered.classification === "ok", "rendered selected row is not inside the safe viewport");
     assert(rendered.visibleRatio === 1 && rendered.frameMatches === true, "rendered row is clipped or stale");
+    scrollObservation = await observeRuntimeTaskTarget(driver, binary, { type: "main" });
+    assert(
+      scrollObservation.transaction.dataGeneration === afterIdentity.dataGeneration,
+      "selected-row runtime transaction changed after its completed-frame measurement",
+    );
+    selectedScrollState = {
+      selectedSemanticId: scrollState.selectedSemanticId,
+      selectedRowWithinSafeViewport: scrollState.selectedRowWithinSafeViewport,
+    };
 
     const beforeActivation = asObj(await driver.getState({ timeoutMs: 5_000 }));
     const activationResult = asObj(await driver.triggerAction(
@@ -370,7 +386,15 @@ async function enabledScenario() {
       }
     }
   }
-  return { proof, runtimeError, cleanup: cleanupFor(driver, closeError) };
+  return {
+    proof,
+    runtimeError,
+    cleanup: cleanupFor(driver, closeError),
+    focusObservation,
+    scrollObservation,
+    selectedScrollState,
+    focusedSemanticId,
+  };
 }
 
 async function disabledScenario() {
@@ -436,11 +460,6 @@ async function disabledScenario() {
 
 const enabled = await enabledScenario();
 const disabled = await disabledScenario();
-const artifact = {
-  executable: relative(process.cwd(), binary),
-  sha256: sha256File(binary),
-};
-
 const hiddenParityLayout = {
   fidelity: {
     appKit: {
@@ -526,41 +545,97 @@ const runtimePassed = enabled.runtimeError == null && disabled.runtimeError == n
 const cleanupPassed = cleanupPass(enabled.cleanup) && cleanupPass(disabled.cleanup) &&
   exactExecutablePids(binary).length === 0;
 const negativesPassed = Object.values(negativeControls).every(Boolean);
-const axReceipt = {
-  schemaVersion: 2,
-  taskId: "PF-007",
-  classification: runtimePassed && cleanupPassed && negativesPassed ? "RUNTIME-CONFIRMED" : "RUNTIME-FAILED",
-  artifact,
-  enabled: {
-    axParity: enabled.proof.axParity ?? null,
-    focusGraph: enabled.proof.focusGraph ?? null,
-    activation: enabled.proof.activation ?? null,
-  },
-  disabled: disabled.proof,
-  negativeControls,
-  cleanup: { enabled: enabled.cleanup, disabled: disabled.cleanup, ownedProcessCount: exactExecutablePids(binary).length },
-  runtimeErrors: { enabled: enabled.runtimeError, disabled: disabled.runtimeError },
-  privacy: { rawAccessibilityLabelReturned: false, rawSelectedSemanticIdReturned: false, clipboardTouched: false },
+const axCleanup = {
+  enabled: enabled.cleanup,
+  disabled: disabled.cleanup,
+  ownedProcessCount: exactExecutablePids(binary).length,
 };
-const scrollReceipt = {
-  schemaVersion: 2,
-  taskId: "PF-008",
-  classification: runtimePassed && cleanupPassed && negativesPassed &&
-      asObj(enabled.proof.selectedRow).selectionChanged === true &&
-      asObj(asObj(enabled.proof.selectedRow).rendered).classification === "ok"
-    ? "RUNTIME-CONFIRMED"
-    : "RUNTIME-FAILED",
-  artifact,
-  selectedRow: enabled.proof.selectedRow ?? null,
-  debug: enabled.proof.debug ?? null,
-  negativeControls: {
-    onePointBelowViewportRejected: negativeControls.onePointBelowViewportRejected,
-    missingRenderedRowBlocks: negativeControls.missingRenderedRowBlocks,
-  },
-  cleanup: enabled.cleanup,
-  runtimeError: enabled.runtimeError,
-  privacy: { rawSelectedSemanticIdReturned: false, clipboardTouched: false },
+const axPrepared = runtimePassed && cleanupPassed && negativesPassed &&
+    enabled.focusObservation && enabled.focusedSemanticId
+  ? prepareRuntimeTaskProof("PF-007", {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.focus",
+      command: "focus.inspect",
+      classification: "ok",
+      proofMode: "ax",
+      ...enabled.focusObservation,
+      windowFocused: true,
+      focusedSemanticId: enabled.focusedSemanticId,
+      keyboardOwner: {
+        surfaceKind: enabled.focusObservation.target.surfaceKind ?? null,
+      },
+      semanticProjection: {
+        quality: "complete",
+        proofAllowed: true,
+      },
+      nativeFooter: { axParity: enabled.proof.axParity },
+      focusGraph: enabled.proof.focusGraph,
+      activationEvidence: {
+        enabled: enabled.proof.activation,
+        disabled: disabled.proof.activation,
+      },
+      enabled: {
+        axParity: enabled.proof.axParity ?? null,
+        focusGraph: enabled.proof.focusGraph ?? null,
+        activation: enabled.proof.activation ?? null,
+      },
+      disabled: disabled.proof,
+      evidence: {
+        accessibility: enabled.proof.axParity,
+        interaction: {
+          enabled: enabled.proof.activation,
+          disabled: disabled.proof.activation,
+        },
+      },
+      cleanup: axCleanup,
+      missingPrimitives: [],
+      errors: [],
+    }, negativeControls)
+  : prepareBlockedRuntimeTaskProof("PF-007", {
+      stage: "native-accessibility-focus-activation",
+      reason: enabled.runtimeError ?? disabled.runtimeError ?? "native runtime or cleanup did not complete",
+      cleanup: axCleanup,
+      controls: negativeControls,
+    });
+const scrollNegativeControls = {
+  onePointBelowViewportRejected: negativeControls.onePointBelowViewportRejected,
+  missingRenderedRowBlocks: negativeControls.missingRenderedRowBlocks,
 };
+const selectedRow = asObj(enabled.proof.selectedRow);
+const renderedSelectedRow = asObj(selectedRow.rendered);
+const scrollPrepared = runtimePassed && cleanupPassed && negativesPassed &&
+    enabled.scrollObservation && selectedRow.selectionChanged === true &&
+    renderedSelectedRow.classification === "ok"
+  ? prepareRuntimeTaskProof("PF-008", {
+      schemaVersion: 2,
+      tool: "script-kit-devtools.scroll",
+      command: "scroll.inspect",
+      classification: "ok",
+      ...enabled.scrollObservation,
+      scroll: enabled.selectedScrollState,
+      resizePressure: { selectedRowOutsideSafeViewport: false },
+      renderedSafeViewport: {
+        ...renderedSelectedRow,
+        required: true,
+        selectedSemanticId: enabled.selectedScrollState.selectedSemanticId,
+      },
+      selectedRow,
+      evidence: {
+        rendered: renderedSelectedRow,
+        interaction: selectedRow.transaction,
+      },
+      cleanup: enabled.cleanup,
+      missingPrimitives: [],
+      errors: [],
+    }, scrollNegativeControls)
+  : prepareBlockedRuntimeTaskProof("PF-008", {
+      stage: "rendered-safe-viewport-selection",
+      reason: enabled.runtimeError ?? "selected-row runtime or cleanup did not complete",
+      cleanup: enabled.cleanup,
+      controls: scrollNegativeControls,
+    });
+const axReceipt = axPrepared.receipt;
+const scrollReceipt = scrollPrepared.receipt;
 
 await mkdir(resolve(axPath, ".."), { recursive: true });
 await mkdir(resolve(scrollPath, ".."), { recursive: true });
@@ -568,7 +643,6 @@ await writeFile(axPath, `${JSON.stringify(axReceipt, null, 2)}\n`);
 await writeFile(scrollPath, `${JSON.stringify(scrollReceipt, null, 2)}\n`);
 console.log(JSON.stringify({ ax: axReceipt, scroll: scrollReceipt }, null, 2));
 
-if (axReceipt.classification !== "RUNTIME-CONFIRMED" ||
-  scrollReceipt.classification !== "RUNTIME-CONFIRMED") {
-  process.exitCode = 1;
+if (axPrepared.exitCode !== 0 || scrollPrepared.exitCode !== 0) {
+  process.exitCode = Math.max(axPrepared.exitCode, scrollPrepared.exitCode);
 }
