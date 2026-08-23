@@ -2244,6 +2244,7 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/agentic/session.sh",
     "scripts/agentic/filterable-surface-matrix.ts",
     "scripts/agentic/automation-window.ts",
+    "scripts/agentic/verify-shot.ts",
     "scripts/agentic/window.ts",
     "scripts/agentic/macos-input.ts",
     "scripts/agentic/macos-input.test.ts",

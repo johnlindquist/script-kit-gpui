@@ -152,6 +152,7 @@ require_clean_source_identity() {
     scripts/agent-check.sh
     scripts/agentic/session.sh
     scripts/agentic/automation-window.ts
+    scripts/agentic/verify-shot.ts
     scripts/agentic/window.ts
     scripts/agentic/macos-input.ts
     scripts/agentic/macos-input.test.ts

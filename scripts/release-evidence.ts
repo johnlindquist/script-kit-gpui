@@ -119,6 +119,7 @@ const REQUIRED_PROOF_SUITES = [
 const REQUIRED_OPERATOR_SAFETY_OWNERS = [
   "scripts/agentic/session.sh",
   "scripts/agentic/automation-window.ts",
+  "scripts/agentic/verify-shot.ts",
   "scripts/agentic/window.ts",
   "scripts/agentic/macos-input.ts",
   "scripts/agentic/macos-input.test.ts",
