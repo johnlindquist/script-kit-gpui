@@ -11,6 +11,9 @@ import {
   snapshot,
   type ProjectionProofMode,
 } from "../../devtools/elements.ts";
+import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("cons-proof-gov.semantic-projection");
 
 const binary = resolve(
   process.env.SCRIPT_KIT_GPUI_BINARY

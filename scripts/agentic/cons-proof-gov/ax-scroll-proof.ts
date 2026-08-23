@@ -12,7 +12,10 @@ import {
 } from "../../devtools/focus.ts";
 import { analyzeLayout } from "../../devtools/layout.ts";
 import { renderedSafeViewportMeasurement } from "../../devtools/scroll.ts";
+import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
 import { targetIdentity } from "../../devtools/lib/target-identity.ts";
+
+assertNoninteractiveVisualProbe("cons-proof-gov.ax-scroll");
 
 const binary = resolve(
   process.env.SCRIPT_KIT_GPUI_BINARY

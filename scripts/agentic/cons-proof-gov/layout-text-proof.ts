@@ -7,7 +7,10 @@ import { relative, resolve } from "node:path";
 import { Driver } from "../../devtools/driver.ts";
 import { analyzeLayout, buildMeasurementJoins } from "../../devtools/layout.ts";
 import { textFitMeasurements } from "../../devtools/text.ts";
+import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
 import { openDayPage } from "../day-page-open-helper.ts";
+
+assertNoninteractiveVisualProbe("cons-proof-gov.layout-text");
 
 const binary = resolve(
   process.env.SCRIPT_KIT_GPUI_BINARY
