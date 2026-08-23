@@ -457,6 +457,13 @@ function makeFixture(): ReleaseFixture {
   writeFileSync(proofResultPath, [
     "scripts/devtools/operator-safety.test.ts:",
     "scripts/devtools/privacy.test.ts:",
+    "scripts/devtools/elements.test.ts:",
+    "scripts/devtools/layout.test.ts:",
+    "scripts/devtools/geometry-evidence.test.ts:",
+    "scripts/devtools/text.test.ts:",
+    "scripts/devtools/focus.test.ts:",
+    "scripts/devtools/scroll.test.ts:",
+    "scripts/devtools/receipt-schema.test.ts:",
     "scripts/devtools/family-fixtures.test.ts:",
     "scripts/devtools/alpha-byte-contract.test.ts:",
     "scripts/devtools/generated-byte-compare.test.ts:",
@@ -466,6 +473,7 @@ function makeFixture(): ReleaseFixture {
     "scripts/agentic/macos-input.test.ts:",
     "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts:",
     "scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts:",
+    "scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts:",
     "scripts/agentic/quick-ai-latency-bench.test.ts:",
     "tests/sdk/runner-safety.test.ts:",
     " 355 pass",
@@ -940,6 +948,22 @@ describe("fail-closed release evidence", () => {
     expect(() => buildGateReceipt({
       gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
     })).toThrow("missing its required directly executed fixture suite: scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts");
+
+    for (const suite of [
+      "scripts/devtools/elements.test.ts",
+      "scripts/devtools/layout.test.ts",
+      "scripts/devtools/geometry-evidence.test.ts",
+      "scripts/devtools/text.test.ts",
+      "scripts/devtools/focus.test.ts",
+      "scripts/devtools/scroll.test.ts",
+      "scripts/devtools/receipt-schema.test.ts",
+      "scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts",
+    ]) {
+      writeFileSync(resultPath, valid.replace(`${suite}:`, ""));
+      expect(() => buildGateReceipt({
+        gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
+      })).toThrow(`missing its required directly executed fixture suite: ${suite}`);
+    }
   });
 
   test("signing attestation requires an accepted notarization and the exact signing team", () => {
@@ -2244,6 +2268,20 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/devtools/actions-projection.test.ts",
     "scripts/devtools/operator-safety.test.ts",
     "scripts/devtools/driver.ts",
+    "scripts/devtools/elements.ts",
+    "scripts/devtools/elements.test.ts",
+    "scripts/devtools/layout.ts",
+    "scripts/devtools/layout.test.ts",
+    "scripts/devtools/lib/geometry-evidence.ts",
+    "scripts/devtools/geometry-evidence.test.ts",
+    "scripts/devtools/text.ts",
+    "scripts/devtools/text.test.ts",
+    "scripts/devtools/focus.ts",
+    "scripts/devtools/focus.test.ts",
+    "scripts/devtools/scroll.ts",
+    "scripts/devtools/scroll.test.ts",
+    "scripts/devtools/lib/receipt-schema.ts",
+    "scripts/devtools/receipt-schema.test.ts",
     "scripts/devtools/actions.ts",
     "scripts/devtools/agent_chat.ts",
     "scripts/devtools/dictation.ts",
@@ -2297,6 +2335,10 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
     "scripts/agentic/cons-proof-gov/story-geometry-proof.mjs",
     "scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts",
+    "scripts/agentic/cons-proof-gov/semantic-projection-proof.ts",
+    "scripts/agentic/cons-proof-gov/layout-text-proof.ts",
+    "scripts/agentic/cons-proof-gov/ax-scroll-proof.ts",
+    "scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts",
     "design/mockups/tests/story-browser-geometry-harness.mjs",
     "design/mockups/stories/stories.json",
     "design/mockups/stories/10-conversation-three-modes/story.js",

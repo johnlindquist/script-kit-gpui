@@ -105,6 +105,13 @@ export const RELEASE_INTEGRATION_SUITES = [
 const REQUIRED_PROOF_SUITES = [
   "scripts/devtools/operator-safety.test.ts",
   "scripts/devtools/privacy.test.ts",
+  "scripts/devtools/elements.test.ts",
+  "scripts/devtools/layout.test.ts",
+  "scripts/devtools/geometry-evidence.test.ts",
+  "scripts/devtools/text.test.ts",
+  "scripts/devtools/focus.test.ts",
+  "scripts/devtools/scroll.test.ts",
+  "scripts/devtools/receipt-schema.test.ts",
   "scripts/devtools/family-fixtures.test.ts",
   "scripts/devtools/alpha-byte-contract.test.ts",
   "scripts/devtools/generated-byte-compare.test.ts",
@@ -114,6 +121,7 @@ const REQUIRED_PROOF_SUITES = [
   "scripts/agentic/macos-input.test.ts",
   "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
   "scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts",
+  "scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts",
   "scripts/agentic/quick-ai-latency-bench.test.ts",
   "tests/sdk/runner-safety.test.ts",
 ] as const;
@@ -211,6 +219,27 @@ const REQUIRED_BROWSER_GEOMETRY_OWNERS = [
   "design/mockups/stories/stories.json",
   "design/mockups/stories/10-conversation-three-modes/story.js",
   "design/mockups/stories/11-launcher-flows-and-scripts/story.js",
+] as const;
+
+const REQUIRED_RUNTIME_PROOF_FOUNDATION_OWNERS = [
+  "scripts/devtools/elements.ts",
+  "scripts/devtools/elements.test.ts",
+  "scripts/devtools/layout.ts",
+  "scripts/devtools/layout.test.ts",
+  "scripts/devtools/lib/geometry-evidence.ts",
+  "scripts/devtools/geometry-evidence.test.ts",
+  "scripts/devtools/text.ts",
+  "scripts/devtools/text.test.ts",
+  "scripts/devtools/focus.ts",
+  "scripts/devtools/focus.test.ts",
+  "scripts/devtools/scroll.ts",
+  "scripts/devtools/scroll.test.ts",
+  "scripts/devtools/lib/receipt-schema.ts",
+  "scripts/devtools/receipt-schema.test.ts",
+  "scripts/agentic/cons-proof-gov/semantic-projection-proof.ts",
+  "scripts/agentic/cons-proof-gov/layout-text-proof.ts",
+  "scripts/agentic/cons-proof-gov/ax-scroll-proof.ts",
+  "scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts",
 ] as const;
 
 const REQUIRED_FOCUSED_FIXTURES = {
@@ -1639,6 +1668,7 @@ function requiredCleanReleaseSourceOwners(repositoryRoot: string): string[] {
     REQUIRED_BUILD_SAFETY_OWNERS.every((owner) => owners.includes(owner)) &&
     REQUIRED_WORKFLOW_EVIDENCE_OWNERS.every((owner) => owners.includes(owner)) &&
     REQUIRED_BROWSER_GEOMETRY_OWNERS.every((owner) => owners.includes(owner)) &&
+    REQUIRED_RUNTIME_PROOF_FOUNDATION_OWNERS.every((owner) => owners.includes(owner)) &&
     RELEASE_INTEGRATION_SUITES.every((suite) => owners.includes(`tests/${suite}.rs`)),
   "publishable release evidence has an invalid or incomplete canonical source-owner inventory");
   return owners;

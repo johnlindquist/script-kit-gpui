@@ -102,12 +102,21 @@ require_clean_source_identity() {
     scripts/devtools/surfaces.ts
     scripts/devtools/coverage.ts
     scripts/devtools/driver.ts
+    scripts/devtools/elements.ts
+    scripts/devtools/layout.ts
+    scripts/devtools/lib/geometry-evidence.ts
+    scripts/devtools/text.ts
+    scripts/devtools/focus.ts
+    scripts/devtools/scroll.ts
     scripts/devtools/surface.test.ts
     scripts/devtools/surfaces-bindings.test.ts
     scripts/devtools/actions-projection.test.ts
     scripts/devtools/elements.test.ts
     scripts/devtools/focus.test.ts
     scripts/devtools/layout.test.ts
+    scripts/devtools/geometry-evidence.test.ts
+    scripts/devtools/text.test.ts
+    scripts/devtools/scroll.test.ts
     scripts/devtools/privacy.test.ts
     scripts/devtools/operator-safety.test.ts
     scripts/devtools/actions.ts
@@ -194,6 +203,10 @@ require_clean_source_identity() {
     scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts
     scripts/agentic/cons-proof-gov/story-geometry-proof.mjs
     scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts
+    scripts/agentic/cons-proof-gov/semantic-projection-proof.ts
+    scripts/agentic/cons-proof-gov/layout-text-proof.ts
+    scripts/agentic/cons-proof-gov/ax-scroll-proof.ts
+    scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts
     scripts/agentic/root-search-visual-stability.ts
     scripts/agentic/glass-smoke-study.ts
     scripts/agentic/automation-window.ts
@@ -494,6 +507,9 @@ run_phase() {
         ./scripts/devtools/elements.test.ts \
         ./scripts/devtools/focus.test.ts \
         ./scripts/devtools/layout.test.ts \
+        ./scripts/devtools/geometry-evidence.test.ts \
+        ./scripts/devtools/text.test.ts \
+        ./scripts/devtools/scroll.test.ts \
         ./scripts/devtools/privacy.test.ts \
         ./scripts/devtools/operator-safety.test.ts \
         ./scripts/devtools/target-identity.test.ts \
@@ -519,6 +535,7 @@ run_phase() {
         ./scripts/agentic/macos-input.test.ts \
         ./scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts \
         ./scripts/agentic/cons-proof-gov/story-geometry-proof.test.ts \
+        ./scripts/agentic/cons-proof-gov/proof-foundation-safety.test.ts \
         ./scripts/agentic/cargo-timings-summary.test.ts \
         ./scripts/agentic/quick-ai-latency-bench.test.ts \
         ./scripts/agentic/ai-phase-trace-report.test.ts \
