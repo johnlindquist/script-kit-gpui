@@ -103,7 +103,7 @@ const result = await mcp.call("localTools", "create_event", { title: "Standup" }
 
 The local-only restriction applies to the app's own discovery token, not to explicitly configured external HTTP servers. Remote MCP servers remain supported when their endpoint and credentials are deliberately defined under the active workspace's `mcp.servers` configuration.
 
-`mcp.listServers()` and `mcp.getServer(id)` expose safe server metadata, not private credentials: authorization headers, API keys, tokens, passwords, cookies, and bearer-like values are returned as `[REDACTED]`. The original configured credentials remain private and are still used for actual server requests. In noninteractive verification, configured stdio servers cannot disable noninteractive mode, enable native/system input, emit operator test-status notifications, or override another desktop permission.
+`mcp.listServers()` and `mcp.getServer(id)` expose safe server metadata, not private credentials: authorization headers, API keys, tokens, passwords, cookies, sensitive command-line arguments, endpoint credentials/query values, and bearer-like values are removed or returned as `[REDACTED]`. The original configured credentials remain private and are still used for actual server requests. Changes, creation, and deletion of the current workspace's `config.ts` take effect without restarting the SDK, including edits that preserve file size and modification time; relative TypeScript imports remain supported. In noninteractive verification, configured stdio servers cannot disable noninteractive mode, enable native/system input, emit operator test-status notifications, or override another desktop permission.
 
 ## Agent Chat Context
 
