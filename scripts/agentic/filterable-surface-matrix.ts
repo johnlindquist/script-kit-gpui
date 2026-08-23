@@ -13,9 +13,15 @@
  */
 
 import { resolve } from "path";
+import {
+  assertNoninteractiveSubprocess,
+  inspectionSessionCleanup,
+  SessionOwnershipRegistry,
+} from "../devtools/lib/operator-safety.ts";
 
 const SCHEMA_VERSION = 1;
 const PROJECT_ROOT = resolve(import.meta.dir, "../..");
+const sessionOwnership = new SessionOwnershipRegistry();
 
 export type JsonObject = Record<string, unknown>;
 
@@ -291,6 +297,7 @@ export async function runTool(
   cmd: string[],
   label: string,
 ): Promise<JsonObject> {
+  assertNoninteractiveSubprocess(cmd);
   const proc = Bun.spawn(cmd, {
     cwd: PROJECT_ROOT,
     stdout: "pipe",
@@ -312,17 +319,22 @@ export async function runTool(
 }
 
 export async function sessionStart(session: string): Promise<JsonObject> {
-  return runTool(
+  inspectionSessionCleanup(session, null);
+  if (session === "dev-watch") {
+    throw new Error("Filterable surface matrix cannot claim the borrowed operator session");
+  }
+  const receipt = await runTool(
     ["bash", "scripts/agentic/session.sh", "start", session],
     "session.start",
   );
+  sessionOwnership.rememberStart(session, receipt);
+  return receipt;
 }
 
 export async function sessionStop(session: string): Promise<JsonObject> {
-  return runTool(
-    ["bash", "scripts/agentic/session.sh", "stop", session],
-    "session.stop",
-  );
+  const receipt = await runTool(sessionOwnership.stopCommand(session), "session.stop");
+  sessionOwnership.release(session);
+  return receipt;
 }
 
 export async function sendAndAwaitParse(
@@ -774,13 +786,13 @@ async function main(): Promise<void> {
   let startedSession = false;
 
   try {
-    await sessionStart(session);
-    startedSession = true;
+    const startReceipt = await sessionStart(session);
+    startedSession = startReceipt.resumed !== true;
     const caseReceipts = [];
     for (const entry of cases) {
       caseReceipts.push(await runEntry(session, entry, timeoutMs));
     }
-    if (!keepSession) {
+    if (!keepSession && startedSession) {
       await sessionStop(session);
     }
     process.stdout.write(

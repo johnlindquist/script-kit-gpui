@@ -8,6 +8,7 @@
  */
 
 import { resolve } from "path";
+import { assertNoninteractiveSubprocess } from "../devtools/lib/operator-safety.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dir, "../..");
 
@@ -120,6 +121,7 @@ export async function runTool(
   cmd: string[],
   label: string
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  assertNoninteractiveSubprocess(cmd);
   const proc = Bun.spawn(cmd, {
     stdout: "pipe",
     stderr: "pipe",

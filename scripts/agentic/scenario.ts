@@ -20,6 +20,11 @@
 
 import { resolve } from "path";
 import {
+  assertNoninteractiveSubprocess,
+  inspectionSessionCleanup,
+  SessionOwnershipRegistry,
+} from "../devtools/lib/operator-safety.ts";
+import {
   assertTargetStable,
   listNativePeerWindows,
   promoteExactTarget,
@@ -31,6 +36,7 @@ import {
 
 const PROJECT_ROOT = resolve(import.meta.dir, "../..");
 const PROOF_BUNDLE_SCHEMA_VERSION = 2;
+const scenarioSessionOwnership = new SessionOwnershipRegistry();
 
 // ---------------------------------------------------------------------------
 // Types
@@ -357,12 +363,28 @@ export function pushProofStep(
   });
 }
 
-async function runTool(
+export async function runTool(
   cmd: string[],
   label: string,
   env?: Record<string, string>
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(cmd, {
+  const isSessionCommand =
+    (cmd[0] === "bash" || cmd[0] === "/bin/bash") &&
+    typeof cmd[1] === "string" &&
+    resolve(PROJECT_ROOT, cmd[1]) === resolve(PROJECT_ROOT, "scripts/agentic/session.sh");
+  const operation = isSessionCommand ? cmd[2] : undefined;
+  const session = isSessionCommand ? cmd[3] : undefined;
+  if (operation === "start") {
+    inspectionSessionCleanup(session ?? "", null);
+    if (session === "dev-watch") {
+      throw new Error("Agentic scenario cannot claim the borrowed operator session");
+    }
+  }
+  const ownedCommand = operation === "stop"
+    ? scenarioSessionOwnership.stopCommand(session ?? "")
+    : cmd;
+  assertNoninteractiveSubprocess(ownedCommand, env);
+  const proc = Bun.spawn(ownedCommand, {
     stdout: "pipe",
     stderr: "pipe",
     cwd: PROJECT_ROOT,
@@ -371,6 +393,14 @@ async function runTool(
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
+  if (exitCode === 0 && operation === "start" && session) {
+    scenarioSessionOwnership.rememberStart(session, parseMaybeJson(stdout), {
+      allowPendingReadiness: true,
+    });
+  }
+  if (exitCode === 0 && operation === "stop" && session) {
+    scenarioSessionOwnership.release(session);
+  }
   stderrLog("tool_complete", { label, exitCode });
   return { exitCode, stdout: stdout.trim(), stderr: stderr.trim() };
 }
