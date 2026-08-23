@@ -66,6 +66,8 @@ The app-owned MCP endpoint is always local: only `localhost`, `127.0.0.1`, or `[
 
 Requests default to a 30-second timeout and a 16-MiB response budget. Set `SCRIPT_KIT_MCP_TIMEOUT_MS` to a positive whole number no greater than `120000` when a deliberately slower local or configured remote server needs another time budget. Set `SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES` to a positive whole number no greater than `67108864` when an approved image response requires more space. Oversized HTTP bodies stop streaming immediately; overflowing or timed-out stdio servers and their owned subprocesses are stopped together.
 
+Tool discovery is bounded instead of starting every configured server at once: unattended runs use at most two workers, interactive runs default to four, and `SCRIPT_KIT_MCP_CONCURRENCY` can select an explicit positive limit up to two unattended or eight interactive. Results keep configuration order, invalid limits fail before transport, and a failing discovery waits for its already-owned requests to finish before returning.
+
 ## External MCP Servers (Script Kit as a Client)
 
 Define servers in `~/.scriptkit/config.ts` under `mcp.servers` — `transport` selects stdio or HTTP:
