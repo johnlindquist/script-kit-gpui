@@ -1066,6 +1066,25 @@ offline receipts until their real producers are run again.
     live `dev-watch` cannot be claimed, failed/unready/mismatched startup is
     terminal, unsafe names/generations cannot form shell commands, and only
     a genuinely new process receives exact PID-and-generation cleanup.
+26. The actual agentic scenario runner, exact-target thread, and 12-surface
+    filtering matrix each owned a separate unguarded `Bun.spawn` path. Even
+    with noninteractive verification enabled, these paths could reach
+    AppleScript, Swift, native input, screenshot capture, arbitrary shells,
+    or a child environment that weakened inherited operator authority before
+    the centralized session guard ever ran. A shared immutable subprocess
+    boundary now rejects every unreviewed child before spawn while retaining
+    reviewed read-only status/RPC transport; mocked-process regressions prove
+    all three real consumers cannot start a native command.
+27. Filterable-matrix cleanup, both surface navigators, Notes resize checks,
+    and more than a dozen scenario stop sites still issued name-only process
+    termination or treated a resumed operator session as newly created.
+    One in-memory session-ownership registry now records actual original
+    PID/generation facts, rewrites scenario and matrix stops to strict
+    ownership, prevents both navigators and Notes from stopping borrowed
+    sessions, and retains cleanup identity for a pending-ready process
+    without converting `ready: false` into a successful readiness receipt.
+    The six independently proven consumer sources are mandatory release
+    owners, and both existing 12-case inventories remain passive.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1316,14 +1335,17 @@ offline receipts until their real producers are run again.
     explicit `noninteractive: false` options nor replacement environments
     can weaken the real parent's authority; target resolution stays on its
     capture-free hidden-state path even when callers request an interactive
-    override. The standalone operator-safety suite passes **56 cases and
-    263 assertions**, including 18 pure canonical-inspector ownership cases;
+    override. The standalone operator-safety suite passes **77 cases and
+    310 assertions**, including pure canonical-inspector ownership, immutable
+    subprocess policy, Notes/matrix/scenario cleanup, and mocked native-spawn
+    cases;
     the separate hidden-target identity suite passes
     **14 cases and 66 assertions**. Release evidence now fail-closes unless
-    all eleven actual safety owners—the direct session shell, shared identity
-    helper, isolated startup, DevTools bootstrap, readiness waiter, canonical
-    inspector, Driver, shared client, central policy, target resolver, and
-    status announcer—are
+    all seventeen actual safety owners—the direct session shell, shared
+    identity helper, isolated startup, DevTools bootstrap, readiness waiter,
+    canonical inspector, Notes, filterable matrix, both navigators, exact
+    target thread, scenario runner, Driver, shared client, central policy,
+    target resolver, and status announcer—are
     tracked and included in the canonical release-source inventory. Real
     failing-then-passing mutations cover each previously omitted owner.
     The independent SDK/custom-script runner now forcibly clears inherited
@@ -1344,7 +1366,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **fourteen direct release-owner/proof-gate cases / 41 assertions** and
+    **twenty direct release-owner/proof-gate cases / 59 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
