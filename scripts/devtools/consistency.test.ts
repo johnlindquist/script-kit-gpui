@@ -7,6 +7,7 @@
  * cache never sees two states of one path.
  */
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -20,6 +21,7 @@ import {
   RECEIPT_REGISTRY_VERSION,
   prepareValidatedReceipt,
   receiptRegistryIdentity,
+  RUNTIME_TASK_PROOF_SPECS,
   validateReceipt,
 } from "./lib/receipt-schema.ts";
 import {
@@ -126,6 +128,187 @@ interface ReceiptOverrides {
   [key: string]: unknown;
 }
 
+function syntheticFoundationReceipt(taskId: string, candidate: Record<string, any>) {
+  const bounds = { x: 0, y: 0, width: 100, height: 20 };
+  if (taskId === "PF-004") {
+    return {
+      primitiveId: "devtools.elements.snapshot",
+      candidate: {
+        ...candidate,
+        tool: "script-kit-devtools.elements",
+        command: "elements.snapshot",
+        semanticSurface: { collectorSurface: "settings" },
+        semanticProjection: {
+          semanticSurface: "settings",
+          version: 1,
+          quality: "complete",
+          reasonCodes: [],
+          proofMode: "action",
+          proofAllowed: true,
+        },
+        nodes: [{ semanticId: "button:run", activatable: true }],
+        duplicateSemanticIds: [],
+      },
+    };
+  }
+  if (taskId === "PF-005") {
+    return {
+      primitiveId: "devtools.layout.measure",
+      candidate: {
+        ...candidate,
+        proofMode: "join",
+        truthLayers: {
+          model: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+          rendered: { nodeCount: 1, clippedNodeCount: 0, overlapCount: 0 },
+          joins: [{
+            measurementId: "layout:row",
+            semanticId: "row:one",
+            role: "rowSlot",
+            coordinateSpace: "window",
+            comparability: "Comparable",
+            classification: "Match",
+            model: { bounds, generation: 1 },
+            rendered: { bounds, visibleBounds: bounds, clipBounds: bounds, frameGeneration: 1 },
+            delta: { x: 0, y: 0, width: 0, height: 0 },
+            tolerance: { x: 1, y: 1, width: 1, height: 1 },
+          }],
+          comparableJoinCount: 1,
+          unjoinedMeasurementIds: [],
+        },
+      },
+    };
+  }
+  if (taskId === "PF-006") {
+    return {
+      primitiveId: "devtools.text.measure",
+      candidate: {
+        ...candidate,
+        tool: "script-kit-devtools.text",
+        command: "text.measure",
+        proofMode: "fit",
+        textSummary: { inputLength: 4, inputFingerprint: "synthetic" },
+        rows: [{ textLength: 4, fingerprint: "synthetic" }],
+        textFits: [{
+          measurementId: "text:line",
+          semanticId: "input:search",
+          role: "textLineBox",
+          lineBoxBounds: bounds,
+          glyphBounds: bounds,
+          clipBounds: bounds,
+          visibleBounds: bounds,
+          visibleRatio: 1,
+          truncationPolicy: "fullDisplay",
+          occluderMeasurementIds: [],
+          fontFamilyFingerprint: "font",
+          fontSize: 14,
+          lineHeight: 20,
+          backingScaleFactor: 2,
+          fontsReady: true,
+          contentFingerprint: "content",
+          graphemeCount: 4,
+          geometryValid: true,
+          measurementIdentityValid: true,
+          paintOrderValid: true,
+          fullDisplayPass: true,
+          rawContentReturned: false,
+          frameMatches: true,
+          backingScaleMatches: true,
+        }],
+      },
+    };
+  }
+  if (taskId === "PF-007") {
+    return {
+      primitiveId: "devtools.focus.inspect",
+      candidate: {
+        ...candidate,
+        tool: "script-kit-devtools.focus",
+        command: "focus.inspect",
+        proofMode: "ax",
+        windowFocused: true,
+        focusedSemanticId: "input:search",
+        keyboardOwner: {},
+        semanticProjection: { quality: "complete", proofAllowed: true },
+        nativeFooter: {
+          axParity: {
+            semanticButtonCount: 1,
+            axNodeCount: 1,
+            peerCount: 1,
+            duplicateAxIds: [],
+            duplicateAxStructuralIds: [],
+            duplicateSemanticIds: [],
+            complete: true,
+            peers: [{
+              semanticId: "footer-action:run",
+              action: "run",
+              enabled: true,
+              disabledReason: null,
+              expectedSelector: "runFooterAction:",
+              axPeer: {
+                structuralId: "footer-run",
+                accessibilityIdentifier: "footer-action:run",
+                role: "AXButton",
+                labelSha256: "a".repeat(64),
+                labelLength: 3,
+                enabled: true,
+                accessibilityElement: true,
+                hidden: false,
+                alpha: 1,
+                actionSelector: "runFooterAction:",
+                bounds,
+              },
+              errors: [],
+              parityPass: true,
+            }],
+          },
+        },
+        focusGraph: {
+          nodes: [{ semanticId: "input:search", previous: null, next: null }],
+          reciprocal: true,
+          duplicateSemanticIds: [],
+          hiddenFocusableIds: [],
+          focusedSemanticIds: ["input:search"],
+        },
+      },
+    };
+  }
+  if (taskId === "PF-008") {
+    return {
+      primitiveId: "devtools.scroll.inspect",
+      candidate: {
+        ...candidate,
+        tool: "script-kit-devtools.scroll",
+        command: "scroll.inspect",
+        scroll: { selectedSemanticId: "row:one", selectedRowWithinSafeViewport: true },
+        renderedSafeViewport: {
+          required: true,
+          classification: "ok",
+          selectedSemanticId: "row:one",
+          rowMeasurementId: "layout:row",
+          safeViewportMeasurementId: "layout:viewport",
+          rowObservationCount: 1,
+          safeViewportObservationCount: 1,
+          rowBounds: bounds,
+          rowVisibleBounds: bounds,
+          rowClipBounds: bounds,
+          safeViewportBounds: bounds,
+          safeViewportClipBounds: bounds,
+          safeViewportPaintBounds: bounds,
+          coordinateSpace: "window",
+          visibleRatio: 1,
+          withinSafeViewport: true,
+          frameGeneration: 1,
+          viewportFrameGeneration: 1,
+          frameMatches: true,
+          targetDataGeneration: 1,
+          missingPrimitives: [],
+        },
+      },
+    };
+  }
+  return { primitiveId: "devtools.layout.measure", candidate };
+}
+
 function passingReceipt(taskId: string, overrides: ReceiptOverrides = {}): Record<string, unknown> {
   const policy = taskProofPolicy(taskId);
   const canonicalTask = syntheticCatalogBindings.get(taskId);
@@ -202,7 +385,32 @@ function passingReceipt(taskId: string, overrides: ReceiptOverrides = {}): Recor
     ...overrides,
   };
   delete (candidate as Record<string, unknown>).producerValidation;
-  return prepareValidatedReceipt("devtools.layout.measure", candidate)
+  const foundation = syntheticFoundationReceipt(taskId, candidate);
+  const spec = RUNTIME_TASK_PROOF_SPECS[taskId as keyof typeof RUNTIME_TASK_PROOF_SPECS];
+  if (spec) {
+    const sourceOwners = [
+      "scripts/devtools/lib/runtime-task-proof.ts",
+      "scripts/devtools/lib/receipt-schema.ts",
+      spec.productionOwner,
+      spec.runtimeProducer,
+    ];
+    Object.assign(foundation.candidate, {
+      runtimeTaskProof: {
+        sourceOwners,
+        productionOwner: spec.productionOwner,
+        runtimeProducer: spec.runtimeProducer,
+        proofMode: spec.proofMode,
+      },
+      sourceFingerprints: Object.fromEntries(
+        sourceOwners.map((path) => [
+          path,
+          createHash("sha256").update(readFileSync(path)).digest("hex"),
+        ]),
+      ),
+      negativeControls: spec.negativeControlIds.map((id) => ({ id, pass: true })),
+    });
+  }
+  return prepareValidatedReceipt(foundation.primitiveId, foundation.candidate)
     .receipt as Record<string, unknown>;
 }
 
@@ -451,11 +659,59 @@ describe("verify-task mutations", () => {
   });
 
   test("registered hidden producer evidence can discharge a runtime task", () => {
-    const tree = setup({ receiptTaskIds: ["PF-004"] });
-    const { receipt, exitCode } = tree.runTask("PF-004");
+    const tree = setup({ receiptTaskIds: ["UX-001"] });
+    const { receipt, exitCode } = tree.runTask("UX-001");
     expect(receipt.proofPolicy.requirement).toBe("direct-runtime");
     expect(receipt.disposition).toBe("EVALUABLE_PASS");
     expect(exitCode).toBe(0);
+  });
+
+  test("a registered layout inspector cannot falsely satisfy semantic projection", () => {
+    const tree = setup({ receiptTaskIds: ["PF-004"] });
+    const binding = syntheticCatalogBindings.get("PF-004")!;
+    tree.writeReceipt("PF-004", "proof.json", passingReceipt("UX-001", {
+      taskId: "PF-004",
+      catalogBinding: {
+        taskId: "PF-004",
+        title: binding.title,
+        sectionSha256: binding.sectionSha256,
+      },
+    }));
+    const { receipt, exitCode } = tree.runTask("PF-004");
+    expect(exitCode).toBe(4);
+    expect(receipt.disposition).toBe("INVALID_SCHEMA");
+    expect(receipt.errors.map((error: { code: string }) => error.code))
+      .toContain("task-runtime-primitive-mismatch");
+  });
+
+  test("the correct registered primitive still cannot substitute inspection for real proof", () => {
+    const tree = setup({ receiptTaskIds: ["PF-004"] });
+    const receipt = passingReceipt("PF-004");
+    (receipt.semanticProjection as Record<string, unknown>).proofMode = "inspection";
+    tree.writeReceipt("PF-004", "proof.json", receipt);
+    const result = tree.runTask("PF-004");
+    expect(result.exitCode).toBe(4);
+    expect(result.receipt.errors.map((error: { code: string }) => error.code))
+      .toContain("task-runtime-proof-mode-mismatch");
+  });
+
+  test("foundation proof cannot omit its actual runtime owner or executed adversarial cases", () => {
+    const tree = setup({ receiptTaskIds: ["PF-004"] });
+    const ownerless = passingReceipt("PF-004");
+    delete ownerless.runtimeTaskProof;
+    tree.writeReceipt("PF-004", "proof.json", ownerless);
+    const missingOwner = tree.runTask("PF-004");
+    expect(missingOwner.exitCode).toBe(4);
+    expect(missingOwner.receipt.errors.map((error: { code: string }) => error.code))
+      .toContain("task-runtime-proof-source-ownership-mismatch");
+
+    const missingControl = passingReceipt("PF-004");
+    (missingControl.negativeControls as unknown[]).pop();
+    tree.writeReceipt("PF-004", "controls.json", missingControl);
+    const missingAdversary = tree.runTask("PF-004");
+    expect(missingAdversary.exitCode).toBe(4);
+    expect(missingAdversary.receipt.errors.map((error: { code: string }) => error.code))
+      .toContain("task-runtime-required-negative-control-missing");
   });
 
   test("swapped GOV-006/GOV-007 obligation IDs and section hashes never pass", () => {

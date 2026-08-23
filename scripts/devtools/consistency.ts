@@ -46,6 +46,7 @@ import {
   producerIdentityForTool,
   receiptDispositions,
   receiptRegistryIdentity,
+  RUNTIME_TASK_PROOF_SPECS,
   validateReceipt,
   type ReceiptDisposition,
 } from "./lib/receipt-schema.ts";
@@ -597,6 +598,27 @@ export function receiptStaleReasons(entry: DiscoveredReceipt, current: CurrentId
       reasons.push({ code: "stale-producer", detail: `${receipt.tool} (${entry.path})` });
     }
   }
+  if (receipt.runtimeTaskProof && typeof receipt.runtimeTaskProof === "object") {
+    const sourceFingerprints = asObject(receipt.sourceFingerprints);
+    for (const [path, expected] of Object.entries(sourceFingerprints)) {
+      if (
+        !(path.startsWith("scripts/devtools/") ||
+          path.startsWith("scripts/agentic/cons-proof-gov/")) ||
+        path.split("/").includes("..") ||
+        typeof expected !== "string" || !/^[a-f0-9]{64}$/.test(expected)
+      ) {
+        reasons.push({ code: "stale-runtime-proof-source-owner", detail: `${path} (${entry.path})` });
+        continue;
+      }
+      const actual = current.fileSha256(path);
+      if (actual === null || actual !== expected) {
+        reasons.push({
+          code: actual === null ? "stale-runtime-proof-source-missing" : "stale-runtime-proof-source",
+          detail: `${path} (${entry.path})`,
+        });
+      }
+    }
+  }
   if (receipt.primitiveId === "devtools.consistency.safe-task-proof") {
     const reviewedWorkflowSuite =
       "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts";
@@ -952,6 +974,75 @@ export function verifyTask(input: VerifyTaskInput): { receipt: JsonObject; exitC
       ) {
         const primitiveId =
           typeof receipt.primitiveId === "string" ? receipt.primitiveId : null;
+        const foundationSpec = RUNTIME_TASK_PROOF_SPECS[
+          taskId as keyof typeof RUNTIME_TASK_PROOF_SPECS
+        ];
+        if (foundationSpec && primitiveId !== foundationSpec.primitiveId) {
+          errors.push({
+            code: "task-runtime-primitive-mismatch",
+            detail:
+              `${taskId} requires ${foundationSpec.primitiveId}; ` +
+              `${entry.path} provides ${primitiveId ?? "no registered primitive"}`,
+          });
+        }
+        if (foundationSpec && primitiveId === foundationSpec.primitiveId) {
+          const observedMode = primitiveId === "devtools.elements.snapshot"
+            ? asObject(receipt.semanticProjection).proofMode
+            : primitiveId === "devtools.scroll.inspect"
+              ? (asObject(receipt.renderedSafeViewport).required === true
+                ? "rendered-safe-viewport"
+                : null)
+              : receipt.proofMode;
+          if (observedMode !== foundationSpec.proofMode) {
+            errors.push({
+              code: "task-runtime-proof-mode-mismatch",
+              detail:
+                `${taskId} requires ${foundationSpec.proofMode}; ` +
+                `${entry.path} provides ${String(observedMode ?? "no actual proof mode")}`,
+            });
+          }
+          const runtimeProof = asObject(receipt.runtimeTaskProof);
+          const sourceFingerprints = asObject(receipt.sourceFingerprints);
+          const expectedOwners = [
+            "scripts/devtools/lib/runtime-task-proof.ts",
+            "scripts/devtools/lib/receipt-schema.ts",
+            foundationSpec.productionOwner,
+            foundationSpec.runtimeProducer,
+          ];
+          const declaredOwners = Array.isArray(runtimeProof.sourceOwners)
+            ? runtimeProof.sourceOwners.filter((path): path is string => typeof path === "string")
+            : [];
+          if (
+            runtimeProof.productionOwner !== foundationSpec.productionOwner ||
+            runtimeProof.runtimeProducer !== foundationSpec.runtimeProducer ||
+            runtimeProof.proofMode !== foundationSpec.proofMode ||
+            declaredOwners.length !== expectedOwners.length ||
+            new Set(declaredOwners).size !== expectedOwners.length ||
+            expectedOwners.some((path) => !declaredOwners.includes(path)) ||
+            Object.keys(sourceFingerprints).length !== expectedOwners.length ||
+            expectedOwners.some((path) => typeof sourceFingerprints[path] !== "string")
+          ) {
+            errors.push({
+              code: "task-runtime-proof-source-ownership-mismatch",
+              detail: `${taskId} requires the exact reviewed primitive, adapter, schema, and runtime-producer owners`,
+            });
+          }
+          const executedControls = Array.isArray(receipt.negativeControls)
+            ? receipt.negativeControls.map(asObject)
+            : [];
+          const controlIds = executedControls.map((control) => String(control.id ?? ""));
+          const requiredControls = foundationSpec.negativeControlIds
+            .filter((id) => !controlIds.includes(id));
+          if (
+            requiredControls.length > 0 ||
+            new Set(controlIds).size !== controlIds.length
+          ) {
+            errors.push({
+              code: "task-runtime-required-negative-control-missing",
+              detail: `${taskId}: ${requiredControls.join(", ") || "duplicate negative controls"}`,
+            });
+          }
+        }
         const validation = primitiveId ? validateReceipt(primitiveId, receipt) : null;
         if (
           !validation?.valid ||
@@ -1096,6 +1187,10 @@ export function verifyTask(input: VerifyTaskInput): { receipt: JsonObject; exitC
       "task-evidence-class-not-accepted",
       "task-evidence-observation-invalid",
       "task-runtime-proof-not-registry-validated",
+      "task-runtime-primitive-mismatch",
+      "task-runtime-proof-mode-mismatch",
+      "task-runtime-proof-source-ownership-mismatch",
+      "task-runtime-required-negative-control-missing",
       "task-canonical-catalog-binding-mismatch",
     ].includes(error.code),
   ) || receiptDispositionList.some((d) => d.startsWith("INVALID_") || d === "ANALYSIS_PENDING");
