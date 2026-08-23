@@ -10,14 +10,29 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
+export const LOCKED_GLASS_SOURCE_PATHS = [
+  "src/theme/opacity.rs",
+  "src/platform/secondary_window_config.rs",
+  "src/platform/secondary_window_config_behavior_tests.rs",
+  "src/platform/secondary_window_glass_animation.rs",
+  "src/platform/secondary_window_glass_backdrop.rs",
+  "src/platform/secondary_window_glass_lifecycle.rs",
+  "src/platform/secondary_window_glass_style.rs",
+  "src/platform/secondary_window_resize_policy.rs",
+  "src/platform/secondary_window_vibrancy_impl.rs",
+  "src/footer_popup.rs",
+  "src/footer_popup_fidelity.rs",
+  "src/footer_popup_glass_geometry.rs",
+  "src/footer_popup_native_dispatch.rs",
+  "src/footer_popup_native_layout.rs",
+  "src/ui/chrome/tokens.rs",
+  "scripts/agentic/fixtures/glass-motion-calibration-theme.json",
+] as const;
+
 export const REQUIRED_PROTECTED_SOURCE_PATHS = [
   "AGENTS.md",
   "scripts/devtools/consistency-catalog.md",
-  "src/theme/opacity.rs",
-  "src/platform/secondary_window_config.rs",
-  "src/footer_popup.rs",
-  "src/ui/chrome/tokens.rs",
-  "scripts/agentic/fixtures/glass-motion-calibration-theme.json",
+  ...LOCKED_GLASS_SOURCE_PATHS,
 ] as const;
 
 type ProtectedPath = { path: string; sha256: string };

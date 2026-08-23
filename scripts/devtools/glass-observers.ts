@@ -58,6 +58,7 @@ import {
 import { newRunId } from "./glass-evidence-contract.ts";
 import { producerIdentityForTool } from "./lib/receipt-schema.ts";
 import { assertNoninteractiveVisualProbe } from "./lib/operator-safety.ts";
+import { LOCKED_GLASS_SOURCE_PATHS } from "./protected-sources.ts";
 
 // ---------------------------------------------------------------------------
 // Disposition table (plan §2.2)
@@ -777,10 +778,7 @@ export function runSyntheticNegativeControls(
 // ---------------------------------------------------------------------------
 
 const PROTECTED_PATHS = [
-  "src/theme/opacity.rs",
-  "src/ui/chrome/tokens.rs",
-  "src/platform/secondary_window_config.rs",
-  "scripts/agentic/fixtures/glass-motion-calibration-theme.json",
+  ...LOCKED_GLASS_SOURCE_PATHS,
   "scripts/devtools/glass-entry-motion-contract.ts",
 ];
 

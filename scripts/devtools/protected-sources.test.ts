@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   createProtectedSourceManifest,
+  LOCKED_GLASS_SOURCE_PATHS,
   REQUIRED_PROTECTED_SOURCE_PATHS,
   validateProtectedSourceManifest,
 } from "./protected-sources.ts";
@@ -17,6 +18,30 @@ describe("static protected consistency-source inventory", () => {
     expect(manifest.protectedPaths.map((entry) => entry.path)).toContain(
       "scripts/agentic/fixtures/glass-motion-calibration-theme.json",
     );
+    expect(manifest.protectedPaths.map((entry) => entry.path)).toEqual(
+      expect.arrayContaining([...LOCKED_GLASS_SOURCE_PATHS]),
+    );
+  });
+
+  test("every extracted calibrated owner remains mandatory and independently drift-sensitive", () => {
+    const baseline = createProtectedSourceManifest();
+    for (const path of LOCKED_GLASS_SOURCE_PATHS) {
+      const omitted = {
+        ...baseline,
+        protectedPaths: baseline.protectedPaths.filter((entry) => entry.path !== path),
+      };
+      expect(validateProtectedSourceManifest(omitted).errors).toContain(
+        `required protected source omitted: ${path}`,
+      );
+
+      const drifted = validateProtectedSourceManifest(baseline, {
+        currentHash: (currentPath) =>
+          currentPath === path
+            ? "a".repeat(64)
+            : baseline.protectedPaths.find((entry) => entry.path === currentPath)?.sha256 ?? null,
+      });
+      expect(drifted.errors).toContain(`protected source drifted since observation: ${path}`);
+    }
   });
 
   test("missing, duplicate, absolute, and escaping protected owners fail closed", () => {

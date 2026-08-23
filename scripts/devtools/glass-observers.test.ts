@@ -20,6 +20,7 @@ import {
   classifyGlassObservation,
   classifySyntheticObservation,
   exitCodeForDisposition,
+  hashProtectedPaths,
   type GlassObservationInput,
   REQUIRED_NOTES_PHASES,
   runSyntheticNegativeControls,
@@ -28,6 +29,7 @@ import {
   validateNotesPhaseRecords,
   validateOwnedRenderedFrames,
 } from "./glass-observers.ts";
+import { LOCKED_GLASS_SOURCE_PATHS } from "./protected-sources.ts";
 
 const SETTLED: [[number, number], [number, number]] = [[0, 0], [750, 501]];
 const DISPLAY_PERIOD_NS = 8_333_333;
@@ -47,6 +49,14 @@ function cleanInput(): GlassObservationInput {
 }
 
 describe("disposition table", () => {
+  test("hashes every extracted calibrated production and anti-drift owner", () => {
+    const hashes = hashProtectedPaths();
+    expect(Object.keys(hashes)).toEqual(expect.arrayContaining([...LOCKED_GLASS_SOURCE_PATHS]));
+    for (const path of LOCKED_GLASS_SOURCE_PATHS) {
+      expect(hashes[path]).toMatch(/^[a-f0-9]{64}$/);
+    }
+  });
+
   test("clean rendered evidence inside the envelope is EVALUABLE_PASS (exit 0)", () => {
     const classified = classifyGlassObservation(cleanInput());
     expect(classified.disposition).toBe("EVALUABLE_PASS");
