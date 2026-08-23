@@ -112,6 +112,7 @@ const REQUIRED_PROOF_SUITES = [
   "scripts/migrate/__tests__/classify.test.ts",
   "scripts/agentic/cargo-build-policy.test.ts",
   "scripts/agentic/macos-input.test.ts",
+  "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
   "scripts/agentic/quick-ai-latency-bench.test.ts",
   "tests/sdk/runner-safety.test.ts",
 ] as const;
@@ -195,6 +196,11 @@ const REQUIRED_BUILD_SAFETY_OWNERS = [
   "scripts/agentic/cargo-build-policy.test.ts",
   "scripts/agentic/reuse-rust-test-binary.sh",
   "scripts/agentic/build-isolated-binary.sh",
+] as const;
+
+const REQUIRED_WORKFLOW_EVIDENCE_OWNERS = [
+  "scripts/agentic/cons-flow-ux/final-workflow-audit.ts",
+  "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
 ] as const;
 
 const REQUIRED_FOCUSED_FIXTURES = {
@@ -1621,6 +1627,7 @@ function requiredCleanReleaseSourceOwners(repositoryRoot: string): string[] {
     REQUIRED_OPERATOR_SAFETY_OWNERS.every((owner) => owners.includes(owner)) &&
     REQUIRED_SDK_SAFETY_OWNERS.every((owner) => owners.includes(owner)) &&
     REQUIRED_BUILD_SAFETY_OWNERS.every((owner) => owners.includes(owner)) &&
+    REQUIRED_WORKFLOW_EVIDENCE_OWNERS.every((owner) => owners.includes(owner)) &&
     RELEASE_INTEGRATION_SUITES.every((suite) => owners.includes(`tests/${suite}.rs`)),
   "publishable release evidence has an invalid or incomplete canonical source-owner inventory");
   return owners;

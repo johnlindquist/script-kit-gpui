@@ -190,6 +190,8 @@ require_clean_source_identity() {
     scripts/agentic/cons-flow-ux/notes-handoff-probe.ts
     scripts/agentic/cons-flow-ux/notes-agent-chat-return-probe.ts
     scripts/agentic/cons-flow-ux/context-lifecycle-probe.ts
+    scripts/agentic/cons-flow-ux/final-workflow-audit.ts
+    scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts
     scripts/agentic/root-search-visual-stability.ts
     scripts/agentic/glass-smoke-study.ts
     scripts/agentic/automation-window.ts
@@ -509,6 +511,7 @@ run_phase() {
         ./scripts/devtools/rapid-toggle-stress.test.ts \
         ./scripts/agentic/cargo-build-policy.test.ts \
         ./scripts/agentic/macos-input.test.ts \
+        ./scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts \
         ./scripts/agentic/cargo-timings-summary.test.ts \
         ./scripts/agentic/quick-ai-latency-bench.test.ts \
         ./scripts/agentic/ai-phase-trace-report.test.ts \

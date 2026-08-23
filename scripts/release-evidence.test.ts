@@ -464,6 +464,7 @@ function makeFixture(): ReleaseFixture {
     "scripts/migrate/__tests__/classify.test.ts:",
     "scripts/agentic/cargo-build-policy.test.ts:",
     "scripts/agentic/macos-input.test.ts:",
+    "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts:",
     "scripts/agentic/quick-ai-latency-bench.test.ts:",
     "tests/sdk/runner-safety.test.ts:",
     " 355 pass",
@@ -928,6 +929,11 @@ describe("fail-closed release evidence", () => {
     expect(() => buildGateReceipt({
       gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
     })).toThrow("missing its required directly executed fixture suite: scripts/agentic/macos-input.test.ts");
+
+    writeFileSync(resultPath, valid.replace("scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts:", ""));
+    expect(() => buildGateReceipt({
+      gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
+    })).toThrow("missing its required directly executed fixture suite: scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts");
   });
 
   test("signing attestation requires an accepted notarization and the exact signing team", () => {
@@ -2281,6 +2287,8 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/agentic/cons-flow-ux/notes-handoff-probe.ts",
     "scripts/agentic/cons-flow-ux/notes-agent-chat-return-probe.ts",
     "scripts/agentic/cons-flow-ux/context-lifecycle-probe.ts",
+    "scripts/agentic/cons-flow-ux/final-workflow-audit.ts",
+    "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
     "scripts/agentic/root-search-visual-stability.ts",
     "scripts/agentic/glass-smoke-study.ts",
     "scripts/agentic/filterable-surface-matrix.ts",
