@@ -255,6 +255,7 @@ require_clean_source_identity() {
     tests/window_resize_logic.rs
     tests/sdk/capability-types.fixture.ts
     tests/sdk/fixtures/runner-negative-case.ts
+    tests/sdk/system-input-tests.ts
     tests/sdk/test-mcp-client.ts
     tests/sdk/runner-safety.test.ts
     kit-init/sdk/menu-syntax.test.ts

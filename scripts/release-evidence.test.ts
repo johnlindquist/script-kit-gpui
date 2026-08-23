@@ -411,8 +411,38 @@ function makeFixture(): ReleaseFixture {
   writeFileSync(designExporterPath, "synthetic-design-exporter", { mode: 0o755 });
   json(contractsPath, syntheticDirectMatrix().registry);
 
+  const sdkTestsDirectory = join(root, "tests/sdk");
+  mkdirSync(sdkTestsDirectory, { recursive: true });
+  const sdkFixtureFiles = [
+    "test-filesystem-exec.ts",
+    "test-mcp-client.ts",
+    "test-window-management.ts",
+  ];
+  for (const file of [...sdkFixtureFiles, "test-system.ts"]) {
+    writeFileSync(join(sdkTestsDirectory, file), `// synthetic reviewed SDK owner: ${file}\n`);
+  }
+  const sdkFiles = sdkFixtureFiles.map((file, index) => {
+    const passed = index === 0 ? 235 : 1;
+    return {
+      file,
+      passed,
+      failed: 0,
+      skipped: 0,
+      tests: Array.from({ length: passed }, (_, caseIndex) => ({
+        test: `${file}-behavior-${caseIndex}`,
+        status: "pass",
+        timestamp: "2026-08-23T00:00:00.000Z",
+      })),
+    };
+  });
   const sdkResultPath = join(root, "sdk-result.json");
-  json(sdkResultPath, { total_passed: 215, total_failed: 0, total_skipped: 0 });
+  json(sdkResultPath, {
+    mode: "parallel",
+    files: sdkFiles,
+    total_passed: 237,
+    total_failed: 0,
+    total_skipped: 0,
+  });
 
   const rustResultPath = join(root, "rust-result.log");
   writeFileSync(rustResultPath,
@@ -814,7 +844,7 @@ describe("fail-closed release evidence", () => {
       gatekeeper_accepted: true,
     });
     expect(manifest.verification.gates.find((gate) => gate.gateId === "sdk-tests")?.result)
-      .toEqual({ passed: 215, failed: 0, skipped: 0 });
+      .toEqual({ passed: 237, failed: 0, skipped: 0 });
     expect(manifest.verification.gates.find((gate) => gate.gateId === "rust-tests")?.result)
       .toEqual({ passed: 32, failed: 0, skipped: 2 });
     expect(manifest.verification.gates.find((gate) => gate.gateId === "integration-tests")?.result)
@@ -861,10 +891,82 @@ describe("fail-closed release evidence", () => {
       gateId: "sdk-tests", evidenceClass: "SDK_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
     })).toThrow("contains failing tests");
 
-    json(resultPath, { total_passed: 215, total_failed: 0, total_skipped: 1 });
+    json(resultPath, { total_passed: 237, total_failed: 0, total_skipped: 1 });
     expect(() => buildGateReceipt({
       gateId: "sdk-tests", evidenceClass: "SDK_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
     })).toThrow("cannot skip behavior coverage");
+  });
+
+  test("SDK release proof rejects totals-only and incomplete reviewed script coverage", () => {
+    const fixture = makeFixture();
+    const resultPath = join(fixture.root, "forged-sdk.json");
+    const original = JSON.parse(readFileSync(join(fixture.root, "sdk-result.json"), "utf8"));
+    const options = {
+      gateId: "sdk-tests",
+      evidenceClass: "SDK_BEHAVIOR",
+      sourceSha: SOURCE_SHA,
+      resultPath,
+      repositoryRoot: fixture.root,
+    };
+
+    json(resultPath, { total_passed: 1, total_failed: 0, total_skipped: 0 });
+    expect(() => buildGateReceipt(options)).toThrow("complete per-file SDK behavior evidence");
+
+    const missing = structuredClone(original);
+    missing.files = missing.files.filter((file: { file: string }) => file.file !== "test-mcp-client.ts");
+    missing.total_passed -= 1;
+    json(resultPath, missing);
+    expect(() => buildGateReceipt(options)).toThrow("complete reviewed SDK script inventory");
+
+    const duplicate = structuredClone(original);
+    duplicate.files.push(structuredClone(duplicate.files[1]));
+    duplicate.total_passed += 1;
+    json(resultPath, duplicate);
+    expect(() => buildGateReceipt(options)).toThrow("duplicate SDK script receipt");
+
+    const foreign = structuredClone(original);
+    foreign.files[1].file = "../../outside.ts";
+    json(resultPath, foreign);
+    expect(() => buildGateReceipt(options)).toThrow("unreviewed SDK script receipt");
+
+    const unsafeSystemInput = structuredClone(original);
+    unsafeSystemInput.files[1].file = "test-system.ts";
+    json(resultPath, unsafeSystemInput);
+    expect(() => buildGateReceipt(options)).toThrow("unreviewed SDK script receipt");
+  });
+
+  test("SDK release proof independently recomputes every terminal outcome and aggregate", () => {
+    const fixture = makeFixture();
+    const resultPath = join(fixture.root, "forged-sdk.json");
+    const original = JSON.parse(readFileSync(join(fixture.root, "sdk-result.json"), "utf8"));
+    const options = {
+      gateId: "sdk-tests",
+      evidenceClass: "SDK_BEHAVIOR",
+      sourceSha: SOURCE_SHA,
+      resultPath,
+      repositoryRoot: fixture.root,
+    };
+
+    const hiddenFailure = structuredClone(original);
+    hiddenFailure.files[0].tests[0].error = "real hidden failure";
+    json(resultPath, hiddenFailure);
+    expect(() => buildGateReceipt(options)).toThrow("passing SDK behavior cannot carry an error");
+
+    const duplicateTerminal = structuredClone(original);
+    duplicateTerminal.files[0].tests.push(structuredClone(duplicateTerminal.files[0].tests[0]));
+    json(resultPath, duplicateTerminal);
+    expect(() => buildGateReceipt(options)).toThrow("duplicate terminal SDK behavior");
+
+    const wrongFileCounts = structuredClone(original);
+    wrongFileCounts.files[0].passed += 1;
+    wrongFileCounts.total_passed += 1;
+    json(resultPath, wrongFileCounts);
+    expect(() => buildGateReceipt(options)).toThrow("per-file SDK result counts");
+
+    const wrongAggregate = structuredClone(original);
+    wrongAggregate.total_passed += 1;
+    json(resultPath, wrongAggregate);
+    expect(() => buildGateReceipt(options)).toThrow("aggregate SDK result counts");
   });
 
   test("Rust proof rejects compile-only output and zero executed tests", () => {
@@ -2386,6 +2488,7 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/test-runner.ts",
     "tests/sdk/capability-types.fixture.ts",
     "tests/sdk/fixtures/runner-negative-case.ts",
+    "tests/sdk/system-input-tests.ts",
     "tests/sdk/test-mcp-client.ts",
     "tests/sdk/runner-safety.test.ts",
     "tests/protocol_batch.rs",

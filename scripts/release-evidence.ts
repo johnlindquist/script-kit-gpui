@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { inflateRawSync } from "node:zlib";
+import { SDK_SYSTEM_INPUT_TESTS } from "../tests/sdk/system-input-tests.ts";
 import {
   GENERATED_BYTE_COMPARE_OUTPUT_PATHS,
   GENERATED_BYTE_COMPARE_SOURCE_PATHS,
@@ -204,6 +205,7 @@ const REQUIRED_SDK_SAFETY_OWNERS = [
   "scripts/mcp-cli.test.ts",
   "scripts/test-runner.ts",
   "tests/sdk/fixtures/runner-negative-case.ts",
+  "tests/sdk/system-input-tests.ts",
   "tests/sdk/test-mcp-client.ts",
   "tests/sdk/runner-safety.test.ts",
 ] as const;
@@ -962,13 +964,99 @@ function requireGateId(value: string): asserts value is GateId {
   requireCondition(Object.hasOwn(REQUIRED_GATE_CLASSES, value), `unknown release gate: ${value}`);
 }
 
-function sdkSuiteSummary(path: string): { passed: number; failed: number; skipped: number } {
+function sdkSuiteSummary(
+  path: string,
+  repositoryRoot = process.cwd(),
+): { passed: number; failed: number; skipped: number } {
   const result = readJson(path);
   requireCondition(Number.isInteger(result.total_passed) && result.total_passed > 0,
     "SDK gate must contain at least one passing behavior test");
   requireCondition(result.total_failed === 0, "SDK gate contains failing tests");
   requireCondition(Number.isInteger(result.total_skipped) && result.total_skipped === 0,
     "SDK release gate cannot skip behavior coverage or depend on unavailable external services");
+  requireCondition(result.mode === "parallel" && Array.isArray(result.files) && result.files.length > 0,
+    "SDK release gate requires complete per-file SDK behavior evidence from the real parallel runner");
+
+  const suiteRoot = realpathSync(join(resolve(repositoryRoot), "tests/sdk"));
+  const blocked = new Set<string>(SDK_SYSTEM_INPUT_TESTS);
+  const expectedFiles = readdirSync(suiteRoot)
+    .filter((file) => /^test-[^/]+\.ts$/.test(file))
+    .filter((file) => {
+      if (blocked.has(file)) return false;
+      const canonical = realpathSync(join(suiteRoot, file));
+      const ownership = relative(suiteRoot, canonical);
+      requireCondition(
+        ownership !== "" && ownership !== ".." && !ownership.startsWith("../") && !isAbsolute(ownership),
+        `SDK release discovery found an unreviewed source owner: ${file}`,
+      );
+      return !blocked.has(canonical.split("/").at(-1)!);
+    })
+    .sort();
+  const expected = new Set(expectedFiles);
+  const observed = new Set<string>();
+  let passed = 0;
+  let failed = 0;
+  let skipped = 0;
+
+  for (const file of result.files) {
+    requireCondition(file && typeof file === "object" && typeof file.file === "string" &&
+      expected.has(file.file), `SDK release gate received an unreviewed SDK script receipt: ${String(file?.file)}`);
+    requireCondition(!observed.has(file.file),
+      `SDK release gate contains a duplicate SDK script receipt: ${file.file}`);
+    observed.add(file.file);
+    requireCondition(Array.isArray(file.tests) && file.tests.length > 0 &&
+      Number.isSafeInteger(file.passed) && file.passed >= 0 &&
+      Number.isSafeInteger(file.failed) && file.failed >= 0 &&
+      Number.isSafeInteger(file.skipped) && file.skipped >= 0,
+    `SDK release gate requires complete per-file SDK behavior evidence: ${file.file}`);
+
+    const terminals = new Map<string, "pass" | "fail" | "skip">();
+    const started = new Set<string>();
+    for (const outcome of file.tests) {
+      requireCondition(outcome && typeof outcome === "object" &&
+        typeof outcome.test === "string" && outcome.test.trim().length > 0 &&
+        typeof outcome.timestamp === "string" && !Number.isNaN(Date.parse(outcome.timestamp)) &&
+        ["running", "pass", "fail", "skip"].includes(outcome.status),
+      `SDK release gate contains an invalid SDK behavior outcome: ${file.file}`);
+      if (outcome.duration_ms !== undefined) {
+        requireCondition(Number.isSafeInteger(outcome.duration_ms) && outcome.duration_ms >= 0,
+          `SDK release gate contains an invalid SDK behavior duration: ${file.file}`);
+      }
+      if (outcome.status === "running") {
+        requireCondition(!terminals.has(outcome.test),
+          `SDK release gate reopens a completed SDK behavior: ${outcome.test}`);
+        started.add(outcome.test);
+        continue;
+      }
+      requireCondition(!terminals.has(outcome.test),
+        `SDK release gate contains a duplicate terminal SDK behavior: ${outcome.test}`);
+      if (outcome.status === "pass" || outcome.status === "skip") {
+        requireCondition(outcome.error == null,
+          `${outcome.status === "pass" ? "passing" : "skipped"} SDK behavior cannot carry an error: ${outcome.test}`);
+      }
+      terminals.set(outcome.test, outcome.status);
+    }
+    for (const name of started) {
+      requireCondition(terminals.has(name),
+        `SDK release gate is missing a terminal SDK behavior outcome: ${name}`);
+    }
+    const outcomes = [...terminals.values()];
+    const filePassed = outcomes.filter((status) => status === "pass").length;
+    const fileFailed = outcomes.filter((status) => status === "fail").length;
+    const fileSkipped = outcomes.filter((status) => status === "skip").length;
+    requireCondition(file.passed === filePassed && file.failed === fileFailed && file.skipped === fileSkipped,
+      `SDK release gate contains incorrect per-file SDK result counts: ${file.file}`);
+    requireCondition(filePassed > 0,
+      `SDK release gate executed no passing behavior for reviewed script: ${file.file}`);
+    passed += filePassed;
+    failed += fileFailed;
+    skipped += fileSkipped;
+  }
+
+  requireCondition(observed.size === expected.size && expectedFiles.every((file) => observed.has(file)),
+    "SDK release gate must execute the complete reviewed SDK script inventory");
+  requireCondition(result.total_passed === passed && result.total_failed === failed && result.total_skipped === skipped,
+    "SDK release gate contains incorrect aggregate SDK result counts");
   return { passed: result.total_passed, failed: result.total_failed, skipped: result.total_skipped };
 }
 
@@ -1846,7 +1934,7 @@ export function buildGateReceipt(options: {
     );
   } else if (options.gateId === "sdk-tests") {
     requireCondition(options.resultPath, "SDK gate requires its complete machine-readable suite result");
-    receipt.result = sdkSuiteSummary(options.resultPath);
+    receipt.result = sdkSuiteSummary(options.resultPath, options.repositoryRoot);
   } else if (options.gateId === "packaged-signing") {
     requireCondition(options.resultPath,
       "packaged signing requires a fresh Apple distribution-security attestation");
