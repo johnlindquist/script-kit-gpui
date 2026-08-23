@@ -1123,6 +1123,19 @@ offline receipts until their real producers are run again.
     explicit resumed/new ownership before any follow-up; failed show halts
     immediately, Actions inherits immutable subprocess authority, and all
     four real owners are mandatory release sources.
+32. The actual Notes live/bottom-resize, Actions-entry, glass-lifecycle,
+    rapid-toggle, Spotlight, glass-observer, and main-window native-drag
+    entrypoints bypassed every scenario guard: in strict noninteractive mode,
+    they could create or delete output directories, compile Swift, activate
+    windows, inject real pointer/keyboard input, or capture the screen before
+    refusing. A disposable fake-process regression proved the Notes probe
+    created its directory and reached the native compiler. The main-window
+    inspector also ignored failed startup/show. One shared visible-probe gate
+    now refuses all eight native owners before filesystem or desktop effects;
+    main validates exact lifecycle receipts, while pure imported analyzers,
+    synthetic glass classification, and Spotlight `--grade-only` remain fully
+    usable. All nine actual owners are mandatory release provenance; the
+    locked motion calibration and fixtures remain unchanged.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1373,18 +1386,23 @@ offline receipts until their real producers are run again.
     explicit `noninteractive: false` options nor replacement environments
     can weaken the real parent's authority; target resolution stays on its
     capture-free hidden-state path even when callers request an interactive
-    override. The standalone operator-safety suite passes **112 cases and
-    416 assertions**, including pure canonical-inspector ownership, immutable
+    override. The standalone operator-safety suite passes **123 cases and
+    466 assertions**, including pure canonical-inspector ownership, immutable
     subprocess policy, Notes/matrix/scenario cleanup, mocked native-spawn
     cases, default/render/fallback screenshot refusal, exact session lifecycle,
-    and independent consumer/Actions child-authority refusal; the separate
+    independent consumer/Actions child-authority refusal, and eight
+    fail-closed native visual entrypoints; the separate
     direct native-input suite passes **43 cases and 89
     assertions** without touching a keyboard, pointer, window, or screen;
     the separate hidden-target identity suite passes
-    **14 cases and 66 assertions**. Release evidence now fail-closes unless
-    all twenty-six actual safety owners—the direct session shell, shared
+    **14 cases and 66 assertions**, and six pure locked-glass suites pass
+    **114 cases and 357 assertions** without visual capture. Release evidence
+    now fail-closes unless all thirty-five actual safety owners—the direct
+    session shell, shared
     identity helper, isolated startup, DevTools bootstrap, readiness waiter,
-    canonical inspector, Actions, Agent Chat, Dictation, Events, Notes,
+    canonical inspector, main inspector, Actions, Agent Chat, Dictation,
+    Events, Notes, both Notes resize probes, Actions/glass filmstrips, rapid
+    toggle, glass aggregation, Spotlight capture, native main-window drag,
     filterable matrix, both navigators, exact
     target thread, scenario runner, automation-window owner, dedicated
     screenshot verifier, native window owner, native-input owner and behavior
@@ -1410,7 +1428,7 @@ offline receipts until their real producers are run again.
     spike. Its focused build/proof-contract lane separately passed **62
     tests and 320 assertions in 0.77s**. The subsequent verifier-only change
     separately passes all **164 fake-Cargo cases / 574 assertions** plus
-    **twenty-nine direct release-owner/proof-gate cases / 87 assertions** and
+    **thirty-eight direct release-owner/proof-gate cases / 114 assertions** and
     **five disposable strict-stop ownership cases / 27 assertions**. The
     optional compile-only preflight now builds only the reviewed `--lib`
     target; it does not silently discover every integration harness. The full
