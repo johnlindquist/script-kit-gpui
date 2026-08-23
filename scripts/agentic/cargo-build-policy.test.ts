@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -111,6 +112,51 @@ function installFakeSccache(workspace: ReturnType<typeof fixture>, usable = true
   writeFileSync(join(workspace.bin, "rustc"), "#!/bin/bash\nexit 0\n");
   chmodSync(join(workspace.bin, "sccache"), 0o755);
   chmodSync(join(workspace.bin, "rustc"), 0o755);
+}
+
+function installFakeGit(workspace: ReturnType<typeof fixture>) {
+  writeFileSync(
+    join(workspace.bin, "git"),
+    `#!/bin/bash
+if [[ "$1" == "-C" ]]; then shift 2; fi
+case "$1" in
+  rev-parse)
+    if [[ "$2" == "--is-inside-work-tree" ]]; then
+      printf 'true\\n'
+    elif [[ "\${CARGO_POLICY_GIT_CHANGE_AFTER_CARGO:-0}" == "1" && -f "$CARGO_POLICY_CAPTURE" ]]; then
+      printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\n'
+    else
+      printf '%s\\n' "\${CARGO_POLICY_GIT_HEAD:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+    fi
+    ;;
+  status)
+    if [[ "\${CARGO_POLICY_GIT_DIRTY:-0}" == "1" ]]; then printf ' M src/example.rs\\n'; fi
+    ;;
+  diff)
+    if [[ "\${CARGO_POLICY_GIT_DIRTY:-0}" == "1" ]]; then printf 'src/example.rs\\n'; fi
+    ;;
+  *) exit 64 ;;
+esac
+`,
+  );
+  chmodSync(join(workspace.bin, "git"), 0o755);
+}
+
+function fakeBuiltBinary(workspace: ReturnType<typeof fixture>, name = "export_design_tokens") {
+  const binary = join(
+    workspace.root,
+    "target-agent",
+    "pools",
+    "agent-debug",
+    "debug",
+    name,
+  );
+  mkdirSync(join(workspace.root, "target-agent", "pools", "agent-debug", "debug"), {
+    recursive: true,
+  });
+  writeFileSync(binary, "#!/bin/sh\nprintf 'real-exporter\\n'\n");
+  chmodSync(binary, 0o755);
+  return binary;
 }
 
 describe("bounded Cargo builds", () => {
@@ -676,19 +722,8 @@ describe("bounded Cargo builds", () => {
 
   test("exports a cheap correctness-profile binary from Cargo's actual debug directory", () => {
     const workspace = fixture();
-    const binary = join(
-      workspace.root,
-      "target-agent",
-      "pools",
-      "agent-debug",
-      "debug",
-      "export_design_tokens",
-    );
-    mkdirSync(join(workspace.root, "target-agent", "pools", "agent-debug", "debug"), {
-      recursive: true,
-    });
-    writeFileSync(binary, "#!/bin/sh\nprintf 'real-exporter\\n'\n");
-    chmodSync(binary, 0o755);
+    installFakeGit(workspace);
+    const binary = fakeBuiltBinary(workspace);
 
     const result = run(
       "agent-cargo.sh",
@@ -706,6 +741,97 @@ describe("bounded Cargo builds", () => {
     expect(result.status).toBe(0);
     expect(result.stderr).toContain(`artifact bin=export_design_tokens path=${exported}`);
     expect(readFileSync(exported, "utf8")).toBe(readFileSync(binary, "utf8"));
+    const manifest = JSON.parse(readFileSync(`${exported}.provenance.json`, "utf8"));
+    expect(manifest).toMatchObject({
+      schemaVersion: 2,
+      pool: "agent-debug",
+      binaryPath: "target-agent/artifacts/consistency-gov005/export_design_tokens",
+      binarySha256: createHash("sha256").update(readFileSync(exported)).digest("hex"),
+      sizeBytes: readFileSync(exported).byteLength,
+      gitHead: "a".repeat(40),
+      rustDirty: false,
+    });
+  });
+
+  test("marks dirty compiler inputs explicitly instead of claiming a committed build", () => {
+    const workspace = fixture();
+    installFakeGit(workspace);
+    fakeBuiltBinary(workspace);
+    const result = run(
+      "agent-cargo.sh",
+      ["build", "--bin", "export_design_tokens"],
+      {
+        ...workspace.env,
+        SCRIPT_KIT_AGENT_ARTIFACT_NAME: "dirty-source",
+        CARGO_POLICY_GIT_DIRTY: "1",
+      },
+    );
+    const manifestPath = join(
+      workspace.root,
+      "target-agent",
+      "artifacts",
+      "dirty-source",
+      "export_design_tokens.provenance.json",
+    );
+    expect(result.status).toBe(0);
+    expect(JSON.parse(readFileSync(manifestPath, "utf8")).rustDirty).toBe(true);
+  });
+
+  test("refuses an exported build before Cargo when its Git source cannot be observed", () => {
+    const workspace = fixture();
+    const result = run(
+      "agent-cargo.sh",
+      ["build", "--bin", "export_design_tokens"],
+      { ...workspace.env, SCRIPT_KIT_AGENT_ARTIFACT_NAME: "missing-source" },
+    );
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("independently observed Git source commit");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("refuses exported provenance when HEAD changes while the owned fake build runs", () => {
+    const workspace = fixture();
+    installFakeGit(workspace);
+    fakeBuiltBinary(workspace);
+    const result = run(
+      "agent-cargo.sh",
+      ["build", "--bin", "export_design_tokens"],
+      {
+        ...workspace.env,
+        SCRIPT_KIT_AGENT_ARTIFACT_NAME: "changed-source",
+        CARGO_POLICY_GIT_CHANGE_AFTER_CARGO: "1",
+      },
+    );
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("Git source commit changed during the build");
+    expect(existsSync(join(
+      workspace.root,
+      "target-agent",
+      "artifacts",
+      "changed-source",
+      "export_design_tokens",
+    ))).toBe(false);
+  });
+
+  test("refuses a symlinked exported provenance manifest before Cargo runs", () => {
+    const workspace = fixture();
+    installFakeGit(workspace);
+    fakeBuiltBinary(workspace);
+    const external = temporaryDirectory("script-kit-external-provenance-");
+    const protectedFile = join(external, "preserved.json");
+    writeFileSync(protectedFile, "private-existing-state\n");
+    const artifactDirectory = join(workspace.root, "target-agent", "artifacts", "symlinked-manifest");
+    mkdirSync(artifactDirectory, { recursive: true });
+    symlinkSync(protectedFile, join(artifactDirectory, "export_design_tokens.provenance.json"));
+    const result = run(
+      "agent-cargo.sh",
+      ["build", "--bin", "export_design_tokens"],
+      { ...workspace.env, SCRIPT_KIT_AGENT_ARTIFACT_NAME: "symlinked-manifest" },
+    );
+    expect(result.status).toBe(64);
+    expect(result.stderr).toContain("artifact provenance cannot follow a symlink");
+    expect(existsSync(workspace.capture)).toBe(false);
+    expect(readFileSync(protectedFile, "utf8")).toBe("private-existing-state\n");
   });
 
   test("fails before launching Cargo when the available disk floor is impossible", () => {
@@ -1029,6 +1155,7 @@ describe("reviewed Rust harness reuse", () => {
 describe("isolated build process ownership", () => {
   function isolatedFixture(builder: string) {
     const workspace = fixture();
+    installFakeGit(workspace);
     const localScripts = join(workspace.root, "scripts", "agentic");
     copyFileSync(join(scripts, "build-isolated-binary.sh"), join(localScripts, "build-isolated-binary.sh"));
     copyFileSync(join(scripts, "devtools-session-lib.sh"), join(localScripts, "devtools-session-lib.sh"));
@@ -1166,6 +1293,55 @@ describe("isolated build process ownership", () => {
     });
     expect(existsSync(join(workspace.root, receipt.binaryPath))).toBe(true);
     expect(existsSync(join(workspace.root, receipt.manifest))).toBe(true);
+    const manifest = JSON.parse(readFileSync(join(workspace.root, receipt.manifest), "utf8"));
+    const binary = readFileSync(join(workspace.root, receipt.binaryPath));
+    expect(manifest).toMatchObject({
+      schemaVersion: 2,
+      binaryPath: receipt.binaryPath,
+      binarySha256: createHash("sha256").update(binary).digest("hex"),
+      sizeBytes: binary.byteLength,
+      gitHead: "a".repeat(40),
+      rustDirty: false,
+    });
+  });
+
+  test("marks isolated builds from dirty compiler inputs without claiming source purity", () => {
+    const workspace = isolatedFixture(
+      '#!/bin/bash\ndestination="$SCRIPT_KIT_REPO_ROOT/target-agent/pools/$SCRIPT_KIT_CARGO_TARGET_POOL/debug/script-kit-gpui"\nmkdir -p "$(dirname "$destination")"\nprintf "#!/bin/sh\\nexit 0\\n" > "$destination"\nchmod +x "$destination"\n',
+    );
+    const result = Bun.spawnSync(["/bin/bash", workspace.builderPath, "--json", "5"], {
+      env: { ...workspace.env, CARGO_POLICY_GIT_DIRTY: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(0);
+    const receipt = JSON.parse(result.stdout.toString());
+    expect(JSON.parse(readFileSync(join(workspace.root, receipt.manifest), "utf8")).rustDirty)
+      .toBe(true);
+  });
+
+  test("refuses to stage an isolated executable when HEAD changes during its owned build", () => {
+    const workspace = isolatedFixture(
+      '#!/bin/bash\nprintf "built\\n" > "$CARGO_POLICY_CAPTURE"\ndestination="$SCRIPT_KIT_REPO_ROOT/target-agent/pools/$SCRIPT_KIT_CARGO_TARGET_POOL/debug/script-kit-gpui"\nmkdir -p "$(dirname "$destination")"\nprintf "#!/bin/sh\\nexit 0\\n" > "$destination"\nchmod +x "$destination"\n',
+    );
+    const result = Bun.spawnSync(["/bin/bash", workspace.builderPath, "--json", "5"], {
+      env: { ...workspace.env, CARGO_POLICY_GIT_CHANGE_AFTER_CARGO: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(33);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "error",
+      phase: "stage",
+      error: { code: "source_changed" },
+    });
+    expect(existsSync(join(
+      workspace.root,
+      "target-agent",
+      "runtime",
+      workspace.env.SCRIPT_KIT_AGENT_ID,
+      "script-kit-gpui",
+    ))).toBe(false);
   });
 
   test("terminates the entire owned compiler process group on timeout", () => {

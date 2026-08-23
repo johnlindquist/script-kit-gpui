@@ -108,6 +108,19 @@ emit_build_json() {
 
 echo "[build-isolated] agent_id=${SCRIPT_KIT_AGENT_ID} pool=${POOL} mode=${TARGET_MODE} timeout=${TIMEOUT_SEC}s log=${LOG}" >&2
 
+build_git_head="$(git -C "$DEVTOOLS_SESSION_REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+if [[ ! "$build_git_head" =~ ^[a-f0-9]{40}$ ]]; then
+  echo "[build-isolated] fail: an isolated binary requires an independently observed Git source commit" >&2
+  emit_build_json error build source_unavailable "isolated binary requires an exact Git source commit" 0
+  exit 33
+fi
+build_source_changes="$(git -C "$DEVTOOLS_SESSION_REPO_ROOT" status --porcelain --untracked-files=all -- \
+  src crates assets .cargo Cargo.toml Cargo.lock build.rs rust-toolchain rust-toolchain.toml 2>/dev/null)" || {
+  echo "[build-isolated] fail: isolated binary compiler-input cleanliness could not be observed" >&2
+  emit_build_json error build source_unavailable "isolated binary compiler-input cleanliness unavailable" 0
+  exit 33
+}
+
 # A background pipeline normally shares the parent's process group, so killing
 # only its shell leaves Cargo/rustc running. Give this exact owned pipeline its
 # own group; timeout cleanup can then terminate every descendant together.
@@ -159,21 +172,37 @@ if [[ ! -f "$SRC" ]]; then
   exit 32
 fi
 
+git_head="$(git -C "$DEVTOOLS_SESSION_REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+if [[ "$git_head" != "$build_git_head" ]]; then
+  echo "[build-isolated] fail: Git source commit changed during the owned build" >&2
+  emit_build_json error stage source_changed "Git source commit changed during the owned build" "$elapsed"
+  exit 33
+fi
+final_source_changes="$(git -C "$DEVTOOLS_SESSION_REPO_ROOT" status --porcelain --untracked-files=all -- \
+  src crates assets .cargo Cargo.toml Cargo.lock build.rs rust-toolchain rust-toolchain.toml 2>/dev/null)" || {
+  echo "[build-isolated] fail: isolated binary compiler-input cleanliness could not be observed" >&2
+  emit_build_json error stage source_unavailable "isolated binary compiler-input cleanliness unavailable" "$elapsed"
+  exit 33
+}
+rust_dirty=false
+if [[ -n "$build_source_changes" || -n "$final_source_changes" ]]; then
+  rust_dirty=true
+fi
+
 mkdir -p "$RUNTIME_DIR"
 tmp="${DST}.tmp.$$"
 cp -f "$SRC" "$tmp"
 chmod +x "$tmp"
 mv -f "$tmp" "$DST"
 
-git_head="$(git rev-parse HEAD 2>/dev/null || true)"
-rust_dirty=false
-if git diff --name-only HEAD -- src Cargo.toml Cargo.lock build.rs 2>/dev/null | grep -q .; then
-  rust_dirty=true
-fi
-
-cat > "$MANIFEST" <<EOF
-{"schemaVersion":1,"pool":"${POOL}","source":"${SRC#${DEVTOOLS_SESSION_REPO_ROOT}/}","binaryPath":"${DST#${DEVTOOLS_SESSION_REPO_ROOT}/}","gitHead":"${git_head}","rustDirty":${rust_dirty},"builtAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
-EOF
+binary_sha="$(shasum -a 256 "$DST" | awk '{print $1}')"
+binary_size="$(wc -c < "$DST" | tr -d '[:space:]')"
+manifest_tmp="${MANIFEST}.tmp.$$"
+printf '{"schemaVersion":2,"pool":"%s","source":"%s","binaryPath":"%s","binarySha256":"%s","sizeBytes":%s,"gitHead":"%s","rustDirty":%s,"builtAt":"%s"}\n' \
+  "$POOL" "${SRC#${DEVTOOLS_SESSION_REPO_ROOT}/}" "${DST#${DEVTOOLS_SESSION_REPO_ROOT}/}" \
+  "$binary_sha" "$binary_size" "$git_head" "$rust_dirty" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$manifest_tmp"
+mv -f "$manifest_tmp" "$MANIFEST"
 
 echo "[build-isolated] staged → ${DST#${DEVTOOLS_SESSION_REPO_ROOT}/}" >&2
 emit_build_json ok stage "" "" "$elapsed"

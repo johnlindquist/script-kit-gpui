@@ -304,6 +304,23 @@ done
 if [[ -n "$validated_artifact_name" && -L "${REPO_ROOT}/target-agent/artifacts/${validated_artifact_name}" ]]; then
   worker_failure "protected cache ownership cannot follow a symlink: ${REPO_ROOT}/target-agent/artifacts/${validated_artifact_name}"
 fi
+if [[ -n "$validated_artifact_name" && "${requested_args[0]:-}" == "build" ]]; then
+  for (( export_arg_index = 0; export_arg_index < ${#requested_args[@]}; export_arg_index++ )); do
+    if [[ "${requested_args[$export_arg_index]}" != "--bin" ]]; then
+      continue
+    fi
+    if (( export_arg_index + 1 >= ${#requested_args[@]} )); then
+      continue
+    fi
+    export_binary_name="${requested_args[$((export_arg_index + 1))]}"
+    [[ "$export_binary_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] \
+      || worker_failure "exported binary must name one owned artifact child; got ${export_binary_name}"
+    export_binary_path="${REPO_ROOT}/target-agent/artifacts/${validated_artifact_name}/${export_binary_name}"
+    if [[ -L "$export_binary_path" || -L "${export_binary_path}.provenance.json" ]]; then
+      worker_failure "protected artifact provenance cannot follow a symlink: ${export_binary_path}"
+    fi
+  done
+fi
 
 mkdir -p "$target_dir" "$lock_root" "$metal_module_cache"
 
@@ -471,9 +488,28 @@ release_lock() {
   rm -rf "$lock_dir" 2>/dev/null || true
 }
 
+artifact_source_commit=""
+artifact_source_dirty=false
+artifact_observed_commit=""
+artifact_observed_dirty=false
+
+observe_artifact_source() {
+  local changed
+  artifact_observed_commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)" \
+    || worker_failure "exported artifact requires an independently observed Git source commit"
+  [[ "$artifact_observed_commit" =~ ^[a-f0-9]{40}$ ]] \
+    || worker_failure "exported artifact requires a full 40-character Git source commit"
+  changed="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- \
+    src crates assets .cargo Cargo.toml Cargo.lock build.rs rust-toolchain rust-toolchain.toml 2>/dev/null)" \
+    || worker_failure "exported artifact requires independently observed compiler-input cleanliness"
+  artifact_observed_dirty=false
+  [[ -z "$changed" ]] || artifact_observed_dirty=true
+}
+
 # After a successful `build --bin X`, clone the binary to a stable per-task
 # path so parallel drivers never need a 26 GB pool of their own. APFS clones
-# (cp -c) are instant and copy-on-write.
+# (cp -c) are instant and copy-on-write. Every clone carries an independently
+# observed source/byte manifest; current HEAD alone is never build provenance.
 export_artifacts() {
   local artifact_name profile_dir="debug" bins=() i=0 argc=$#
   local args=("$@")
@@ -504,21 +540,42 @@ export_artifacts() {
     return 0
   fi
 
+  observe_artifact_source
+  [[ "$artifact_observed_commit" == "$artifact_source_commit" ]] \
+    || worker_failure "Git source commit changed during the build; refusing misleading artifact provenance"
+  if [[ "$artifact_observed_dirty" == "true" ]]; then
+    artifact_source_dirty=true
+  fi
+
   local artifact_dir="${REPO_ROOT}/target-agent/artifacts/${artifact_name}"
   mkdir -p "$artifact_dir"
-  local bin src dest tmp
+  local bin src dest tmp manifest manifest_tmp binary_sha binary_size
   for bin in "${bins[@]}"; do
+    [[ "$bin" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] \
+      || worker_failure "exported binary must name one owned artifact child; got ${bin}"
     src="${target_dir}/${profile_dir}/${bin}"
     if [[ ! -x "$src" ]]; then
       echo "AGENT_CARGO warning: built binary not found at ${src}; skipped export" >&2
       continue
     fi
     dest="${artifact_dir}/${bin}"
+    manifest="${dest}.provenance.json"
+    if [[ -L "$src" || -L "$dest" || -L "$manifest" ]]; then
+      worker_failure "protected artifact provenance cannot follow a symlink: ${dest}"
+    fi
     tmp="${dest}.tmp.$$"
+    manifest_tmp="${manifest}.tmp.$$"
     if ! cp -c "$src" "$tmp" 2>/dev/null; then
       cp -p "$src" "$tmp"
     fi
+    binary_sha="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+    binary_size="$(wc -c < "$tmp" | tr -d '[:space:]')"
+    printf '{"schemaVersion":2,"pool":"%s","source":"%s","binaryPath":"%s","binarySha256":"%s","sizeBytes":%s,"gitHead":"%s","rustDirty":%s,"builtAt":"%s"}\n' \
+      "$pool" "${src#${REPO_ROOT}/}" "${dest#${REPO_ROOT}/}" \
+      "$binary_sha" "$binary_size" "$artifact_source_commit" "$artifact_source_dirty" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$manifest_tmp"
     mv -f "$tmp" "$dest"
+    mv -f "$manifest_tmp" "$manifest"
     echo "AGENT_CARGO artifact bin=${bin} path=${dest}" >&2
   done
 }
@@ -560,6 +617,12 @@ fi
 started_epoch="$(date +%s)"
 free_before_gb="$(( $(free_disk_kb) / 1024 / 1024 ))"
 echo "AGENT_CARGO mode=${target_mode} pool=${pool} cache=${cache_state} jobs=${CARGO_BUILD_JOBS} test_threads=${RUST_TEST_THREADS} target_dir=${CARGO_TARGET_DIR} metal_module_cache=${metal_module_cache} lock=${lock_name} rustc_wrapper=${rustc_wrapper_state} debug=${CARGO_PROFILE_DEV_DEBUG} incremental=${CARGO_INCREMENTAL:-default} cargo ${cargo_args[*]}" >&2
+
+if [[ -n "$validated_artifact_name" && "${cargo_args[0]:-}" == "build" ]]; then
+  observe_artifact_source
+  artifact_source_commit="$artifact_observed_commit"
+  artifact_source_dirty="$artifact_observed_dirty"
+fi
 
 set +e
 cargo "${cargo_args[@]}"
