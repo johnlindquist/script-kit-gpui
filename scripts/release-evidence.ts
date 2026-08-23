@@ -117,12 +117,18 @@ const REQUIRED_PROOF_SUITES = [
 
 const REQUIRED_OPERATOR_SAFETY_OWNERS = [
   "scripts/agentic/session.sh",
+  "scripts/agentic/filterable-surface-matrix.ts",
+  "scripts/agentic/surface-navigator.ts",
+  "scripts/agentic/surface-navigator-inventory-audit.ts",
+  "scripts/agentic/target-thread.ts",
+  "scripts/agentic/scenario.ts",
   "scripts/agentic/devtools-session-lib.sh",
   "scripts/agentic/start-isolated.sh",
   "scripts/agentic/devtools-session.sh",
   "scripts/agentic/wait-session-ready.sh",
   "scripts/devtools/driver.ts",
   "scripts/devtools/inspect.ts",
+  "scripts/devtools/notes.ts",
   "scripts/devtools/lib/client.ts",
   "scripts/devtools/lib/operator-safety.ts",
   "scripts/devtools/lib/target-identity.ts",

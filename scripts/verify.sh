@@ -111,6 +111,7 @@ require_clean_source_identity() {
     scripts/devtools/privacy.test.ts
     scripts/devtools/operator-safety.test.ts
     scripts/devtools/inspect.ts
+    scripts/devtools/notes.ts
     scripts/devtools/target-identity.test.ts
     scripts/devtools/__tests__/client-lib.test.ts
     scripts/devtools/receipt-output.test.ts
@@ -150,6 +151,11 @@ require_clean_source_identity() {
     scripts/devtools/test-status.ts
     scripts/agent-check.sh
     scripts/agentic/session.sh
+    scripts/agentic/filterable-surface-matrix.ts
+    scripts/agentic/surface-navigator.ts
+    scripts/agentic/surface-navigator-inventory-audit.ts
+    scripts/agentic/target-thread.ts
+    scripts/agentic/scenario.ts
     scripts/agentic/devtools-session-lib.sh
     scripts/agentic/start-isolated.sh
     scripts/agentic/devtools-session.sh
