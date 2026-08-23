@@ -1152,8 +1152,7 @@ impl ScriptListApp {
             let footer_edge_padding =
                 crate::components::footer_chrome::footer_centered_action_edge_padding_x();
             let cancel_x = window_width - footer_edge_padding - metrics.cancel_slot_width;
-            let confirm_x =
-                cancel_x - metrics.action_button_gap - metrics.confirm_slot_width;
+            let confirm_x = cancel_x - metrics.action_button_gap - metrics.confirm_slot_width;
             let button_y = footer_y
                 + (metrics.footer_spacer_height - metrics.action_button_height).max(0.0) / 2.0;
 
@@ -1312,12 +1311,14 @@ impl ScriptListApp {
                 window_height,
             ));
             let (viewport_id, row_id_prefix) = match mode {
-                ArgPresentationMode::Mini => {
-                    (MINI_LIST_VIEWPORT_MEASUREMENT_ID, MINI_ROW_MEASUREMENT_ID_PREFIX)
-                }
-                ArgPresentationMode::Full => {
-                    (ARG_LIST_VIEWPORT_MEASUREMENT_ID, ARG_ROW_MEASUREMENT_ID_PREFIX)
-                }
+                ArgPresentationMode::Mini => (
+                    MINI_LIST_VIEWPORT_MEASUREMENT_ID,
+                    MINI_ROW_MEASUREMENT_ID_PREFIX,
+                ),
+                ArgPresentationMode::Full => (
+                    ARG_LIST_VIEWPORT_MEASUREMENT_ID,
+                    ARG_ROW_MEASUREMENT_ID_PREFIX,
+                ),
             };
 
             let header_h = resolved.header_chrome_height;
@@ -1400,11 +1401,10 @@ impl ScriptListApp {
                 (-state.base_handle.offset().y.as_f32()).max(0.0)
             };
             let first_visible = (scroll_offset_y / resolved.row_slot_height).floor() as usize;
-            let last_visible = ((scroll_offset_y + viewport_h) / resolved.row_slot_height).ceil()
-                as usize;
+            let last_visible =
+                ((scroll_offset_y + viewport_h) / resolved.row_slot_height).ceil() as usize;
             for ix in first_visible..last_visible.min(filtered_len) {
-                let row_y = viewport_top + (ix as f32 * resolved.row_slot_height)
-                    - scroll_offset_y;
+                let row_y = viewport_top + (ix as f32 * resolved.row_slot_height) - scroll_offset_y;
                 let selected = ix == self.arg_selected_index;
                 components.push(
                     LayoutComponentInfo::new(
@@ -1445,7 +1445,8 @@ impl ScriptListApp {
             const KIT_STORE_LIST_PADDING_Y: f32 = 4.0;
             // GEO-009: the 72px browse card is a SPECIALIZED density — typed
             // owner/rationale, never forced into the general row resolver.
-            const KIT_STORE_BROWSE_CARD: crate::list_item::metrics::SpecializedListPresentationMetrics =
+            const KIT_STORE_BROWSE_CARD:
+                crate::list_item::metrics::SpecializedListPresentationMetrics =
                 crate::list_item::metrics::SpecializedListPresentationMetrics {
                     owner: "build_layout_info::BrowseKitsView",
                     row_height: 72.0,
@@ -1623,11 +1624,12 @@ impl ScriptListApp {
             const KIT_STORE_COUNT_WIDTH: f32 = 96.0;
             const KIT_STORE_LIST_PADDING_Y: f32 = 4.0;
             // GEO-009 ledgered legacy caller: InstalledKits.
-            let kit_store_row_metrics = crate::list_item::metrics::resolved_legacy_metrics_for_caller(
-                crate::list_item::metrics::LegacyListCallerId::InstalledKits,
-                self.current_design,
-                menu_theme,
-            );
+            let kit_store_row_metrics =
+                crate::list_item::metrics::resolved_legacy_metrics_for_caller(
+                    crate::list_item::metrics::LegacyListCallerId::InstalledKits,
+                    self.current_design,
+                    menu_theme,
+                );
             #[allow(non_snake_case)]
             let KIT_STORE_ROW_HEIGHT: f32 = kit_store_row_metrics.row_slot_height;
             const KIT_STORE_FOOTER_HEIGHT: f32 = 34.0;
@@ -2303,7 +2305,7 @@ impl ScriptListApp {
                 let bottom = y + FIELD_HEIGHT;
                 let visible_top = y.max(viewport_top);
                 let visible_bottom = bottom.min(viewport_bottom);
-                let visible_height = (visible_bottom - visible_top).max(0.0).min(FIELD_HEIGHT);
+                let visible_height = (visible_bottom - visible_top).clamp(0.0, FIELD_HEIGHT);
                 let visible_ratio = if FIELD_HEIGHT > 0.0 {
                     visible_height / FIELD_HEIGHT
                 } else {

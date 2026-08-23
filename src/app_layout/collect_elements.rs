@@ -21,6 +21,18 @@ pub(crate) struct ElementCollectionOutcome {
     pub warnings: Vec<String>,
 }
 
+struct FilterableRowsCollection<'a> {
+    input_name: &'a str,
+    input_value: String,
+    list_name: &'a str,
+    empty_state_id: &'static str,
+    empty_text: &'a str,
+    empty_icon_hint: &'static str,
+    rows: &'a [String],
+    selected_index: usize,
+    limit: usize,
+}
+
 impl ElementCollectionOutcome {
     const VERSION: u32 = 1;
 
@@ -102,116 +114,6 @@ impl ElementCollectionOutcome {
 }
 
 impl ScriptListApp {
-    /// Push an element into the vec only if it hasn't reached the limit.
-    /// Returns true if the element was added, false if capped.
-    #[inline]
-    fn push_limited_element(
-        elements: &mut Vec<protocol::ElementInfo>,
-        limit: usize,
-        element: protocol::ElementInfo,
-    ) -> bool {
-        if elements.len() >= limit {
-            return false;
-        }
-        elements.push(element);
-        true
-    }
-
-    /// Build an ElementInfo for a Choice, preferring its stable key for the semantic ID.
-    #[inline]
-    fn keyed_choice_element(
-        display_index: usize,
-        choice: &Choice,
-        selected: bool,
-    ) -> protocol::ElementInfo {
-        protocol::ElementInfo {
-            semantic_id: choice.generate_id(display_index),
-            element_type: protocol::ElementType::Choice,
-            text: Some(choice.name.clone()),
-            value: Some(choice.value.clone()),
-            content: None,
-            selected: Some(selected),
-            focused: None,
-            index: Some(display_index),
-            role: None,
-            kind: None,
-            source: None,
-            source_name: None,
-            selectable: None,
-            status_kind: None,
-            action_disabled: None,
-            style: None,
-        }
-        .redact_content(protocol::ElementContentKind::ExternalContent)
-    }
-
-    /// S12: project the SHARED AI recovery card into driver-visible elements.
-    ///
-    /// `collect_visible_elements` is a hand-written model of each surface, not
-    /// a walk of the real GPUI tree. The recovery card had no node here, so
-    /// `getElements` never reported it — and every probe assertion of the form
-    /// "the recovery card is on screen" was unfalsifiable: it failed whether
-    /// the card rendered or not. This projects the same
-    /// [`crate::components::recovery_semantic_tree`] the renderer consumes, so
-    /// runtime proof and render come from ONE source and cannot drift.
-    fn ai_recovery_elements(
-        spec: &crate::ai::reliability::AiRecoveryCardSpec,
-    ) -> Vec<protocol::ElementInfo> {
-        crate::components::recovery_semantic_tree(spec)
-            .into_iter()
-            .map(|node| {
-                let is_action = node.role.ends_with("-action");
-                let mut element = protocol::ElementInfo {
-                    semantic_id: node.semantic_id.to_string(),
-                    element_type: if is_action {
-                        protocol::ElementType::Button
-                    } else {
-                        protocol::ElementType::Panel
-                    },
-                    text: None,
-                    value: None,
-                    content: None,
-                    selected: None,
-                    focused: None,
-                    index: None,
-                    role: Some(node.role.to_string()),
-                    kind: None,
-                    source: Some("AiRecoveryCard".to_string()),
-                    source_name: None,
-                    selectable: Some(node.enabled),
-                    status_kind: None,
-                    action_disabled: node
-                        .disabled_reason
-                        .as_ref()
-                        .map(|reason| format!("{reason:?}")),
-                    style: None,
-                };
-                match node.semantic_id {
-                    crate::ai::reliability::AI_RECOVERY_TITLE_ID => {
-                        element.text = Some(spec.title.to_string())
-                    }
-                    crate::ai::reliability::AI_RECOVERY_BODY_ID => {
-                        element.text = Some(spec.body.to_string())
-                    }
-                    crate::ai::reliability::AI_RECOVERY_PROGRESS_ID => {
-                        element.text = spec
-                            .progress
-                            .as_ref()
-                            .map(|progress| progress.label.to_string())
-                    }
-                    _ => {
-                        element.text = spec
-                            .actions
-                            .iter()
-                            .find(|action| action.semantic_id == node.semantic_id)
-                            .map(|action| action.label.to_string())
-                    }
-                }
-                element
-            })
-            .collect()
-    }
-
     fn info_state_elements(
         snapshot: &crate::components::InfoStateSemanticSnapshot,
     ) -> Vec<protocol::ElementInfo> {
@@ -277,26 +179,29 @@ impl ScriptListApp {
             }
         }
 
-        elements.extend(syntax_tokens.into_iter().enumerate().map(|(index, syntax)| {
-            protocol::ElementInfo {
-                semantic_id: format!("menu-syntax-cue:{index}"),
-                element_type: protocol::ElementType::Panel,
-                text: Some(syntax),
-                value: None,
-                content: None,
-                selected: Some(false),
-                focused: Some(false),
-                index: Some(index),
-                role: Some("guidance-cue".to_string()),
-                kind: Some("syntax".to_string()),
-                source: Some("MenuSyntaxMainHint".to_string()),
-                source_name: Some(format!("{:?}", snapshot.kind)),
-                selectable: Some(false),
-                status_kind: None,
-                action_disabled: None,
-                style: None,
-            }
-        }));
+        elements.extend(
+            syntax_tokens
+                .into_iter()
+                .enumerate()
+                .map(|(index, syntax)| protocol::ElementInfo {
+                    semantic_id: format!("menu-syntax-cue:{index}"),
+                    element_type: protocol::ElementType::Panel,
+                    text: Some(syntax),
+                    value: None,
+                    content: None,
+                    selected: Some(false),
+                    focused: Some(false),
+                    index: Some(index),
+                    role: Some("guidance-cue".to_string()),
+                    kind: Some("syntax".to_string()),
+                    source: Some("MenuSyntaxMainHint".to_string()),
+                    source_name: Some(format!("{:?}", snapshot.kind)),
+                    selectable: Some(false),
+                    status_kind: None,
+                    action_disabled: None,
+                    style: None,
+                }),
+        );
         elements
     }
 
@@ -311,9 +216,7 @@ impl ScriptListApp {
 
         chips
             .into_iter()
-            .flat_map(
-                crate::windows::automation_surface_collector::collect_semantic_chip_elements,
-            )
+            .flat_map(crate::windows::automation_surface_collector::collect_semantic_chip_elements)
             .collect()
     }
 
@@ -642,8 +545,7 @@ impl ScriptListApp {
                 selected_index,
                 visible_limit,
             } => {
-                let page_result =
-                    crate::dictation::search_history_page(filter, 0, *visible_limit);
+                let page_result = crate::dictation::search_history_page(filter, 0, *visible_limit);
                 let load_failed = page_result.is_err();
                 let page = page_result
                     .ok()
@@ -691,7 +593,9 @@ impl ScriptListApp {
                             source_name: None,
                             selectable: Some(false),
                             status_kind: Some("loadFailed".to_string()),
-                            action_disabled: Some("Retry after the History file becomes available".to_string()),
+                            action_disabled: Some(
+                                "Retry after the History file becomes available".to_string(),
+                            ),
                             style: None,
                         },
                     );
@@ -775,77 +679,7 @@ impl ScriptListApp {
                 filter,
                 selected_index,
                 ..
-            } => {
-                let desk_state = self.flow_desk_state(filter);
-                let descriptors: Vec<FlowDeskRowDescriptor> = self
-                    .flow_desk_rows(filter)
-                    .iter()
-                    .map(|row| self.flow_desk_row_descriptor(row))
-                    .collect();
-                let total_count = descriptors.len() + 3;
-                let mut elements = Vec::with_capacity(limit.min(total_count));
-                Self::push_limited_element(
-                    &mut elements,
-                    limit,
-                    protocol::ElementInfo::input(
-                        "flow-ux-filter",
-                        Some(filter.as_str()),
-                        self.focused_input != FocusedInput::None,
-                    ),
-                );
-                Self::push_limited_element(
-                    &mut elements,
-                    limit,
-                    protocol::ElementInfo {
-                        semantic_id: "flow-desk:state".to_string(),
-                        element_type: protocol::ElementType::Panel,
-                        text: Some(desk_state.automation_label().to_string()),
-                        value: None,
-                        content: None,
-                        selected: None,
-                        focused: None,
-                        index: None,
-                        role: Some("flowDeskState".to_string()),
-                        kind: Some(desk_state.automation_label().to_string()),
-                        source: None,
-                        source_name: None,
-                        selectable: Some(false),
-                        status_kind: None,
-                        action_disabled: None,
-                        style: None,
-                    },
-                );
-                Self::push_limited_element(
-                    &mut elements,
-                    limit,
-                    protocol::ElementInfo::list("flows", descriptors.len()),
-                );
-                for (index, descriptor) in descriptors.into_iter().enumerate() {
-                    if elements.len() >= limit {
-                        break;
-                    }
-                    elements.push(protocol::ElementInfo {
-                        semantic_id: descriptor.semantic_id,
-                        element_type: protocol::ElementType::Choice,
-                        text: Some(descriptor.title),
-                        value: Some(descriptor.detail),
-                        content: None,
-                        selected: Some(index == *selected_index),
-                        focused: None,
-                        index: Some(index),
-                        role: Some("flowDeskRow".to_string()),
-                        kind: Some(descriptor.primary.label().to_string()),
-                        source: None,
-                        source_name: None,
-                        selectable: Some(true),
-                        status_kind: None,
-                        action_disabled: None,
-                        style: None,
-                    });
-                }
-                ElementCollectionOutcome::complete("flowDesk", elements, total_count)
-            }
-
+            } => self.collect_flow_desk_elements(filter, *selected_index, limit),
             AppView::SettingsView {
                 filter,
                 selected_index,
@@ -889,17 +723,17 @@ impl ScriptListApp {
                 let rows = Self::ai_preset_search_visible_row_labels(filter);
                 ElementCollectionOutcome::complete_from(
                     "searchAiPresets",
-                    self.collect_filterable_rows_with_info_empty(
-                        "ai-presets-filter",
-                        filter.clone(),
-                        "ai-presets",
-                        "ai-presets-empty",
-                        AiPresetSearchEmptyState::from_filter(filter).message(),
-                        "sparkles",
-                        &rows,
-                        *selected_index,
+                    self.collect_filterable_rows_with_info_empty(FilterableRowsCollection {
+                        input_name: "ai-presets-filter",
+                        input_value: filter.clone(),
+                        list_name: "ai-presets",
+                        empty_state_id: "ai-presets-empty",
+                        empty_text: AiPresetSearchEmptyState::from_filter(filter).message(),
+                        empty_icon_hint: "sparkles",
+                        rows: &rows,
+                        selected_index: *selected_index,
                         limit,
-                    ),
+                    }),
                 )
             }
 
@@ -910,17 +744,17 @@ impl ScriptListApp {
                 let rows = self.filtered_favorite_ids_for_filter(filter);
                 ElementCollectionOutcome::complete_from(
                     "favoritesBrowse",
-                    self.collect_filterable_rows_with_info_empty(
-                        "favorites-filter",
-                        filter.clone(),
-                        "favorites",
-                        "favorites-empty",
-                        FavoritesEmptyState::from_filter(filter).message(),
-                        "star",
-                        &rows,
-                        *selected_index,
+                    self.collect_filterable_rows_with_info_empty(FilterableRowsCollection {
+                        input_name: "favorites-filter",
+                        input_value: filter.clone(),
+                        list_name: "favorites",
+                        empty_state_id: "favorites-empty",
+                        empty_text: FavoritesEmptyState::from_filter(filter).message(),
+                        empty_icon_hint: "star",
+                        rows: &rows,
+                        selected_index: *selected_index,
                         limit,
-                    ),
+                    }),
                 )
             }
 
@@ -1818,160 +1652,8 @@ impl ScriptListApp {
             }
 
             AppView::CreationFeedback { payload } => {
-                let mut all_elements = Vec::new();
-                let mut field = |semantic_id: &str,
-                                 element_type: protocol::ElementType,
-                                 text: Option<String>,
-                                 value: Option<String>,
-                                 role: Option<&str>,
-                                 kind: Option<&str>,
-                                 status_kind: Option<&str>,
-                                 action_disabled: Option<&str>| {
-                    all_elements.push(protocol::ElementInfo {
-                        semantic_id: semantic_id.to_string(),
-                        element_type,
-                        text,
-                        value,
-                        content: None,
-                        selected: None,
-                        focused: None,
-                        index: None,
-                        role: role.map(str::to_string),
-                        kind: kind.map(str::to_string),
-                        source: None,
-                        source_name: None,
-                        selectable: Some(false),
-                        status_kind: status_kind.map(str::to_string),
-                        action_disabled: action_disabled.map(str::to_string),
-                        style: None,
-                    });
-                };
-
-                field(
-                    "creation-feedback:panel",
-                    protocol::ElementType::Panel,
-                    Some("Creation feedback".to_string()),
-                    None,
-                    Some("panel"),
-                    Some("creation_feedback"),
-                    None,
-                    None,
-                );
-                field(
-                    "creation-feedback:artifact-kind",
-                    protocol::ElementType::Panel,
-                    Some(payload.artifact_kind_label().to_string()),
-                    Some(payload.artifact_kind.kind().to_string()),
-                    Some("status"),
-                    Some("artifact_kind"),
-                    Some(payload.artifact_kind.kind()),
-                    None,
-                );
-                field(
-                    "creation-feedback:artifact-path",
-                    protocol::ElementType::Input,
-                    Some("Artifact path".to_string()),
-                    Some(payload.artifact_path.to_string_lossy().to_string()),
-                    Some("readonly_path"),
-                    Some("artifact_path"),
-                    None,
-                    None,
-                );
-                field(
-                    "creation-feedback:verification-status",
-                    protocol::ElementType::Panel,
-                    Some(payload.verification_status_label().to_string()),
-                    Some(payload.verification_status_kind().to_string()),
-                    Some("status"),
-                    Some("verification_status"),
-                    Some(payload.verification_status_kind()),
-                    None,
-                );
-                field(
-                    "creation-feedback:receipt-status",
-                    protocol::ElementType::Panel,
-                    Some(payload.receipt_status_label().to_string()),
-                    Some(payload.receipt_status_kind().to_string()),
-                    Some("status"),
-                    Some("receipt_status"),
-                    Some(payload.receipt_status_kind()),
-                    None,
-                );
-                field(
-                    "creation-feedback:receipt-path",
-                    protocol::ElementType::Input,
-                    Some("Receipt path".to_string()),
-                    Some(payload.receipt_path_text().to_string()),
-                    Some("readonly_path"),
-                    Some("receipt_path"),
-                    Some(payload.receipt_status_kind()),
-                    None,
-                );
-
-                for (index, semantic_id, label, disabled) in [
-                    (
-                        0,
-                        "button:creation-feedback:reveal-artifact",
-                        "Reveal in Finder",
-                        None,
-                    ),
-                    (
-                        1,
-                        "button:creation-feedback:copy-artifact-path",
-                        "Copy Path",
-                        None,
-                    ),
-                    (2, "button:creation-feedback:edit-artifact", "Edit", None),
-                    (
-                        3,
-                        "button:creation-feedback:run-artifact",
-                        "Run",
-                        Some(payload.run_disabled_reason()),
-                    ),
-                    (
-                        4,
-                        "button:creation-feedback:copy-receipt-path",
-                        "Copy Receipt Path",
-                        payload
-                            .receipt_path()
-                            .is_none()
-                            .then_some("receipt_not_applicable"),
-                    ),
-                    (
-                        5,
-                        "button:creation-feedback:open-receipt",
-                        "Open Receipt",
-                        payload
-                            .receipt_path()
-                            .is_none()
-                            .then_some("receipt_not_applicable"),
-                    ),
-                ] {
-                    all_elements.push(protocol::ElementInfo {
-                        semantic_id: semantic_id.to_string(),
-                        element_type: protocol::ElementType::Button,
-                        text: Some(label.to_string()),
-                        value: None,
-                        content: None,
-                        selected: None,
-                        focused: None,
-                        index: Some(index),
-                        role: Some("action".to_string()),
-                        kind: Some("creation_feedback_action".to_string()),
-                        source: None,
-                        source_name: None,
-                        selectable: Some(disabled.is_none()),
-                        status_kind: disabled.map(str::to_string),
-                        action_disabled: disabled.map(str::to_string),
-                        style: None,
-                    });
-                }
-
-                let total_count = all_elements.len();
-                let elements = all_elements.into_iter().take(limit).collect();
-                ElementCollectionOutcome::complete("creationFeedback", elements, total_count)
+                self.collect_creation_feedback_elements(payload, limit)
             }
-
             AppView::ConfirmPrompt {
                 options,
                 focused_button,
@@ -2048,184 +1730,8 @@ impl ScriptListApp {
             }
 
             AppView::FlowSessionView { session_id } => {
-                let entity = self
-                    .conversations.flow_sessions
-                    .iter()
-                    .find(|(meta, _)| meta.id == *session_id)
-                    .map(|(_, entity)| entity.clone());
-                if let Some(entity) = entity {
-                    let chat = entity.read(cx);
-                    let (mut elements, mut total_count) =
-                        self.collect_chat_prompt_elements(chat, limit);
-                    // The chat's internal composer/model rows are suppressed
-                    // in this surface (`external_input`): the shared MAIN
-                    // input is the composer. Report that input — with its
-                    // real draft and real focus — instead of the hidden ones.
-                    let removed = elements.len();
-                    elements.retain(|el| {
-                        el.semantic_id != "input:chat-input"
-                            && el.semantic_id != "input:chat-model"
-                            && (el.role.as_deref() != Some("conversationCommand")
-                                || el.semantic_id.starts_with("conversation.copyTurn:"))
-                    });
-                    total_count = total_count.saturating_sub(removed - elements.len());
-                    let placeholder = chat
-                        .placeholder
-                        .clone()
-                        .unwrap_or_else(|| "Message".to_string());
-                    let viewing_archive = self
-                        .conversations
-                        .flow_sessions
-                        .iter()
-                        .find(|(meta, _)| meta.id == *session_id)
-                        .is_some_and(|(meta, _)| meta.selected_is_archived());
-                    if !viewing_archive {
-                        elements.insert(
-                            0,
-                            Self::input_element(
-                                "flow-session-composer",
-                                placeholder,
-                                Some(Self::preview_value(&self.filter_text, 240)),
-                                self.focused_input == FocusedInput::MainFilter,
-                                Some(0),
-                            ),
-                        );
-                        total_count += 1;
-                    }
-                    // S12: the shared recovery card, from the same projection
-                    // the flow session renderer uses.
-                    if let Some(meta) = self
-                        .conversations.flow_sessions
-                        .iter()
-                        .map(|(meta, _)| meta)
-                        .find(|meta| meta.id == *session_id)
-                    {
-                        let snapshot = crate::flows::session::FlowSessionIdentitySnapshot::from_meta(meta);
-                        let identity = crate::components::main_view_chrome::SemanticChipSpec::enabled_identity(
-                            "flow-session:identity",
-                            format!(
-                                "{} · {} · {}",
-                                snapshot.friendly_name,
-                                snapshot.engine,
-                                if snapshot.read_only { "Archived" } else { "Active" }
-                            ),
-                            crate::components::main_view_chrome::SemanticChipAction::OpenDetails,
-                            "⌘K",
-                        );
-                        elements.push(
-                            crate::windows::automation_surface_collector::collect_semantic_chip_element(&identity),
-                        );
-                        let fact_specs = [
-                            ("flow-session:friendly-name", snapshot.friendly_name.clone()),
-                            ("flow-session:engine", snapshot.engine.clone()),
-                            (
-                                "flow-session:model",
-                                snapshot.model.clone().unwrap_or_else(|| "Model unavailable".into()),
-                            ),
-                            ("flow-session:cwd", snapshot.cwd_display.clone()),
-                            ("flow-session:origin", snapshot.origin_label.to_string()),
-                            ("flow-session:selection", snapshot.selection.to_string()),
-                            (
-                                "flow-session:thread",
-                                format!(
-                                    "active={} selected={}",
-                                    snapshot.active_thread_fingerprint,
-                                    snapshot.selected_thread_fingerprint
-                                ),
-                            ),
-                            (
-                                "flow-session:lineage",
-                                format!(
-                                    "inherited={} parentRetained={}",
-                                    snapshot.inherited_turn_count,
-                                    snapshot
-                                        .parent_retained
-                                        .map(|retained| retained.to_string())
-                                        .unwrap_or_else(|| "unavailable".into())
-                                ),
-                            ),
-                            ("flow-session:retention", snapshot.retention_text()),
-                            (
-                                "flow-session:rethread",
-                                format!("needsRethread={}", snapshot.needs_rethread),
-                            ),
-                            (
-                                "flow-session:draft",
-                                format!(
-                                    "chars={} generation={}",
-                                    snapshot.draft_chars, snapshot.draft_generation
-                                ),
-                            ),
-                            (
-                                "flow-session:runtime",
-                                format!(
-                                    "ready={} generation={} revision={}",
-                                    snapshot.thread_ready,
-                                    snapshot.runtime_generation,
-                                    snapshot.persistence_revision
-                                ),
-                            ),
-                        ];
-                        let fact_count = fact_specs.len();
-                        for (semantic_id, label) in fact_specs {
-                            let spec = crate::components::main_view_chrome::SemanticChipSpec::disabled_identity(
-                                semantic_id,
-                                label,
-                                "Read-only Flow session fact",
-                            );
-                            elements.push(
-                                crate::windows::automation_surface_collector::collect_semantic_chip_element(&spec),
-                            );
-                        }
-                        let command_elements = crate::windows::automation_surface_collector::collect_conversation_command_elements(
-                            &crate::components::conversation_actions::flow_conversation_commands_for_facts(
-                                crate::components::conversation_actions::FlowConversationCommandFacts {
-                                    response_in_progress: meta.active_turn.is_some(),
-                                    viewing_archive: meta.selected_is_archived(),
-                                    has_archives: !meta.archived_threads.is_empty(),
-                                    selected_has_response: meta.selected_turns().iter().any(|turn| !turn.assistant.trim().is_empty()),
-                                    composer_has_text: !self.filter_text.trim().is_empty(),
-                                    hidden_draft_exists: meta.selected_is_archived() && !meta.active_draft.is_empty(),
-                                    runtime_attached: meta.thread_ready,
-                                },
-                            ),
-                        );
-                        total_count += 1 + fact_count + command_elements.len();
-                        elements.extend(command_elements);
-                        if let Some(spec) = (!meta.selected_is_archived())
-                            .then(|| {
-                                crate::ai::reliability::project_recovery(
-                                    &meta.reliability.state().identity,
-                                    meta.reliability.state(),
-                                    &crate::ai::reliability::flow_session_recovery_capabilities(),
-                                )
-                            })
-                            .flatten()
-                        {
-                            let recovery = Self::ai_recovery_elements(&spec);
-                            total_count += recovery.len();
-                            elements.extend(recovery);
-                        }
-                    }
-                    Self::finalize_surface_outcome(
-                        "flow-session",
-                        "flow-session",
-                        "panel_only_flow_session",
-                        limit,
-                        elements,
-                        total_count,
-                    )
-                } else {
-                    ElementCollectionOutcome::partial(
-                        "flowSession",
-                        protocol::ProjectionReason::RuntimeEntityMissing,
-                        vec![protocol::ElementInfo::panel("flow-session")],
-                        1,
-                    )
-                    .with_warning("flow_session_entity_missing")
-                }
+                self.collect_flow_session_elements(*session_id, limit, cx)
             }
-
             AppView::About { .. } => ElementCollectionOutcome::partial(
                 "about",
                 protocol::ProjectionReason::CollectorUnavailable,
@@ -2343,331 +1849,6 @@ impl ScriptListApp {
 
         self.append_footer_elements(&mut outcome, limit, cx);
         outcome
-    }
-
-    fn append_footer_elements(
-        &self,
-        outcome: &mut ElementCollectionOutcome,
-        limit: usize,
-        cx: &Context<Self>,
-    ) {
-        let footer = self.active_footer_snapshot(cx);
-        let row_kind = match footer.owner.as_str() {
-            "native" => Some("nativeFooterRow"),
-            "prompt" => Some("promptFooterRow"),
-            "popup" => Some("popupFooterRow"),
-            "content" => Some("contentFooterRow"),
-            _ => None,
-        };
-        let Some(row_kind) = row_kind else {
-            return;
-        };
-
-        outcome.total_count += 1 + footer.buttons.len();
-
-        if outcome.elements.len() >= limit {
-            outcome
-                .warnings
-                .push("footer_elements_truncated_by_limit".to_string());
-            return;
-        }
-
-        outcome.elements.push(protocol::ElementInfo {
-            semantic_id: format!("footer:{}:row", footer.owner),
-            element_type: protocol::ElementType::Panel,
-            text: Some(footer.owner.clone()),
-            value: footer.expected_surface.clone(),
-            content: None,
-            selected: None,
-            focused: None,
-            index: None,
-            role: Some("footer".to_string()),
-            kind: Some(row_kind.to_string()),
-            source: None,
-            source_name: None,
-            selectable: Some(false),
-            status_kind: footer.mismatch.clone(),
-            action_disabled: None,
-            style: None,
-        });
-
-        for (index, button) in footer.buttons.iter().enumerate() {
-            if outcome.elements.len() >= limit {
-                outcome
-                    .warnings
-                    .push("footer_elements_truncated_by_limit".to_string());
-                break;
-            }
-
-            let kind = match footer.owner.as_str() {
-                "native" => "nativeFooterButton",
-                "prompt" => "promptFooterButton",
-                "popup" => "popupFooterButton",
-                _ => "contentFooterButton",
-            };
-            let text = if button.shortcut_routable {
-                format!("{} {}", button.key, button.label)
-            } else {
-                button.label.clone()
-            };
-            outcome.elements.push(protocol::ElementInfo {
-                semantic_id: button.id.clone(),
-                element_type: protocol::ElementType::Button,
-                text: Some(text),
-                value: Some(button.action.clone()),
-                content: None,
-                selected: Some(button.selected),
-                focused: None,
-                index: Some(index),
-                role: Some("footer".to_string()),
-                kind: Some(kind.to_string()),
-                source: footer.expected_surface.clone(),
-                source_name: footer.requested_surface.clone(),
-                selectable: Some(button.enabled),
-                status_kind: button.action_disabled.clone(),
-                action_disabled: button.action_disabled.clone(),
-                style: None,
-            });
-        }
-    }
-
-    fn collect_choice_view_elements(
-        &self,
-        input_name: &str,
-        input_value: String,
-        choices: &[Choice],
-        selected_index: usize,
-        limit: usize,
-    ) -> (Vec<protocol::ElementInfo>, usize) {
-        let filtered = self.get_filtered_arg_choices(choices);
-        let total_count = filtered.len() + 2;
-
-        let mut elements = Vec::with_capacity(limit.min(total_count));
-
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            protocol::ElementInfo::input(
-                input_name,
-                Some(input_value.as_str()),
-                self.focused_input != FocusedInput::None,
-            ),
-        );
-
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            protocol::ElementInfo::list("choices", filtered.len()),
-        );
-
-        for (display_index, choice) in filtered.iter().enumerate() {
-            if elements.len() >= limit {
-                break;
-            }
-            elements.push(Self::keyed_choice_element(
-                display_index,
-                choice,
-                display_index == selected_index,
-            ));
-        }
-
-        (elements, total_count)
-    }
-
-    fn collect_notes_browse_elements(
-        &self,
-        search: &crate::notes::search_model::NoteSearchHostState,
-        limit: usize,
-    ) -> (Vec<protocol::ElementInfo>, usize) {
-        let rows = search.state.rows();
-        let total_count = rows.len().saturating_mul(2) + 4;
-        let mut elements = Vec::with_capacity(limit.min(total_count));
-
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            protocol::ElementInfo::input(
-                "notes-browse-filter",
-                Some(search.query.as_str()),
-                self.focused_input != FocusedInput::None,
-            ),
-        );
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            protocol::ElementInfo::list("notes", rows.len()),
-        );
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            protocol::ElementInfo {
-                semantic_id: "notes-search-state".to_string(),
-                element_type: protocol::ElementType::Panel,
-                text: Some(match search.state.kind() {
-                    "failed" => "Notes couldn’t be loaded".to_string(),
-                    "loading" => "Loading notes".to_string(),
-                    "readyEmpty" => "No notes yet".to_string(),
-                    "noMatch" => "No matching notes".to_string(),
-                    _ => "Notes ready".to_string(),
-                }),
-                value: Some(search.state.generation().to_string()),
-                content: None,
-                selected: None,
-                focused: None,
-                index: None,
-                role: Some("status".to_string()),
-                kind: Some("noteSearchState".to_string()),
-                source: Some("notes".to_string()),
-                source_name: None,
-                selectable: Some(false),
-                status_kind: Some(search.state.kind().to_string()),
-                action_disabled: None,
-                style: None,
-            },
-        );
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            protocol::ElementInfo {
-                semantic_id: search.destination.semantic_action().to_string(),
-                element_type: protocol::ElementType::Button,
-                text: Some(search.destination.primary_verb().to_string()),
-                value: search.selected_id.map(|id| id.stable_id()),
-                content: None,
-                selected: None,
-                focused: None,
-                index: None,
-                role: Some("action".to_string()),
-                kind: Some(search.destination.as_str().to_string()),
-                source: Some("notes".to_string()),
-                source_name: Some("Notes search".to_string()),
-                selectable: Some(search.selected_row().is_some()),
-                status_kind: None,
-                action_disabled: search
-                    .selected_row()
-                    .is_none()
-                    .then(|| "Select a note first.".to_string()),
-                style: None,
-            },
-        );
-
-        for (index, row) in rows.iter().enumerate() {
-            if elements.len() >= limit {
-                break;
-            }
-            elements.push(
-                protocol::ElementInfo {
-                    semantic_id: row.semantic_id(),
-                    element_type: protocol::ElementType::Choice,
-                    text: Some(row.title.clone()),
-                    value: Some(row.stable_id()),
-                    content: None,
-                    selected: Some(search.selected_id == Some(row.id)),
-                    focused: None,
-                    index: Some(index),
-                    role: Some("result".to_string()),
-                    kind: Some(row.kind.as_str().to_string()),
-                    source: Some("notes".to_string()),
-                    source_name: Some(search.destination.primary_verb().to_string()),
-                    selectable: Some(true),
-                    status_kind: None,
-                    action_disabled: None,
-                    style: None,
-                }
-                .redact_text(protocol::ElementContentKind::UserContent),
-            );
-            Self::push_limited_element(
-                &mut elements,
-                limit,
-                protocol::ElementInfo {
-                    semantic_id: format!("{}:metadata", row.semantic_id()),
-                    element_type: protocol::ElementType::Panel,
-                    text: Some(row.preview.clone()),
-                    value: Some(row.automation_metadata()),
-                    content: None,
-                    selected: None,
-                    focused: None,
-                    index: Some(index),
-                    role: Some("resultMetadata".to_string()),
-                    kind: Some(row.kind.as_str().to_string()),
-                    source: Some("notes".to_string()),
-                    source_name: None,
-                    selectable: Some(false),
-                    status_kind: None,
-                    action_disabled: None,
-                    style: None,
-                }
-                .redact_content(protocol::ElementContentKind::UserContent),
-            );
-        }
-
-        (elements, total_count)
-    }
-
-    fn collect_named_rows(
-        &self,
-        input_name: &str,
-        input_value: String,
-        list_name: &str,
-        rows: &[String],
-        selected_index: usize,
-        limit: usize,
-    ) -> (Vec<protocol::ElementInfo>, usize) {
-        let total_count = rows.len() + 2;
-
-        let mut elements = Vec::with_capacity(limit.min(total_count));
-
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            protocol::ElementInfo::input(
-                input_name,
-                Some(input_value.as_str()),
-                self.focused_input != FocusedInput::None,
-            ),
-        );
-
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            protocol::ElementInfo::list(list_name, rows.len()),
-        );
-
-        let content_kind = match list_name {
-            "clipboard-history" | "agent_chat-history" | "dictation-history" => {
-                Some(protocol::ElementContentKind::UserContent)
-            }
-            "windows" | "browser-tabs" | "browser-history" | "processes"
-            | "kit-results" | "installed-kits" => {
-                Some(protocol::ElementContentKind::ExternalContent)
-            }
-            "file-results" | "migrate-v1-results" => {
-                Some(protocol::ElementContentKind::FilePath)
-            }
-            "apps" | "settings" | "menu-commands" | "sdk-functions" | "tips"
-            | "script-templates" | "emoji-results" => None,
-            _ => Some(protocol::ElementContentKind::ExternalContent),
-        };
-
-        for (index, row) in rows.iter().enumerate() {
-            if elements.len() >= limit {
-                break;
-            }
-            let element = if let Some(content_kind) = content_kind {
-                protocol::ElementInfo::redacted_choice(
-                    index,
-                    row,
-                    row,
-                    index == selected_index,
-                    content_kind,
-                )
-            } else {
-                protocol::ElementInfo::product_static_choice(index, row, row, index == selected_index)
-            };
-            elements.push(element);
-        }
-
-        (elements, total_count)
     }
 
     fn collect_profile_search_elements(
@@ -2968,191 +2149,6 @@ impl ScriptListApp {
         ElementCollectionOutcome::complete("profileSearch", elements, total_count)
     }
 
-    fn collect_filterable_rows_with_info_empty(
-        &self,
-        input_name: &str,
-        input_value: String,
-        list_name: &str,
-        empty_state_id: &'static str,
-        empty_text: &str,
-        empty_icon_hint: &'static str,
-        rows: &[String],
-        selected_index: usize,
-        limit: usize,
-    ) -> (Vec<protocol::ElementInfo>, usize) {
-        let empty_state = rows.is_empty().then(|| {
-            crate::components::simple_empty_state_spec(
-                empty_state_id,
-                empty_text.to_string(),
-                empty_icon_hint,
-                None,
-            )
-            .semantic_snapshot()
-        });
-        let empty_element_count = empty_state
-            .as_ref()
-            .map_or(0, |snapshot| Self::info_state_elements(snapshot).len());
-        let total_count = rows.len() + 2 + empty_element_count;
-        let mut elements = Vec::with_capacity(limit.min(total_count));
-
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            protocol::ElementInfo::input(
-                input_name,
-                Some(input_value.as_str()),
-                self.focused_input != FocusedInput::None,
-            ),
-        );
-
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            protocol::ElementInfo::list(list_name, rows.len()),
-        );
-
-        if let Some(snapshot) = empty_state.as_ref() {
-            for element in Self::info_state_elements(snapshot) {
-                if !Self::push_limited_element(&mut elements, limit, element) {
-                    break;
-                }
-            }
-            return (elements, total_count);
-        }
-
-        for (index, row) in rows.iter().enumerate() {
-            if elements.len() >= limit {
-                break;
-            }
-            elements.push(protocol::ElementInfo {
-                semantic_id: protocol::generate_semantic_id("choice", index, row),
-                element_type: protocol::ElementType::Choice,
-                text: Some(row.clone()),
-                value: Some(row.clone()),
-                content: None,
-                selected: Some(index == selected_index),
-                focused: None,
-                index: Some(index),
-                role: Some("generic-filterable-row".to_string()),
-                kind: Some(list_name.to_string()),
-                source: Some(list_name.to_string()),
-                source_name: None,
-                selectable: Some(true),
-                status_kind: None,
-                action_disabled: None,
-                style: None,
-            });
-        }
-
-        (elements, total_count)
-    }
-
-    fn finalize_surface_outcome(
-        surface: &str,
-        panel_name: &str,
-        warning: &str,
-        limit: usize,
-        elements: Vec<protocol::ElementInfo>,
-        total_count: usize,
-    ) -> ElementCollectionOutcome {
-        if !elements.is_empty() {
-            let elements: Vec<protocol::ElementInfo> = elements.into_iter().take(limit).collect();
-            tracing::info!(
-                surface = surface,
-                element_count = elements.len(),
-                total_count,
-                used_panel_fallback = false,
-                "Collected semantic elements for inspectable surface"
-            );
-            return ElementCollectionOutcome::complete(surface, elements, total_count);
-        }
-
-        let total_count = 1;
-        let elements: Vec<protocol::ElementInfo> = vec![protocol::ElementInfo::panel(panel_name)]
-            .into_iter()
-            .take(limit)
-            .collect();
-        tracing::info!(
-            surface = surface,
-            element_count = elements.len(),
-            total_count,
-            used_panel_fallback = true,
-            "Collected semantic elements for inspectable surface"
-        );
-        ElementCollectionOutcome::partial(
-            surface,
-            protocol::ProjectionReason::PanelOnly,
-            elements,
-            total_count,
-        )
-        .with_warning(warning)
-    }
-
-    fn preview_value(value: &str, max_chars: usize) -> String {
-        let char_count = value.chars().count();
-        if char_count <= max_chars {
-            return value.to_string();
-        }
-
-        let mut preview: String = value.chars().take(max_chars).collect();
-        preview.push_str("...");
-        preview
-    }
-
-    fn input_element(
-        semantic_name: &str,
-        label: impl Into<String>,
-        value: Option<String>,
-        focused: bool,
-        index: Option<usize>,
-    ) -> protocol::ElementInfo {
-        protocol::ElementInfo {
-            semantic_id: protocol::generate_semantic_id_named("input", semantic_name),
-            element_type: protocol::ElementType::Input,
-            text: Some(label.into()),
-            value,
-            content: None,
-            selected: None,
-            focused: Some(focused),
-            index,
-            role: None,
-            kind: None,
-            source: None,
-            source_name: None,
-            selectable: None,
-            status_kind: None,
-            action_disabled: None,
-            style: None,
-        }
-        .redact_value(protocol::ElementContentKind::UserContent)
-    }
-
-    fn choice_element(
-        index: usize,
-        text: String,
-        value: String,
-        selected: bool,
-    ) -> protocol::ElementInfo {
-        protocol::ElementInfo {
-            semantic_id: protocol::generate_semantic_id("choice", index, value.as_str()),
-            element_type: protocol::ElementType::Choice,
-            text: Some(text),
-            value: Some(value),
-            content: None,
-            selected: Some(selected),
-            focused: None,
-            index: Some(index),
-            role: None,
-            kind: None,
-            source: None,
-            source_name: None,
-            selectable: None,
-            status_kind: None,
-            action_disabled: None,
-            style: None,
-        }
-    }
-
     fn collect_form_prompt_elements(
         &self,
         form: &FormPromptState,
@@ -3232,102 +2228,6 @@ impl ScriptListApp {
             };
 
             elements.push(element);
-        }
-
-        (elements, total_count)
-    }
-
-    fn collect_term_prompt_elements(
-        &self,
-        term: &term_prompt::TermPrompt,
-        semantic_prefix: &str,
-        limit: usize,
-    ) -> (Vec<protocol::ElementInfo>, usize) {
-        let content = term.terminal.content();
-        let visible_lines: Vec<(usize, String)> = content
-            .lines_plain()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, line)| {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some((index, Self::preview_value(trimmed, 240)))
-                }
-            })
-            .collect();
-
-        let total_count = visible_lines.len() + 1;
-        let mut elements = Vec::with_capacity(limit.min(total_count));
-
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            protocol::ElementInfo::list(
-                format!("{semantic_prefix}-lines").as_str(),
-                visible_lines.len(),
-            ),
-        );
-
-        for (index, (line_index, line)) in visible_lines.iter().enumerate() {
-            if elements.len() >= limit {
-                break;
-            }
-            elements.push(Self::choice_element(
-                index,
-                format!("Line {}", line_index + 1),
-                line.clone(),
-                *line_index == content.cursor_line,
-            ));
-        }
-
-        (elements, total_count)
-    }
-
-    fn collect_editor_prompt_elements(
-        &self,
-        editor: &crate::editor::EditorPrompt,
-        semantic_prefix: &str,
-        limit: usize,
-    ) -> (Vec<protocol::ElementInfo>, usize) {
-        let mut total_count = 1;
-        let mut elements = Vec::with_capacity(limit.min(8));
-
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            Self::input_element(
-                format!("{semantic_prefix}-language").as_str(),
-                "Language",
-                Some(editor.language().to_string()),
-                true,
-                Some(0),
-            ),
-        );
-
-        if let Some(snippet_state) = editor.snippet_state() {
-            total_count += snippet_state.current_values.len() + 1;
-            Self::push_limited_element(
-                &mut elements,
-                limit,
-                protocol::ElementInfo::list(
-                    format!("{semantic_prefix}-tabstops").as_str(),
-                    snippet_state.current_values.len(),
-                ),
-            );
-
-            for (index, value) in snippet_state.current_values.iter().enumerate() {
-                if elements.len() >= limit {
-                    break;
-                }
-                elements.push(Self::choice_element(
-                    index,
-                    format!("Tabstop {}", index + 1),
-                    Self::preview_value(value.as_str(), 120),
-                    index == snippet_state.current_tabstop_idx,
-                ));
-            }
         }
 
         (elements, total_count)
@@ -3665,46 +2565,6 @@ impl ScriptListApp {
         (elements, total_count)
     }
 
-    fn collect_naming_prompt_elements(
-        &self,
-        naming_prompt: &prompts::NamingPrompt,
-        limit: usize,
-    ) -> (Vec<protocol::ElementInfo>, usize) {
-        let total_count = 2;
-        let mut elements = Vec::with_capacity(limit.min(total_count));
-
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            Self::input_element(
-                "naming-friendly-name",
-                naming_prompt
-                    .placeholder
-                    .clone()
-                    .unwrap_or_else(|| "Name".to_string()),
-                Some(Self::preview_value(
-                    naming_prompt.friendly_name.as_str(),
-                    180,
-                )),
-                true,
-                Some(0),
-            ),
-        );
-        Self::push_limited_element(
-            &mut elements,
-            limit,
-            Self::input_element(
-                "naming-filename",
-                "Filename",
-                Some(Self::preview_value(naming_prompt.filename.as_str(), 180)),
-                false,
-                Some(1),
-            ),
-        );
-
-        (elements, total_count)
-    }
-
     pub(crate) fn script_list_visible_row_labels_from_cache(&self) -> (Vec<String>, Option<usize>) {
         let (grouped_items, flat_results) = self.cached_grouped_results_snapshot();
         let selected_grouped_index =
@@ -3943,10 +2803,7 @@ impl ScriptListApp {
                     source_name: Some(form.target.clone()),
                     selectable: Some(selectable && shell_spec.editable()),
                     status_kind: Some(shell_spec.validation.status_kind().to_string()),
-                    action_disabled: shell_spec
-                        .disabled_reason
-                        .as_ref()
-                        .map(ToString::to_string),
+                    action_disabled: shell_spec.disabled_reason.as_ref().map(ToString::to_string),
                     style: None,
                 });
             }
@@ -3986,13 +2843,12 @@ impl ScriptListApp {
             match item {
                 crate::list_item::GroupedListItem::SectionHeader(label, icon) => {
                     if include_headers {
-                        let presentation =
-                            crate::list_item::resolve_section_header_presentation(
-                                label,
-                                icon.as_deref(),
-                                None,
-                                crate::list_item::SectionPresentationFamily::Launcher,
-                            );
+                        let presentation = crate::list_item::resolve_section_header_presentation(
+                            label,
+                            icon.as_deref(),
+                            None,
+                            crate::list_item::SectionPresentationFamily::Launcher,
+                        );
                         elements.push(protocol::ElementInfo {
                             semantic_id: protocol::generate_semantic_id(
                                 "section",
@@ -4035,7 +2891,9 @@ impl ScriptListApp {
                         }
                     });
                     let (value, content_kind) = match result {
-                        scripts::SearchResult::BuiltIn(_) => (subtitle.unwrap_or_else(|| label.clone()), None),
+                        scripts::SearchResult::BuiltIn(_) => {
+                            (subtitle.unwrap_or_else(|| label.clone()), None)
+                        }
                         scripts::SearchResult::File(file_match) => (
                             file_match.file.path.clone(),
                             Some(protocol::ElementContentKind::FilePath),
@@ -4161,150 +3019,10 @@ impl ScriptListApp {
 }
 include!("prompt_and_script_list_collectors.rs");
 
-#[cfg(test)]
-mod info_state_semantic_tests {
-    use super::*;
-
-    #[test]
-    fn info_state_elements_project_cue_kind_without_action_fiction() {
-        let snapshot =
-            crate::components::launcher_empty_or_no_results_spec("#work", false).semantic_snapshot();
-        let elements = ScriptListApp::info_state_elements(&snapshot);
-        let root = elements
-            .iter()
-            .find(|element| element.role.as_deref() == Some("info-state"))
-            .expect("InfoState root");
-        assert_eq!(root.kind.as_deref(), Some("help"));
-        assert_eq!(root.status_kind.as_deref(), Some("help"));
-
-        let syntax: Vec<_> = elements
-            .iter()
-            .filter(|element| element.role.as_deref() == Some("guidance-cue"))
-            .collect();
-        assert_eq!(syntax.len(), 3);
-        assert!(syntax.iter().all(|element| element.kind.as_deref() == Some("syntax")));
-        assert!(syntax.iter().all(|element| element.selectable == Some(false)));
-        assert!(syntax.iter().all(|element| element.action_disabled.is_none()));
-        assert!(syntax.iter().any(|element| element.text.as_deref() == Some(";todo")));
-    }
-
-    #[test]
-    fn empty_agent_chat_elements_expose_trigger_and_shortcut_kinds() {
-        let snapshot = crate::components::agent_chat_empty_guidance_spec().semantic_snapshot();
-        let elements = ScriptListApp::info_state_elements(&snapshot);
-        assert!(elements.iter().any(|element| {
-            element.kind.as_deref() == Some("trigger")
-                && element.text.as_deref() == Some("/")
-                && element.value.is_none()
-        }));
-        assert!(elements.iter().any(|element| {
-            element.kind.as_deref() == Some("shortcut")
-                && element.text.as_deref() == Some("⌘K")
-                && element.value.as_deref() == Some("cmd+k")
-                && element.semantic_id == "info-cue:agent-chat-open-actions"
-        }));
-    }
-
-    #[test]
-    fn simple_builtin_empty_elements_expose_info_state_owner_and_icon() {
-        let snapshot = crate::components::simple_empty_state_spec(
-            "favorites-empty",
-            "No favorites yet",
-            "star",
-            None,
-        )
-        .semantic_snapshot();
-        let elements = ScriptListApp::info_state_elements(&snapshot);
-        assert_eq!(elements.len(), 1);
-        let root = &elements[0];
-        assert_eq!(root.semantic_id, "info-state:favorites-empty");
-        assert_eq!(root.role.as_deref(), Some("info-state"));
-        assert_eq!(root.source.as_deref(), Some("InfoState"));
-        assert_eq!(root.source_name.as_deref(), Some("favorites-empty"));
-        assert_eq!(root.value.as_deref(), Some("star"));
-        assert_eq!(root.kind.as_deref(), Some("neutral"));
-    }
-}
+include!("collect_elements_surface_rows.rs");
+include!("collect_elements_projection_primitives.rs");
+include!("collect_elements_flow_surfaces.rs");
+include!("collect_elements_creation_feedback.rs");
 
 #[cfg(test)]
-mod app_layout_projection_tests {
-    use super::*;
-
-    #[test]
-    fn complete_projection_has_no_degradation_reasons() {
-        let outcome = ElementCollectionOutcome::complete(
-            "settings",
-            vec![protocol::ElementInfo::panel("settings")],
-            1,
-        );
-        assert_eq!(outcome.semantic_surface, "settings");
-        assert_eq!(outcome.version, 1);
-        assert_eq!(
-            outcome.projection_quality,
-            protocol::ProjectionQuality::Complete
-        );
-        assert!(outcome.reason_codes.is_empty());
-    }
-
-    #[test]
-    fn partial_and_unsupported_projections_are_typed() {
-        let partial = ElementCollectionOutcome::partial(
-            "flowSession",
-            protocol::ProjectionReason::RuntimeEntityMissing,
-            vec![protocol::ElementInfo::panel("flow-session")],
-            1,
-        );
-        assert_eq!(partial.projection_quality, protocol::ProjectionQuality::Partial);
-        assert_eq!(
-            partial.reason_codes,
-            vec![protocol::ProjectionReason::RuntimeEntityMissing]
-        );
-
-        let unsupported = ElementCollectionOutcome::unsupported(
-            "divPrompt",
-            protocol::ProjectionReason::UnsupportedCustomDocument,
-            vec![protocol::ElementInfo::panel("div-prompt")],
-            1,
-        );
-        assert_eq!(
-            unsupported.projection_quality,
-            protocol::ProjectionQuality::Unsupported
-        );
-        assert_eq!(
-            unsupported.reason_codes,
-            vec![protocol::ProjectionReason::UnsupportedCustomDocument]
-        );
-    }
-
-    #[test]
-    fn empty_surface_finalizer_cannot_fabricate_completeness() {
-        let outcome = ScriptListApp::finalize_surface_outcome(
-            "fixture",
-            "fixture",
-            "panel_only_fixture",
-            10,
-            Vec::new(),
-            0,
-        );
-        assert_eq!(outcome.projection_quality, protocol::ProjectionQuality::Partial);
-        assert_eq!(outcome.reason_codes, vec![protocol::ProjectionReason::PanelOnly]);
-        assert_eq!(outcome.warnings, vec!["panel_only_fixture"]);
-    }
-}
-
-#[cfg(test)]
-mod recent_files_semantic_tests {
-    use super::*;
-
-    #[test]
-    fn recent_files_semantic_kind_distinguishes_directories() {
-        assert_eq!(
-            root_file_semantic_kind(crate::file_search::FileType::Directory),
-            "directory"
-        );
-        assert_eq!(
-            root_file_semantic_kind(crate::file_search::FileType::Document),
-            "file"
-        );
-    }
-}
+include!("collect_elements_tests.rs");
