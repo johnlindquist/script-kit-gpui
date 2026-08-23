@@ -138,7 +138,14 @@ export const SAFE_TASK_SPECS: readonly SafeTaskSpec[] = [
     taskId: "GOV-006",
     title: "Add a final consistency completion auditor",
     evidenceClass: "UNIT_BEHAVIOR",
-    testFiles: ["scripts/devtools/consistency.test.ts"],
+    testFiles: [
+      "scripts/devtools/consistency.test.ts",
+      "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
+    ],
+    productionSources: [
+      "scripts/devtools/consistency.ts",
+      "scripts/agentic/cons-flow-ux/final-workflow-audit.ts",
+    ],
   },
   {
     taskId: "GOV-007",
@@ -266,9 +273,18 @@ export function runSafeTaskProof(
   if (!entry || catalog.errors.length > 0 || entry.title !== spec.title) {
     throw new Error(`${taskId} does not match its exact canonical task ID/title/section`);
   }
+  const reviewedWorkflowSuite =
+    "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts";
+  const reviewedWorkflowOwner =
+    "scripts/agentic/cons-flow-ux/final-workflow-audit.ts";
+  const ownedBehaviorSuite = (path: string): boolean =>
+    path.endsWith(".test.ts") && existsSync(path) && (
+      path.startsWith("scripts/devtools/") ||
+      (taskId === "GOV-006" && path === reviewedWorkflowSuite)
+    );
   for (const path of spec.testFiles) {
-    if (!path.startsWith("scripts/devtools/") || !path.endsWith(".test.ts") || !existsSync(path)) {
-      throw new Error(`offline proof suite is not an existing owned DevTools behavior test: ${path}`);
+    if (!ownedBehaviorSuite(path)) {
+      throw new Error(`offline proof suite is not an existing reviewed behavior owner: ${path}`);
     }
   }
   for (const path of spec.productionSources ?? []) {
@@ -276,7 +292,8 @@ export function runSafeTaskProof(
       !existsSync(path) ||
       !(path.startsWith("src/") || path.startsWith("scripts/devtools/") ||
         path.startsWith("crates/sk-protocol/src/") ||
-        path.startsWith("design/mockups/generated/")) ||
+        path.startsWith("design/mockups/generated/") ||
+        (taskId === "GOV-006" && path === reviewedWorkflowOwner)) ||
       path.includes("..")
     ) {
       throw new Error(`offline proof production source is missing or outside its reviewed owner: ${path}`);
@@ -287,14 +304,10 @@ export function runSafeTaskProof(
     executedTestFiles.length === 0 ||
     new Set(executedTestFiles).size !== executedTestFiles.length ||
     spec.testFiles.some((path) => !executedTestFiles.includes(path)) ||
-    executedTestFiles.some((path) =>
-      !path.startsWith("scripts/devtools/") ||
-      !path.endsWith(".test.ts") ||
-      !existsSync(path)
-    )
+    executedTestFiles.some((path) => !ownedBehaviorSuite(path))
   ) {
     throw new Error(
-      "the observed test command must contain every required task suite exactly once and only existing owned DevTools suites",
+      "the observed test command must contain every required task suite exactly once and only existing reviewed behavior suites",
     );
   }
 

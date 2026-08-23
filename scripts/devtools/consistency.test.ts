@@ -24,6 +24,7 @@ import {
 } from "./lib/receipt-schema.ts";
 import {
   AUTHORIZED_CONFLICT_COUNT,
+  CONS_FLOW_UX_IDS,
   CONS_PROOF_GOV_IDS,
   DEFAULT_CONSISTENCY_CATALOG_PATH,
   FAMILY_IDS,
@@ -303,13 +304,22 @@ function taskErrorCodes(tree: Tree, taskId: string): { codes: string[]; receipt:
 }
 
 describe("canonical ID sets", () => {
-  test("program set has exactly 75 IDs and scope set exactly 28", () => {
+  test("program has 75 tasks and both independent proof/workflow scopes contain exactly 28", () => {
     expect(PROGRAM_IDS.size).toBe(75);
     expect(CONS_PROOF_GOV_IDS.size).toBe(28);
+    expect(CONS_FLOW_UX_IDS.size).toBe(28);
     for (const id of CONS_PROOF_GOV_IDS) expect(PROGRAM_IDS.has(id)).toBe(true);
+    for (const id of CONS_FLOW_UX_IDS) {
+      expect(PROGRAM_IDS.has(id)).toBe(true);
+      expect(CONS_PROOF_GOV_IDS.has(id)).toBe(false);
+      expect(id.startsWith("SAFE-") || id.startsWith("WF-")).toBe(true);
+    }
     expect(PROGRAM_IDS.has("GOV-001")).toBe(true);
     expect(CONS_PROOF_GOV_IDS.has("GOV-001")).toBe(false);
     expect(CONS_PROOF_GOV_IDS.has("SAFE-001")).toBe(false);
+    expect(CONS_FLOW_UX_IDS.has("SAFE-001")).toBe(true);
+    expect(CONS_FLOW_UX_IDS.has("WF-024")).toBe(true);
+    expect(CONS_FLOW_UX_IDS.has("PF-001")).toBe(false);
   });
 
   test("every canonical task has an explicit evidence policy", () => {
@@ -1014,6 +1024,73 @@ describe("verify-scope and verify-all", () => {
     });
     const { receipt, exitCode } = tree.runScope();
     expect(receipt.missingScopeTaskIds).toEqual(["PF-007"]);
+    expect(receipt.disposition).toBe("BLOCKED_MISSING_PRIMITIVE");
+    expect(exitCode).toBe(3);
+  });
+
+  test("a complete workflow scope requires all 28 exact, source-current direct runtime receipts", () => {
+    const tree = setup({ receiptTaskIds: CONS_FLOW_UX_IDS });
+    const { receipt, exitCode } = verifyScope({
+      scope: "cons-flow-ux",
+      fixesPath: tree.fixesPath,
+      progressPath: tree.progressPath,
+      receiptsRoot: tree.receiptsRoot,
+      current: tree.current,
+    });
+
+    expect(receipt.scope).toBe("cons-flow-ux");
+    expect(receipt.scopeTaskCount).toBe(28);
+    expect(receipt.scopePassedTaskCount).toBe(28);
+    expect(receipt.missingScopeTaskIds).toEqual([]);
+    expect(receipt.headCommit).toBe(HEAD);
+    expect(receipt.disposition).toBe("EVALUABLE_PASS");
+    expect(exitCode).toBe(0);
+    expect(validateReceipt("devtools.consistency.verify-scope", receipt).valid).toBe(true);
+
+    const all = tree.runAll();
+    expect(all.exitCode).not.toBe(0);
+    expect(all.receipt.missingTaskIds.length).toBe(47);
+  });
+
+  test("a fabricated legacy workflow lane cannot discharge any canonical runtime obligation", () => {
+    const tree = setup({ receiptTaskIds: [] });
+    tree.writeFile("cons-flow-ux/final-audit/lane-receipt.json", JSON.stringify({
+      verdict: "PASS",
+      productCommit: "493769e03208b411790f2b5639222179d8bd7eff",
+      taskCoverage: { expected: 28, passed: 28, taskIds: [...CONS_FLOW_UX_IDS] },
+      focusedMatrix: { "ai::agent_chat": { passed: 625, failed: 0 } },
+      governance: { protectedGlassContracts: { passed: 40, failed: 0 } },
+    }));
+    const { receipt, exitCode } = verifyScope({
+      scope: "cons-flow-ux",
+      fixesPath: tree.fixesPath,
+      progressPath: tree.progressPath,
+      receiptsRoot: tree.receiptsRoot,
+      current: tree.current,
+    });
+
+    expect(receipt.scopeTaskCount).toBe(28);
+    expect(receipt.scopePassedTaskCount).toBe(0);
+    expect(receipt.missingScopeTaskIds).toEqual([...CONS_FLOW_UX_IDS].sort());
+    expect(receipt.disposition).toBe("BLOCKED_MISSING_PRIMITIVE");
+    expect(exitCode).toBe(3);
+  });
+
+  test("one missing exact workflow receipt names its task without weakening the other 27", () => {
+    const tree = setup({
+      receiptTaskIds: CONS_FLOW_UX_IDS,
+      skipReceiptsFor: new Set(["SAFE-001"]),
+    });
+    const { receipt, exitCode } = verifyScope({
+      scope: "cons-flow-ux",
+      fixesPath: tree.fixesPath,
+      progressPath: tree.progressPath,
+      receiptsRoot: tree.receiptsRoot,
+      current: tree.current,
+    });
+
+    expect(receipt.scopePassedTaskCount).toBe(27);
+    expect(receipt.missingScopeTaskIds).toEqual(["SAFE-001"]);
     expect(receipt.disposition).toBe("BLOCKED_MISSING_PRIMITIVE");
     expect(exitCode).toBe(3);
   });

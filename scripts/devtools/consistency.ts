@@ -88,11 +88,24 @@ export const CONS_PROOF_GOV_IDS: ReadonlySet<string> = new Set([
   ...ids("GOV", 2, 7),
 ]);
 
+export const CONS_FLOW_UX_IDS: ReadonlySet<string> = new Set([
+  ...ids("SAFE", 1, 4),
+  ...ids("WF", 1, 24),
+]);
+
 if (PROGRAM_IDS.size !== 75) {
   throw new Error(`canonical program ID set must contain 75 IDs, found ${PROGRAM_IDS.size}`);
 }
 if (CONS_PROOF_GOV_IDS.size !== 28) {
   throw new Error(`canonical cons-proof-gov ID set must contain 28 IDs, found ${CONS_PROOF_GOV_IDS.size}`);
+}
+if (
+  CONS_FLOW_UX_IDS.size !== 28 ||
+  [...CONS_FLOW_UX_IDS].some((taskId) =>
+    !PROGRAM_IDS.has(taskId) || CONS_PROOF_GOV_IDS.has(taskId)
+  )
+) {
+  throw new Error("canonical cons-flow-ux scope must contain 28 distinct SAFE/WF program tasks");
 }
 if (
   TASK_PROOF_POLICIES.size !== PROGRAM_IDS.size ||
@@ -104,6 +117,7 @@ if (
 
 export const KNOWN_SCOPES: Record<string, ReadonlySet<string>> = {
   "cons-proof-gov": CONS_PROOF_GOV_IDS,
+  "cons-flow-ux": CONS_FLOW_UX_IDS,
   program: PROGRAM_IDS,
 };
 
@@ -1875,7 +1889,11 @@ export async function main(argv: string[]): Promise<number> {
         );
         return 64;
       }
-      const scope = CONS_PROOF_GOV_IDS.has(command.taskId) ? "cons-proof-gov" : "program";
+      const scope = CONS_PROOF_GOV_IDS.has(command.taskId)
+        ? "cons-proof-gov"
+        : CONS_FLOW_UX_IDS.has(command.taskId)
+          ? "cons-flow-ux"
+          : "program";
       const { receipt, exitCode } = verifyTask({
         taskId: command.taskId,
         scope,

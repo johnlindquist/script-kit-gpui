@@ -158,6 +158,20 @@ describe("catalog-bound offline consistency task proofs", () => {
     expect(
       conflicts.sourceFingerprints["design/mockups/generated/tokens.json"],
     ).toMatch(/^[a-f0-9]{64}$/);
+
+    const completion = observedProof("GOV-006");
+    expect(completion.productionSources).toEqual([
+      "scripts/devtools/consistency.ts",
+      "scripts/agentic/cons-flow-ux/final-workflow-audit.ts",
+    ]);
+    expect(completion.testRun.executedSuiteFiles).toEqual([
+      "scripts/devtools/consistency.test.ts",
+      "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
+    ]);
+    expect(completion.sourceFingerprints["scripts/devtools/consistency.ts"])
+      .toMatch(/^[a-f0-9]{64}$/);
+    expect(completion.sourceFingerprints["scripts/agentic/cons-flow-ux/final-workflow-audit.ts"])
+      .toMatch(/^[a-f0-9]{64}$/);
   });
 
   test("green-looking output with zero tests, failures, no expectations, or missing suites fails", () => {
@@ -252,6 +266,22 @@ describe("catalog-bound offline consistency task proofs", () => {
     ]) {
       expect(() =>
         runSafeTaskProof("GEO-001", {
+          executedTestFiles,
+          runTests: () => ({ output: "should never run", exitCode: 0 }),
+        })
+      ).toThrow("observed test command");
+    }
+
+    for (const executedTestFiles of [
+      ["scripts/devtools/consistency.test.ts"],
+      [
+        "scripts/devtools/consistency.test.ts",
+        "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
+        "scripts/agentic/macos-input.test.ts",
+      ],
+    ]) {
+      expect(() =>
+        runSafeTaskProof("GOV-006", {
           executedTestFiles,
           runTests: () => ({ output: "should never run", exitCode: 0 }),
         })
