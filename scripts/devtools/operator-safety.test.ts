@@ -7,6 +7,7 @@ import {
   assertNoninteractiveProtocolCommand,
   assertNoninteractiveSessionCommand,
   assertNoninteractiveUnownedSessionCommand,
+  inspectionSessionCleanup,
   NONINTERACTIVE_SAFE_COMMAND_TYPES,
   NoninteractiveSafetyError,
 } from "./lib/operator-safety.ts";
@@ -868,6 +869,77 @@ describe("noninteractive DevTools operator safety", () => {
       expect(result.stdout.toString()).toContain("session lifecycle mutation is forbidden");
     }
   });
+
+  test("passive inspector sessions never acquire cleanup authority", () => {
+    expect(inspectionSessionCleanup("dev-watch", null)).toEqual({
+      required: false,
+      createdSession: false,
+      command: null,
+    });
+  });
+
+  test("resumed inspector sessions remain borrowed even when startup was requested", () => {
+    expect(inspectionSessionCleanup("reviewed-session", {
+      status: "ok",
+      session: "reviewed-session",
+      pid: 4242,
+      resumed: true,
+      ready: true,
+    })).toEqual({
+      required: false,
+      createdSession: false,
+      command: null,
+    });
+  });
+
+  test("a newly created inspector session gets only exact PID-and-generation cleanup", () => {
+    expect(inspectionSessionCleanup("reviewed-session", {
+      status: "ok",
+      session: "reviewed-session",
+      pid: 4242,
+      sessionGeneration: "reviewed-generation",
+      resumed: false,
+      ready: true,
+    })).toEqual({
+      required: true,
+      createdSession: true,
+      ownership: { pid: 4242, generation: "reviewed-generation" },
+      command: "scripts/agentic/session.sh stop reviewed-session --expected-pid 4242 --expected-generation reviewed-generation",
+    });
+  });
+
+  test.each([
+    ["failed-start", { status: "error", error: "start_failed" }],
+    ["wrong-session", { status: "ok", session: "other-session", resumed: false, ready: true, pid: 4242, sessionGeneration: "generation" }],
+    ["not-ready", { status: "ok", session: "reviewed-session", resumed: false, ready: false, pid: 4242, sessionGeneration: "generation" }],
+    ["missing-resume-fact", { status: "ok", session: "reviewed-session", ready: true, pid: 4242, sessionGeneration: "generation" }],
+    ["missing-pid", { status: "ok", session: "reviewed-session", resumed: false, ready: true, sessionGeneration: "generation" }],
+    ["zero-pid", { status: "ok", session: "reviewed-session", resumed: false, ready: true, pid: 0, sessionGeneration: "generation" }],
+    ["fractional-pid", { status: "ok", session: "reviewed-session", resumed: false, ready: true, pid: 4.2, sessionGeneration: "generation" }],
+    ["missing-generation", { status: "ok", session: "reviewed-session", resumed: false, ready: true, pid: 4242 }],
+    ["traversal-generation", { status: "ok", session: "reviewed-session", resumed: false, ready: true, pid: 4242, sessionGeneration: "../generation" }],
+    ["shell-generation", { status: "ok", session: "reviewed-session", resumed: false, ready: true, pid: 4242, sessionGeneration: "generation;stop" }],
+  ])("inspector rejects unowned startup fact %s without constructing a stop command", (_name, receipt) => {
+    expect(() => inspectionSessionCleanup("reviewed-session", receipt!)).toThrow();
+  });
+
+  test("the live dev-watch session can never become inspector-owned", () => {
+    expect(() => inspectionSessionCleanup("dev-watch", {
+      status: "ok",
+      session: "dev-watch",
+      pid: 4242,
+      sessionGeneration: "fake-generation",
+      resumed: false,
+      ready: true,
+    })).toThrow("borrowed operator session");
+  });
+
+  test.each(["..", "../dev-watch", "unsafe name", "-option"])(
+    "inspector rejects unsafe session identity %s without creating a shell command",
+    (session) => {
+      expect(() => inspectionSessionCleanup(session!, null)).toThrow("safe session identity");
+    },
+  );
 
   test("independent DevTools transports cannot bypass strict session-start safety", () => {
     const commands: Array<[string, string[]]> = [

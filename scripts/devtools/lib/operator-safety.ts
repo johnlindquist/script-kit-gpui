@@ -11,6 +11,65 @@ import { resolve } from "node:path";
 
 type ProtocolCommand = Record<string, unknown>;
 
+export type InspectionSessionCleanup = {
+  required: boolean;
+  createdSession: boolean;
+  command: string | null;
+  ownership?: { pid: number; generation: string };
+};
+
+const safeSessionIdentity = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+export function inspectionSessionCleanup(
+  session: string,
+  startReceipt: Record<string, unknown> | null,
+): InspectionSessionCleanup {
+  if (!safeSessionIdentity.test(session)) {
+    throw new Error("DevTools inspection requires one safe session identity");
+  }
+
+  const borrowed: InspectionSessionCleanup = {
+    required: false,
+    createdSession: false,
+    command: null,
+  };
+  if (startReceipt === null) return borrowed;
+
+  if (
+    startReceipt.status !== "ok" ||
+    startReceipt.session !== session ||
+    startReceipt.ready !== true ||
+    typeof startReceipt.resumed !== "boolean"
+  ) {
+    throw new Error("DevTools inspection cannot claim a failed, unready, or mismatched session");
+  }
+  if (startReceipt.resumed) return borrowed;
+  if (session === "dev-watch") {
+    throw new Error("DevTools inspection cannot claim the borrowed operator session");
+  }
+
+  const pid = startReceipt.pid;
+  const generation = startReceipt.sessionGeneration;
+  if (
+    typeof pid !== "number" ||
+    !Number.isSafeInteger(pid) ||
+    pid <= 0 ||
+    typeof generation !== "string" ||
+    !safeSessionIdentity.test(generation)
+  ) {
+    throw new Error("DevTools inspection requires the exact owned session PID and generation");
+  }
+
+  return {
+    required: true,
+    createdSession: true,
+    ownership: { pid, generation },
+    command:
+      `scripts/agentic/session.sh stop ${session}` +
+      ` --expected-pid ${pid} --expected-generation ${generation}`,
+  };
+}
+
 export const NONINTERACTIVE_SAFE_COMMAND_TYPES = [
   "getState",
   "getElements",

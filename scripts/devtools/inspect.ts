@@ -6,6 +6,7 @@ import { classifyTransportError } from "./lib/transport-errors.ts";
 import {
   assertNoninteractiveProtocolCommand,
   assertNoninteractiveSessionCommand,
+  inspectionSessionCleanup,
 } from "./lib/operator-safety.ts";
 import {
   compareWindowLifetimeSnapshots,
@@ -486,11 +487,19 @@ function recipeBoundaryReason(classification: string, missing: string[]) {
 
 async function main() {
   const args = parseArgs(Bun.argv.slice(2));
+  let cleanup = inspectionSessionCleanup(args.session, null);
   if (args.start) {
-    await run(["bash", "scripts/agentic/session.sh", "start", args.session], "session-start");
+    if (args.session === "dev-watch") {
+      throw new Error("DevTools inspection cannot claim the borrowed operator session");
+    }
+    const started = await run(
+      ["bash", "scripts/agentic/session.sh", "start", args.session],
+      "session-start",
+    );
+    cleanup = inspectionSessionCleanup(args.session, started);
   }
   if (args.show) {
-    await run([
+    const shown = await run([
       "bash",
       "scripts/agentic/session.sh",
       "send",
@@ -500,6 +509,9 @@ async function main() {
       "--timeout",
       String(args.timeoutMs),
     ], "session-show");
+    if (shown.status !== "ok") {
+      throw new Error("DevTools inspection cannot continue after session show failed");
+    }
   }
 
   const target = args.target ?? { type: "focused" };
@@ -642,8 +654,7 @@ async function main() {
     likelyOwners: likelyOwners(args.surface, targetKind, missing),
     doNotUseRecipeReason: recipeBoundaryReason(classificationValue, missing),
     cleanup: {
-      required: Boolean(args.start),
-      command: args.start ? `scripts/agentic/session.sh stop ${args.session}` : null,
+      ...cleanup,
       statusCommand: `scripts/agentic/session.sh status ${args.session}`,
     },
     warnings: diagnostic(warningsFrom(inspect, elements, layout, state)),
