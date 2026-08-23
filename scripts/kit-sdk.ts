@@ -1301,9 +1301,11 @@ export interface McpServerInfo {
   description?: string;
   command?: string;
   args?: string[];
+  /** Safe public metadata; credential-like environment values are redacted. */
   env?: Record<string, string>;
   cwd?: string;
   endpoint?: string;
+  /** Safe public metadata; authorization and credential values are redacted. */
   headers?: Record<string, string>;
 }
 
@@ -9962,6 +9964,16 @@ function getEnabledMcpServerEntries(config: McpConfig): Array<[string, McpServer
   return Object.entries(config.servers ?? {}).filter(([, server]) => isServerEnabled(server));
 }
 
+function publicMcpServerMetadata(values: Record<string, string> = {}): Record<string, string> {
+  return Object.fromEntries(Object.entries(values).map(([name, value]) => [
+    name,
+    /authorization|token|api[-_]?key|password|passwd|secret|cookie|credential|private[-_]?key|access[-_]?key/i.test(name)
+      || /\b(?:Bearer|Basic)\s+\S/i.test(value)
+      ? '[REDACTED]'
+      : value,
+  ]));
+}
+
 function toMcpServerInfo(id: string, server: McpServerConfig): McpServerInfo {
   if (server.transport === 'stdio') {
     return {
@@ -9972,7 +9984,7 @@ function toMcpServerInfo(id: string, server: McpServerConfig): McpServerInfo {
       description: server.description,
       command: server.command,
       args: server.args ?? [],
-      env: server.env ?? {},
+      env: publicMcpServerMetadata(server.env),
       cwd: server.cwd,
     };
   }
@@ -9984,7 +9996,7 @@ function toMcpServerInfo(id: string, server: McpServerConfig): McpServerInfo {
     name: server.name,
     description: server.description,
     endpoint: server.endpoint,
-    headers: server.headers ?? {},
+    headers: publicMcpServerMetadata(server.headers),
   };
 }
 
@@ -10064,20 +10076,23 @@ async function createStdioMcpSession(serverId: string, server: McpStdioServerCon
     ...(server.env ?? {}),
   };
   if (process.env.SCRIPT_KIT_NONINTERACTIVE === '1') {
-    for (const permission of [
-      'SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER',
-      'SCRIPT_KIT_ALLOW_VISIBLE_PROBES',
-      'SCRIPT_KIT_ALLOW_NATIVE_INPUT',
-      'SCRIPT_KIT_ALLOW_SCREEN_CAPTURE',
-      'SCRIPT_KIT_ALLOW_LIVE_AI',
-      'SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH',
-    ]) {
-      if (server.env?.[permission] === '1') {
+    const protectedAuthority: Record<string, string> = {
+      SCRIPT_KIT_NONINTERACTIVE: '1',
+      SCRIPT_KIT_ALLOW_SCREEN_TAKEOVER: '0',
+      SCRIPT_KIT_ALLOW_VISIBLE_PROBES: '0',
+      SCRIPT_KIT_ALLOW_NATIVE_INPUT: '0',
+      SCRIPT_KIT_ALLOW_SCREEN_CAPTURE: '0',
+      SCRIPT_KIT_ALLOW_LIVE_AI: '0',
+      SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: '0',
+      INCLUDE_SYSTEM_INPUT: '0',
+      SCRIPT_KIT_TEST_STATUS: '0',
+    };
+    for (const [permission, required] of Object.entries(protectedAuthority)) {
+      if (server.env?.[permission] !== undefined && server.env[permission] !== required) {
         throw new Error(`[mcp:${serverId}] noninteractive MCP server cannot override ${permission}`);
       }
-      serverEnvironment[permission] = '0';
+      serverEnvironment[permission] = required;
     }
-    serverEnvironment.INCLUDE_SYSTEM_INPUT = '0';
   }
   const ownsProcessGroup = process.platform !== 'win32';
   const child = spawnChildProcess(server.command, server.args ?? [], {

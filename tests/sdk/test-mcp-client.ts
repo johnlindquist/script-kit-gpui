@@ -76,7 +76,11 @@ writeFileSync(join(fixtureDirectory, "config.ts"), `export default ${JSON.string
         transport: "stdio",
         command: process.execPath,
         args: [stdioServerPath, "private-error"],
-        env: { MCP_TOKEN: privateToken },
+        env: {
+          MCP_TOKEN: privateToken,
+          SAFE_REGION: "fixture-region",
+          OPAQUE_HINT: "Bearer opaque-stdio-credential",
+        },
       },
       stdioUnsafe: {
         transport: "stdio",
@@ -84,10 +88,33 @@ writeFileSync(join(fixtureDirectory, "config.ts"), `export default ${JSON.string
         args: [stdioServerPath, "unsafe-override", unsafeLaunchPath],
         env: { SCRIPT_KIT_ALLOW_NATIVE_INPUT: "1" },
       },
+      stdioUnsafeMode: {
+        transport: "stdio",
+        command: process.execPath,
+        args: [stdioServerPath, "unsafe-override", unsafeLaunchPath],
+        env: { SCRIPT_KIT_NONINTERACTIVE: "0" },
+      },
+      stdioUnsafeSystemInput: {
+        transport: "stdio",
+        command: process.execPath,
+        args: [stdioServerPath, "unsafe-override", unsafeLaunchPath],
+        env: { INCLUDE_SYSTEM_INPUT: "1" },
+      },
+      stdioUnsafeTestStatus: {
+        transport: "stdio",
+        command: process.execPath,
+        args: [stdioServerPath, "unsafe-override", unsafeLaunchPath],
+        env: { SCRIPT_KIT_TEST_STATUS: "1" },
+      },
       remoteExplicit: {
         transport: "http",
         endpoint: "https://configured-remote.example/rpc",
-        headers: { authorization: "Bearer explicitly-configured-remote-token" },
+        headers: {
+          authorization: "Bearer explicitly-configured-remote-token",
+          "x-api-key": "remote-private-api-key",
+          "x-region": "fixture-region",
+          "x-opaque-hint": "Bearer opaque-http-credential",
+        },
       },
       stdioOwned: {
         transport: "stdio",
@@ -188,6 +215,39 @@ try {
       throw new Error("SDK loaded another workspace's MCP configuration");
     }
     return { configuredServerCount: servers.length, activeWorkspaceRespected: true };
+  });
+
+  await check("mcp-public-server-inventory-never-discloses-private-stdio-credentials", async () => {
+    const servers = await mcp.listServers();
+    const stdio = servers.find((server) => server.id === "stdioPrivateError");
+    if (!stdio) throw new Error("Configured stdio fixture is missing from the public inventory");
+    const serialized = JSON.stringify(stdio);
+    if (serialized.includes(privateToken) || serialized.includes("opaque-stdio-credential")) {
+      throw new Error("Public MCP server inventory disclosed a private stdio credential");
+    }
+    if (stdio.env?.SAFE_REGION !== "fixture-region") {
+      throw new Error("Public MCP server inventory discarded safe stdio metadata");
+    }
+    return { privateEnvironmentRedacted: true, safeMetadataPreserved: true };
+  });
+
+  await check("mcp-public-server-lookup-never-discloses-configured-http-credentials", async () => {
+    const server = await mcp.getServer("remoteExplicit");
+    if (!server) throw new Error("Configured remote fixture is missing from public lookup");
+    const serialized = JSON.stringify(server);
+    for (const secret of [
+      "explicitly-configured-remote-token",
+      "remote-private-api-key",
+      "opaque-http-credential",
+    ]) {
+      if (serialized.includes(secret)) {
+        throw new Error("Public MCP server lookup disclosed a configured HTTP credential");
+      }
+    }
+    if (server.headers?.["x-region"] !== "fixture-region") {
+      throw new Error("Public MCP server lookup discarded safe HTTP metadata");
+    }
+    return { privateHeadersRedacted: true, safeMetadataPreserved: true };
   });
 
   await check("mcp-workspace-cache-never-reuses-another-SK_PATH-configuration", async () => {
@@ -357,6 +417,21 @@ try {
     if (existsSync(unsafeLaunchPath)) throw new Error("Unsafe configured MCP server actually started");
     return { unauthorizedChildStarted: false };
   });
+
+  for (const [serverId, permission] of [
+    ["stdioUnsafeMode", "SCRIPT_KIT_NONINTERACTIVE"],
+    ["stdioUnsafeSystemInput", "INCLUDE_SYSTEM_INPUT"],
+    ["stdioUnsafeTestStatus", "SCRIPT_KIT_TEST_STATUS"],
+  ] as const) {
+    await check(`mcp-stdio-config-cannot-override-${permission.toLowerCase()}-authority`, async () => {
+      rmSync(unsafeLaunchPath, { force: true });
+      await expectFailure(() => mcp.listTools(serverId), `cannot override ${permission}`);
+      if (existsSync(unsafeLaunchPath)) {
+        throw new Error(`Configured MCP server started after overriding ${permission}`);
+      }
+      return { protectedPermission: permission, unauthorizedChildStarted: false };
+    });
+  }
 
   await check("mcp-stdio-failures-never-echo-private-server-environment-values", async () => {
     const failure = await expectFailure(() => mcp.listTools("stdioPrivateError"), "failed");
