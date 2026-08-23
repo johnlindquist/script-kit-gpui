@@ -391,6 +391,53 @@ describe("mcp-cli", () => {
     expect(performance.now() - started).toBeLessThan(1_000);
   });
 
+  it("rejects a declared oversized MCP response before accepting its body", async () => {
+    globalThis.fetch = (async () => new Response("x".repeat(257), {
+      headers: { "content-length": "257" },
+    })) as typeof fetch;
+    await expect(runCli(["tools"], {
+      SCRIPT_KIT_MCP_ENDPOINT: "http://127.0.0.1:43129/rpc",
+      SCRIPT_KIT_MCP_TOKEN: "test-token",
+      SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES: "256",
+    })).rejects.toThrow("256-byte response safety budget");
+  });
+
+  it("cancels an oversized streamed MCP response without buffering unbounded bytes", async () => {
+    let cancelled = false;
+    let pullCount = 0;
+    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pullCount += 1;
+        controller.enqueue(new Uint8Array(pullCount === 1 ? 128 : 129));
+        if (pullCount >= 8) controller.close();
+      },
+      cancel() { cancelled = true; },
+    }))) as typeof fetch;
+    await expect(runCli(["tools"], {
+      SCRIPT_KIT_MCP_ENDPOINT: "http://127.0.0.1:43129/rpc",
+      SCRIPT_KIT_MCP_TOKEN: "test-token",
+      SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES: "256",
+    })).rejects.toThrow("256-byte response safety budget");
+    expect(cancelled).toBe(true);
+  });
+
+  it.each(["0", "-1", "1.5", "67108865", "invalid"])(
+    "refuses invalid MCP response budget %s before fetching",
+    async (budget) => {
+      let requestCount = 0;
+      globalThis.fetch = (async () => {
+        requestCount += 1;
+        return Response.json({});
+      }) as typeof fetch;
+      await expect(runCli(["tools"], {
+        SCRIPT_KIT_MCP_ENDPOINT: "http://127.0.0.1:43129/rpc",
+        SCRIPT_KIT_MCP_TOKEN: "test-token",
+        SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES: budget,
+      })).rejects.toThrow("SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES");
+      expect(requestCount).toBe(0);
+    },
+  );
+
   it.each(["0", "-1", "1.5", "120001", "invalid"])(
     "refuses invalid MCP request timeout %s before fetching",
     async (timeout) => {

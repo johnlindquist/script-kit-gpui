@@ -79,6 +79,7 @@ function mcpUsage() {
     "  SCRIPT_KIT_MCP_ENDPOINT     Base URL or /rpc endpoint",
     "  SCRIPT_KIT_MCP_TOKEN        Bearer token",
     "  SCRIPT_KIT_MCP_TIMEOUT_MS   Request timeout, at most 120000ms",
+    "  SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES  Response budget, at most 67108864 bytes",
   ].join("\n");
 }
 
@@ -220,6 +221,44 @@ function mcpRequestTimeoutMs(): number {
   return timeout;
 }
 
+function mcpMaxResponseBytes(): number {
+  const configured = process.env.SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES;
+  if (configured === undefined || configured === "") return 16 * 1024 * 1024;
+  const budget = Number(configured);
+  if (!/^[1-9][0-9]*$/.test(configured) || !Number.isSafeInteger(budget) || budget > 64 * 1024 * 1024) {
+    fail("SCRIPT_KIT_MCP_MAX_RESPONSE_BYTES must be a positive whole byte budget no greater than 67108864.");
+  }
+  return budget;
+}
+
+async function readBoundedMcpResponse(response: Response, maximumBytes: number): Promise<string> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maximumBytes) {
+    await response.body?.cancel();
+    fail(`Script Kit MCP exceeded its ${maximumBytes}-byte response safety budget.`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maximumBytes) {
+        await reader.cancel();
+        fail(`Script Kit MCP exceeded its ${maximumBytes}-byte response safety budget.`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks, received));
+}
+
 function safeMcpDiagnostic(message: string, token: string): string {
   return message
     .split(token).join("[REDACTED]")
@@ -278,6 +317,7 @@ function installCommand(targetArg: string | undefined): CliResult {
 export async function rpc(method: string, params: unknown): Promise<unknown> {
   const { endpoint, token } = resolveEndpointAndToken();
   const timeoutMs = mcpRequestTimeoutMs();
+  const maximumResponseBytes = mcpMaxResponseBytes();
   const requestId = `script-kit-mcp-cli-${crypto.randomUUID()}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -299,7 +339,7 @@ export async function rpc(method: string, params: unknown): Promise<unknown> {
         params,
       }),
     });
-    text = await response.text();
+    text = await readBoundedMcpResponse(response, maximumResponseBytes);
   } catch (error) {
     if (controller.signal.aborted) {
       fail(`Script Kit MCP ${method} timed out after ${timeoutMs}ms.`);
