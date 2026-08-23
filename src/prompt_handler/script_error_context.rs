@@ -6,6 +6,15 @@ struct ScriptErrorAgentChatContextBundle {
     error_report_label: String,
 }
 
+struct ScriptErrorAgentChatContext<'a> {
+    script_path: &'a str,
+    error_message: &'a str,
+    stderr_output: Option<&'a str>,
+    exit_code: Option<i32>,
+    stack_trace: Option<&'a str>,
+    suggestions: &'a [String],
+}
+
 fn sanitize_script_error_context_name(value: &str, fallback: &str) -> String {
     let sanitized = value
         .chars()
@@ -341,14 +350,17 @@ impl ScriptListApp {
 
     fn route_script_error_to_agent_chat(
         &mut self,
-        script_path: &str,
-        error_message: &str,
-        stderr_output: Option<&str>,
-        exit_code: Option<i32>,
-        stack_trace: Option<&str>,
-        suggestions: &[String],
+        context: ScriptErrorAgentChatContext<'_>,
         cx: &mut Context<Self>,
     ) {
+        let ScriptErrorAgentChatContext {
+            script_path,
+            error_message,
+            stderr_output,
+            exit_code,
+            stack_trace,
+            suggestions,
+        } = context;
         let context_root = crate::setup::get_kit_path()
             .join("agent_chat")
             .join("script-error-context");

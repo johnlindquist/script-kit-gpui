@@ -2624,12 +2624,14 @@ impl ScriptListApp {
                 );
 
                 self.route_script_error_to_agent_chat(
-                    &script_path,
-                    &error_message,
-                    stderr_output.as_deref(),
-                    exit_code,
-                    stack_trace.as_deref(),
-                    &suggestions,
+                    ScriptErrorAgentChatContext {
+                        script_path: &script_path,
+                        error_message: &error_message,
+                        stderr_output: stderr_output.as_deref(),
+                        exit_code,
+                        stack_trace: stack_trace.as_deref(),
+                        suggestions: &suggestions,
+                    },
                     cx,
                 );
 
@@ -4261,8 +4263,10 @@ impl ScriptListApp {
                 ) {
                     Ok(t) => t,
                     Err(error) => {
-                        let mut state = protocol::AgentChatStateSnapshot::default();
-                        state.warnings = vec![format!("target_unsupported: {}", error.message)];
+                        let state = protocol::AgentChatStateSnapshot {
+                            warnings: vec![format!("target_unsupported: {}", error.message)],
+                            ..Default::default()
+                        };
                         let response = Message::agent_chat_state_result(request_id.clone(), state);
                         if let Some(ref sender) = self.response_sender {
                             let _ = sender.try_send(response);
@@ -4630,8 +4634,10 @@ impl ScriptListApp {
                 ) {
                     Ok(t) => t,
                     Err(error) => {
-                        let mut probe = protocol::AgentChatTestProbeSnapshot::default();
-                        probe.warnings = vec![format!("target_unsupported: {}", error.message)];
+                        let probe = protocol::AgentChatTestProbeSnapshot {
+                            warnings: vec![format!("target_unsupported: {}", error.message)],
+                            ..Default::default()
+                        };
                         let response =
                             Message::agent_chat_test_probe_result(request_id.clone(), probe);
                         if let Some(ref sender) = self.response_sender {
@@ -4720,8 +4726,10 @@ impl ScriptListApp {
                 ) {
                     Ok(t) => t,
                     Err(error) => {
-                        let mut probe = protocol::AgentChatTestProbeSnapshot::default();
-                        probe.warnings = vec![format!("target_unsupported: {}", error.message)];
+                        let probe = protocol::AgentChatTestProbeSnapshot {
+                            warnings: vec![format!("target_unsupported: {}", error.message)],
+                            ..Default::default()
+                        };
                         let response =
                             Message::agent_chat_test_probe_result(request_id.clone(), probe);
                         if let Some(ref sender) = self.response_sender {
@@ -6800,13 +6808,16 @@ impl ScriptListApp {
                     }
 
                     // ── PromptPopup batch path ─────────────────────────
-                    // When targeting a PromptPopup, detect the active popup
-                    // sub-type at execution time and route commands.
+                    // Resolve the active PromptPopup subtype at execution time.
                     // Supported: selectByValue, selectBySemanticId, waitFor.
                     // setInput fails closed (popups don't have independent input).
                     if is_prompt_popup_batch {
-                        let (prompt_popup_info, prompt_popup_subtype) = prompt_popup_batch_target
-                            .expect("PromptPopup batch target must accompany its kind");
+                        let Some((prompt_popup_info, prompt_popup_subtype)) =
+                            prompt_popup_batch_target
+                        else {
+                            reject_missing_prompt_popup_batch_target(&rid, sender.as_ref());
+                            return;
+                        };
                         let batch_started_at_ms = protocol::transaction_trace::now_epoch_ms();
                         let batch_start = std::time::Instant::now();
                         let batch_timeout = std::time::Duration::from_millis(opts.timeout);
@@ -9513,8 +9524,6 @@ impl ScriptListApp {
                 | AppView::ScriptTemplateCatalogView { .. }
         );
         let content_owned = matches!(self.current_view, AppView::About { .. });
-        let footerless = matches!(self.current_view, AppView::MicroPrompt { .. });
-
         let owner = if popup_open {
             "popup"
         } else if agent_chat_footer_hidden {
@@ -9525,8 +9534,6 @@ impl ScriptListApp {
             "prompt"
         } else if content_owned {
             "content"
-        } else if footerless {
-            "none"
         } else {
             "none"
         };

@@ -19,10 +19,35 @@ enum PromptConversionSource {
     Sessionless,
 }
 
+fn reject_missing_prompt_popup_batch_target(
+    request_id: &str,
+    sender: Option<&std::sync::mpsc::SyncSender<crate::protocol::Message>>,
+) {
+    tracing::warn!(request_id, "automation.batch.prompt_popup_target_missing");
+    if let Some(sender) = sender {
+        let _ = sender.try_send(Message::batch_result(
+            request_id.to_string(),
+            false,
+            vec![protocol::BatchResultEntry {
+                index: 0,
+                success: false,
+                command: "target".to_string(),
+                elapsed: Some(0),
+                value: None,
+                error: Some(protocol::TransactionError::action_failed(
+                    "PromptPopup target is no longer available",
+                )),
+            }],
+            Some(0),
+            0,
+        ));
+    }
+}
+
 fn convert_protocol_prompt_message(
     message: crate::protocol::Message,
     _source: PromptConversionSource,
-) -> Result<PromptMessage, crate::protocol::Message> {
+) -> Result<PromptMessage, Box<crate::protocol::Message>> {
     match message {
         Message::Arg {
             id,
@@ -161,7 +186,7 @@ fn convert_protocol_prompt_message(
             confirm_text,
             cancel_text,
         }),
-        other => Err(other),
+        other => Err(Box::new(other)),
     }
 }
 
@@ -171,7 +196,7 @@ fn prompt_message_from_protocol_message(
     let message =
         match convert_protocol_prompt_message(message, PromptConversionSource::Sessionless) {
             Ok(prompt_message) => return Some(prompt_message),
-            Err(message) => message,
+            Err(message) => *message,
         };
 
     match message {
