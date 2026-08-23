@@ -2226,6 +2226,7 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/devtools/actions-projection.test.ts",
     "scripts/devtools/operator-safety.test.ts",
     "scripts/devtools/driver.ts",
+    "scripts/devtools/inspect.ts",
     "scripts/devtools/lib/client.ts",
     "scripts/devtools/lib/target-identity.ts",
     "scripts/devtools/lib/privacy.ts",
