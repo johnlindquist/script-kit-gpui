@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("cons-flow-ux.notes-today");
 
 type Obj = Record<string, any>;
 

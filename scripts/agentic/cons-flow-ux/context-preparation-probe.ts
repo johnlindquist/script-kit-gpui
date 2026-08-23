@@ -3,6 +3,9 @@
 import { mkdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
+import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("cons-flow-ux.context-preparation");
 
 const binary = resolve(
   process.env.SCRIPT_KIT_GPUI_BINARY ??

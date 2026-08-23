@@ -2,6 +2,9 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
+import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("cons-flow-ux.notes-agent-chat-return");
 
 const PROJECT_ROOT = resolve(import.meta.dir, "../../..");
 const BINARY =

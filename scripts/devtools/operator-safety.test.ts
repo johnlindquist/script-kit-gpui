@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1388,6 +1388,82 @@ describe("noninteractive DevTools operator safety", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused");
     expect(result.stdout.toString()).not.toContain("operator clipboard accessed");
+  });
+
+  test.each([
+    ["semantic-command", "cons-flow-ux.semantic-command"],
+    ["entry-verbs", "cons-flow-ux.entry-verbs"],
+    ["dictation-recovery-focus", "cons-flow-ux.dictation-recovery-focus"],
+    ["notes-search", "cons-flow-ux.notes-search"],
+    ["dictation-delivery", "cons-flow-ux.dictation-delivery"],
+    ["context-preparation", "cons-flow-ux.context-preparation"],
+    ["notes-today", "cons-flow-ux.notes-today"],
+    ["dictation-dismiss-targets", "cons-flow-ux.dictation-dismiss-targets"],
+    ["flow-history", "cons-flow-ux.flow-history"],
+    ["notes-handoff", "cons-flow-ux.notes-handoff"],
+    ["notes-agent-chat-return", "cons-flow-ux.notes-agent-chat-return"],
+    ["context-lifecycle", "cons-flow-ux.context-lifecycle"],
+    ["conversation-hosts", "conversation-hosts.private-pasteboard-archive"],
+    ["notes-actions", "notes-actions.private-pasteboard-archive"],
+    ["dictation-history", "dictation-history.system-clipboard"],
+  ])("consistency workflow %s refuses before runtime receipts, fixtures, or child processes", (name, expectedOwner) => {
+    const result = child(`
+      import * as filesystem from "node:fs";
+      import * as asyncFilesystem from "node:fs/promises";
+      import { mock } from "bun:test";
+      const unsafe = (() => { throw new Error("unsafe consistency workflow side effect reached"); });
+      mock.module("node:fs", () => ({
+        ...filesystem,
+        mkdirSync: unsafe,
+        mkdtempSync: unsafe,
+        writeFileSync: unsafe,
+        rmSync: unsafe,
+        unlinkSync: unsafe,
+      }));
+      mock.module("node:fs/promises", () => ({
+        ...asyncFilesystem,
+        mkdir: unsafe,
+        unlink: unsafe,
+        writeFile: unsafe,
+      }));
+      Bun.spawn = unsafe;
+      Bun.spawnSync = unsafe;
+      try { await import(${JSON.stringify("./scripts/agentic/cons-flow-ux/")} + ${JSON.stringify(name)} + "-probe.ts"); }
+      catch (error) { console.log("failure=" + error.message); }
+    `);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain(`SCRIPT_KIT_NONINTERACTIVE=1 refused ${expectedOwner}`);
+    expect(result.stdout.toString()).not.toContain("unsafe consistency workflow side effect reached");
+  });
+
+  test("SAFE-001 refusal preserves its exact preexisting authoritative runtime receipt", () => {
+    const root = mkdtempSync(join(tmpdir(), "script-kit-safe001-receipt-safety-"));
+    const directory = join(root, ".artifacts", "consistency", "cons-flow-ux", "safe001-canonical-v2", "SAFE-001");
+    const receipt = join(directory, "receipt.json");
+    const owner = join(new URL("../..", import.meta.url).pathname, "scripts/agentic/cons-flow-ux/context-preparation-probe.ts");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(receipt, "preserve-exact-runtime-evidence");
+    try {
+      const result = child(`
+        import { existsSync, readFileSync } from "node:fs";
+        process.chdir(${JSON.stringify(root)});
+        Bun.spawnSync = (() => { throw new Error("unsafe SAFE-001 native hash started"); });
+        try { await import(${JSON.stringify(owner)}); }
+        catch (error) { console.log("failure=" + error.message); }
+        console.log("receiptExists=" + existsSync(${JSON.stringify(receipt)}));
+        if (existsSync(${JSON.stringify(receipt)})) console.log("receipt=" + readFileSync(${JSON.stringify(receipt)}, "utf8"));
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("SCRIPT_KIT_NONINTERACTIVE=1 refused cons-flow-ux.context-preparation");
+      expect(result.stdout.toString()).toContain("receiptExists=true");
+      expect(result.stdout.toString()).toContain("receipt=preserve-exact-runtime-evidence");
+      expect(result.stdout.toString()).not.toContain("unsafe SAFE-001 native hash started");
+      expect(readFileSync(receipt, "utf8")).toBe("preserve-exact-runtime-evidence");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test.each([

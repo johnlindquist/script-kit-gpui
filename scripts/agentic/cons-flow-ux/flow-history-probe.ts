@@ -12,6 +12,9 @@ import {
 } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { Driver, type Json } from "../../devtools/driver";
+import { assertNoninteractiveVisualProbe } from "../../devtools/lib/operator-safety.ts";
+
+assertNoninteractiveVisualProbe("cons-flow-ux.flow-history");
 
 const repoRoot = resolve(import.meta.dir, "../../..");
 const binary = resolve(
