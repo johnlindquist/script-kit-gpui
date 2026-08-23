@@ -22,15 +22,31 @@ if [[ "${1:-}" == "--json" ]]; then
   TIMEOUT_SEC="${2:-120}"
 fi
 
+if [[ ! "$TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[build-isolated] fail: timeout must be a positive whole number; got ${TIMEOUT_SEC}" >&2
+  exit 64
+fi
+
 export SCRIPT_KIT_AGENT_ID="${SCRIPT_KIT_AGENT_ID:-dt-agent-build}"
 sanitize_id() {
   printf '%s' "$1" | tr -c 'a-zA-Z0-9._-' '-'
 }
 
+owned_build_id() {
+  local raw="$1" name="$2" normalized
+  normalized="$(sanitize_id "$raw")"
+  if [[ -z "$normalized" || "$normalized" == "." || "$normalized" == ".." ]]; then
+    echo "[build-isolated] fail: isolated build identity must name one owned child; ${name}=${raw}" >&2
+    exit 64
+  fi
+  printf '%s' "$normalized"
+}
+
 TARGET_MODE="${SCRIPT_KIT_AGENT_TARGET_MODE:-pool}"
-POOL="$(sanitize_id "${SCRIPT_KIT_CARGO_TARGET_POOL:-agent-debug}")"
-AGENT_ID="$(sanitize_id "$SCRIPT_KIT_AGENT_ID")"
-SESSION_NAME="$(sanitize_id "${SCRIPT_KIT_DEVTOOLS_SESSION:-$SCRIPT_KIT_AGENT_ID}")"
+POOL="$(owned_build_id "${SCRIPT_KIT_CARGO_TARGET_POOL:-agent-debug}" SCRIPT_KIT_CARGO_TARGET_POOL)"
+AGENT_ID="$(owned_build_id "$SCRIPT_KIT_AGENT_ID" SCRIPT_KIT_AGENT_ID)"
+SESSION_NAME="$(owned_build_id "${SCRIPT_KIT_DEVTOOLS_SESSION:-$SCRIPT_KIT_AGENT_ID}" SCRIPT_KIT_DEVTOOLS_SESSION)"
+export SCRIPT_KIT_AGENT_ID="$AGENT_ID"
 export SCRIPT_KIT_CARGO_TARGET_POOL="$POOL"
 
 case "$TARGET_MODE" in
@@ -47,6 +63,24 @@ RUNTIME_DIR="${DEVTOOLS_SESSION_REPO_ROOT}/target-agent/runtime/${SESSION_NAME}"
 DST="${RUNTIME_DIR}/script-kit-gpui"
 MANIFEST="${RUNTIME_DIR}/manifest.json"
 LOG="/tmp/sk-isolated-build-${SCRIPT_KIT_AGENT_ID}.log"
+
+for protected_build_path in \
+  "${DEVTOOLS_SESSION_REPO_ROOT}/target-agent" \
+  "${DEVTOOLS_SESSION_REPO_ROOT}/target-agent/pools" \
+  "${DEVTOOLS_SESSION_REPO_ROOT}/target-agent/agents" \
+  "${DEVTOOLS_SESSION_REPO_ROOT}/target-agent/runtime" \
+  "$TARGET_DIR" \
+  "$SRC" \
+  "$RUNTIME_DIR" \
+  "$DST" \
+  "$MANIFEST" \
+  "$LOG"; do
+  if [[ -L "$protected_build_path" ]]; then
+    echo "[build-isolated] fail: isolated build ownership cannot follow a symlink: ${protected_build_path}" >&2
+    exit 64
+  fi
+done
+
 : > "$LOG"
 
 emit_build_json() {
@@ -74,19 +108,25 @@ emit_build_json() {
 
 echo "[build-isolated] agent_id=${SCRIPT_KIT_AGENT_ID} pool=${POOL} mode=${TARGET_MODE} timeout=${TIMEOUT_SEC}s log=${LOG}" >&2
 
+# A background pipeline normally shares the parent's process group, so killing
+# only its shell leaves Cargo/rustc running. Give this exact owned pipeline its
+# own group; timeout cleanup can then terminate every descendant together.
+set -m
 (
   ./scripts/agentic/agent-cargo.sh build --bin script-kit-gpui --message-format=short 2>&1 | tee -a "$LOG" >&2
 ) &
 build_pid=$!
+set +m
 
 start_epoch=$(date +%s)
 while kill -0 "$build_pid" 2>/dev/null; do
   elapsed=$(( $(date +%s) - start_epoch ))
   if [[ "$elapsed" -ge "$TIMEOUT_SEC" ]]; then
-    echo "[build-isolated] timeout after ${TIMEOUT_SEC}s — killing cargo (pid ${build_pid})" >&2
-    kill "$build_pid" 2>/dev/null || true
-    sleep 2
-    kill -9 "$build_pid" 2>/dev/null || true
+    echo "[build-isolated] timeout after ${TIMEOUT_SEC}s — stopping owned cargo process group ${build_pid}" >&2
+    kill -TERM -- "-${build_pid}" 2>/dev/null || kill -TERM "$build_pid" 2>/dev/null || true
+    sleep 0.05
+    kill -KILL -- "-${build_pid}" 2>/dev/null || true
+    wait "$build_pid" 2>/dev/null || true
     tail -n 30 "$LOG" >&2 || true
     emit_build_json error build build_timeout "cargo build exceeded ${TIMEOUT_SEC}s" "$elapsed"
     exit 30
@@ -100,8 +140,10 @@ while kill -0 "$build_pid" 2>/dev/null; do
   sleep 5
 done
 
+set +e
 wait "$build_pid"
 status=$?
+set -e
 elapsed=$(( $(date +%s) - start_epoch ))
 
 if [[ "$status" -ne 0 ]]; then

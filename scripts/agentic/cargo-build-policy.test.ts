@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -1022,6 +1023,183 @@ describe("reviewed Rust harness reuse", () => {
     expect(result.status).toBe(64);
     expect(result.stderr).toContain("cached test pool cannot follow a symlink");
     expect(existsSync(workspace.capture)).toBe(false);
+  });
+});
+
+describe("isolated build process ownership", () => {
+  function isolatedFixture(builder: string) {
+    const workspace = fixture();
+    const localScripts = join(workspace.root, "scripts", "agentic");
+    copyFileSync(join(scripts, "build-isolated-binary.sh"), join(localScripts, "build-isolated-binary.sh"));
+    copyFileSync(join(scripts, "devtools-session-lib.sh"), join(localScripts, "devtools-session-lib.sh"));
+    writeFileSync(join(localScripts, "agent-cargo.sh"), builder);
+    chmodSync(join(localScripts, "agent-cargo.sh"), 0o755);
+    writeFileSync(
+      join(workspace.bin, "sleep"),
+      '#!/bin/bash\nif [[ "$1" == "5" || "$1" == "2" ]]; then exec /bin/sleep 0.02; fi\nexec /bin/sleep "$@"\n',
+    );
+    chmodSync(join(workspace.bin, "sleep"), 0o755);
+    const agentId = `policy-${process.pid}-${Math.random().toString(36).slice(2)}`;
+    temporaryDirectories.push(`/tmp/sk-isolated-build-${agentId}.log`);
+    return {
+      ...workspace,
+      builderPath: join(localScripts, "build-isolated-binary.sh"),
+      env: { ...workspace.env, SCRIPT_KIT_AGENT_ID: agentId },
+    };
+  }
+
+  test("returns a structured build failure when its owned Cargo child exits nonzero", () => {
+    const workspace = isolatedFixture('#!/bin/bash\nprintf "synthetic-build-failure\\n" >&2\nexit 75\n');
+    const result = Bun.spawnSync(["/bin/bash", workspace.builderPath, "--json", "5"], {
+      env: workspace.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(result.exitCode).toBe(31);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      tool: "build-isolated-binary",
+      status: "error",
+      phase: "build",
+      error: { code: "build_failed" },
+    });
+  });
+
+  test.each(["0", "-1", "1.5", "invalid"])(
+    "rejects malformed isolated build timeout %s before any child starts",
+    (timeout) => {
+      const workspace = isolatedFixture(
+        '#!/bin/bash\nprintf "started\\n" > "$CARGO_POLICY_CAPTURE"\nexit 0\n',
+      );
+      const result = Bun.spawnSync(["/bin/bash", workspace.builderPath, "--json", timeout], {
+        env: workspace.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      expect(result.exitCode).toBe(64);
+      expect(result.stderr.toString()).toContain("timeout must be a positive whole number");
+      expect(existsSync(workspace.capture)).toBe(false);
+    },
+  );
+
+  test.each([
+    ["SCRIPT_KIT_CARGO_TARGET_POOL", ".."],
+    ["SCRIPT_KIT_AGENT_ID", ".."],
+    ["SCRIPT_KIT_DEVTOOLS_SESSION", ".."],
+  ])("rejects parent-traversing isolated identity %s before any child starts", (setting, value) => {
+    const workspace = isolatedFixture(
+      '#!/bin/bash\nprintf "started\\n" > "$CARGO_POLICY_CAPTURE"\nexit 0\n',
+    );
+    const result = Bun.spawnSync(["/bin/bash", workspace.builderPath, "--json", "5"], {
+      env: { ...workspace.env, [setting!]: value },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(result.exitCode).toBe(64);
+    expect(result.stderr.toString()).toContain("isolated build identity must name one owned child");
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("refuses a symlinked isolated runtime destination before any build starts", () => {
+    const workspace = isolatedFixture(
+      '#!/bin/bash\nprintf "started\\n" > "$CARGO_POLICY_CAPTURE"\nexit 0\n',
+    );
+    const external = temporaryDirectory("script-kit-external-runtime-");
+    const runtimeRoot = join(workspace.root, "target-agent", "runtime");
+    mkdirSync(runtimeRoot, { recursive: true });
+    symlinkSync(external, join(runtimeRoot, "escaped"));
+
+    const result = Bun.spawnSync(["/bin/bash", workspace.builderPath, "--json", "5"], {
+      env: { ...workspace.env, SCRIPT_KIT_DEVTOOLS_SESSION: "escaped" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(result.exitCode).toBe(64);
+    expect(result.stderr.toString()).toContain("isolated build ownership cannot follow a symlink");
+    expect(existsSync(workspace.capture)).toBe(false);
+    expect(existsSync(join(external, "script-kit-gpui"))).toBe(false);
+  });
+
+  test("refuses a symlinked build log without truncating its external target", () => {
+    const workspace = isolatedFixture(
+      '#!/bin/bash\nprintf "started\\n" > "$CARGO_POLICY_CAPTURE"\nexit 0\n',
+    );
+    const external = temporaryDirectory("script-kit-external-build-log-");
+    const protectedFile = join(external, "preserved.txt");
+    writeFileSync(protectedFile, "preserve-private-state\n");
+    const logPath = `/tmp/sk-isolated-build-${workspace.env.SCRIPT_KIT_AGENT_ID}.log`;
+    symlinkSync(protectedFile, logPath);
+
+    const result = Bun.spawnSync(["/bin/bash", workspace.builderPath, "--json", "5"], {
+      env: workspace.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(result.exitCode).toBe(64);
+    expect(result.stderr.toString()).toContain("isolated build ownership cannot follow a symlink");
+    expect(existsSync(workspace.capture)).toBe(false);
+    expect(readFileSync(protectedFile, "utf8")).toBe("preserve-private-state\n");
+  });
+
+  test("stages a successful owned fake build and returns its structured manifest", () => {
+    const workspace = isolatedFixture(
+      '#!/bin/bash\ndestination="$SCRIPT_KIT_REPO_ROOT/target-agent/pools/$SCRIPT_KIT_CARGO_TARGET_POOL/debug/script-kit-gpui"\nmkdir -p "$(dirname "$destination")"\nprintf "#!/bin/sh\\nexit 0\\n" > "$destination"\nchmod +x "$destination"\n',
+    );
+
+    const result = Bun.spawnSync(["/bin/bash", workspace.builderPath, "--json", "5"], {
+      env: workspace.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(result.exitCode).toBe(0);
+    const receipt = JSON.parse(result.stdout.toString());
+    expect(receipt).toMatchObject({
+      tool: "build-isolated-binary",
+      status: "ok",
+      phase: "stage",
+      pool: "agent-debug",
+    });
+    expect(existsSync(join(workspace.root, receipt.binaryPath))).toBe(true);
+    expect(existsSync(join(workspace.root, receipt.manifest))).toBe(true);
+  });
+
+  test("terminates the entire owned compiler process group on timeout", () => {
+    const workspace = isolatedFixture(
+      '#!/bin/bash\nexec >/dev/null 2>&1\nprintf "%s\\n" "$$" > "$CARGO_POLICY_CAPTURE"\nexec /bin/sleep 30\n',
+    );
+    let descendant = 0;
+    try {
+      const result = Bun.spawnSync(["/bin/bash", workspace.builderPath, "--json", "1"], {
+        env: workspace.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      descendant = Number.parseInt(readFileSync(workspace.capture, "utf8"), 10);
+      expect(result.exitCode).toBe(30);
+      expect(JSON.parse(result.stdout.toString())).toMatchObject({
+        status: "error",
+        error: { code: "build_timeout" },
+      });
+      let alive = true;
+      try {
+        process.kill(descendant, 0);
+      } catch {
+        alive = false;
+      }
+      expect(alive).toBe(false);
+    } finally {
+      if (!descendant && existsSync(workspace.capture)) {
+        descendant = Number.parseInt(readFileSync(workspace.capture, "utf8"), 10);
+      }
+      if (descendant > 0) {
+        try { process.kill(descendant, "SIGKILL"); } catch {}
+      }
+    }
   });
 });
 
