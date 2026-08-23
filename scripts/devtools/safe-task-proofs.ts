@@ -280,7 +280,7 @@ export function runSafeTaskProof(
   const ownedBehaviorSuite = (path: string): boolean =>
     path.endsWith(".test.ts") && existsSync(path) && (
       path.startsWith("scripts/devtools/") ||
-      (taskId === "GOV-006" && path === reviewedWorkflowSuite)
+      path === reviewedWorkflowSuite
     );
   for (const path of spec.testFiles) {
     if (!ownedBehaviorSuite(path)) {

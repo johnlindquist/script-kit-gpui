@@ -618,16 +618,20 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
         }
         const hashes = asObject(receipt.sourceFingerprints);
         const productionSources = stringArray(receipt.productionSources);
+        const reviewedWorkflowSuite =
+          "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts";
+        const reviewedWorkflowOwner =
+          "scripts/agentic/cons-flow-ux/final-workflow-audit.ts";
         if (
           executedSuiteFiles.some((path) =>
-            !path.startsWith("scripts/devtools/") ||
+            !(path.startsWith("scripts/devtools/") || path === reviewedWorkflowSuite) ||
             !path.endsWith(".test.ts") ||
             path.split("/").includes("..") ||
             !/^[a-f0-9]{64}$/.test(String(hashes[path] ?? "")) ||
             fileFingerprint(resolve(process.cwd(), path)) !== hashes[path]
           )
         ) {
-          errors.push("offline task proof requires exact current fingerprinted owned DevTools test suites");
+          errors.push("offline task proof requires exact current fingerprinted reviewed behavior suites");
         }
         if (
           productionSources.some((path) =>
@@ -635,7 +639,8 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
               path.startsWith("src/") ||
               path.startsWith("scripts/devtools/") ||
               path.startsWith("crates/sk-protocol/src/") ||
-              path.startsWith("design/mockups/generated/")
+              path.startsWith("design/mockups/generated/") ||
+              (taskId === "GOV-006" && path === reviewedWorkflowOwner)
             ) ||
             path.split("/").includes("..") ||
             !/^[a-f0-9]{64}$/.test(String(hashes[path] ?? "")) ||
@@ -661,7 +666,13 @@ export const receiptSchemaRegistry: ReceiptSchemaDefinition[] = [
             )) ||
           (taskId === "GOV-003" && !productionSources.includes("src/theme/alpha.rs")) ||
           (taskId === "GOV-005" &&
-            !productionSources.includes("design/mockups/generated/tokens.json"))
+            !productionSources.includes("design/mockups/generated/tokens.json")) ||
+          (taskId === "GOV-006" && (
+            !productionSources.includes("scripts/devtools/consistency.ts") ||
+            !productionSources.includes(reviewedWorkflowOwner) ||
+            !suiteFiles.includes("scripts/devtools/consistency.test.ts") ||
+            !suiteFiles.includes(reviewedWorkflowSuite)
+          ))
         ) {
           errors.push("offline governance proof requires fingerprints for its actual production owner");
         }

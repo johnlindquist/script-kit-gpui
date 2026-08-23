@@ -51,6 +51,31 @@ describe("catalog-bound offline consistency task proofs", () => {
     expect(taskProofPolicy("PF-012")?.requirement).toBe("direct-runtime");
   });
 
+  test("one reviewed shared behavior run supports every authorized offline task", () => {
+    const suites = [...new Set(SAFE_TASK_SPECS.flatMap((spec) => spec.testFiles))];
+    const output = `${suites.map((path) => `${path}:`).join("\n")}\n` +
+      " 5 pass\n 0 fail\n 11 expect() calls\n";
+    const receipts = SAFE_TASK_SPECS.map((spec) => runSafeTaskProof(spec.taskId, {
+      executedTestFiles: suites,
+      runTests: () => ({ output, exitCode: 0 }),
+    }));
+
+    expect(receipts.map((receipt) => receipt.taskId)).toEqual(
+      SAFE_TASK_SPECS.map((spec) => spec.taskId),
+    );
+    expect(receipts.every((receipt) =>
+      receipt.classification === "ok" && receipt.errors.length === 0
+    )).toBe(true);
+    expect(receipts.every((receipt) =>
+      receipt.testRun.executedSuiteFiles.includes(
+        "scripts/agentic/cons-flow-ux/final-workflow-audit.test.ts",
+      )
+    )).toBe(true);
+    expect(receipts.map((receipt) =>
+      prepareValidatedReceipt("devtools.consistency.safe-task-proof", receipt).exitCode
+    )).toEqual(new Array(SAFE_TASK_SPECS.length).fill(0));
+  });
+
   test("production governance behavior carries the actual owning source fingerprints", () => {
     const ownership = observedProof("GOV-001");
     expect(ownership.productionSources).toContain(
@@ -172,6 +197,28 @@ describe("catalog-bound offline consistency task proofs", () => {
       .toMatch(/^[a-f0-9]{64}$/);
     expect(completion.sourceFingerprints["scripts/agentic/cons-flow-ux/final-workflow-audit.ts"])
       .toMatch(/^[a-f0-9]{64}$/);
+    expect(
+      prepareValidatedReceipt("devtools.consistency.safe-task-proof", completion).exitCode,
+    ).toBe(0);
+    for (const forged of [
+      {
+        ...completion,
+        productionSources: completion.productionSources.filter((path) =>
+          path !== "scripts/agentic/cons-flow-ux/final-workflow-audit.ts"
+        ),
+      },
+      {
+        ...completion,
+        testRun: {
+          ...completion.testRun,
+          suiteFiles: ["scripts/devtools/consistency.test.ts"],
+        },
+      },
+    ]) {
+      expect(
+        prepareValidatedReceipt("devtools.consistency.safe-task-proof", forged).exitCode,
+      ).not.toBe(0);
+    }
   });
 
   test("green-looking output with zero tests, failures, no expectations, or missing suites fails", () => {
