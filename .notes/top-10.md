@@ -1707,6 +1707,131 @@ offline receipts until their real producers are run again.
     compiling, opening an application, or contacting the network. The
     [upstream sccache configuration reference](https://github.com/mozilla/sccache/blob/main/docs/Configuration.md)
     documents its client/server and local-cache environment controls.
+67. The previously green "strict release Clippy" evidence covered only
+    `--lib`: the actual independently compiled `script-kit-gpui` executable
+    was omitted by local release verification, the agent verification
+    owner, and required CI. Expanding the real gate to
+    `--lib --bin script-kit-gpui` immediately exposed **142 executable-only
+    strict errors**, including **55 production `expect`/`unwrap` panic
+    paths**, **28 oversized argument lists**, ten stable public/wire enum
+    naming findings, large hot-path result/state variants, and additional
+    real documentation/style failures. The production repairs preserve
+    existing typed command dispatch, safe AI recovery, private diagnostics,
+    protected glass-motion calibration, public enums, and launcher aliases;
+    replace impossible-state panics with exhaustive typed fallbacks or
+    truthful recoverable failures; box the oversized protocol/route state;
+    and share typed GPUI modifiers, search policies, actions placement,
+    Agent Chat launches, Dictation delivery, current-app capture, and Theme
+    Designer controls. All three actual release owners now name both app
+    targets, and adversarial fake-Cargo behavior independently rejects a
+    verifier that drops the shipping binary. **141 source-bound behavior
+    cases / 393 assertions** plus **ten focused release/CI/cache policy cases
+    / 39 assertions** pass without a compiler or desktop interaction. The
+    source-current single-worker offline Cargo checks were deliberately
+    stopped after 15 and 27 seconds when unrelated machine load exceeded
+    the owner's 16 logical cores. Machine load later fell below the CPU
+    ceiling, but the real writable volume then dropped to **24,214,212 KiB
+    free (23.09 GiB)**, below the wrapper's non-negotiable **25 GiB**
+    floor. No disk-floor override, competing compiler, or application launch
+    is authorized. Until a fresh full
+    library-plus-executable check and exact expanded strict Clippy command
+    both finish successfully, the repaired shipping gate is
+    **SOURCE-ONLY / UNVERIFIED**, not green.
+68. The separately required pull-request file-size ratchet was also
+    already red before this implementation started: checking the original
+    `aee92338d` source reports **56 violations** across **66 files over
+    2,000 lines**; checking the current committed baseline reports **65
+    violations** across **71 critical files**. Its actual 11 policy-unit
+    cases pass, so this is genuine accumulated architectural debt, not a
+    broken scanner. Moving new PromptPopup failure ownership into its
+    existing small protocol-routing module restored the 10,341-line prompt
+    handler to its exact approved ceiling. Seven genuinely shrunken
+    grandfather limits were then reduced, never increased. Another **40,614
+    unchanged test-only lines** moved out of **34 production modules** into
+    explicitly test-only siblings across launcher surface state, Actions,
+    emoji, browser history, AI context/message parts, Agent Chat, providers,
+    persistence, file search, MCP, command grouping, setup, prompts,
+    keyboard shortcuts, shared chrome, and Notes. Today/Day Page's shared
+    reference-normalization, truthful scroll observation, and task
+    statistics additionally moved into one small mapped production owner.
+    Ten now-unnecessary grandfather exemptions were deleted entirely; every
+    retained changed ceiling moved only downward. Subsequent typed ownership
+    extractions covered Agent Chat conversation/view state, Flow session and
+    persistence, truthful semantic projections, Dictation overlay behavior,
+    Notes automation/MCP mutation, launcher footer/chips, design-token
+    exporters, current-app capture/download support, and startup services.
+    The two calibrated-glass owners were then separated by **exact relocation
+    only**: the source-audited footer capsule inventory and every locked
+    Spotlight timing, alpha, curve, geometry, material, and fixture value
+    remain unchanged, while native fidelity, geometry, layout, dispatch,
+    backdrop, lifecycle, animation, style, vibrancy, and resize logic now
+    have explicit small production owners.
+
+    The real required guard is now **GREEN / ZERO VIOLATIONS**:
+
+    ```text
+    Production Rust files: 1125; critical: 40; grandfathered: 40
+    File-size ratchet passed.
+    ```
+
+    The final formerly blocking owners are **8,518 / 8,518** for built-in
+    execution, **4,814 / 4,814** for the native footer, **3,672 / 3,672**
+    for app startup, and **1,983 / 2,000** for secondary-window calibration.
+    The Day Page renderer remains **1,980 lines**. No ceiling was raised,
+    no new critical owner was grandfathered, and all **11** file-size-policy
+    unit cases pass. The independent source-reader ratchet still reports
+    **zero new guarded reader sites** and the visual-token ratchet reports
+    **zero hardcoded visual additions**. This is architecture/source-gate
+    proof, not a replacement for compiling or executing the moved Rust.
+69. A two-worker ceiling still does not tell whether the workstation has
+    capacity for even one more compiler: both real one-worker checks had to
+    be stopped after independent CPU-intensive work pushed the machine past
+    its 16 logical cores. Agent Cargo now supports an explicit,
+    fail-closed `SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT=1..100` policy.
+    For compilation, Clippy, app/domain tests, Rustdoc, and documentation
+    builds it observes the current one-minute load plus the larger actual
+    reviewed compiler/test-harness worker count before creating any build
+    pool or taking its
+    lock. A projected over-budget run exits 75 with its exact observed
+    load, CPU count, worker count, and recovery instruction; malformed
+    budgets, load observations, and processor counts fail closed before
+    Cargo. Cheap metadata, formatting, and dependency-tree inspection stay
+    available. Successful build receipts record the actual observed load,
+    logical CPUs, and selected budget; normal runs retain explicit `null`
+    observations when no workload budget was requested. Ten synthetic
+    high-load, exact-boundary, single-worker, wider-test-harness,
+    metadata-only, malformed, and invalid-observer cases prove the policy
+    without invoking Rust. The broader focused release/CI/cache/CPU suite
+    passes **22 cases / 82 assertions** without starting the app or using
+    the desktop. CPU availability alone never authorizes Cargo when free
+    disk is below 25 GiB; recheck both actual signals before starting one
+    bounded offline compiler worker.
+70. Splitting a calibrated owner silently invalidates any verifier that
+    hashes only the former umbrella filename: a stale root-only manifest
+    would incorrectly accept edits to relocated entry animation, lifecycle,
+    material, backdrop, footer geometry, or capsule layout. The consistency
+    manifest and actual glass observer now share one canonical complete
+    inventory of **every extracted production owner plus the moved named
+    calibration test and fixture**. For every owner, adversarial tests prove
+    independent omission and byte drift fail closed. The launcher coverage
+    registry also names each real startup, built-in, footer, and glass owner.
+
+    That source-ownership audit additionally exposed an independently red
+    modal fast verifier and a matching stale Rust source audit. Both were
+    asserting obsolete direct calls after confirm, actions, and footer had
+    moved to the actual shared `configure_attached_popup_window` authority;
+    the fast verifier also searched the leaf confirm window for footer
+    renderer implementation now correctly owned by the shared modal shell.
+    Both guards now follow real ownership, enforce the shared
+    `ContentLayer` popup policy, preserve the footer-only `FadeOnly` /
+    no-shadow / flush-corner exception, and verify shared action-row/keycap
+    centering in its actual shell/footer owners. The exact app-free modal
+    gate passes **5/5 checks in 0.595 ms**. The combined real source/cache/
+    policy/design/coverage/protected-glass/observer suite passes **337 tests,
+    zero failures, and 1,388 assertions across 10 files**; the named locked
+    glass envelope/lifecycle/stress subset remains **46/46 green**. None of
+    these source/fixture results proves actual runtime pixels or resolves the
+    remaining **60/75** direct-runtime obligations.
 
 ### Ten implemented improvements and their verification contracts
 
@@ -1841,7 +1966,14 @@ offline receipts until their real producers are run again.
    limit must explicitly raise `SCRIPT_KIT_AGENT_MAX_JOBS`. Noninteractive
    child tests forcibly receive `SCRIPT_KIT_SEARCH_FULL_STRESS=0` and
    `SCRIPT_KIT_STORAGE_FULL_STRESS=0` even when a parent accidentally enabled
-   an expensive corpus. The real top-level release verifier independently
+   an expensive corpus. During unrelated workstation-heavy work, additionally
+   set `SCRIPT_KIT_AGENT_MAX_SYSTEM_LOAD_PERCENT=75`: the wrapper observes
+   the real one-minute load and logical CPU count, adds its reviewed effective
+   compiler workers, and refuses an over-budget build with exit 75 **before
+   pool creation or locking**. Metadata/tree/format commands remain cheap and
+   available. Malformed budgets and unreliable CPU observations fail closed;
+   receipts bind the actual observed load, cores, and configured budget. The
+   real top-level release verifier independently
    enforces the same two-worker ceiling and disables both expensive corpora
    before launching even an explicitly overridden Cargo executable. Every
    real receipt records both compiler and harness worker counts, cache
@@ -3672,12 +3804,14 @@ and ratified performance gates all pass against the release candidate.
 
 ### Step-by-step implementation
 
-1. Preserve the independently verified **zero-warning strict Clippy gate**
-   after eliminating its historical 280-error failure. Rerun
-   `./scripts/agentic/agent-cargo.sh clippy --locked --lib --no-deps --
-   -D warnings` against each candidate source without broad lint suppression,
-   weakening `unwrap`/`expect` policy, or touching locked glass-motion
-   calibration. A green compile alone remains insufficient.
+1. Preserve a **zero-warning strict Clippy gate for both app targets**, not
+   merely the application library. Rerun
+   `./scripts/agentic/agent-cargo.sh clippy --locked --lib --bin
+   script-kit-gpui --no-deps -- -D warnings` against each candidate source
+   without broad lint suppression, weakening `unwrap`/`expect` policy, or
+   touching locked glass-motion calibration. The historical library-only
+   command hid 142 executable-only errors and is not release proof. A green
+   compile alone also remains insufficient.
 2. Preserve the current candidate repair of the previously failing
    `validate-sdk-tests` release dependency: rerun every stale-ID mutation,
    preserve native registry/generation rejection, and require a complete
@@ -3748,7 +3882,7 @@ and ratified performance gates all pass against the release candidate.
 ### Verification and exit gate
 
 ```bash
-./scripts/agentic/agent-cargo.sh clippy --locked --lib --no-deps -- -D warnings
+./scripts/agentic/agent-cargo.sh clippy --locked --lib --bin script-kit-gpui --no-deps -- -D warnings
 ./scripts/agentic/agent-cargo.sh test --lib
 ./scripts/agentic/agent-cargo.sh test -p sk-clipboard -p sk-protocol -p sk-storage
 bun run scripts/check-sdk-types.ts
@@ -3761,9 +3895,12 @@ bash scripts/verify-macos-bundle.sh '<packaged-app-path>'
   Cargo pool, expected build size, and free-disk floor are checked. The last
   command is `PACKAGED-APP` only and requires a real bundle containing both
   executable binaries; the quoted placeholder is not runnable as written.
-- The required strict Clippy command currently passes with zero warnings and
-  errors; its historical 280-error failure is not a current blocker. Preserve
-  the actual source-bound gate rather than substituting fixtures or compile.
+- The old library-only strict Clippy command passed with zero warnings but
+  excluded the executable. The expanded library-plus-shipping-binary gate
+  exposed 142 executable-only errors; its repairs must pass the real exact
+  expanded command before any current zero-warning release claim is valid.
+  Fixtures, source inspection, interrupted checks, and ordinary compilation
+  cannot substitute for that source-bound strict result.
 - The full SDK command is an existing required release job; the current
   current candidate passes **261 cases, with zero failures and zero skips**.
   Shipping still requires the same exact green result from the actual
