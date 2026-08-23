@@ -21,6 +21,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { verifyRuntimeBinaryProvenance } from "./lib/runtime-task-proof.ts";
 
 export const GENERATED_BYTE_COMPARE_SOURCE_PATHS = [
   "Cargo.toml",
@@ -66,6 +67,7 @@ export interface GeneratedByteCompareDependencies {
   removeTemporaryDirectory?: (path: string) => void;
   pathExists?: (path: string) => boolean;
   currentSourceSha?: () => string | null;
+  verifyBinaryProvenance?: (binaryPath: string) => Record<string, unknown>;
   runExporter?: (
     binaryPath: string,
     arguments_: readonly string[],
@@ -242,6 +244,50 @@ export function generateAuthoritativeByteComparison(
 
   const binaryBytes = readFile(binaryPath);
   const binarySha256 = sha256(binaryBytes);
+  let verifiedBinary: Record<string, unknown>;
+  try {
+    verifiedBinary = (
+      dependencies.verifyBinaryProvenance ?? verifyRuntimeBinaryProvenance
+    )(binaryRelativePath);
+  } catch (error) {
+    failure(
+      "the exporter requires current independently verified build provenance: " +
+        (error instanceof Error ? error.message : String(error)),
+    );
+  }
+  const provenance = object(verifiedBinary.provenance);
+  const provenancePath = provenance.path;
+  if (
+    verifiedBinary.path !== binaryRelativePath ||
+    verifiedBinary.sha256 !== binarySha256 ||
+    verifiedBinary.sizeBytes !== binaryStats.size ||
+    verifiedBinary.sourceCommit !== sourceSha ||
+    typeof provenancePath !== "string" ||
+    !(provenancePath === `${binaryRelativePath}.provenance.json` ||
+      provenancePath === join(dirname(binaryRelativePath), "manifest.json")) ||
+    typeof provenance.sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(provenance.sha256) ||
+    provenance.schemaVersion !== 2 ||
+    typeof provenance.builtGitHead !== "string" ||
+    !/^[a-f0-9]{40}$/.test(provenance.builtGitHead) ||
+    typeof provenance.compilerInputSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(provenance.compilerInputSha256) ||
+    typeof provenance.profile !== "string" ||
+    !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(provenance.profile) ||
+    typeof provenance.requiresExactGitHead !== "boolean" ||
+    provenance.rustDirty !== false
+  ) {
+    failure("the verified exporter provenance does not match its exact current source and executable");
+  }
+  let provenanceBytes: Uint8Array;
+  try {
+    provenanceBytes = readFile(resolve(repositoryRoot, provenancePath));
+  } catch {
+    failure("the independently verified exporter provenance manifest is missing");
+  }
+  if (sha256(provenanceBytes) !== provenance.sha256) {
+    failure("the independently verified exporter provenance manifest does not match its observed bytes");
+  }
   const sourceFingerprints = fingerprintSources(repositoryRoot, readFile);
   const checkedInBytes = new Map<string, Uint8Array>();
   for (const path of GENERATED_BYTE_COMPARE_OUTPUT_PATHS) {
@@ -344,6 +390,11 @@ export function generateAuthoritativeByteComparison(
     if (sha256(readFile(binaryPath)) !== binarySha256) {
       failure("the exporter binary changed during execution");
     }
+    if (
+      sha256(readFile(resolve(repositoryRoot, provenancePath))) !== provenance.sha256
+    ) {
+      failure("the exporter build provenance changed during execution");
+    }
     if (!sameIdentity(sourceFingerprints, fingerprintSources(repositoryRoot, readFile))) {
       failure("an exporter source owner changed during execution");
     }
@@ -374,6 +425,17 @@ export function generateAuthoritativeByteComparison(
       path: binaryRelativePath,
       sha256: binarySha256,
       sizeBytes: binaryStats.size,
+      sourceCommit: sourceSha,
+      provenance: {
+        path: provenancePath,
+        sha256: provenance.sha256,
+        schemaVersion: 2 as const,
+        builtGitHead: provenance.builtGitHead,
+        compilerInputSha256: provenance.compilerInputSha256,
+        profile: provenance.profile,
+        requiresExactGitHead: provenance.requiresExactGitHead,
+        rustDirty: false as const,
+      },
     },
     outputHashes: outputHashes!,
     generatedOutputHashes: generatedOutputHashes!,
@@ -497,6 +559,8 @@ export function validateGeneratedByteCompareReceipt(
     binaryPath.split("/").some((part) =>
       part === "" || part === "." || part === "..",
     ) ||
+    !(binaryPath.startsWith("target-agent/artifacts/") ||
+      binaryPath.startsWith("target-agent/runtime/")) ||
     typeof binary.sha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(binary.sha256) ||
     !Number.isSafeInteger(binary.sizeBytes) ||
@@ -508,6 +572,36 @@ export function validateGeneratedByteCompareReceipt(
     identity.currentFileSha256(binaryPath) !== binary.sha256
   ) {
     errors.push("exporter binary fingerprint no longer matches the proven executable");
+  }
+
+  const provenance = object(binary.provenance);
+  const provenancePath = provenance.path;
+  if (
+    binary.sourceCommit !== sourceSha ||
+    typeof binaryPath !== "string" ||
+    typeof provenancePath !== "string" ||
+    !(provenancePath === `${binaryPath}.provenance.json` ||
+      provenancePath === join(dirname(binaryPath), "manifest.json")) ||
+    typeof provenance.sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(provenance.sha256) ||
+    provenance.schemaVersion !== 2 ||
+    typeof provenance.builtGitHead !== "string" ||
+    !/^[a-f0-9]{40}$/.test(provenance.builtGitHead) ||
+    typeof provenance.compilerInputSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(provenance.compilerInputSha256) ||
+    typeof provenance.profile !== "string" ||
+    !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(provenance.profile) ||
+    typeof provenance.requiresExactGitHead !== "boolean" ||
+    provenance.rustDirty !== false ||
+    (provenance.requiresExactGitHead === true &&
+      provenance.builtGitHead !== sourceSha)
+  ) {
+    errors.push("exporter build provenance is missing, dirty, stale, or inconsistent with its current source");
+  } else if (
+    identity.currentFileSha256 !== undefined &&
+    identity.currentFileSha256(provenancePath) !== provenance.sha256
+  ) {
+    errors.push("exporter build provenance fingerprint no longer matches the observed manifest");
   }
 
   const checkedHashes = object(receipt.outputHashes);

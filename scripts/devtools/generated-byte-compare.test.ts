@@ -14,8 +14,10 @@ import {
 
 const repositoryRoot = "/synthetic/exporter-repository";
 const sourceSha = "a".repeat(40);
-const binaryPath = "target-agent/pools/agent-debug/debug/export_design_tokens";
+const binaryPath = "target-agent/artifacts/consistency-gov005/export_design_tokens";
 const absoluteBinary = resolve(repositoryRoot, binaryPath);
+const provenancePath = `${binaryPath}.provenance.json`;
+const absoluteProvenance = resolve(repositoryRoot, provenancePath);
 const environment = {
   SCRIPT_KIT_NONINTERACTIVE: "1",
   SCRIPT_KIT_ALLOW_ISOLATED_APP_LAUNCH: "0",
@@ -27,6 +29,22 @@ const environment = {
 function fixture() {
   const files = new Map<string, Uint8Array>();
   files.set(absoluteBinary, Buffer.from("actual prebuilt exporter bytes"));
+  const binaryBytes = files.get(absoluteBinary)!;
+  const binarySha256 = createHash("sha256").update(binaryBytes).digest("hex");
+  files.set(absoluteProvenance, Buffer.from(JSON.stringify({
+    schemaVersion: 2,
+    pool: "agent-debug",
+    source: "target-agent/pools/agent-debug/debug/export_design_tokens",
+    binaryPath,
+    binarySha256,
+    sizeBytes: binaryBytes.byteLength,
+    gitHead: sourceSha,
+    compilerInputSha256: "c".repeat(64),
+    profile: "debug",
+    requiresExactGitHead: false,
+    rustDirty: false,
+    builtAt: "2026-08-23T12:00:00.000Z",
+  })));
   for (const path of GENERATED_BYTE_COMPARE_SOURCE_PATHS) {
     files.set(
       resolve(repositoryRoot, path),
@@ -95,6 +113,47 @@ function fixture() {
       return path === temporaryDirectory && tempExists;
     },
     currentSourceSha: () => currentSha,
+    verifyBinaryProvenance(path) {
+      const bytes = files.get(absoluteBinary);
+      const manifestBytes = files.get(absoluteProvenance);
+      if (path !== binaryPath || !bytes || !manifestBytes) {
+        throw new Error("missing independently observed artifact manifest");
+      }
+      let manifest: Record<string, unknown>;
+      try {
+        manifest = JSON.parse(Buffer.from(manifestBytes).toString("utf8"));
+      } catch {
+        throw new Error("artifact manifest is not valid JSON");
+      }
+      const observedSha = createHash("sha256").update(bytes).digest("hex");
+      if (
+        manifest.schemaVersion !== 2 ||
+        manifest.binaryPath !== path ||
+        manifest.binarySha256 !== observedSha ||
+        manifest.sizeBytes !== bytes.byteLength ||
+        manifest.gitHead !== currentSha ||
+        manifest.rustDirty !== false
+      ) {
+        throw new Error("artifact manifest does not prove the current clean source and binary");
+      }
+      return {
+        path,
+        sha256: observedSha,
+        sizeBytes: bytes.byteLength,
+        sourceCommit: currentSha,
+        provenance: {
+          path: provenancePath,
+          sha256: createHash("sha256").update(manifestBytes).digest("hex"),
+          schemaVersion: manifest.schemaVersion,
+          pool: manifest.pool,
+          builtGitHead: manifest.gitHead,
+          compilerInputSha256: manifest.compilerInputSha256,
+          profile: manifest.profile,
+          requiresExactGitHead: manifest.requiresExactGitHead,
+          rustDirty: false,
+        },
+      };
+    },
     runExporter(binary, arguments_, childEnvironment) {
       processStarts += 1;
       calls.push({ binary, arguments_, environment: childEnvironment });
@@ -158,6 +217,14 @@ describe("authoritative non-GUI generated-token byte comparison", () => {
     expect(receipt.sourceSha).toBe(sourceSha);
     expect(receipt.binary.path).toBe(binaryPath);
     expect(receipt.binary.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(receipt.binary.sourceCommit).toBe(sourceSha);
+    expect(receipt.binary.provenance).toMatchObject({
+      path: provenancePath,
+      schemaVersion: 2,
+      builtGitHead: sourceSha,
+      compilerInputSha256: "c".repeat(64),
+      rustDirty: false,
+    });
     expect(Object.keys(receipt.sourceFingerprints)).toEqual(
       [...GENERATED_BYTE_COMPARE_SOURCE_PATHS],
     );
@@ -245,6 +312,26 @@ describe("authoritative non-GUI generated-token byte comparison", () => {
     expect(stale.processStarts).toBe(0);
   });
 
+  test("an old binary without an independently observed build manifest cannot start", () => {
+    const sandbox = fixture();
+    sandbox.files.delete(absoluteProvenance);
+    expect(() => sandbox.run()).toThrow("independently verified build provenance");
+    expect(sandbox.processStarts).toBe(0);
+    expect(sandbox.cleanupCalls).toBe(0);
+  });
+
+  test.each([
+    ["wrong build commit", { gitHead: "b".repeat(40) }],
+    ["wrong executable hash", { binarySha256: "d".repeat(64) }],
+    ["dirty compiler sources", { rustDirty: true }],
+  ])("%s fails before any exporter process", (_description, override) => {
+    const sandbox = fixture();
+    const current = JSON.parse(Buffer.from(sandbox.files.get(absoluteProvenance)!).toString());
+    sandbox.files.set(absoluteProvenance, Buffer.from(JSON.stringify({ ...current, ...override })));
+    expect(() => sandbox.run()).toThrow("independently verified build provenance");
+    expect(sandbox.processStarts).toBe(0);
+  });
+
   test("missing named exporter source or checked-in artifact fails before execution", () => {
     for (const path of [
       GENERATED_BYTE_COMPARE_SOURCE_PATHS[1],
@@ -328,6 +415,13 @@ describe("authoritative non-GUI generated-token byte comparison", () => {
     changedCommit.onRun(() => changedCommit.setCurrentSha("b".repeat(40)));
     expect(() => changedCommit.run()).toThrow("source commit changed");
     expect(changedCommit.cleanupCalls).toBe(1);
+
+    const changedProvenance = fixture();
+    changedProvenance.onRun(() => {
+      changedProvenance.files.set(absoluteProvenance, Buffer.from("swapped build provenance"));
+    });
+    expect(() => changedProvenance.run()).toThrow("build provenance changed");
+    expect(changedProvenance.cleanupCalls).toBe(1);
   });
 
   test("failed cleanup blocks otherwise matching exporter bytes", () => {
@@ -406,6 +500,40 @@ describe("authoritative non-GUI generated-token byte comparison", () => {
       ).errors,
     ).toContain(
       "exporter binary fingerprint no longer matches the proven executable",
+    );
+  });
+
+  test("receipt validation rejects omitted, stale, dirty, and wrong-source build provenance", () => {
+    const sandbox = fixture();
+    const receipt = sandbox.run();
+    for (const binary of [
+      { ...receipt.binary, provenance: undefined },
+      { ...receipt.binary, sourceCommit: "b".repeat(40) },
+      {
+        ...receipt.binary,
+        provenance: { ...receipt.binary.provenance, rustDirty: true },
+      },
+      {
+        ...receipt.binary,
+        provenance: {
+          ...receipt.binary.provenance,
+          requiresExactGitHead: true,
+          builtGitHead: "b".repeat(40),
+        },
+      },
+    ]) {
+      expect(
+        validateGeneratedByteCompareReceipt({ ...receipt, binary }, currentIdentity(sandbox)).errors,
+      ).toContain(
+        "exporter build provenance is missing, dirty, stale, or inconsistent with its current source",
+      );
+    }
+
+    sandbox.files.set(absoluteProvenance, Buffer.from("subsequently replaced manifest"));
+    expect(
+      validateGeneratedByteCompareReceipt(receipt, currentIdentity(sandbox)).errors,
+    ).toContain(
+      "exporter build provenance fingerprint no longer matches the observed manifest",
     );
   });
 
