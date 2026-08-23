@@ -293,7 +293,9 @@ PY
       export SCRIPT_KIT_GPUI_BINARY="$binary_path"
       DEVTOOLS_SESSION_BINARY="$binary_path"
       progress preflight "preflight staged binary"
-      if ! bash "${SCRIPT_DIR}/preflight-isolated.sh" --mode isolated; then
+      if bash "${SCRIPT_DIR}/preflight-isolated.sh" --mode isolated; then
+        :
+      else
         preflight_status=$?
         case "$preflight_status" in
           11) json_error preflight dev_sh_running "./dev.sh is running; isolated mode must not start a second GPUI instance." "Use --mode reuse-dev-watch or stop ./dev.sh."; exit 11 ;;
@@ -311,7 +313,9 @@ PY
   local start_args=("$SESSION")
   [[ "${#NOTES_FLAG[@]}" -gt 0 ]] && start_args+=("${NOTES_FLAG[@]}")
   start_args+=(--wait-sec "$READY_TIMEOUT_SEC")
-  if ! bash "${SCRIPT_DIR}/start-isolated.sh" "${start_args[@]}"; then
+  if bash "${SCRIPT_DIR}/start-isolated.sh" "${start_args[@]}" >&2; then
+    :
+  else
     start_status=$?
     if [[ "$CLEANUP_ON_FAIL" -eq 1 ]]; then
       bash scripts/agentic/session.sh stop "$SESSION" >/dev/null 2>&1 || true

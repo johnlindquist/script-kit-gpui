@@ -1203,6 +1203,134 @@ describe("isolated build process ownership", () => {
   });
 });
 
+describe("isolated session readiness ownership", () => {
+  function sessionFixture() {
+    const workspace = fixture();
+    const localScripts = join(workspace.root, "scripts", "agentic");
+    for (const script of [
+      "devtools-session-lib.sh",
+      "devtools-session.sh",
+      "start-isolated.sh",
+    ]) {
+      copyFileSync(join(scripts, script), join(localScripts, script));
+    }
+
+    writeFileSync(
+      join(localScripts, "preflight-isolated.sh"),
+      '#!/bin/bash\ncount=0\nif [[ -f "$SESSION_PREFLIGHT_CAPTURE" ]]; then count="$(<"$SESSION_PREFLIGHT_CAPTURE")"; fi\ncount=$((count + 1))\nprintf "%s\\n" "$count" > "$SESSION_PREFLIGHT_CAPTURE"\nif [[ "$count" == "2" ]]; then exit "${SESSION_FAKE_SECOND_PREFLIGHT_STATUS:-0}"; fi\nexit 0\n',
+    );
+    writeFileSync(
+      join(localScripts, "wait-session-ready.sh"),
+      '#!/bin/bash\nexit "${SESSION_FAKE_READY_STATUS:-41}"\n',
+    );
+    writeFileSync(
+      join(localScripts, "session.sh"),
+      '#!/bin/bash\nprintf "%s:%s\\n" "$1" "${2:-}" >> "$CARGO_POLICY_CAPTURE"\nif [[ "$1" == "status" ]]; then printf \'{"alive":true,"healthy":true,"pid":4242}\\n\'; fi\n',
+    );
+    writeFileSync(
+      join(localScripts, "build-isolated-binary.sh"),
+      '#!/bin/bash\nprintf \'{"status":"ok","binaryPath":"target-agent/runtime/synthetic/script-kit-gpui"}\\n\'\n',
+    );
+    writeFileSync(join(workspace.bin, "python3"), '#!/bin/bash\nprintf "target-agent/runtime/synthetic/script-kit-gpui\\n"\n');
+    for (const executable of [
+      "preflight-isolated.sh",
+      "wait-session-ready.sh",
+      "session.sh",
+      "build-isolated-binary.sh",
+    ]) {
+      chmodSync(join(localScripts, executable), 0o755);
+    }
+    chmodSync(join(workspace.bin, "python3"), 0o755);
+
+    return {
+      ...workspace,
+      localScripts,
+      env: {
+        ...workspace.env,
+        SCRIPT_KIT_SESSION_DIR: join(workspace.root, "session-registry"),
+        SESSION_PREFLIGHT_CAPTURE: join(workspace.root, "preflight-count"),
+      },
+    };
+  }
+
+  test("isolated startup preserves the real readiness timeout instead of returning success", () => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "start-isolated.sh"), "reviewed-session", "--wait-sec", "1"],
+      { env: workspace.env, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(41);
+    expect(result.stderr.toString()).toContain("exit 41");
+  });
+
+  test.each([
+    ["41", "ready_timeout"],
+    ["42", "app_log_empty"],
+  ])("DevTools bootstrap preserves exact readiness failure %s", (exitCode, failureCode) => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "reviewed-session", "--mode", "isolated", "--build", "never"],
+      {
+        env: { ...workspace.env, SESSION_FAKE_READY_STATUS: exitCode! },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(Number(exitCode));
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "error",
+      phase: "wait-ready",
+      error: { code: failureCode },
+    });
+  });
+
+  test.each([
+    ["11", "dev_sh_running"],
+    ["12", "multiple_gpui_instances"],
+    ["13", "binary_missing"],
+  ])("post-build preflight preserves exact failure %s without starting a session", (exitCode, failureCode) => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "reviewed-session", "--mode", "isolated", "--build", "always"],
+      {
+        env: { ...workspace.env, SESSION_FAKE_SECOND_PREFLIGHT_STATUS: exitCode! },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(Number(exitCode));
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "error",
+      phase: "preflight",
+      error: { code: failureCode },
+    });
+    expect(existsSync(workspace.capture)).toBe(false);
+  });
+
+  test("successful fake readiness still produces a truthful ready receipt", () => {
+    const workspace = sessionFixture();
+    const result = Bun.spawnSync(
+      ["/bin/bash", join(workspace.localScripts, "devtools-session.sh"), "start", "--session", "reviewed-session", "--mode", "isolated", "--build", "never"],
+      {
+        env: { ...workspace.env, SESSION_FAKE_READY_STATUS: "0" },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toMatchObject({
+      status: "ok",
+      session: "reviewed-session",
+      ready: true,
+      pid: 4242,
+    });
+  });
+});
+
 describe("development, correctness-test, and CI profile separation", () => {
   test("keeps interactive rendering optimized while correctness harnesses remain unoptimized", () => {
     const manifest = Bun.TOML.parse(readFileSync(join(scripts, "..", "..", "Cargo.toml"), "utf8"));

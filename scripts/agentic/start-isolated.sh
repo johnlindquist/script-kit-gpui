@@ -48,7 +48,9 @@ echo "[start-isolated] binary=${DEVTOOLS_SESSION_BINARY}" >&2
 bash scripts/agentic/session.sh start "$SESSION"
 bash scripts/agentic/session.sh status "$SESSION"
 
-if ! bash "${SCRIPT_DIR}/wait-session-ready.sh" "$SESSION" "$WAIT_SEC"; then
+if bash "${SCRIPT_DIR}/wait-session-ready.sh" "$SESSION" "$WAIT_SEC"; then
+  :
+else
   wait_status=$?
   echo "[start-isolated] fail: session not ready within ${WAIT_SEC}s (exit ${wait_status})" >&2
   exit "$wait_status"
