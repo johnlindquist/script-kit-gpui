@@ -9801,6 +9801,22 @@ globalThis.batch = async function batch(
 };
 
 const MCP_PROTOCOL_VERSION = '2024-11-05';
+interface ScriptKitConfigRuntime {
+  Transpiler: new (options: { loader: 'ts' }) => {
+    scanImports(source: string): unknown[];
+    transformSync(source: string): string;
+  };
+  build(options: {
+    entrypoints: string[];
+    target: 'bun';
+    format: 'esm';
+    splitting: boolean;
+    write: boolean;
+  }): Promise<{
+    success: boolean;
+    outputs: Array<{ text(): Promise<string> }>;
+  }>;
+}
 let cachedScriptKitConfig: {
   path: string;
   ownerFingerprint: string;
@@ -9867,12 +9883,18 @@ async function loadScriptKitConfig(): Promise<Config | null> {
   ) {
     const result = (async () => {
       const source = await fs.readFile(configPath, 'utf8');
-      const transpiler = new Bun.Transpiler({ loader: 'ts' });
+      const runtime = (globalThis as typeof globalThis & {
+        Bun?: ScriptKitConfigRuntime;
+      }).Bun;
+      if (!runtime) {
+        throw new Error('Script Kit configuration requires the Bun TypeScript runtime.');
+      }
+      const transpiler = new runtime.Transpiler({ loader: 'ts' });
       let executableSource: string;
       if (transpiler.scanImports(source).length === 0) {
         executableSource = transpiler.transformSync(source);
       } else {
-        const built = await Bun.build({
+        const built = await runtime.build({
           entrypoints: [configPath],
           target: 'bun',
           format: 'esm',
