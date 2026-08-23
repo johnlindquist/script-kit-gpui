@@ -35,7 +35,13 @@ const BUILTIN_DICTATION_SETUP_DOWNLOAD_MODEL: &str = "download-model";
 const BUILTIN_DICTATION_SETUP_REQUEST_MIC: &str = "request-microphone";
 const BUILTIN_DICTATION_SETUP_OPEN_MIC_SETTINGS: &str = "open-microphone-settings";
 
+include!("builtin_execution_support.rs");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "Send-prefixed actions preserve the established capture routing contract"
+)]
 enum AiImageCaptureBuiltinAction {
     SendScreen,
     SendFocusedWindow,
@@ -43,6 +49,18 @@ enum AiImageCaptureBuiltinAction {
 }
 
 impl AiImageCaptureBuiltinAction {
+    fn screen() -> Self {
+        AiImageCaptureBuiltinAction::SendScreen
+    }
+
+    fn focused_window() -> Self {
+        AiImageCaptureBuiltinAction::SendFocusedWindow
+    }
+
+    fn screen_area() -> Self {
+        AiImageCaptureBuiltinAction::SendScreenArea
+    }
+
     fn failure_message(self, error: impl std::fmt::Display) -> String {
         match self {
             Self::SendScreen => format!("Failed to capture screen: {error}"),
@@ -59,6 +77,15 @@ enum AiTextCaptureBuiltinAction {
 }
 
 impl AiTextCaptureBuiltinAction {
+    fn agent_chat_failure_message(error: impl std::fmt::Display) -> String {
+        let capture_action = AiTextCaptureBuiltinAction::AgentChatContent;
+        capture_action.failure_message(&error)
+    }
+
+    fn current_app_failure_message(error: impl std::fmt::Display) -> String {
+        AiTextCaptureBuiltinAction::CurrentAppContext.failure_message(&error)
+    }
+
     fn failure_message(self, error: impl std::fmt::Display) -> String {
         match self {
             Self::AgentChatContent => {
@@ -424,10 +451,13 @@ impl PermissionCommandBuiltinAction {
             builtins::PermissionCommandType::OpenAccessibilitySettings => {
                 Self::OpenAccessibilitySettings
             }
-            builtins::PermissionCommandType::AllowAccessibility
-            | builtins::PermissionCommandType::AllowScreenRecording => Self::Assistant(
+            builtins::PermissionCommandType::AllowAccessibility => Self::Assistant(
                 PermissionAssistantBuiltinAction::from_command(command)
-                    .expect("permission assistant command should map to assistant action"),
+                    .unwrap_or(PermissionAssistantBuiltinAction::Accessibility),
+            ),
+            builtins::PermissionCommandType::AllowScreenRecording => Self::Assistant(
+                PermissionAssistantBuiltinAction::from_command(command)
+                    .unwrap_or(PermissionAssistantBuiltinAction::ScreenRecording),
             ),
         }
     }
@@ -829,33 +859,45 @@ enum UtilityCommandBuiltinAction {
 impl UtilityCommandBuiltinAction {
     fn from_command(command: builtins::UtilityCommandType) -> Self {
         match command {
-            builtins::UtilityCommandType::MainWindow
-            | builtins::UtilityCommandType::ScratchPad
-            | builtins::UtilityCommandType::QuickTerminal
-            | builtins::UtilityCommandType::ClaudeCode
-            | builtins::UtilityCommandType::ProcessManager => Self::Open(
+            builtins::UtilityCommandType::MainWindow => Self::Open(
                 UtilityOpenBuiltinAction::from_command(command)
-                    .expect("utility open command should map to open action"),
+                    .unwrap_or(UtilityOpenBuiltinAction::MainWindow),
+            ),
+            builtins::UtilityCommandType::ScratchPad => Self::Open(
+                UtilityOpenBuiltinAction::from_command(command)
+                    .unwrap_or(UtilityOpenBuiltinAction::ScratchPad),
+            ),
+            builtins::UtilityCommandType::QuickTerminal => Self::Open(
+                UtilityOpenBuiltinAction::from_command(command)
+                    .unwrap_or(UtilityOpenBuiltinAction::QuickTerminal),
+            ),
+            builtins::UtilityCommandType::ClaudeCode => Self::Open(
+                UtilityOpenBuiltinAction::from_command(command)
+                    .unwrap_or(UtilityOpenBuiltinAction::ClaudeCode),
+            ),
+            builtins::UtilityCommandType::ProcessManager => Self::Open(
+                UtilityOpenBuiltinAction::from_command(command)
+                    .unwrap_or(UtilityOpenBuiltinAction::ProcessManager),
             ),
             builtins::UtilityCommandType::StopAllProcesses => Self::Process(
                 UtilityProcessBuiltinAction::from_command(command)
-                    .expect("utility process command should map to process action"),
+                    .unwrap_or(UtilityProcessBuiltinAction::StopAllProcesses),
             ),
             builtins::UtilityCommandType::ScriptKitSelfie => Self::Selfie(
                 UtilitySelfieBuiltinAction::from_command(command)
-                    .expect("utility selfie command should map to selfie action"),
+                    .unwrap_or(UtilitySelfieBuiltinAction::Selfie),
             ),
             builtins::UtilityCommandType::TurnThisIntoCommand => Self::Recipe(
                 UtilityRecipeBuiltinAction::from_command(command)
-                    .expect("utility recipe command should map to recipe action"),
+                    .unwrap_or(UtilityRecipeBuiltinAction::TurnThisIntoCommand),
             ),
             builtins::UtilityCommandType::DoInCurrentApp => Self::DoInCurrentApp(
                 UtilityDoInCurrentAppBuiltinAction::from_command(command)
-                    .expect("utility do-in command should map to do-in action"),
+                    .unwrap_or(UtilityDoInCurrentAppBuiltinAction::Submit),
             ),
             builtins::UtilityCommandType::CurrentAppCommands => Self::CurrentAppCommands(
                 UtilityCurrentAppCommandsBuiltinAction::from_command(command)
-                    .expect("utility current-app command should map to current-app action"),
+                    .unwrap_or(UtilityCurrentAppCommandsBuiltinAction::Open),
             ),
         }
     }
@@ -1361,11 +1403,11 @@ impl SettingsCommandBuiltinAction {
             builtins::SettingsCommandType::DictationSetup => Self::DictationSetup,
             builtins::SettingsCommandType::SelectMicrophone => Self::SelectMicrophone(
                 SettingsMicrophoneBuiltinAction::from_command(command)
-                    .expect("select microphone command should map to microphone action"),
+                    .unwrap_or(SettingsMicrophoneBuiltinAction::Select),
             ),
             builtins::SettingsCommandType::ConfigureSnapMode => Self::SnapMode(
                 SettingsSnapModeBuiltinAction::from_command(command)
-                    .expect("snap mode settings command should map to snap mode action"),
+                    .unwrap_or(SettingsSnapModeBuiltinAction::Configure),
             ),
         }
     }
@@ -1569,38 +1611,47 @@ impl AiCommandBuiltinAction {
         match command {
             builtins::AiCommandType::GenerateScript => Self::Generate(
                 AiGenerateBuiltinAction::from_command(command)
-                    .expect("generate command should map to generate action"),
+                    .unwrap_or(AiGenerateBuiltinAction::NewScript),
             ),
             builtins::AiCommandType::GenerateScriptFromCurrentApp => Self::Generate(
                 AiGenerateBuiltinAction::from_command(command)
-                    .expect("current-app generate command should map to generate action"),
+                    .unwrap_or(AiGenerateBuiltinAction::CurrentAppScript),
             ),
             builtins::AiCommandType::SendScreenToAi => Self::Capture(
                 AiCaptureBuiltinAction::from_command(command)
-                    .expect("screen command should map to capture action"),
+                    .unwrap_or(AiCaptureBuiltinAction::FullScreen),
             ),
             builtins::AiCommandType::SendFocusedWindowToAi => Self::Capture(
                 AiCaptureBuiltinAction::from_command(command)
-                    .expect("focused-window command should map to capture action"),
+                    .unwrap_or(AiCaptureBuiltinAction::FocusedWindow),
             ),
             builtins::AiCommandType::SendSelectedTextToAi => Self::Capture(
                 AiCaptureBuiltinAction::from_command(command)
-                    .expect("selected-text command should map to capture action"),
+                    .unwrap_or(AiCaptureBuiltinAction::SelectedText),
             ),
             builtins::AiCommandType::SendBrowserTabToAi => Self::Capture(
                 AiCaptureBuiltinAction::from_command(command)
-                    .expect("browser-tab command should map to capture action"),
+                    .unwrap_or(AiCaptureBuiltinAction::BrowserTab),
             ),
             builtins::AiCommandType::SendScreenAreaToAi => Self::Unavailable(
                 AiUnavailableBuiltinAction::from_command(command)
-                    .expect("screen-area command should map to unavailable action"),
+                    .unwrap_or(AiUnavailableBuiltinAction::ScreenAreaCapture),
             ),
-            builtins::AiCommandType::OpenAi
-            | builtins::AiCommandType::MiniAi
-            | builtins::AiCommandType::NewConversation
-            | builtins::AiCommandType::ClearConversation => Self::AgentChat(
+            builtins::AiCommandType::OpenAi => Self::AgentChat(
                 AiAgentChatBuiltinAction::from_command(command)
-                    .expect("agent chat command should map to agent chat action"),
+                    .unwrap_or(AiAgentChatBuiltinAction::OpenAi),
+            ),
+            builtins::AiCommandType::MiniAi => Self::AgentChat(
+                AiAgentChatBuiltinAction::from_command(command)
+                    .unwrap_or(AiAgentChatBuiltinAction::MiniAi),
+            ),
+            builtins::AiCommandType::NewConversation => Self::AgentChat(
+                AiAgentChatBuiltinAction::from_command(command)
+                    .unwrap_or(AiAgentChatBuiltinAction::NewConversation),
+            ),
+            builtins::AiCommandType::ClearConversation => Self::AgentChat(
+                AiAgentChatBuiltinAction::from_command(command)
+                    .unwrap_or(AiAgentChatBuiltinAction::ClearConversation),
             ),
         }
     }
@@ -1615,219 +1666,9 @@ fn builtin_choice_semantic_id(prompt_id: &str, index: usize, value: &str) -> Str
     crate::protocol::generate_semantic_id(&format!("{prompt_id}:choice"), index, value)
 }
 
-/// Typed progress events sent from the blocking download thread to the
-/// async context for updating the in-prompt progress display.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum DictationModelProgressEvent {
-    Downloading {
-        percentage: u8,
-        downloaded_bytes: u64,
-        total_bytes: u64,
-        speed_bytes_per_sec: u64,
-        eta_seconds: Option<u64>,
-    },
-    Extracting,
-}
-
-/// Simple rolling-window speed tracker for download progress.
-struct SpeedTracker {
-    last_bytes: u64,
-    last_time: std::time::Instant,
-    speed: u64,
-}
-
-impl SpeedTracker {
-    fn new() -> Self {
-        Self {
-            last_bytes: 0,
-            last_time: std::time::Instant::now(),
-            speed: 0,
-        }
-    }
-
-    fn update(&mut self, downloaded: u64) {
-        let now = std::time::Instant::now();
-        let elapsed = now.duration_since(self.last_time).as_secs_f64();
-        if elapsed >= 0.5 {
-            let delta = downloaded.saturating_sub(self.last_bytes);
-            self.speed = (delta as f64 / elapsed) as u64;
-            self.last_bytes = downloaded;
-            self.last_time = now;
-        }
-    }
-
-    fn speed_bytes_per_sec(&self) -> u64 {
-        self.speed
-    }
-}
-
-/// Phases tracked by the UI coalescing emitter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DictationModelUiPhase {
-    Downloading,
-    Extracting,
-}
-
-/// Snapshot of the last UI-visible state, used to decide whether a new
-/// progress event is worth publishing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DictationModelUiSnapshot {
-    phase: DictationModelUiPhase,
-    percentage: u8,
-    eta_bucket_seconds: Option<u64>,
-}
-
-impl DictationModelUiSnapshot {
-    fn downloading(percentage: u8, eta_seconds: Option<u64>) -> Self {
-        Self {
-            phase: DictationModelUiPhase::Downloading,
-            percentage,
-            eta_bucket_seconds: bucket_dictation_eta_seconds(eta_seconds),
-        }
-    }
-
-    fn extracting() -> Self {
-        Self {
-            phase: DictationModelUiPhase::Extracting,
-            percentage: 100,
-            eta_bucket_seconds: Some(0),
-        }
-    }
-}
-
-/// Gates cosmetic UI updates so the download thread is never blocked on
-/// repaints.  Publishes on meaningful change or after a ~300 ms heartbeat.
-#[derive(Debug, Default)]
-struct DictationModelUiEmitter {
-    last_emit_at: Option<std::time::Instant>,
-    last_snapshot: Option<DictationModelUiSnapshot>,
-}
-
-impl DictationModelUiEmitter {
-    fn should_emit(&self, now: std::time::Instant, next: &DictationModelUiSnapshot) -> bool {
-        const HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(300);
-
-        let Some(last_snapshot) = self.last_snapshot.as_ref() else {
-            return true;
-        };
-        let Some(last_emit_at) = self.last_emit_at else {
-            return true;
-        };
-
-        if last_snapshot.phase != next.phase {
-            return true;
-        }
-        if last_snapshot.percentage != next.percentage {
-            return true;
-        }
-        if last_snapshot.eta_bucket_seconds != next.eta_bucket_seconds {
-            return true;
-        }
-
-        now.duration_since(last_emit_at) >= HEARTBEAT
-    }
-
-    fn record_emit(&mut self, now: std::time::Instant, next: &DictationModelUiSnapshot) {
-        self.last_emit_at = Some(now);
-        self.last_snapshot = Some(next.clone());
-    }
-}
-
-/// Bucket ETA seconds into human-friendly steps so minor fluctuations
-/// don't trigger a UI repaint.
-fn bucket_dictation_eta_seconds(eta_seconds: Option<u64>) -> Option<u64> {
-    eta_seconds.map(|value| match value {
-        0..=15 => value,
-        16..=60 => value - (value % 5),
-        61..=300 => value - (value % 15),
-        _ => value - (value % 60),
-    })
-}
-
-/// Prevent overlapping Parakeet model downloads when the dictation hotkey is
-/// pressed repeatedly while the model is still missing.
-static PARAKEET_MODEL_DOWNLOAD_IN_PROGRESS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-static DICTATION_MODEL_PROMPT_STATUS: std::sync::OnceLock<
-    parking_lot::Mutex<crate::dictation::DictationModelStatus>,
-> = std::sync::OnceLock::new();
-
-fn dictation_model_prompt_status(
-) -> &'static parking_lot::Mutex<crate::dictation::DictationModelStatus> {
-    DICTATION_MODEL_PROMPT_STATUS.get_or_init(|| {
-        parking_lot::Mutex::new(crate::dictation::DictationModelStatus::NotDownloaded)
-    })
-}
-
-static PARAKEET_MODEL_DOWNLOAD_CANCEL: std::sync::OnceLock<
-    parking_lot::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
-> = std::sync::OnceLock::new();
-
-fn parakeet_model_download_cancel_slot(
-) -> &'static parking_lot::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> {
-    PARAKEET_MODEL_DOWNLOAD_CANCEL.get_or_init(|| parking_lot::Mutex::new(None))
-}
-
-static PENDING_DICTATION_MODEL_ACTION: std::sync::OnceLock<
-    parking_lot::Mutex<Option<DictationBuiltinAction>>,
-> = std::sync::OnceLock::new();
-
-fn pending_dictation_model_action() -> &'static parking_lot::Mutex<Option<DictationBuiltinAction>> {
-    PENDING_DICTATION_MODEL_ACTION.get_or_init(|| parking_lot::Mutex::new(None))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PendingDictationRestart {
-    action: DictationBuiltinAction,
-    target: crate::dictation::DictationTarget,
-}
-
-static PENDING_DICTATION_RESTART: std::sync::OnceLock<
-    parking_lot::Mutex<Option<PendingDictationRestart>>,
-> = std::sync::OnceLock::new();
-
-fn pending_dictation_restart() -> &'static parking_lot::Mutex<Option<PendingDictationRestart>> {
-    PENDING_DICTATION_RESTART.get_or_init(|| parking_lot::Mutex::new(None))
-}
-
-/// A toggle received while capture teardown is in flight flips the desired
-/// post-stop state. Odd extra presses queue a restart; even extra presses
-/// cancel it. This preserves toggle parity instead of dropping keystrokes.
-fn next_pending_dictation_restart(
-    pending: Option<PendingDictationRestart>,
-    requested: PendingDictationRestart,
-) -> Option<PendingDictationRestart> {
-    if crate::dictation::toggled_post_stop_restart(pending.is_some()) {
-        Some(requested)
-    } else {
-        None
-    }
-}
-
-fn toggle_pending_dictation_restart(requested: PendingDictationRestart) -> bool {
-    let mut pending = pending_dictation_restart().lock();
-    *pending = next_pending_dictation_restart(*pending, requested);
-    pending.is_some()
-}
-
-fn take_pending_dictation_restart() -> Option<PendingDictationRestart> {
-    pending_dictation_restart().lock().take()
-}
-
 #[cfg(test)]
 fn ai_open_failure_message(error: impl std::fmt::Display) -> String {
     format!("Failed to open AI: {error}")
-}
-
-#[derive(Debug)]
-enum DeferredAiCapturedText {
-    Ready(String),
-    Empty(String),
-}
-
-fn ai_capture_hide_settle_duration() -> std::time::Duration {
-    std::time::Duration::from_millis(AI_CAPTURE_HIDE_SETTLE_MS)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1897,972 +1738,14 @@ fn created_file_path_for_feedback(path: &std::path::Path) -> std::path::PathBuf 
     }
 }
 
-#[cfg(target_os = "macos")]
-#[allow(dead_code)] // Retained for potential future AppleScript-based pickers
-fn applescript_list_literal(values: &[String]) -> String {
-    let escaped_values = values
-        .iter()
-        .map(|value| format!("\"{}\"", crate::utils::escape_applescript_string(value)))
-        .join(", ");
-    format!("{{{}}}", escaped_values)
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)] // Retained for potential future AppleScript-based pickers
-fn choose_from_list(
-    prompt: &str,
-    ok_button: &str,
-    values: &[String],
-) -> Result<Option<String>, String> {
-    if values.is_empty() {
-        return Ok(None);
-    }
-
-    let list_literal = applescript_list_literal(values);
-    let script = format!(
-        r#"set selectedItem to choose from list {list_literal} with prompt "{prompt}" OK button name "{ok_button}" cancel button name "Cancel" without multiple selections allowed
-if selectedItem is false then
-    return ""
-end if
-return item 1 of selectedItem"#,
-        list_literal = list_literal,
-        prompt = crate::utils::escape_applescript_string(prompt),
-        ok_button = crate::utils::escape_applescript_string(ok_button),
-    );
-
-    let selected = crate::platform::run_osascript(&script, "builtin_picker_choose_from_list")
-        .map_err(|error| error.to_string())?;
-    if selected.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(selected))
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)] // Retained for potential future AppleScript-based pickers
-fn prompt_for_text(
-    prompt: &str,
-    default_value: &str,
-    ok_button: &str,
-) -> Result<Option<String>, String> {
-    let script = format!(
-        r#"try
-set dialogResult to display dialog "{prompt}" default answer "{default_value}" buttons {{"Cancel", "{ok_button}"}} default button "{ok_button}"
-return text returned of dialogResult
-on error number -128
-return ""
-end try"#,
-        prompt = crate::utils::escape_applescript_string(prompt),
-        default_value = crate::utils::escape_applescript_string(default_value),
-        ok_button = crate::utils::escape_applescript_string(ok_button),
-    );
-
-    let value = crate::platform::run_osascript(&script, "builtin_picker_prompt_for_text")
-        .map_err(|error| error.to_string())?;
-    if value.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(value))
-    }
-}
-
 #[cfg(test)]
 fn emoji_picker_label(emoji: &script_kit_gpui::emoji::Emoji) -> String {
     format!("{}  {}", emoji.emoji, emoji.name)
 }
 
+include!("builtin_execution_ai_capture.rs");
+
 impl ScriptListApp {
-    fn spawn_send_screen_to_ai_after_hide(&mut self, trace_id: &str, cx: &mut Context<Self>) {
-        let capture_action = AiImageCaptureBuiltinAction::SendScreen;
-        let trace_id = trace_id.to_string();
-
-        tracing::info!(
-            category = "AI",
-            event = "ai_capture_scheduled",
-            source_action = "SendScreenToAi",
-            trace_id = %trace_id,
-            hide_settle_ms = AI_CAPTURE_HIDE_SETTLE_MS,
-            "Deferring main window hide and scheduling screen capture for AI"
-        );
-
-        platform::defer_hide_main_window(cx);
-
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(ai_capture_hide_settle_duration())
-                .await;
-
-            let capture_result = cx
-                .background_executor()
-                .spawn(async { platform::capture_screen_screenshot() })
-                .await;
-
-            match capture_result {
-                Ok((png_data, width, height)) => {
-                    let size_bytes = png_data.len();
-                    if size_bytes > crate::prompts::chat::MAX_IMAGE_BYTES {
-                        tracing::warn!(
-                            category = "AI",
-                            event = "ai_capture_rejected",
-                            source_action = "SendScreenToAi",
-                            trace_id = %trace_id,
-                            size_bytes,
-                            max_bytes = crate::prompts::chat::MAX_IMAGE_BYTES,
-                            "Rejecting screen capture larger than 10 MB"
-                        );
-                        this.update(cx, |this, cx| {
-                            this.show_error_toast(
-                                "Screen capture exceeds 10 MB limit".to_string(),
-                                cx,
-                            );
-                        })
-                        .ok();
-                        return;
-                    }
-
-                    let base64_data = base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &png_data,
-                    );
-                    let message = format!(
-                        "[Screenshot captured: {}x{} pixels]\n\nPlease analyze this screenshot.",
-                        width, height
-                    );
-
-                    tracing::info!(
-                        category = "AI",
-                        event = "ai_capture_completed",
-                        source_action = "SendScreenToAi",
-                        trace_id = %trace_id,
-                        width,
-                        height,
-                        size_bytes,
-                        "Screen captured for AI"
-                    );
-
-                    this.update(cx, |this, cx| {
-                        this.open_agent_chat_after_already_hidden(
-                            "SendScreenToAi",
-                            &trace_id,
-                            DeferredAgentChatAction::SetInputWithImage {
-                                text: message,
-                                image_base64: base64_data,
-                                submit: false,
-                            },
-                            cx,
-                        );
-                    })
-                    .ok();
-                }
-                Err(error) => {
-                    tracing::error!(
-                        category = "AI",
-                        event = "ai_capture_failed",
-                        source_action = "SendScreenToAi",
-                        trace_id = %trace_id,
-                        error = %error,
-                        "Failed to capture screen for AI"
-                    );
-                    let message = capture_action.failure_message(&error);
-                    this.update(cx, |this, cx| {
-                        this.show_error_toast(message, cx);
-                    })
-                    .ok();
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn spawn_send_focused_window_to_ai_after_hide(
-        &mut self,
-        trace_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let capture_action = AiImageCaptureBuiltinAction::SendFocusedWindow;
-        let trace_id = trace_id.to_string();
-
-        tracing::info!(
-            category = "AI",
-            event = "ai_capture_scheduled",
-            source_action = "SendFocusedWindowToAi",
-            trace_id = %trace_id,
-            hide_settle_ms = AI_CAPTURE_HIDE_SETTLE_MS,
-            "Deferring main window hide and scheduling focused window capture for AI"
-        );
-
-        platform::defer_hide_main_window(cx);
-
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(ai_capture_hide_settle_duration())
-                .await;
-
-            let capture_result = cx
-                .background_executor()
-                .spawn(async { platform::capture_focused_window_screenshot() })
-                .await;
-
-            match capture_result {
-                Ok(capture) => {
-                    let size_bytes = capture.png_data.len();
-                    if size_bytes > crate::prompts::chat::MAX_IMAGE_BYTES {
-                        tracing::warn!(
-                            category = "AI",
-                            event = "ai_capture_rejected",
-                            source_action = "SendFocusedWindowToAi",
-                            trace_id = %trace_id,
-                            size_bytes,
-                            max_bytes = crate::prompts::chat::MAX_IMAGE_BYTES,
-                            "Rejecting window capture larger than 10 MB"
-                        );
-                        this.update(cx, |this, cx| {
-                            this.show_error_toast(
-                                "Window capture exceeds 10 MB limit".to_string(),
-                                cx,
-                            );
-                        })
-                        .ok();
-                        return;
-                    }
-
-                    let fallback_warning = capture.used_fallback.then(|| {
-                        format!(
-                            "No focused window found — captured '{}'",
-                            capture.window_title
-                        )
-                    });
-                    let base64_data = base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &capture.png_data,
-                    );
-                    let message = format!(
-                        "[Window: {} - {}x{} pixels]\n\nPlease analyze this window screenshot.",
-                        capture.window_title, capture.width, capture.height
-                    );
-
-                    let safe_window_title =
-                        crate::logging::log_private_user_value(&capture.window_title);
-                    tracing::info!(
-                        category = "AI",
-                        event = "ai_capture_completed",
-                        source_action = "SendFocusedWindowToAi",
-                        trace_id = %trace_id,
-                        window_title_bytes = safe_window_title.raw_bytes,
-                        window_title_sha256 = %safe_window_title.sha256,
-                        width = capture.width,
-                        height = capture.height,
-                        size_bytes,
-                        used_fallback = capture.used_fallback,
-                        "Focused window captured for AI"
-                    );
-
-                    this.update(cx, |this, cx| {
-                        if let Some(warning_message) = fallback_warning {
-                            this.toast_manager.push(
-                                components::toast::Toast::warning(warning_message, &this.theme)
-                                    .duration_ms(Some(TOAST_WARNING_MS)),
-                            );
-                            cx.notify();
-                        }
-
-                        this.open_agent_chat_after_already_hidden(
-                            "SendFocusedWindowToAi",
-                            &trace_id,
-                            DeferredAgentChatAction::SetInputWithImage {
-                                text: message,
-                                image_base64: base64_data,
-                                submit: false,
-                            },
-                            cx,
-                        );
-                    })
-                    .ok();
-                }
-                Err(error) => {
-                    tracing::error!(
-                        category = "AI",
-                        event = "ai_capture_failed",
-                        source_action = "SendFocusedWindowToAi",
-                        trace_id = %trace_id,
-                        error = %error,
-                        "Failed to capture focused window for AI"
-                    );
-                    let message = capture_action.failure_message(&error);
-                    this.update(cx, |this, cx| {
-                        this.show_error_toast(message, cx);
-                    })
-                    .ok();
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn spawn_send_screen_area_to_ai_after_hide(&mut self, trace_id: &str, cx: &mut Context<Self>) {
-        let capture_action = AiImageCaptureBuiltinAction::SendScreenArea;
-        let trace_id = trace_id.to_string();
-
-        tracing::info!(
-            category = "AI",
-            event = "ai_capture_scheduled",
-            source_action = "SendScreenAreaToAi",
-            trace_id = %trace_id,
-            hide_settle_ms = AI_CAPTURE_HIDE_SETTLE_MS,
-            "Deferring main window hide and scheduling screen area capture for AI"
-        );
-
-        platform::defer_hide_main_window(cx);
-
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(ai_capture_hide_settle_duration())
-                .await;
-
-            let capture_result = cx
-                .background_executor()
-                .spawn(async { platform::capture_screen_area() })
-                .await;
-
-            match capture_result {
-                Ok(Some(capture)) => {
-                    let size_bytes = capture.png_data.len();
-                    if size_bytes > crate::prompts::chat::MAX_IMAGE_BYTES {
-                        tracing::warn!(
-                            category = "AI",
-                            event = "ai_capture_rejected",
-                            source_action = "SendScreenAreaToAi",
-                            trace_id = %trace_id,
-                            size_bytes,
-                            max_bytes = crate::prompts::chat::MAX_IMAGE_BYTES,
-                            "Rejecting screen area capture larger than 10 MB"
-                        );
-                        this.update(cx, |this, cx| {
-                            this.show_error_toast(
-                                "Screen area capture exceeds 10 MB limit".to_string(),
-                                cx,
-                            );
-                        })
-                        .ok();
-                        return;
-                    }
-
-                    let base64_data = base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &capture.png_data,
-                    );
-                    let message = format!(
-                        "[Screen area captured: {}x{} pixels]\n\nPlease analyze this selected screen area.",
-                        capture.width, capture.height
-                    );
-
-                    tracing::info!(
-                        category = "AI",
-                        event = "ai_capture_completed",
-                        source_action = "SendScreenAreaToAi",
-                        trace_id = %trace_id,
-                        width = capture.width,
-                        height = capture.height,
-                        size_bytes,
-                        "Screen area captured for AI"
-                    );
-
-                    this.update(cx, |this, cx| {
-                        this.open_agent_chat_after_already_hidden(
-                            "SendScreenAreaToAi",
-                            &trace_id,
-                            DeferredAgentChatAction::SetInputWithImage {
-                                text: message,
-                                image_base64: base64_data,
-                                submit: false,
-                            },
-                            cx,
-                        );
-                    })
-                    .ok();
-                }
-                Ok(None) => {
-                    tracing::info!(
-                        category = "AI",
-                        event = "ai_capture_cancelled",
-                        source_action = "SendScreenAreaToAi",
-                        trace_id = %trace_id,
-                        "Screen area selection cancelled by user"
-                    );
-                }
-                Err(error) => {
-                    tracing::error!(
-                        category = "AI",
-                        event = "ai_capture_failed",
-                        source_action = "SendScreenAreaToAi",
-                        trace_id = %trace_id,
-                        error = %error,
-                        "Failed to capture screen area for AI"
-                    );
-                    let message = capture_action.failure_message(&error);
-                    this.update(cx, |this, cx| {
-                        this.show_error_toast(message, cx);
-                    })
-                    .ok();
-                }
-            }
-        })
-        .detach();
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_capture_text_to_ai_after_already_hidden<C, F>(
-        &mut self,
-        source_action: &'static str,
-        trace_id: &str,
-        capture_kind: &'static str,
-        capture_fn: C,
-        format_fn: F,
-        cx: &mut Context<Self>,
-    ) where
-        C: FnOnce() -> Result<DeferredAiCapturedText, String> + Send + 'static,
-        F: FnOnce(String) -> String + Send + 'static,
-    {
-        let capture_action = AiTextCaptureBuiltinAction::AgentChatContent;
-        let trace_id = trace_id.to_string();
-
-        tracing::info!(
-            category = "AI",
-            event = "ai_capture_scheduled",
-            source_action,
-            trace_id = %trace_id,
-            capture_kind,
-            hide_settle_ms = AI_CAPTURE_HIDE_SETTLE_MS,
-            "Scheduled deferred AI text capture"
-        );
-
-        platform::defer_hide_main_window(cx);
-
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(ai_capture_hide_settle_duration())
-                .await;
-
-            let (result_tx, result_rx) =
-                async_channel::bounded::<Result<DeferredAiCapturedText, String>>(1);
-
-            let trace_id_for_thread = trace_id.clone();
-            std::thread::spawn(move || {
-                let started_at = std::time::Instant::now();
-                let result = capture_fn();
-
-                let (success, result_state) = match &result {
-                    Ok(DeferredAiCapturedText::Ready(_)) => (true, "ready"),
-                    Ok(DeferredAiCapturedText::Empty(_)) => (true, "empty"),
-                    Err(_) => (false, "error"),
-                };
-
-                tracing::info!(
-                    category = "AI",
-                    event = "ai_capture_completed",
-                    source_action,
-                    trace_id = %trace_id_for_thread,
-                    capture_kind,
-                    result_state,
-                    success,
-                    duration_ms = started_at.elapsed().as_millis() as u64,
-                    "Deferred AI text capture finished"
-                );
-
-                let _ = result_tx.send_blocking(result);
-            });
-
-            let Ok(result) = result_rx.recv().await else {
-                return;
-            };
-
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(DeferredAiCapturedText::Ready(captured)) => {
-                    this.open_agent_chat_after_already_hidden(
-                        source_action,
-                        &trace_id,
-                        DeferredAgentChatAction::SetInput {
-                            text: format_fn(captured),
-                            submit: false,
-                        },
-                        cx,
-                    );
-                }
-                Ok(DeferredAiCapturedText::Empty(message)) => {
-                    this.toast_manager.push(
-                        components::toast::Toast::info(message, &this.theme)
-                            .duration_ms(Some(TOAST_INFO_MS)),
-                    );
-                    cx.notify();
-                }
-                Err(error) => {
-                    tracing::error!(
-                        category = "AI",
-                        event = "ai_capture_failed",
-                        source_action,
-                        trace_id = %trace_id,
-                        capture_kind,
-                        error = %error,
-                        "Deferred AI text capture failed"
-                    );
-                    let message = capture_action.failure_message(&error);
-                    this.toast_manager.push(
-                        components::toast::Toast::error(message, &this.theme)
-                            .duration_ms(Some(TOAST_CRITICAL_MS)),
-                    );
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn spawn_send_selected_text_to_ai_after_hide(
-        &mut self,
-        trace_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        self.spawn_capture_text_to_ai_after_already_hidden(
-            "SendSelectedTextToAi",
-            trace_id,
-            "selected_text",
-            || {
-                crate::selected_text::get_selected_text()
-                    .map_err(|error| error.to_string())
-                    .map(|text| {
-                        let trimmed = text.trim().to_string();
-                        if trimmed.is_empty() {
-                            DeferredAiCapturedText::Empty(
-                                "No text selected. Select some text first.".to_string(),
-                            )
-                        } else {
-                            DeferredAiCapturedText::Ready(trimmed)
-                        }
-                    })
-            },
-            |text| {
-                format!(
-                    "I've selected the following text:\n\n```\n{}\n```\n\nPlease help me with this.",
-                    text
-                )
-            },
-            cx,
-        );
-    }
-
-    fn spawn_send_browser_tab_to_ai_after_hide(&mut self, trace_id: &str, cx: &mut Context<Self>) {
-        self.spawn_capture_text_to_ai_after_already_hidden(
-            "SendBrowserTabToAi",
-            trace_id,
-            "browser_url",
-            || {
-                platform::get_focused_browser_tab_url()
-                    .map_err(|error| error.to_string())
-                    .map(|url| {
-                        let trimmed = url.trim().to_string();
-                        if trimmed.is_empty() {
-                            DeferredAiCapturedText::Empty(
-                                "No browser URL found in the frontmost tab.".to_string(),
-                            )
-                        } else {
-                            DeferredAiCapturedText::Ready(trimmed)
-                        }
-                    })
-            },
-            |url| {
-                format!(
-                    "I'm looking at this webpage:\n\n{}\n\nPlease help me analyze or understand its content.",
-                    url
-                )
-            },
-            cx,
-        );
-    }
-
-    fn spawn_generate_script_from_current_app_after_hide(
-        &mut self,
-        trace_id: String,
-        query_override: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let fallback_query = query_override.unwrap_or_else(|| self.filter_text.clone());
-
-        tracing::info!(
-            category = "AI",
-            event = "ai_capture_scheduled",
-            source_action = "GenerateScriptFromCurrentApp",
-            trace_id = %trace_id,
-            hide_settle_ms = AI_CAPTURE_HIDE_SETTLE_MS,
-            "Deferring main window hide and scheduling context capture for script generation"
-        );
-
-        platform::defer_hide_main_window(cx);
-
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(ai_capture_hide_settle_duration())
-                .await;
-
-            let snapshot_result = cx
-                .background_executor()
-                .spawn(async { crate::menu_bar::load_frontmost_menu_snapshot() })
-                .await;
-
-            let selected_text = match crate::selected_text::get_selected_text() {
-                Ok(text) if !text.trim().is_empty() => Some(text),
-                Ok(_) => None,
-                Err(error) => {
-                    tracing::warn!(
-                        trace_id = %trace_id,
-                        error = %error,
-                        "ai_generate_script_from_current_app.selected_text_unavailable"
-                    );
-                    None
-                }
-            };
-
-            let browser_url = match platform::get_focused_browser_tab_url() {
-                Ok(url) if !url.trim().is_empty() => Some(url),
-                Ok(_) => None,
-                Err(error) => {
-                    tracing::warn!(
-                        trace_id = %trace_id,
-                        error = %error,
-                        "ai_generate_script_from_current_app.browser_url_unavailable"
-                    );
-                    None
-                }
-            };
-
-            // Build prompt outside entity borrow so we can show window safely.
-            let prompt_or_error = match snapshot_result {
-                Ok(snapshot) => {
-                    let user_request =
-                        crate::menu_bar::current_app_commands::normalize_generate_script_from_current_app_request(
-                            Some(fallback_query.as_str()),
-                        );
-
-                    let (prompt, receipt) =
-                        crate::menu_bar::current_app_commands::build_generate_script_prompt_from_snapshot(
-                            snapshot,
-                            user_request,
-                            selected_text.as_deref(),
-                            browser_url.as_deref(),
-                        );
-
-                    tracing::info!(
-                        trace_id = %trace_id,
-                        app_name = %receipt.app_name,
-                        bundle_id = %receipt.bundle_id,
-                        total_menu_items = receipt.total_menu_items,
-                        included_menu_items = receipt.included_menu_items,
-                        included_user_request = receipt.included_user_request,
-                        included_selected_text = receipt.included_selected_text,
-                        included_browser_url = receipt.included_browser_url,
-                        "ai_generate_script_from_current_app.prompt_ready"
-                    );
-
-                    Ok(prompt)
-                }
-                Err(error) => Err(error),
-            };
-
-            match prompt_or_error {
-                Ok(prompt) => {
-                    // Platform calls — trigger macOS delegate callbacks.
-                    // Safe here: no AppCell borrow is active.
-                    script_kit_gpui::set_main_window_visible(true);
-                    tracing::info!(
-                        trace_id = %trace_id,
-                        "ai_generate_script_from_current_app.showing_window"
-                    );
-                    crate::platform::show_main_window_without_activation();
-
-                    // GPUI state changes inside entity borrow.
-                    let _ = this.update(cx, |app, cx| {
-                        app.dispatch_ai_script_generation_from_query(prompt, cx);
-                    });
-                }
-                Err(error) => {
-                    let _ = this.update(cx, |app, cx| {
-                        let message =
-                            AiTextCaptureBuiltinAction::CurrentAppContext.failure_message(&error);
-                        app.show_error_toast(message.clone(), cx);
-                        tracing::error!(
-                            trace_id = %trace_id,
-                            error = %error,
-                            "ai_generate_script_from_current_app.capture_failed"
-                        );
-                    });
-                }
-            }
-        })
-        .detach();
-    }
-
-    /// Like `spawn_generate_script_from_current_app_after_hide`, but reuses an
-    /// already-built recipe instead of recapturing live context after hide.
-    ///
-    /// This eliminates prompt drift: the prompt copied in the recipe is
-    /// byte-for-byte the prompt sent to the AI generation path.
-    fn spawn_generate_script_from_recipe_after_hide(
-        &mut self,
-        trace_id: String,
-        recipe: crate::menu_bar::current_app_commands::CurrentAppCommandRecipe,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::info!(
-            category = "AI",
-            event = "ai_recipe_generation_scheduled",
-            source_action = "TurnThisIntoCommand",
-            trace_id = %trace_id,
-            recipe_prompt_bytes = recipe.prompt.len(),
-            recipe_bundle_id = %recipe.prompt_receipt.bundle_id,
-            recipe_included_selected_text = recipe.prompt_receipt.included_selected_text,
-            recipe_included_browser_url = recipe.prompt_receipt.included_browser_url,
-            hide_settle_ms = AI_CAPTURE_HIDE_SETTLE_MS,
-            "Deferring main window hide and scheduling recipe-based script generation (no recapture)"
-        );
-
-        platform::defer_hide_main_window(cx);
-
-        let prompt =
-            crate::menu_bar::current_app_commands::build_generated_script_prompt_from_recipe(
-                &recipe,
-            );
-
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(ai_capture_hide_settle_duration())
-                .await;
-
-            tracing::info!(
-                trace_id = %trace_id,
-                recipe_prompt_bytes = prompt.len(),
-                recipe_bundle_id = %recipe.prompt_receipt.bundle_id,
-                recipe_included_selected_text = recipe.prompt_receipt.included_selected_text,
-                recipe_included_browser_url = recipe.prompt_receipt.included_browser_url,
-                "ai_generate_script_from_recipe.prompt_ready"
-            );
-
-            // Platform calls — trigger macOS delegate callbacks.
-            // Safe here: no AppCell borrow is active.
-            script_kit_gpui::set_main_window_visible(true);
-            tracing::info!(
-                trace_id = %trace_id,
-                "ai_generate_script_from_recipe.showing_window"
-            );
-            crate::platform::show_main_window_without_activation();
-
-            // GPUI state changes inside entity borrow.
-            let _ = this.update(cx, |app, cx| {
-                app.dispatch_ai_script_generation_from_query(prompt, cx);
-            });
-        })
-        .detach();
-    }
-
-    /// Schedule the DoInCurrentApp→GenerateScript flow, capturing selected
-    /// text and the focused browser URL off the UI thread.
-    ///
-    /// Both `get_selected_text()` (AX-first, clipboard fallback) and
-    /// `get_focused_browser_tab_url()` (single `osascript` call gated by the
-    /// in-process frontmost-app tracker) can block for hundreds of
-    /// milliseconds. Running them on `cx.background_executor()` keeps the
-    /// launcher responsive while macOS answers; the memory lookup, recipe
-    /// build, and dispatch run back on the main thread once capture completes.
-    fn spawn_generate_script_from_current_app_with_capture(
-        &mut self,
-        trace_id: String,
-        raw_query_owned: String,
-        snapshot_for_recipe: crate::menu_bar::FrontmostMenuSnapshot,
-        entries: Vec<crate::builtins::BuiltInEntry>,
-        snapshot_receipt: crate::menu_bar::FrontmostMenuSnapshotReceipt,
-        snapshot_pid: i32,
-        cx: &mut Context<Self>,
-    ) {
-        let safe_query = crate::logging::log_private_user_value(&raw_query_owned);
-        tracing::info!(
-            trace_id = %trace_id,
-            raw_query_bytes = safe_query.raw_bytes,
-            raw_query_sha256 = %safe_query.sha256,
-            "do_in_current_app.spawn_context_capture"
-        );
-
-        cx.spawn(async move |this, cx| {
-            let capture_started_at = std::time::Instant::now();
-            let (selected_text, browser_url) = cx
-                .background_executor()
-                .spawn(async {
-                    let selected_text = crate::selected_text::get_selected_text()
-                        .ok()
-                        .filter(|text| !text.trim().is_empty());
-                    let browser_url = crate::platform::get_focused_browser_tab_url()
-                        .ok()
-                        .filter(|url| !url.trim().is_empty());
-                    (selected_text, browser_url)
-                })
-                .await;
-
-            tracing::info!(
-                trace_id = %trace_id,
-                capture_ms = capture_started_at.elapsed().as_millis() as u64,
-                has_selected_text = selected_text.is_some(),
-                has_browser_url = browser_url.is_some(),
-                "do_in_current_app.context_capture_complete"
-            );
-
-            let _ = this.update(cx, |this, cx| {
-                this.continue_generate_script_from_current_app_after_capture(
-                    trace_id,
-                    raw_query_owned,
-                    snapshot_for_recipe,
-                    entries,
-                    snapshot_receipt,
-                    snapshot_pid,
-                    selected_text,
-                    browser_url,
-                    cx,
-                );
-            });
-        })
-        .detach();
-    }
-
-    /// Continuation of `spawn_generate_script_from_current_app_with_capture`,
-    /// invoked back on the main thread once the blocking capture finishes.
-    fn continue_generate_script_from_current_app_after_capture(
-        &mut self,
-        trace_id: String,
-        raw_query_owned: String,
-        snapshot_for_recipe: crate::menu_bar::FrontmostMenuSnapshot,
-        entries: Vec<crate::builtins::BuiltInEntry>,
-        snapshot_receipt: crate::menu_bar::FrontmostMenuSnapshotReceipt,
-        snapshot_pid: i32,
-        selected_text: Option<String>,
-        browser_url: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let memory_decision = crate::ai::resolve_current_app_automation_from_memory(
-            &raw_query_owned,
-            &snapshot_for_recipe,
-            &entries,
-            selected_text.as_deref(),
-            browser_url.as_deref(),
-        );
-
-        if let Ok(ref decision) = memory_decision {
-            if let Some(ref replay) = decision.replay {
-                tracing::info!(
-                    category = "CURRENT_APP_AUTOMATION_MEMORY",
-                    trace_id = %trace_id,
-                    action = %decision.action,
-                    best_score = decision.best_score,
-                    matched_slug = decision
-                        .matched
-                        .as_ref()
-                        .map(|entry| entry.slug.as_str())
-                        .unwrap_or(""),
-                    reason = %decision.reason,
-                    "do_in_current_app.memory_resolved"
-                );
-
-                match decision.action.as_str() {
-                    "replay_recipe" => match replay.action.as_str() {
-                        "execute_entry" => {
-                            if let Some(entry_index) = replay.selected_entry_index {
-                                if entry_index < entries.len() {
-                                    let entry = entries[entry_index].clone();
-                                    let dctx = crate::action_helpers::DispatchContext {
-                                        trace_id: trace_id.clone(),
-                                        surface: crate::action_helpers::DispatchSurface::Builtin,
-                                        action_id: entry.id.clone(),
-                                    };
-                                    let _ = self.execute_builtin_inner(
-                                        &entry,
-                                        Some(&raw_query_owned),
-                                        &dctx,
-                                        cx,
-                                    );
-                                    return;
-                                }
-                            }
-                        }
-                        "open_command_palette" => {
-                            let filter = replay.verification.live_recipe.effective_query.clone();
-                            self.present_current_app_commands_entries(
-                                entries.clone(),
-                                &snapshot_receipt,
-                                snapshot_pid,
-                                &filter,
-                                cx,
-                            );
-                            return;
-                        }
-                        "generate_script" => {
-                            self.spawn_generate_script_from_recipe_after_hide(
-                                trace_id.clone(),
-                                replay.verification.live_recipe.clone(),
-                                cx,
-                            );
-                            return;
-                        }
-                        _ => {}
-                    },
-                    "repair_recipe" => {
-                        self.spawn_generate_script_from_recipe_after_hide(
-                            trace_id.clone(),
-                            replay.verification.live_recipe.clone(),
-                            cx,
-                        );
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let recipe = crate::menu_bar::current_app_commands::build_current_app_command_recipe(
-            snapshot_for_recipe,
-            Some(&raw_query_owned),
-            selected_text.as_deref(),
-            browser_url.as_deref(),
-        );
-
-        match serde_json::to_string_pretty(&recipe) {
-            Ok(json) => {
-                let safe_query = crate::logging::log_private_user_value(&recipe.effective_query);
-                let safe_script_name =
-                    crate::logging::log_private_user_value(&recipe.suggested_script_name);
-                tracing::info!(
-                    category = "CURRENT_APP_RECIPE",
-                    trace_id = %trace_id,
-                    app_name = %recipe.prompt_receipt.app_name,
-                    bundle_id = %recipe.prompt_receipt.bundle_id,
-                    effective_query_bytes = safe_query.raw_bytes,
-                    effective_query_sha256 = %safe_query.sha256,
-                    route = %recipe.trace.action,
-                    suggested_script_name_bytes = safe_script_name.raw_bytes,
-                    suggested_script_name_sha256 = %safe_script_name.sha256,
-                    included_selected_text = recipe.prompt_receipt.included_selected_text,
-                    included_browser_url = recipe.prompt_receipt.included_browser_url,
-                    json_bytes = json.len(),
-                    "do_in_current_app.recipe_prepared"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    trace_id = %trace_id,
-                    error = %error,
-                    "do_in_current_app.recipe_serialize_failed"
-                );
-            }
-        }
-
-        self.spawn_generate_script_from_recipe_after_hide(trace_id, recipe, cx);
-    }
-
     fn system_action_feedback_message(
         &self,
         action_type: &builtins::SystemActionType,
@@ -3822,7 +2705,7 @@ impl ScriptListApp {
         match &entry.feature {
             builtins::BuiltInFeature::ClipboardHistory => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive ClipboardHistory");
+                    .unwrap_or(SurfaceOpenBuiltinAction::ClipboardHistory);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             builtins::BuiltInFeature::PasteSequentially => {
@@ -3830,48 +2713,56 @@ impl ScriptListApp {
             }
             builtins::BuiltInFeature::Favorites => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive Favorites");
+                    .unwrap_or(SurfaceOpenBuiltinAction::Favorites);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             builtins::BuiltInFeature::AppLauncher => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive AppLauncher");
+                    .unwrap_or(SurfaceOpenBuiltinAction::AppLauncher);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             builtins::BuiltInFeature::App(app_name) => {
                 let launch_action = AppLaunchBuiltinAction::from_feature(&entry.feature)
-                    .expect("app launch arm should only receive App");
+                    .unwrap_or(AppLaunchBuiltinAction::Launch);
                 self.execute_app_launch_builtin(launch_action, app_name, dctx, cx)
             }
             builtins::BuiltInFeature::WindowSwitcher => {
                 let window_switcher_action =
                     WindowSwitcherBuiltinAction::from_feature(&entry.feature)
-                        .expect("window switcher arm should only receive WindowSwitcher");
+                        .unwrap_or(WindowSwitcherBuiltinAction::Open);
                 self.execute_window_switcher_builtin(window_switcher_action, dctx, cx)
             }
             builtins::BuiltInFeature::BrowserTabs => {
                 let browser_tabs_action = BrowserTabsBuiltinAction::from_feature(&entry.feature)
-                    .expect("browser tabs arm should only receive BrowserTabs");
+                    .unwrap_or(BrowserTabsBuiltinAction::Open);
                 self.execute_browser_tabs_builtin(browser_tabs_action, dctx, cx)
             }
-            builtins::BuiltInFeature::AiChat | builtins::BuiltInFeature::AiChatVariant(_) => {
+            builtins::BuiltInFeature::AiChat => {
+                let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature).unwrap_or(
+                    SurfaceOpenBuiltinAction::AiChat(
+                        crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::Standard,
+                    ),
+                );
+                self.execute_surface_open_builtin(open_action, dctx, cx)
+            }
+            builtins::BuiltInFeature::AiChatVariant(variant) => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive AiChat");
+                    .unwrap_or(SurfaceOpenBuiltinAction::AiChat(*variant));
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             builtins::BuiltInFeature::Notes => {
                 let notes_action = NotesBuiltinAction::from_feature(&entry.feature)
-                    .expect("notes arm should only receive Notes");
+                    .unwrap_or(NotesBuiltinAction::Open);
                 self.execute_notes_builtin(notes_action, dctx, cx)
             }
             builtins::BuiltInFeature::EmojiPicker => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive EmojiPicker");
+                    .unwrap_or(SurfaceOpenBuiltinAction::EmojiPicker);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             builtins::BuiltInFeature::SyncToGithub => {
                 let sync_action = SyncToGithubBuiltinAction::from_feature(&entry.feature)
-                    .expect("sync-to-github arm should only receive SyncToGithub");
+                    .unwrap_or(SyncToGithubBuiltinAction::Dispatch);
                 self.execute_sync_to_github_builtin(sync_action, dctx, cx)
             }
             builtins::BuiltInFeature::MenuBarAction(action) => {
@@ -3894,7 +2785,8 @@ impl ScriptListApp {
                 let next = self
                     .background_effect
                     .map(|effect| effect.next())
-                    .unwrap_or(crate::effects::BackgroundEffect::all()[0]);
+                    .or_else(|| crate::effects::BackgroundEffect::all().first().copied())
+                    .unwrap_or(crate::effects::BackgroundEffect::Aurora);
                 self.set_background_effect(Some(next), cx);
                 self.toast_manager.push(
                     components::toast::Toast::success(
@@ -3909,7 +2801,8 @@ impl ScriptListApp {
                 let prev = self
                     .background_effect
                     .map(|effect| effect.prev())
-                    .unwrap_or_else(|| *crate::effects::BackgroundEffect::all().last().unwrap());
+                    .or_else(|| crate::effects::BackgroundEffect::all().last().copied())
+                    .unwrap_or(crate::effects::BackgroundEffect::SoftPrism);
                 self.set_background_effect(Some(prev), cx);
                 self.toast_manager.push(
                     components::toast::Toast::success(
@@ -4080,7 +2973,7 @@ impl ScriptListApp {
             // =========================================================================
             builtins::BuiltInFeature::Webcam => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive Webcam");
+                    .unwrap_or(SurfaceOpenBuiltinAction::Webcam);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             builtins::BuiltInFeature::Dictation => self.execute_dictation_builtin_action(
@@ -4098,7 +2991,7 @@ impl ScriptListApp {
             }
             builtins::BuiltInFeature::FileSearch => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive FileSearch");
+                    .unwrap_or(SurfaceOpenBuiltinAction::FileSearch);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             // =========================================================================
@@ -4106,7 +2999,7 @@ impl ScriptListApp {
             // =========================================================================
             builtins::BuiltInFeature::Settings => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive Settings");
+                    .unwrap_or(SurfaceOpenBuiltinAction::Settings);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             // =========================================================================
@@ -4114,17 +3007,17 @@ impl ScriptListApp {
             // =========================================================================
             builtins::BuiltInFeature::AgentChatHistory => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive AgentChatHistory");
+                    .unwrap_or(SurfaceOpenBuiltinAction::AgentChatHistory);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             builtins::BuiltInFeature::AiVault => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive AiVault");
+                    .unwrap_or(SurfaceOpenBuiltinAction::AiVault);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             builtins::BuiltInFeature::DictationHistory => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive DictationHistory");
+                    .unwrap_or(SurfaceOpenBuiltinAction::DictationHistory);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             // =========================================================================
@@ -4132,12 +3025,12 @@ impl ScriptListApp {
             // =========================================================================
             builtins::BuiltInFeature::SdkReference => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive SdkReference");
+                    .unwrap_or(SurfaceOpenBuiltinAction::SdkReference);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             builtins::BuiltInFeature::Tips => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive Tips");
+                    .unwrap_or(SurfaceOpenBuiltinAction::Tips);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             // =========================================================================
@@ -4150,12 +3043,12 @@ impl ScriptListApp {
             // =========================================================================
             builtins::BuiltInFeature::NewScriptFromTemplate => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive NewScriptFromTemplate");
+                    .unwrap_or(SurfaceOpenBuiltinAction::ScriptTemplateCatalog);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
             builtins::BuiltInFeature::MigrateV1Scripts => {
                 let open_action = SurfaceOpenBuiltinAction::from_feature(&entry.feature)
-                    .expect("surface open arm should only receive MigrateV1Scripts");
+                    .unwrap_or(SurfaceOpenBuiltinAction::MigrateV1Scripts);
                 self.execute_surface_open_builtin(open_action, dctx, cx)
             }
         }
@@ -5651,12 +4544,14 @@ impl ScriptListApp {
                         );
 
                         self.spawn_generate_script_from_current_app_with_capture(
-                            dctx.trace_id.to_string(),
-                            effective_query.clone(),
-                            snapshot_for_recipe,
-                            entries,
-                            snapshot_receipt.clone(),
-                            snapshot_pid,
+                            CurrentAppScriptCaptureRequest {
+                                trace_id: dctx.trace_id.to_string(),
+                                raw_query: effective_query.clone(),
+                                snapshot: snapshot_for_recipe,
+                                entries,
+                                snapshot_receipt: snapshot_receipt.clone(),
+                                snapshot_pid,
+                            },
                             cx,
                         );
 
@@ -6743,8 +5638,10 @@ impl ScriptListApp {
                 Self::handle_dictation_transcript(
                     this,
                     transcript_result,
-                    audio_duration,
-                    target,
+                    DictationDeliveryTiming {
+                        audio_duration,
+                        target,
+                    },
                     selection,
                     session_generation,
                     None,
@@ -6950,13 +5847,16 @@ impl ScriptListApp {
     fn present_dictation_delivery_failure(
         &mut self,
         request: crate::dictation::DictationDeliveryRequest,
-        audio_duration: std::time::Duration,
-        target: crate::dictation::DictationTarget,
+        timing: DictationDeliveryTiming,
         failure: crate::ai::reliability::AppFailureRecord,
         reason: crate::dictation::DictationDeliveryFailureReason,
         retry_safety: sk_protocol::ai_reliability::RetrySafety,
         cx: &mut Context<Self>,
     ) {
+        let DictationDeliveryTiming {
+            audio_duration,
+            target,
+        } = timing;
         let mut request = request;
         if request.history_entry_id.is_empty() {
             match crate::dictation::record_dictation_history(
@@ -7081,8 +5981,10 @@ impl ScriptListApp {
                 );
                 self.handle_dictation_transcript(
                     Ok(Some(request.transcript.text().to_string())),
-                    work.audio_duration,
-                    target,
+                    DictationDeliveryTiming {
+                        audio_duration: work.audio_duration,
+                        target,
+                    },
                     Some(selection),
                     request.session_generation,
                     Some(request),
@@ -7177,13 +6079,16 @@ impl ScriptListApp {
     fn handle_dictation_transcript(
         &mut self,
         result: anyhow::Result<Option<String>>,
-        audio_duration: std::time::Duration,
-        target: crate::dictation::DictationTarget,
+        timing: DictationDeliveryTiming,
         frozen_selection: Option<crate::dictation::DictationTargetSelection>,
         session_generation: u64,
         preserved_request: Option<crate::dictation::DictationDeliveryRequest>,
         cx: &mut Context<Self>,
     ) {
+        let DictationDeliveryTiming {
+            audio_duration,
+            target,
+        } = timing;
         match result {
             Ok(Some(transcript)) => {
                 let recovery_request = preserved_request;
@@ -7322,8 +6227,7 @@ impl ScriptListApp {
                     let failure = crate::ai::reliability::destination_failure(true, &detail);
                     self.present_dictation_delivery_failure(
                         request,
-                        audio_duration,
-                        target,
+                        timing,
                         failure,
                         crate::dictation::DictationDeliveryFailureReason::DestinationStale,
                         sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
@@ -7578,8 +6482,7 @@ impl ScriptListApp {
                             );
                             self.present_dictation_delivery_failure(
                                 request,
-                                audio_duration,
-                                target,
+                                timing,
                                 failure,
                                 crate::dictation::DictationDeliveryFailureReason::DestinationStale,
                                 sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
@@ -7623,8 +6526,7 @@ impl ScriptListApp {
                                     );
                                     this.present_dictation_delivery_failure(
                                         request,
-                                        audio_duration,
-                                        target,
+                                        timing,
                                         failure,
                                         crate::dictation::DictationDeliveryFailureReason::DestinationStale,
                                         sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
@@ -7646,8 +6548,7 @@ impl ScriptListApp {
                                     );
                                     this.present_dictation_delivery_failure(
                                         request,
-                                        audio_duration,
-                                        target,
+                                        timing,
                                         failure,
                                         crate::dictation::DictationDeliveryFailureReason::MutationOutcomeUnknown,
                                         sk_protocol::ai_reliability::RetrySafety::Never,
@@ -7690,8 +6591,7 @@ impl ScriptListApp {
                         );
                         self.present_dictation_delivery_failure(
                             request,
-                            audio_duration,
-                            target,
+                            timing,
                             failure,
                             crate::dictation::DictationDeliveryFailureReason::DestinationStale,
                             sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
@@ -7761,8 +6661,7 @@ impl ScriptListApp {
                                 );
                                 this.present_dictation_delivery_failure(
                                     request.clone(),
-                                    audio_duration,
-                                    target,
+                                    timing,
                                     failure,
                                     crate::dictation::DictationDeliveryFailureReason::DestinationUnavailable,
                                     sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
@@ -7804,8 +6703,7 @@ impl ScriptListApp {
                                 );
                                 this.present_dictation_delivery_failure(
                                     request.clone(),
-                                    audio_duration,
-                                    target,
+                                    timing,
                                     failure,
                                     crate::dictation::DictationDeliveryFailureReason::DestinationStale,
                                     sk_protocol::ai_reliability::RetrySafety::ExplicitUserConfirmation,
@@ -7883,8 +6781,7 @@ impl ScriptListApp {
                                     );
                                     this.present_dictation_delivery_failure(
                                         request.clone(),
-                                        audio_duration,
-                                        target,
+                                        timing,
                                         failure,
                                         crate::dictation::DictationDeliveryFailureReason::MutationOutcomeUnknown,
                                         sk_protocol::ai_reliability::RetrySafety::Never,
@@ -8104,8 +7001,10 @@ impl ScriptListApp {
         let result = Ok(resolution.transcript);
         self.handle_dictation_transcript(
             result,
-            std::time::Duration::ZERO,
-            target,
+            DictationDeliveryTiming {
+                audio_duration: std::time::Duration::ZERO,
+                target,
+            },
             Some(frozen_selection),
             0,
             None,

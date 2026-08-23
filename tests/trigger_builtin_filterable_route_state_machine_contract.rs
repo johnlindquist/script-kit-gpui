@@ -59,7 +59,7 @@ fn route_state_machine_has_explicit_terminal_states() {
     for required in [
         "enum FilterableRouteState",
         "Start(FilterableView)",
-        "Prepared(FilterableRoutePlan)",
+        "Prepared(Box<FilterableRoutePlan>)",
         "Failed {",
         "Applied {",
         "surface_kind: SurfaceKind",
@@ -74,9 +74,9 @@ fn route_state_machine_has_explicit_terminal_states() {
     let compact = compact(body);
     for required in [
         "FilterableRouteState::Start(view)=>matchself.prepare_filterable_route(view)",
-        "Ok(plan)=>FilterableRouteState::Prepared(plan)",
+        "Ok(plan)=>FilterableRouteState::Prepared(Box::new(plan))",
         "Err(reason)=>FilterableRouteState::Failed{view,reason}",
-        "FilterableRouteState::Prepared(plan)=>{self.apply_filterable_route_plan(plan,window,cx)}",
+        "FilterableRouteState::Prepared(plan)=>{self.apply_filterable_route_plan(*plan,window,cx)}",
         "terminal@FilterableRouteState::Applied{..}=>returnterminal",
     ] {
         assert!(
