@@ -2238,6 +2238,7 @@ describe("nonintrusive executed Rust verification", () => {
     "scripts/agentic/cargo-cache-locks.sh",
     "scripts/agentic/cargo-build-policy.test.ts",
     "scripts/agentic/reuse-rust-test-binary.sh",
+    "scripts/agentic/build-isolated-binary.sh",
     "scripts/agentic/root-search-frame-stability.test.ts",
     "tests/sdk/capability-types.fixture.ts",
     "tests/sdk/fixtures/runner-negative-case.ts",
