@@ -363,6 +363,10 @@ impl NotesApp {
                             return;
                         }
                         if let Some(ch) = key.chars().next() {
+                            if ch.len_utf8() != key.len() {
+                                cx.stop_propagation();
+                                return;
+                            }
                             let ch = ch.to_ascii_lowercase();
                             if ch.is_alphanumeric() || ch.is_whitespace() || ch == '-' || ch == '_'
                             {
@@ -442,6 +446,28 @@ impl NotesApp {
                     cx.stop_propagation();
                     return;
                 }
+                key if (key.eq_ignore_ascii_case("left")
+                    || key.eq_ignore_ascii_case("arrowleft"))
+                    && !modifiers.platform
+                    && !modifiers.control
+                    && !modifiers.alt =>
+                {
+                    self.note_switcher
+                        .move_search_cursor(false, modifiers.shift, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                key if (key.eq_ignore_ascii_case("right")
+                    || key.eq_ignore_ascii_case("arrowright"))
+                    && !modifiers.platform
+                    && !modifiers.control
+                    && !modifiers.alt =>
+                {
+                    self.note_switcher
+                        .move_search_cursor(true, modifiers.shift, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 key if (is_key_backspace(key) || is_key_delete(key)) && !modifiers.platform => {
                     if modifiers.alt {
                         self.note_switcher.handle_backspace_word(window, cx);
@@ -464,6 +490,10 @@ impl NotesApp {
                             return;
                         }
                         if let Some(ch) = key.chars().next() {
+                            if ch.len_utf8() != key.len() {
+                                cx.stop_propagation();
+                                return;
+                            }
                             let ch = ch.to_ascii_lowercase();
                             if ch.is_alphanumeric() || ch.is_whitespace() || ch == '-' || ch == '_'
                             {
