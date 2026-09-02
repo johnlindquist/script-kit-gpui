@@ -71,6 +71,62 @@ fn failed_save_keeps_notes_open_for_escape_and_cmd_w(cx: &mut gpui::TestAppConte
         .expect("failed save leaves the Notes window available");
 }
 
+/// A removed backing day file must not strand the last editable copy in memory.
+#[gpui::test]
+fn missing_day_file_is_recreated_from_the_notes_editor(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+    let directory = tempfile::tempdir().expect("private day fixture");
+    let path = directory.path().join("2026-08-28.md");
+    let base = "# Today\n\nExisting capture.\n";
+    let draft = "# Today\n\nExisting capture.\nNew unsaved capture.\n";
+    let handle = cx.update(|cx| {
+        cx.open_window(
+            WindowOptions {
+                show: false,
+                focus: false,
+                ..Default::default()
+            },
+            |window, cx| {
+                cx.new(|cx| {
+                    NotesApp::from_initial_data(
+                        NotesInitialData {
+                            notes: Vec::new(),
+                            deleted_notes: Vec::new(),
+                            host_policy: crate::runtime_policy::WindowHostPolicy::OwnedHidden,
+                            ghost_clipboard: Some(Vec::new()),
+                            now: None,
+                        },
+                        window,
+                        cx,
+                    )
+                })
+            },
+        )
+        .expect("isolated Notes day window")
+    });
+    handle
+        .update(cx, |app, window, cx| {
+            app.active_day_binding = Some(NotesDayBinding {
+                date: chrono::NaiveDate::from_ymd_opt(2026, 8, 28).expect("fixture date"),
+                path: path.clone(),
+                content: base.into(),
+                base_disk_content: base.into(),
+            });
+            app.set_editor_text_for_automation(draft.into(), window, cx);
+            assert!(app.has_unsaved_changes);
+            assert!(app.save_current_note(), "missing file must be recreated");
+            assert!(!app.has_unsaved_changes);
+            assert_eq!(app.editor_text(cx), draft);
+            assert_eq!(
+                crate::brain::substrate::io::read_private_document(&path)
+                    .expect("recreated private day file"),
+                draft
+            );
+        })
+        .expect("save the owned day editor");
+    assert!(path.exists());
+}
+
 #[gpui::test]
 fn injected_notes_preserve_reveal_and_real_editor_mutations(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
