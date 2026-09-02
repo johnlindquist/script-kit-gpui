@@ -123,7 +123,7 @@ impl ScriptListApp {
                 }
                 if is_key_enter(key) {
                     cx.stop_propagation();
-                    this.select_profile_search_result(cx);
+                    this.select_profile_search_result(window, cx);
                 }
             },
         );
@@ -136,20 +136,18 @@ impl ScriptListApp {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    crate::components::render_simple_empty_state(
-                        "profile-search-empty",
-                        if filter.trim().is_empty() {
-                            "No profiles"
-                        } else {
-                            "No matching profiles"
-                        },
-                        "user",
-                        None,
-                        &self.theme,
-                        cx,
-                    ),
-                )
+                .child(crate::components::render_simple_empty_state(
+                    "profile-search-empty",
+                    if filter.trim().is_empty() {
+                        "No profiles"
+                    } else {
+                        "No matching profiles"
+                    },
+                    "user",
+                    None,
+                    &self.theme,
+                    cx,
+                ))
                 .into_any_element()
         } else {
             // Profile Search is a split-pane built-in, but its rows must use the

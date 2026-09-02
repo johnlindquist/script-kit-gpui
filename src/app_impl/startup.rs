@@ -470,6 +470,7 @@ impl ScriptListApp {
             pending_filter_sync: false,
             history_filter_render_pending: None,
             return_to_script_list_key_guard: None,
+            profile_search_return_input: None,
             pending_placeholder: None,
             last_output: None,
             focus_handle: cx.focus_handle(),
@@ -1044,7 +1045,7 @@ impl ScriptListApp {
                                 }
                                 if !has_shift {
                                     let assigned =
-                                        this.select_profile_search_result_for_quick_ai(cx);
+                                        this.select_profile_search_result_for_quick_ai(window, cx);
                                     tracing::info!(
                                         target: "script_kit::spine",
                                         event = "profile_search_quick_ai_tab_assign",

@@ -1397,6 +1397,8 @@ pub(crate) struct ScriptListApp {
     /// back to ScriptList. Prevents the same physical keydown from launching
     /// the highlighted main-menu row after the view reset.
     return_to_script_list_key_guard: Option<ReturnToScriptListKeyGuard>,
+    /// Launcher input and caret retained while the profile picker owns the filter.
+    profile_search_return_input: Option<AgentChatInputReturnState>,
     /// Pending placeholder text to set on next render (needs Window access).
     pending_placeholder: Option<String>,
     last_output: Option<SharedString>,

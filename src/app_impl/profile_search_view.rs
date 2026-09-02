@@ -104,6 +104,9 @@ impl ScriptListApp {
             event = "profile_search_open",
             "Opening Profile Search"
         );
+        if matches!(self.current_view, AppView::ScriptList) {
+            self.profile_search_return_input = Some(self.agent_chat_input_return_state(cx));
+        }
         self.filter_text.clear();
         self.pending_filter_sync = true;
         self.pending_placeholder = Some("Search profiles...".to_string());
@@ -118,6 +121,34 @@ impl ScriptListApp {
         self.pending_focus = Some(FocusTarget::MainFilter);
         self.focused_input = FocusedInput::MainFilter;
         cx.notify();
+    }
+
+    pub(super) fn reset_to_script_list_from_profile_search(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = self.profile_search_return_input.take();
+        self.reset_to_script_list(cx);
+        let Some(AgentChatInputReturnState {
+            value,
+            selection,
+            focused_input,
+            pending_focus,
+        }) = input
+        else {
+            return;
+        };
+        self.set_filter_text_and_cursor_immediate(value, selection.end, window, cx);
+        if !selection.is_empty() {
+            self.gpui_input_state.update(cx, |state, cx| {
+                state.set_selection(selection.start, selection.end, window, cx);
+            });
+        }
+        self.focused_input = focused_input;
+        self.pending_focus = pending_focus.or_else(|| {
+            (focused_input == FocusedInput::MainFilter).then_some(FocusTarget::MainFilter)
+        });
     }
 
     pub(crate) fn try_open_profile_search_from_script_list_shift_tab(
@@ -221,19 +252,23 @@ impl ScriptListApp {
         cx.notify();
     }
 
-    pub(crate) fn select_profile_search_result(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn select_profile_search_result(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(result) = self.selected_profile_search_result_owned() else {
             return false;
         };
         // The built-in Quick AI row is not a valid Agent Chat default — Enter
         // on it performs the Quick AI assignment instead (same as Tab).
         if result.profile.id == crate::ai::agent_chat::profiles::BUILTIN_QUICK_AI_PROFILE_ID {
-            return self.select_profile_search_result_for_quick_ai(cx);
+            return self.select_profile_search_result_for_quick_ai(window, cx);
         }
         // The trailing action row writes a starter markdown profile and hands
         // it to the editor instead of switching profiles.
         if result.profile.id == crate::profile_search::CREATE_PROFILE_ROW_ID {
-            return self.create_profile_from_profile_search(cx);
+            return self.create_profile_from_profile_search(window, cx);
         }
         let persisted = self.persist_profile_search_selection_for_host(&result.profile.id, false);
         if persisted {
@@ -241,7 +276,7 @@ impl ScriptListApp {
                 self.refresh_agent_model_footer_labels();
             }
             self.arm_return_to_script_list_enter_guard_from_profile_search();
-            self.reset_to_script_list(cx);
+            self.reset_to_script_list_from_profile_search(window, cx);
             if self.main_services.is_production() {
                 self.refresh_agent_model_footer_labels();
             } else {
@@ -257,7 +292,11 @@ impl ScriptListApp {
     /// Enter on the "Create New Profile…" row: write a starter markdown
     /// profile (mdflow format) into `<kit>/profiles/` and open it in the
     /// configured editor.
-    pub(crate) fn create_profile_from_profile_search(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn create_profile_from_profile_search(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         // This command creates and opens a profile. Refuse the unavailable
         // external half before creating a file or resolving operator setup.
         if let Err(refusal) =
@@ -284,7 +323,7 @@ impl ScriptListApp {
                     );
                 }
                 self.arm_return_to_script_list_enter_guard_from_profile_search();
-                self.reset_to_script_list(cx);
+                self.reset_to_script_list_from_profile_search(window, cx);
                 cx.notify();
                 true
             }
@@ -305,6 +344,7 @@ impl ScriptListApp {
     /// `simulate_key_dispatch.rs` — keep the two paths in lockstep.
     pub(crate) fn select_profile_search_result_for_quick_ai(
         &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(result) = self.selected_profile_search_result_owned() else {
@@ -313,7 +353,7 @@ impl ScriptListApp {
         let persisted = self.persist_profile_search_selection_for_host(&result.profile.id, true);
         if persisted {
             self.arm_return_to_script_list_enter_guard_from_profile_search();
-            self.reset_to_script_list(cx);
+            self.reset_to_script_list_from_profile_search(window, cx);
         }
         cx.notify();
         persisted

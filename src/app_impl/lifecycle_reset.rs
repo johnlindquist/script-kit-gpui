@@ -1057,6 +1057,14 @@ impl ScriptListApp {
         if !self.cancel_prompt_before_close(cx) {
             return;
         }
+        if matches!(self.current_view, AppView::ProfileSearchView { .. })
+            && self.profile_search_return_input.is_some()
+        {
+            self.reset_to_script_list_from_profile_search(window, cx);
+            self.update_window_size_deferred(window, cx);
+            self.request_script_list_main_filter_focus(cx);
+            return;
+        }
         if self.opened_from_main_menu {
             logging::log(
                 "KEY",

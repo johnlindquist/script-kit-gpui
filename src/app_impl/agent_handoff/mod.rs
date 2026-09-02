@@ -4220,7 +4220,7 @@ impl ScriptListApp {
         }
     }
 
-    fn agent_chat_input_return_state(&self, cx: &App) -> AgentChatInputReturnState {
+    pub(super) fn agent_chat_input_return_state(&self, cx: &App) -> AgentChatInputReturnState {
         AgentChatInputReturnState {
             value: self.filter_text.clone(),
             selection: self.gpui_input_state.read(cx).selection(),

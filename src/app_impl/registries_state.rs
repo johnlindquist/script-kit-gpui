@@ -342,6 +342,7 @@ impl ScriptListApp {
         }
 
         // Reset view
+        self.profile_search_return_input = None;
         self.editor_escape_armed_at = None;
         self.transition_current_view_and_rekey_main_automation_surface(AppView::ScriptList);
         self.reset_main_menu_selection_intent();

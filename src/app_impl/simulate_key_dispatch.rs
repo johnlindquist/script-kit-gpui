@@ -1002,7 +1002,7 @@ impl ScriptListApp {
                     }
                     "enter" => {
                         logging::log("STDIN", "SimulateKey: Enter - select Profile Search row");
-                        view.select_profile_search_result(ctx);
+                        view.select_profile_search_result(window, ctx);
                     }
                     "tab" if !has_shift => {
                         // Mirrors the live Tab interceptor in startup.rs:
@@ -1012,7 +1012,7 @@ impl ScriptListApp {
                             "STDIN",
                             "SimulateKey: Tab - use Profile Search row for Quick AI",
                         );
-                        view.select_profile_search_result_for_quick_ai(ctx);
+                        view.select_profile_search_result_for_quick_ai(window, ctx);
                     }
                     "escape" => {
                         logging::log("STDIN", "SimulateKey: Escape - close Profile Search");

@@ -504,7 +504,7 @@ fn profile_search_selection_arms_enter_guard_before_reset_to_script_list() {
         .find("arm_return_to_script_list_enter_guard_from_profile_search")
         .expect("ProfileSearch selection must arm Enter transition guard");
     let reset_pos = body
-        .find("reset_to_script_list(cx)")
+        .find("reset_to_script_list_from_profile_search(window, cx)")
         .expect("ProfileSearch selection must return to ScriptList");
     assert!(
         guard_pos < reset_pos,
@@ -522,7 +522,7 @@ fn profile_search_selection_refreshes_header_labels_after_reset() {
         .find("persist_profile_search_selection")
         .expect("ProfileSearch must persist before refresh");
     let reset_pos = body
-        .find("reset_to_script_list(cx)")
+        .find("reset_to_script_list_from_profile_search(window, cx)")
         .expect("ProfileSearch selection must return to ScriptList");
     let refresh_positions = body
         .match_indices("refresh_agent_model_footer_labels")
