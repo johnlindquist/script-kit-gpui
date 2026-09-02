@@ -115,8 +115,7 @@ fn disabled_action_blocks_selected_and_direct_activation_without_callback(
     let (selected_outcome, direct_outcome, selected_index) = cx.update(|cx| {
         dialog.update(cx, |dialog, entity_cx| {
             let selected_outcome = dialog.activate_selected(entity_cx);
-            let direct_outcome =
-                dialog.activate_action_id("disabled".to_string(), entity_cx);
+            let direct_outcome = dialog.activate_action_id("disabled".to_string(), entity_cx);
             (selected_outcome, direct_outcome, dialog.selected_index)
         })
     });
@@ -131,13 +130,14 @@ fn disabled_action_blocks_selected_and_direct_activation_without_callback(
         ));
     }
     assert_eq!(selected_index, Some(0));
-    assert!(selected_ids.lock().expect("disabled callback lock").is_empty());
+    assert!(selected_ids
+        .lock()
+        .expect("disabled callback lock")
+        .is_empty());
 }
 
 #[gpui::test]
-fn direct_activation_uses_the_activated_actions_close_policy(
-    cx: &mut gpui::TestAppContext,
-) {
+fn direct_activation_uses_the_activated_actions_close_policy(cx: &mut gpui::TestAppContext) {
     let selected_ids = Arc::new(Mutex::new(Vec::new()));
     let dialog = cx.update(|cx| {
         build_dialog_entity(
@@ -156,7 +156,10 @@ fn direct_activation_uses_the_activated_actions_close_policy(
             closes.close = Some(true);
             dialog.set_sdk_actions(vec![stays_open, closes]);
 
-            assert_eq!(dialog.get_selected_action_id().as_deref(), Some("stays_open"));
+            assert_eq!(
+                dialog.get_selected_action_id().as_deref(),
+                Some("stays_open")
+            );
             dialog.activate_action_id("closes".to_string(), entity_cx)
         })
     });
@@ -175,9 +178,7 @@ fn direct_activation_uses_the_activated_actions_close_policy(
 }
 
 #[gpui::test]
-fn refresh_restores_identity_then_uses_nearest_eligible_row(
-    cx: &mut gpui::TestAppContext,
-) {
+fn refresh_restores_identity_then_uses_nearest_eligible_row(cx: &mut gpui::TestAppContext) {
     let dialog = cx.update(|cx| {
         build_dialog_entity(
             cx,
@@ -193,7 +194,10 @@ fn refresh_restores_identity_then_uses_nearest_eligible_row(
 
     cx.update(|cx| {
         dialog.update(cx, |dialog, entity_cx| {
-            assert_eq!(dialog.select_action_by_id("b", entity_cx), Some("b".to_string()));
+            assert_eq!(
+                dialog.select_action_by_id("b", entity_cx),
+                Some("b".to_string())
+            );
             dialog.replace_actions_for_test(vec![
                 sample_action("x", "X", None),
                 sample_action("a", "A", None),
@@ -202,7 +206,10 @@ fn refresh_restores_identity_then_uses_nearest_eligible_row(
             ]);
             assert_eq!(dialog.get_selected_action_id().as_deref(), Some("b"));
             assert_eq!(dialog.selected_index, Some(2));
-            assert!(!dialog.get_selected_action().expect("selected b").is_enabled());
+            assert!(!dialog
+                .get_selected_action()
+                .expect("selected b")
+                .is_enabled());
 
             dialog.replace_actions_for_test(vec![
                 sample_action("x", "X", None),
@@ -220,9 +227,7 @@ fn refresh_restores_identity_then_uses_nearest_eligible_row(
 }
 
 #[gpui::test]
-fn empty_actions_dialog_has_no_selected_row_and_cannot_activate(
-    cx: &mut gpui::TestAppContext,
-) {
+fn empty_actions_dialog_has_no_selected_row_and_cannot_activate(cx: &mut gpui::TestAppContext) {
     let dialog = cx.update(|cx| {
         build_dialog_entity(
             cx,
@@ -292,6 +297,35 @@ fn actions_search_edits_use_input_state_cursor_selection_and_history(
                 assert!(dialog.redo_search_input(window, cx));
                 assert_eq!(dialog.search_text, "réopen?-file");
                 assert_eq!(dialog.filtered_actions.len(), 0);
+
+                assert!(dialog.select_all_search_input(window, cx));
+                assert!(dialog.insert_search_text("a😀é界z", window, cx));
+                for _ in 0..4 {
+                    assert!(dialog.move_search_cursor_left(false, window, cx));
+                }
+                assert!(dialog.delete_search_input(window, cx));
+                assert_eq!(dialog.search_text, "aé界z");
+                assert!(dialog.delete_search_input(window, cx));
+                assert_eq!(dialog.search_text, "a界z");
+                assert!(dialog.move_search_cursor_right(true, window, cx));
+                assert!(dialog.delete_search_input(window, cx));
+                assert_eq!(dialog.search_text, "az");
+                assert!(dialog.backspace_search_input(window, cx));
+                assert_eq!(dialog.search_text, "z");
+                assert!(dialog.delete_search_input(window, cx));
+                assert_eq!(dialog.search_text, "");
+                assert!(dialog.delete_search_input(window, cx));
+                assert_eq!(dialog.search_text, "");
+
+                assert!(dialog.insert_search_text("alpha beta", window, cx));
+                for _ in 0..4 {
+                    assert!(dialog.move_search_cursor_left(false, window, cx));
+                }
+                assert!(dialog.delete_next_search_word(window, cx));
+                assert_eq!(dialog.search_text, "alpha ");
+                assert!(dialog.select_all_search_input(window, cx));
+                assert!(dialog.delete_next_search_word(window, cx));
+                assert_eq!(dialog.search_text, "");
             });
         })
         .expect("Actions search test window remains available");
@@ -381,7 +415,10 @@ fn ux13_hidden_search_never_installs_or_focuses_input(cx: &mut gpui::TestAppCont
         })
         .expect("hidden Actions test window opens")
     });
-    let dialog = dialog_slot.borrow().clone().expect("hidden dialog installed");
+    let dialog = dialog_slot
+        .borrow()
+        .clone()
+        .expect("hidden dialog installed");
 
     window
         .update(cx, |_empty, window, cx| {

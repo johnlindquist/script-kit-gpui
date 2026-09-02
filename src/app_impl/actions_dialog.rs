@@ -1186,6 +1186,18 @@ impl ScriptListApp {
             }
         }
 
+        if key.eq_ignore_ascii_case("delete") && !modifiers.platform && !modifiers.control {
+            dialog.update(cx, |d, cx| {
+                if modifiers.alt {
+                    d.delete_next_search_word(window, cx);
+                } else {
+                    d.delete_search_input(window, cx);
+                }
+            });
+            crate::actions::notify_actions_window(cx);
+            return ActionsRoute::Handled;
+        }
+
         if key.eq_ignore_ascii_case("left")
             && !modifiers.platform
             && !modifiers.control

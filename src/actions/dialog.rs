@@ -3621,6 +3621,16 @@ impl ActionsDialog {
         })
     }
 
+    pub(crate) fn delete_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_search_input(window, cx, |state, window, cx| {
+            state.edit_delete(window, cx);
+        })
+    }
+
     pub(crate) fn delete_previous_search_word(
         &mut self,
         window: &mut Window,
@@ -3628,6 +3638,16 @@ impl ActionsDialog {
     ) -> bool {
         self.edit_search_input(window, cx, |state, window, cx| {
             state.edit_delete_previous_word(window, cx);
+        })
+    }
+
+    pub(crate) fn delete_next_search_word(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.edit_search_input(window, cx, |state, window, cx| {
+            state.edit_delete_next_word(window, cx);
         })
     }
 

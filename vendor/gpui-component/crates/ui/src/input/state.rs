@@ -995,9 +995,19 @@ impl InputState {
         self.backspace(&Backspace, window, cx);
     }
 
+    /// Apply the input owner's normal forward Delete semantics programmatically.
+    pub fn edit_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete(&Delete, window, cx);
+    }
+
     /// Apply the input owner's normal previous-word deletion semantics.
     pub fn edit_delete_previous_word(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_previous_word(&DeleteToPreviousWordStart, window, cx);
+    }
+
+    /// Apply the input owner's normal next-word deletion semantics.
+    pub fn edit_delete_next_word(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_next_word(&DeleteToNextWordEnd, window, cx);
     }
 
     /// Apply the input owner's normal clipboard paste semantics.

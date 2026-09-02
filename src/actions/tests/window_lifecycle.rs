@@ -133,6 +133,62 @@ fn parent_forwarded_edits_stay_in_actions_search(cx: &mut gpui::TestAppContext) 
                     "forwarded deletion must not reach the parent draft"
                 );
                 assert_eq!(popup.dialog.read(cx).search_text, "");
+
+                for ch in ["f", "o", "r", "m", "a", "t"] {
+                    assert!(popup.handle_key_event(
+                        ActionsWindowKeyOrigin::ParentWindow,
+                        ch,
+                        Some(ch),
+                        &Default::default(),
+                        window,
+                        cx,
+                    ));
+                }
+                assert!(!popup.handle_key_event(
+                    ActionsWindowKeyOrigin::PopupWindow,
+                    "delete",
+                    None,
+                    &Default::default(),
+                    window,
+                    cx,
+                ));
+                assert_eq!(popup.dialog.read(cx).search_text, "format");
+                for (key, expected) in [("left", "format"), ("left", "format"), ("delete", "formt")]
+                {
+                    assert!(popup.handle_key_event(
+                        ActionsWindowKeyOrigin::ParentWindow,
+                        key,
+                        None,
+                        &Default::default(),
+                        window,
+                        cx,
+                    ));
+                    assert_eq!(popup.dialog.read(cx).search_text, expected);
+                }
+                assert!(!popup.handle_key_event(
+                    ActionsWindowKeyOrigin::PopupWindow,
+                    "delete",
+                    None,
+                    &gpui::Modifiers {
+                        alt: true,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                ));
+                assert_eq!(popup.dialog.read(cx).search_text, "formt");
+                assert!(popup.handle_key_event(
+                    ActionsWindowKeyOrigin::ParentWindow,
+                    "delete",
+                    None,
+                    &gpui::Modifiers {
+                        alt: true,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                ));
+                assert_eq!(popup.dialog.read(cx).search_text, "form");
             });
         })
         .expect("simulated Actions test window remains available");
@@ -278,6 +334,15 @@ fn test_actions_window_key_intent_search_input_upgrades() {
         actions_window_key_intent("backspace", None, &cmd_only),
         None
     );
+    assert_eq!(
+        actions_window_key_intent("delete", None, &no_mods),
+        Some(ActionsWindowKeyIntent::Delete)
+    );
+    assert_eq!(
+        actions_window_key_intent("delete", None, &alt_only),
+        Some(ActionsWindowKeyIntent::DeleteWord)
+    );
+    assert_eq!(actions_window_key_intent("delete", None, &cmd_only), None);
 
     assert_eq!(
         actions_window_key_intent("left", None, &no_mods),

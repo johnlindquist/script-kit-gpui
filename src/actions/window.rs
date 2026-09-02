@@ -147,6 +147,9 @@ enum ActionsWindowKeyIntent {
     Backspace,
     /// Option+Backspace: delete the trailing word, like the main search input.
     BackspaceWord,
+    Delete,
+    /// Option+Delete: delete the following word.
+    DeleteWord,
     MoveCursorLeft {
         select: bool,
     },
@@ -221,7 +224,7 @@ fn actions_window_key_intent(
             select: modifiers.shift,
         });
     }
-    if is_key_backspace(key) || key.eq_ignore_ascii_case("delete") {
+    if is_key_backspace(key) {
         // Option+Backspace deletes a word like the main search input.
         // Cmd+Backspace intentionally falls through (returns None) so
         // destructive action shortcuts (e.g. Delete Note ⌘⌫) can match.
@@ -230,6 +233,15 @@ fn actions_window_key_intent(
         }
         if !modifiers.platform && !modifiers.control {
             return Some(ActionsWindowKeyIntent::Backspace);
+        }
+        return None;
+    }
+    if key.eq_ignore_ascii_case("delete") {
+        if modifiers.alt && !modifiers.platform && !modifiers.control {
+            return Some(ActionsWindowKeyIntent::DeleteWord);
+        }
+        if !modifiers.platform && !modifiers.control {
+            return Some(ActionsWindowKeyIntent::Delete);
         }
         return None;
     }
@@ -705,6 +717,8 @@ impl ActionsWindow {
                 Some(
                     ActionsWindowKeyIntent::Backspace
                         | ActionsWindowKeyIntent::BackspaceWord
+                        | ActionsWindowKeyIntent::Delete
+                        | ActionsWindowKeyIntent::DeleteWord
                         | ActionsWindowKeyIntent::MoveCursorLeft { .. }
                         | ActionsWindowKeyIntent::MoveCursorRight { .. }
                         | ActionsWindowKeyIntent::TypeChar(_)
@@ -882,6 +896,20 @@ impl ActionsWindow {
                 crate::logging::log("ACTIONS", "ActionsWindow: word backspace pressed");
                 self.dialog.update(cx, |d, cx| {
                     d.delete_previous_search_word(window, cx);
+                });
+                cx.notify();
+                true
+            }
+            Some(ActionsWindowKeyIntent::Delete) => {
+                self.dialog.update(cx, |d, cx| {
+                    d.delete_search_input(window, cx);
+                });
+                cx.notify();
+                true
+            }
+            Some(ActionsWindowKeyIntent::DeleteWord) => {
+                self.dialog.update(cx, |d, cx| {
+                    d.delete_next_search_word(window, cx);
                 });
                 cx.notify();
                 true

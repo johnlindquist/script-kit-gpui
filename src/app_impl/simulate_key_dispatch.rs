@@ -1696,6 +1696,15 @@ impl ScriptListApp {
                                         }
                                     });
                                 }
+                                "delete" if !has_cmd && !_has_ctrl => {
+                                    dialog.update(ctx, |d, cx| {
+                                        if _has_alt {
+                                            d.delete_next_search_word(window, cx);
+                                        } else {
+                                            d.delete_search_input(window, cx);
+                                        }
+                                    });
+                                }
                                 "a" if has_cmd && !has_shift && !_has_alt && !_has_ctrl => {
                                     dialog.update(ctx, |d, cx| {
                                         d.select_all_search_input(window, cx);

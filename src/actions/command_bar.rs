@@ -59,6 +59,9 @@ enum CommandBarKeyIntent {
     Backspace,
     /// Option+Backspace: delete the trailing word, like the main search input.
     BackspaceWord,
+    Delete,
+    /// Option+Delete: delete the following word.
+    DeleteWord,
     MoveCursorLeft {
         select: bool,
     },
@@ -149,7 +152,7 @@ fn command_bar_key_intent(key: &str, modifiers: &gpui::Modifiers) -> Option<Comm
             select: modifiers.shift,
         });
     }
-    if is_key_backspace(key) || key.eq_ignore_ascii_case("delete") {
+    if is_key_backspace(key) {
         // Option+Backspace deletes a word like the main search input;
         // Cmd+Backspace falls through so destructive action shortcuts
         // (e.g. Delete Note ⌘⌫) can be handled by the host.
@@ -158,6 +161,15 @@ fn command_bar_key_intent(key: &str, modifiers: &gpui::Modifiers) -> Option<Comm
         }
         if !modifiers.platform && !modifiers.control {
             return Some(CommandBarKeyIntent::Backspace);
+        }
+        return None;
+    }
+    if key.eq_ignore_ascii_case("delete") {
+        if modifiers.alt && !modifiers.platform && !modifiers.control {
+            return Some(CommandBarKeyIntent::DeleteWord);
+        }
+        if !modifiers.platform && !modifiers.control {
+            return Some(CommandBarKeyIntent::Delete);
         }
         return None;
     }
@@ -569,6 +581,30 @@ mod command_bar_key_intent_tests {
         assert_eq!(
             command_bar_key_intent("backspace", &no_mods),
             Some(CommandBarKeyIntent::Backspace)
+        );
+        assert_eq!(
+            command_bar_key_intent("delete", &no_mods),
+            Some(CommandBarKeyIntent::Delete)
+        );
+        assert_eq!(
+            command_bar_key_intent(
+                "delete",
+                &gpui::Modifiers {
+                    alt: true,
+                    ..no_mods
+                }
+            ),
+            Some(CommandBarKeyIntent::DeleteWord)
+        );
+        assert_eq!(
+            command_bar_key_intent(
+                "delete",
+                &gpui::Modifiers {
+                    platform: true,
+                    ..no_mods
+                }
+            ),
+            None
         );
     }
 
@@ -1035,11 +1071,31 @@ impl CommandBar {
         }
     }
 
+    /// Forward Delete to the entity-backed Actions search input.
+    pub fn handle_delete<V: 'static>(&mut self, window: &mut Window, cx: &mut Context<V>) {
+        if let Some(dialog) = &self.dialog {
+            dialog.update(cx, |d, cx| {
+                d.delete_search_input(window, cx);
+            });
+            notify_actions_window(cx);
+        }
+    }
+
     /// Forward Option+Backspace to the entity-backed Actions search input.
     pub fn handle_backspace_word<V: 'static>(&mut self, window: &mut Window, cx: &mut Context<V>) {
         if let Some(dialog) = &self.dialog {
             dialog.update(cx, |d, cx| {
                 d.delete_previous_search_word(window, cx);
+            });
+            notify_actions_window(cx);
+        }
+    }
+
+    /// Forward Option+Delete to the entity-backed Actions search input.
+    pub fn handle_delete_word<V: 'static>(&mut self, window: &mut Window, cx: &mut Context<V>) {
+        if let Some(dialog) = &self.dialog {
+            dialog.update(cx, |d, cx| {
+                d.delete_next_search_word(window, cx);
             });
             notify_actions_window(cx);
         }
@@ -1354,6 +1410,14 @@ pub trait CommandBarHost {
             }
             Some(CommandBarKeyIntent::BackspaceWord) => {
                 self.command_bar_mut().handle_backspace_word(window, cx);
+                true
+            }
+            Some(CommandBarKeyIntent::Delete) => {
+                self.command_bar_mut().handle_delete(window, cx);
+                true
+            }
+            Some(CommandBarKeyIntent::DeleteWord) => {
+                self.command_bar_mut().handle_delete_word(window, cx);
                 true
             }
             Some(CommandBarKeyIntent::MoveCursorLeft { select }) => {
