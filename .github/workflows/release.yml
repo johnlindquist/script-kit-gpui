@@ -410,6 +410,13 @@ jobs:
         with:
           bun-version: 1.2.21
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "macos-release"
+          workspaces: ". -> target-agent/pools/agent-debug"
+          cache-all-crates: true
+          cache-on-failure: true
+
       - name: Download executed Rust gate evidence
         uses: actions/download-artifact@v4
         with:
@@ -452,6 +459,8 @@ jobs:
           chmod 0755 target/pi-sidecar/pi
 
       - name: Build and install the exact pre-sign compile artifact
+        env:
+          SCRIPT_KIT_AGENT_TIMEOUT_MS: "5400000"
         run: |
           mkdir -p .test-output/release
           bun scripts/devtools/devtools.ts build-ops act app-build \
