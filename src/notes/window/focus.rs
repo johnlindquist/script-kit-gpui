@@ -176,8 +176,14 @@ impl NotesApp {
         match surface {
             NotesFocusSurface::Editor => {
                 self.search_was_last_focused = false;
-                self.editor_state
-                    .update(cx, |state, cx| state.focus(window, cx));
+                if self.get_visible_notes().is_empty() && self.selected_note_id.is_none() {
+                    // render_editor_body shows a placeholder instead of the input.
+                    // Keep Notes shortcuts reachable on the mounted window root.
+                    self.focus_handle.focus(window, cx);
+                } else {
+                    self.editor_state
+                        .update(cx, |state, cx| state.focus(window, cx));
+                }
             }
             NotesFocusSurface::Search => {
                 self.search_was_last_focused = true;
