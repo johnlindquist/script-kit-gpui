@@ -1,8 +1,0 @@
-CLAUDE.md
-GLOSSARY.md
-src/actions_button_visibility_tests.rs
-src/footer_popup.rs
-src/list_item_tests.rs
-src/mcp_computer_use_tools.rs
-src/test_support/agent_chat_portal.rs
-src/warning_banner.rs

@@ -1,6 +1,0 @@
-AGENTS.md
-GLOSSARY.md
-src/list_item_tests.rs
-src/test_support/agent_chat_portal.rs
-src/actions_button_visibility_tests.rs
-src/warning_banner.rs

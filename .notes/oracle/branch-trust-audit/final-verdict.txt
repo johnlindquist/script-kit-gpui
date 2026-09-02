@@ -1,4 +1,0 @@
-VERDICT: PASS
-MERGE_DISPOSITION: BLOCKED
-PUBLICATION: https://coral-oyster-xrzw.here.now/
-REASON: The audit and permanent article are complete, but the branch proof-admission system reproducibly accepts forged or incomplete evidence.
