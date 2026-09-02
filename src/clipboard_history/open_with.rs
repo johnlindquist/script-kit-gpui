@@ -127,11 +127,19 @@ mod macos {
 
 #[cfg(target_os = "macos")]
 pub fn get_apps_for_file(path: &Path) -> Vec<AppInfo> {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)
+    {
+        tracing::warn!(%error, "Launch Services lookup refused");
+        return Vec::new();
+    }
     macos::get_apps_for_file(path)
 }
 
 #[cfg(target_os = "macos")]
 pub fn open_file_with_app(file_path: &Path, app_path: &Path) -> Result<(), String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+        .map_err(|error| error.to_string())?;
     macos::open_file_with_app(file_path, app_path)
 }
 

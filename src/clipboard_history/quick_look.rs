@@ -11,6 +11,8 @@ use super::{content_to_png_bytes, get_entry_content, ClipboardEntryMeta, Content
 
 /// Preview a clipboard history entry with Quick Look (macOS) or open fallback.
 pub fn quick_look_entry(entry: &ClipboardEntryMeta) -> Result<(), String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+        .map_err(|error| error.to_string())?;
     let content = get_entry_content(&entry.id)
         .ok_or_else(|| "Failed to load clipboard entry content".to_string())?;
 

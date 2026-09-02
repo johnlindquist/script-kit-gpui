@@ -35,6 +35,7 @@ use tracing::debug;
 /// * `Err` with description on failure
 #[cfg(target_os = "macos")]
 pub fn copy_image_with_file_url(png_bytes: &[u8], file_path: &Path) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     // SAFETY: All ObjC objects (pasteboard, data, image, url) are nil-checked after
     // creation. NSData is created from a valid slice. NSImage/NSURL are initialized
     // from the validated data/path. Pasteboard writeObjects uses Foundation's copy semantics.
@@ -124,6 +125,7 @@ pub fn copy_image_with_file_url(_png_bytes: &[u8], _file_path: &Path) -> Result<
 /// * `Ok(())` on success
 /// * `Err` with description on failure
 pub fn copy_blob_with_file_url(blob_content: &str) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     use super::blob_store::{get_blob_dir, is_blob_content, load_blob};
 
     if !is_blob_content(blob_content) {

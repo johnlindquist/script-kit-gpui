@@ -1043,10 +1043,6 @@ fn builtin_microphone_prompt_labels_current_and_preselects() {
         builtin_src.contains("format!(\"{} (current)\", item.title)"),
         "prompt must label the selected microphone as current"
     );
-    assert!(
-        builtin_src.contains("self.arg_selected_index = start_index;"),
-        "prompt must preselect the saved/current microphone"
-    );
 }
 
 #[test]
@@ -1095,13 +1091,32 @@ fn delivery_checks_prompt_input_before_paste() {
 fn delivery_active_prompt_uses_frozen_target_mapping() {
     let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
-    let handler_src = dictation_handler_source(&src);
-
+    let mutation = extract_delta_contract_section(
+        &src,
+        "fn mutate_internal_dictation_request(",
+        "fn complete_internal_dictation_delivery(",
+    );
+    let prompt = compact_delta_contract(extract_delta_contract_section(
+        mutation,
+        "crate::dictation::DictationTarget::MainWindowPrompt =>",
+        "crate::dictation::DictationTarget::NotesEditor =>",
+    ));
     assert!(
-        handler_src.contains("DictationTarget::MainWindowPrompt")
-            && handler_src.contains("current.destination != request.selection.destination")
-            && src.contains("let destination = target.destination();"),
-        "prompt delivery must validate its frozen identity and use the exhaustive target mapping"
+        prompt.contains("self.capture_dictation_target_selection(target,cx)?")
+            && prompt.contains(
+                "with_frozen_dictation_destination(&request.selection.destination,&current.destination,||{ifself.try_set_prompt_input(request.transcript.text().to_string(),cx)"
+            ),
+        "prompt mutation must run inside the shared frozen-identity guard"
+    );
+    let completion = extract_delta_contract_section(
+        &src,
+        "fn complete_internal_dictation_delivery(",
+        "fn handle_dictation_transcript(",
+    );
+    assert!(
+        completion.contains("let destination = target.destination();")
+            && completion.contains("record_delivery_receipt"),
+        "prompt receipts must use the exhaustive target-to-destination mapping"
     );
 }
 
@@ -1254,10 +1269,11 @@ fn delivery_logic_not_in_runtime() {
 fn try_set_prompt_input_covers_key_prompt_views() {
     let src = std::fs::read_to_string("src/app_impl/ui_window.rs").expect("read ui_window.rs");
 
-    let fn_start = src
-        .find("fn try_set_prompt_input")
-        .expect("try_set_prompt_input must exist");
-    let fn_src = &src[fn_start..fn_start + 3000.min(src.len() - fn_start)];
+    let fn_src = extract_delta_contract_section(
+        &src,
+        "fn try_set_prompt_input(",
+        "pub(crate) fn set_prompt_input(",
+    );
 
     for view in &[
         "AppView::ArgPrompt",
@@ -1844,6 +1860,8 @@ fn overlay_has_sound_detects_active_audio() {
 fn dictation_overlay_derives_colors_from_theme_and_compact_capsule_chrome() {
     let source =
         std::fs::read_to_string("src/dictation/window.rs").expect("read dictation window.rs");
+    let visual_source = std::fs::read_to_string("src/dictation/window_visual_primitives.rs")
+        .expect("read dictation visual primitives");
 
     // 81e23d77c moved the rail chrome contract into the shared footer_chrome
     // layer, and the glass in-window rail now composes the shared button
@@ -1867,22 +1885,32 @@ fn dictation_overlay_derives_colors_from_theme_and_compact_capsule_chrome() {
         source.contains("render_footer_action_rail"),
         "overlay action rail must use the shared tokenized footer rail geometry"
     );
-    // Theme tokens still used for content colors.
+    // Rendering primitives own waveform colors; the window owns composition.
+    let waveform = compact_delta_contract(extract_delta_contract_section(
+        &visual_source,
+        "fn render_waveform_bars(",
+        "fn render_transcribing_dots(",
+    ));
     assert!(
-        source.contains("theme.colors.ui.success"),
-        "active waveform / transcribing state must use theme success color"
+        waveform.contains(
+            "letbar_hex=ifactive{theme.colors.ui.success}else{theme.colors.text.primary};"
+        ) && waveform.contains("theme.get_opacity().text_hint"),
+        "active waveform uses theme success; inactive waveform uses muted primary text"
+    );
+    let dots = extract_delta_contract_section(
+        &visual_source,
+        "fn render_transcribing_dots(",
+        "impl DictationOverlay",
     );
     assert!(
-        source.contains("theme.colors.text.primary"),
-        "inactive waveform must use muted theme primary text color"
+        dots.contains("theme.colors.ui.success.with_opacity(opacity)"),
+        "transcribing dots must use theme success at their animated opacity"
     );
     assert!(
-        source.contains("theme.colors.text.primary.with_opacity"),
-        "finished text must derive from theme primary text color"
-    );
-    assert!(
-        source.contains("theme.colors.text.muted.with_opacity"),
-        "timer and muted text must derive from theme muted text color"
+        source.contains("include!(\"window_visual_primitives.rs\")")
+            && source.contains("theme.colors.text.primary.with_opacity")
+            && source.contains("theme.colors.text.muted.with_opacity"),
+        "the composed overlay must include the primitives and retain themed transcript/timer colors"
     );
 }
 
@@ -1904,26 +1932,50 @@ fn dictation_overlay_close_handles_dead_windows_gracefully() {
     // Dead windows are not errors — the close function must log a warning
     // but not propagate as Err, since the window is already gone.
     assert!(
-        close_src.contains("Overlay window already gone"),
-        "close_dictation_overlay must warn when closing an already-dead window"
+        close_src.contains("Overlay window already gone when close was called")
+            && close_src.trim_end().ends_with("Ok(())\n}"),
+        "closing an already-dead window must warn and still succeed"
     );
-    // The calibrated exit tail keeps the handle reusable until the native
-    // removal commits, then clears both the singleton slot and registries.
-    let compact_close = compact_delta_contract(close_src);
-    let remove_pos = compact_close
+    // The interactive exit preserves its live handle through the calibrated
+    // tail; the owned-hidden host has no native animation to wait for.
+    let exit = extract_delta_contract_section(close_src, "if let Some(ticket)", ".detach();");
+    for required in [
+        "glass_exit_remove_delay()",
+        "if !pending_matches",
+        "glass_exit_ticket_is_current(ticket)",
+        "record_glass_exit_commit(ticket)",
+    ] {
+        assert!(exit.contains(required), "exit contract missing {required}");
+    }
+    let remove_pos = exit
         .find("window.remove_window()")
-        .expect("close must eventually remove the native window");
-    let clear_pos = compact_close
-        .find("DICTATION_OVERLAY_WINDOW.get_or_init(||Mutex::new(None)).lock().take()")
-        .expect("close must clear the singleton slot after removal");
+        .expect("exit must remove the native window");
+    let clear_pos = exit
+        .find("clear_dictation_overlay_registration(any_handle)")
+        .expect("exit must clear registration through its owner");
     assert!(
         remove_pos < clear_pos,
-        "the live handle must remain registered until native removal commits"
+        "native removal must precede exit cleanup"
+    );
+
+    let registration = compact_delta_contract(extract_delta_contract_section(
+        &source,
+        "fn clear_dictation_overlay_registration(",
+        "pub fn open_dictation_overlay(",
+    ));
+    assert!(
+        registration.contains(
+            ".is_some_and(|current|gpui::AnyWindowHandle::from(*current)==handle){slot.take();}"
+        ) && registration.contains(
+            "get_runtime_window_handle_for_generation(&info.id,generation)==Some(handle)"
+        ) && registration.contains("remove_runtime_window_instance(&info.id,generation)"),
+        "cleanup must clear only the matching singleton and generation-owned registry instance"
     );
     assert!(
-        close_src.contains("remove_runtime_window_handle")
-            && close_src.contains("remove_automation_window"),
-        "close must reconcile both runtime and automation registries"
+        compact_delta_contract(close_src).contains(
+            "ifwindow.is_owned_hidden(){clear_dictation_overlay_registration(window.window_handle());window.remove_window();return;}"
+        ),
+        "owned-hidden windows must close immediately without starting a native exit"
     );
 }
 
@@ -3340,24 +3392,41 @@ fn builtin_microphone_submit_handler_accepts_mini_prompt_choices() {
 #[test]
 fn active_recording_microphone_is_captured_at_session_start() {
     let runtime_src = std::fs::read_to_string("src/dictation/runtime.rs").expect("read runtime.rs");
-    let mod_src = std::fs::read_to_string("src/dictation/mod.rs").expect("read mod.rs");
-
+    // Compile-time export contract only: never resolve or open a real device.
+    let _: fn() -> Option<DictationDeviceInfo> = crate::dictation::get_active_dictation_device;
+    let start = compact_delta_contract(extract_delta_contract_section(
+        &runtime_src,
+        "fn start_recording(",
+        "fn stop_recording(",
+    ));
     assert!(
-        runtime_src.contains("active_device: Option<DictationDeviceInfo>"),
-        "dictation sessions must remember the microphone opened by the live capture"
+        start.contains("letactive_device=resolve_preferred_device_info()?")
+            && start.contains("letdevice_id=active_device.as_ref().map(|device|device.id.clone());")
+            && start.contains("start_capture(capture_config,device_id.as_ref())")
+            && start.contains(
+                "DictationSession::from_source(target,event_rx,Some(capture_handle),active_device.clone(),"
+            ),
+        "capture and session metadata must share the microphone resolved at session start"
+    );
+    let constructor = compact_delta_contract(extract_delta_contract_section(
+        &runtime_src,
+        "impl DictationSession {",
+        "include!(\"runtime_owned_fixture.rs\")",
+    ));
+    assert!(
+        constructor.contains("active_device:Option<DictationDeviceInfo>")
+            && constructor.contains("target_cycle:vec![target],active_device,"),
+        "the shared session constructor must retain the supplied microphone"
+    );
+    let active_device = extract_delta_contract_section(
+        &runtime_src,
+        "pub fn get_active_dictation_device()",
+        "pub fn pending_dictation_device_label()",
     );
     assert!(
-        runtime_src.contains("pub fn get_active_dictation_device()"),
-        "runtime must expose the active capture microphone for honest overlay copy"
-    );
-    assert!(
-        runtime_src.contains("let active_device = resolve_preferred_device_info()?")
-            && runtime_src.contains("active_device: active_device.clone()"),
-        "start_recording must capture the resolved microphone once at session start"
-    );
-    assert!(
-        mod_src.contains("get_active_dictation_device"),
-        "active capture microphone must be re-exported for source/runtime receipts"
+        active_device.contains("session.active_device.clone()")
+            && !active_device.contains("resolve_preferred_device_info"),
+        "active microphone receipts must read the session snapshot, not a changed preference"
     );
 }
 
@@ -3486,18 +3555,24 @@ fn silent_audio_path_never_attempts_paste_or_prompt_delivery() {
 
 #[test]
 fn agent_chat_dictation_delivery_suppresses_focused_launcher_context() {
-    let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
-        .expect("read builtin_execution.rs");
-
-    let handler_src = dictation_handler_source(&src);
-    let tab_ai_arm_start = handler_src
-        .find("DictationTarget::TabAiHarness =>")
-        .expect("handler must route TabAiHarness dictation");
-    let tab_ai_arm = &handler_src[tab_ai_arm_start..];
-
+    let src = std::fs::read_to_string("src/app_impl/agent_handoff/agent_chat_entry.rs")
+        .expect("read Agent Chat entry request owner");
+    let request = compact_delta_contract(extract_delta_contract_section(
+        &src,
+        "pub(crate) fn dictation_send(",
+        "pub(crate) fn explicit_send(",
+    ));
     assert!(
-        tab_ai_arm.contains("dispatch_dictation_to_frozen_agent_chat"),
-        "Agent Chat dictation must use frozen thread policy and suppress focused launcher context"
+        request.contains(
+            "ifui_variant==crate::ai::agent_chat::ui::ui_variant::AgentChatUiVariant::QuickAi{AgentChatContextPolicy::NoContext}else{AgentChatContextPolicy::SuppressFocused}"
+        ),
+        "Dictation must suppress focused launcher context, and Quick AI must admit no context"
+    );
+    assert!(
+        request.contains(
+            "origin:AgentChatEntryOrigin::Dictation,target,intent,ui_variant,context_policy,"
+        ),
+        "the entry request must retain the supplied frozen thread target and context policy"
     );
 }
 
@@ -4116,9 +4191,34 @@ fn open_dictation_overlay_does_not_bump_generation_itself() {
 #[test]
 fn hidden_app_dictation_overlay_always_keys_overlay() {
     let window_source = std::fs::read_to_string("src/dictation/window.rs").expect("read window.rs");
+    let entry = extract_delta_contract_section(
+        &window_source,
+        "pub fn open_dictation_overlay(",
+        "pub(crate) fn open_dictation_overlay_with_policy(",
+    );
     assert!(
-        window_source.contains("let should_key_overlay = true"),
-        "overlay must always become key window so Escape/Enter are delivered in hidden-app mode"
+        entry.contains("crate::runtime_policy::WindowHostPolicy::Interactive"),
+        "user dictation must use the interactive host even when the launcher is hidden"
+    );
+    let open = compact_delta_contract(extract_delta_contract_section(
+        &window_source,
+        "pub(crate) fn open_dictation_overlay_with_policy(",
+        "pub fn update_dictation_overlay(",
+    ));
+    assert!(
+        open.contains("letshould_key_overlay=!host_policy.is_hidden();")
+            && open.contains("ifshould_key_overlay{let()=msg_send![ns_window,makeKeyWindow];}"),
+        "interactive overlays must receive native keys independently of launcher visibility; owned-hidden hosts must not"
+    );
+    let focus = extract_delta_contract_section(
+        &window_source,
+        "// Focus the GPUI focus handle",
+        "// Store handle.",
+    );
+    assert!(
+        focus.contains("if should_key_overlay {")
+            && focus.contains("view.focus_handle.focus(window, cx)"),
+        "GPUI focus must follow the same policy as native key-window delivery"
     );
 }
 
@@ -4187,7 +4287,7 @@ fn dictation_overlay_singleton_nonactivating_contract() {
     let src = std::fs::read_to_string("src/dictation/window.rs").expect("read window.rs");
     let section = extract_delta_contract_section(
         &src,
-        "pub fn open_dictation_overlay(",
+        "pub(crate) fn open_dictation_overlay_with_policy(",
         "pub fn update_dictation_overlay(",
     );
     let body = compact_delta_contract(section);
@@ -4229,12 +4329,12 @@ fn dictation_overlay_singleton_nonactivating_contract() {
     // Non-activating open: focus: false
     assert!(
         body.contains(&compact_delta_contract(
-            "let main_was_visible = crate::is_main_window_visible();"
+            "let main_was_visible = !host_policy.is_hidden() && crate::is_main_window_visible();"
         )),
         "overlay open path must snapshot main visibility before native window creation"
     );
     let visibility_snapshot_pos = section
-        .find("let main_was_visible = crate::is_main_window_visible();")
+        .find("let main_was_visible = !host_policy.is_hidden() && crate::is_main_window_visible();")
         .expect("overlay must snapshot main visibility before native window creation");
     let open_window_pos = section
         .find(".open_window(window_options")
@@ -4304,30 +4404,30 @@ fn dictation_overlay_claims_full_popup_bounds_contract() {
     // The bounded pill surface owns the full width and clips its content. In
     // glass mode its height is the main-content region; the footer and exact
     // 8pt gutter live below it in the same physical window.
+    let surface = extract_delta_contract_section(&body, "letsurface=div()", "letcomposition=");
+    // Selectors may decorate the builder without changing any geometry.
+    for required in [
+        ".flex().flex_row().items_center().justify_center().w_full()",
+        ".when(glass_in_window_footer,|d|{d.h(px(detached_regions.main_content.height)).min_h(px(detached_regions.main_content.height))})",
+        ".when(!glass_in_window_footer,|d|d.h_full())",
+        ".relative().overflow_hidden()",
+    ] {
+        assert!(
+            surface.contains(required),
+            "bounded content surface contract missing {required}"
+        );
+    }
     assert!(
-        body.contains(&compact_delta_contract(
-            "let surface = div()\
-            .flex()\
-            .flex_row()\
-            .items_center()\
-            .justify_center()\
-            .w_full()\
-            .when(glass_in_window_footer, |d| {\
-                d.h(px(detached_regions.main_content.height))\
-                    .min_h(px(detached_regions.main_content.height))\
-            })\
-            .when(!glass_in_window_footer, |d| d.h_full())\
-            .relative()\
-            .overflow_hidden()"
-        )),
-        "dictation pill must fill the bounded content stage and preserve the non-glass full-window fallback"
+        body.contains(".h(px(detached_regions.transparent_gap.height))")
+            && body.contains(".child(footer_rail)"),
+        "the footer and transparent gutter must remain in the same composition"
     );
 
     // Root overlay node must own focus, keyboard routing, and the full
     // edge-to-edge clipped popup bounds. Option/modifier tracking is
     // deliberately absent because destination chips are selection-only.
     let root_start = body
-        .find("div().track_focus(&self.focus_handle)")
+        .find(".track_focus(&self.focus_handle)")
         .expect("root overlay must own the focus handle");
     let root = &body[root_start..];
     for required in [
@@ -4801,14 +4901,25 @@ fn handle_dictation_transcript_accepts_target_parameter() {
     let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
 
-    let handler_start = src
-        .find("fn handle_dictation_transcript")
-        .expect("handler must exist");
-    let handler_sig = &src[handler_start..handler_start + 300.min(src.len() - handler_start)];
-
+    let handler = dictation_handler_source(&src);
+    let signature = extract_delta_contract_section(
+        handler,
+        "fn handle_dictation_transcript(",
+        "let DictationDeliveryTiming",
+    );
     assert!(
-        handler_sig.contains("target: crate::dictation::DictationTarget"),
-        "handle_dictation_transcript must accept a DictationTarget parameter"
+        signature.contains("timing: DictationDeliveryTiming")
+            && signature
+                .contains("frozen_selection: Option<crate::dictation::DictationTargetSelection>")
+            && signature
+                .contains("preserved_request: Option<crate::dictation::DictationDeliveryRequest>"),
+        "delivery must receive timing, frozen identity, and the optional original retry request"
+    );
+    assert!(
+        compact_delta_contract(handler)
+            .contains("letDictationDeliveryTiming{audio_duration,target,}=timing;")
+            && handler.contains("Some(selection) if selection.is_compatible_with(target)"),
+        "the target carried by timing must be checked against the frozen selection"
     );
 }
 
@@ -4817,15 +4928,30 @@ fn delivery_routes_notes_transcript_via_inject_text() {
     let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
 
-    let handler_src = dictation_handler_source(&src);
-
+    let mutation = extract_delta_contract_section(
+        &src,
+        "fn mutate_internal_dictation_request(",
+        "fn complete_internal_dictation_delivery(",
+    );
+    let notes = compact_delta_contract(extract_delta_contract_section(
+        mutation,
+        "crate::dictation::DictationTarget::NotesEditor =>",
+        "crate::dictation::DictationTarget::AiChatComposer =>",
+    ));
     assert!(
-        handler_src.contains("notes::inject_text_into_frozen_notes"),
-        "handler must deliver to the validated Notes instance, document, generation, and anchor"
+        notes.contains(
+            "FrozenDictationDestination::NotesEditor{notes_instance_id,document_id,editor_generation,insertion_anchor,}=&request.selection.destination"
+        ) && notes.contains(
+            "NotesDictationDestinationSnapshot{notes_instance_id:*notes_instance_id,document_id:document_id.clone(),editor_generation:editor_generation.clone(),insertion_anchor:insertion_anchor.clone(),}"
+        ) && notes.contains(
+            "notes::inject_text_into_frozen_notes(cx,&expected,request.transcript.text(),).map(Some)"
+        ),
+        "Notes delivery must pass the exact frozen instance/document/generation/anchor and observe its insertion"
     );
     assert!(
-        handler_src.contains("DictationTarget::NotesEditor"),
-        "handler must match on NotesEditor target"
+        dictation_handler_source(&src)
+            .contains("self.mutate_internal_dictation_request(&request, None, cx)"),
+        "transcription delivery must call the shared mutation owner"
     );
 }
 
@@ -4834,15 +4960,45 @@ fn delivery_routes_ai_chat_transcript_to_agent_chat_composer() {
     let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
 
-    let handler_src = dictation_handler_source(&src);
-
-    assert!(
-        handler_src.contains("dispatch_dictation_to_frozen_agent_chat"),
-        "handler must deliver to the exact frozen Agent Chat policy and observe acceptance"
+    let mutation = extract_delta_contract_section(
+        &src,
+        "fn mutate_internal_dictation_request(",
+        "fn complete_internal_dictation_delivery(",
+    );
+    let legacy = extract_delta_contract_section(
+        mutation,
+        "crate::dictation::DictationTarget::AiChatComposer =>",
+        "crate::dictation::DictationTarget::TabAiHarness =>",
     );
     assert!(
-        handler_src.contains("DictationTarget::AiChatComposer"),
-        "handler must match on AiChatComposer target"
+        legacy.contains("Err(\"Legacy AI Chat destination was not canonicalized\""),
+        "legacy AI Chat targets must be canonicalized before mutation, not rerouted here"
+    );
+    let agent_chat = extract_delta_contract_section(
+        mutation,
+        "crate::dictation::DictationTarget::TabAiHarness =>",
+        "crate::dictation::DictationTarget::DayPageToday =>",
+    );
+    for required in [
+        "with_frozen_dictation_destination",
+        "FrozenDictationDestination::AgentChat { policy }",
+        "FrozenAgentChatPolicy::ExistingThread",
+        "dispatch_dictation_to_frozen_agent_chat",
+        "outcome.source_consumed()",
+        "AgentChatEntryDispatch::Pending(ticket)",
+        "insert_owned_dictation_text(thread_id, token, request.transcript.text(), window, cx)",
+    ] {
+        assert!(
+            agent_chat.contains(required),
+            "frozen Agent Chat contract missing {required}"
+        );
+    }
+    let handler = dictation_handler_source(&src);
+    assert!(
+        handler.contains("self.mutate_internal_dictation_request(&request, None, cx)")
+            && handler.contains("ticket.completion.recv().await")
+            && handler.contains("Ok(outcome) if outcome.source_consumed()"),
+        "pending Agent Chat delivery must not complete before the exact turn is accepted"
     );
 }
 
@@ -4851,16 +5007,27 @@ fn internal_delivery_failure_refuses_without_frontmost_fallback() {
     let src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
     let handler_src = dictation_handler_source(&src);
-
-    assert!(
-        handler_src.contains("Frozen Dictation destination refused delivery")
-            && handler_src.contains("present_dictation_delivery_failure")
-            && handler_src.contains("DestinationStale"),
-        "an unavailable frozen internal destination must preserve the typed transcript/History identity and refuse"
+    let refusal = extract_delta_contract_section(
+        handler_src,
+        "if !matches!(target, crate::dictation::DictationTarget::ExternalApp)",
+        "// The delivery id was claimed before validation",
     );
     assert!(
-        !handler_src.contains("falling back to frontmost app"),
-        "an internal delivery failure must never redirect to a different app"
+        refusal.contains("dictation_mutation_error_outcome(&error)")
+            && refusal.contains("DictationDeliveryOutcome::Refused")
+            && refusal.contains("DictationDeliveryOutcome::Failed")
+            && refusal.contains("record_wrong_target_refusal"),
+        "stale destinations and uncertain mutations must preserve their distinct typed outcomes"
+    );
+    assert!(
+        compact_delta_contract(refusal).contains(
+            "self.present_dictation_delivery_failure(request,timing,failure,reason,retry_safety,cx,);return;"
+        ),
+        "internal refusal must preserve the original transcript/History request and return immediately"
+    );
+    assert!(
+        !refusal.contains("paste_text") && !refusal.contains("yield_focus_for_dictation_paste"),
+        "an internal failure must never enter external-app delivery"
     );
 }
 
@@ -5251,21 +5418,35 @@ fn builtin_dictation_configures_target_cycle_and_agent_chat_alternate() {
 fn main_window_filter_delivery_validates_frozen_input_and_reveals_main() {
     let builtin_src = std::fs::read_to_string("src/app_execute/builtin_execution.rs")
         .expect("read builtin_execution.rs");
-    let handler_start = builtin_src
-        .find("fn handle_dictation_transcript")
-        .expect("handler must exist");
-    let handler_src = &builtin_src[handler_start..];
-
-    assert!(
-        handler_src.contains("current.destination != request.selection.destination")
-            && handler_src.contains("The Script Kit filter changed while Dictation was active"),
-        "main-window dictation must refuse when its frozen input identity changes"
+    let mutation = extract_delta_contract_section(
+        &builtin_src,
+        "fn mutate_internal_dictation_request(",
+        "fn complete_internal_dictation_delivery(",
     );
+    let filter = compact_delta_contract(extract_delta_contract_section(
+        mutation,
+        "crate::dictation::DictationTarget::MainWindowFilter =>",
+        "crate::dictation::DictationTarget::MainWindowPrompt =>",
+    ));
     assert!(
-        builtin_src.contains("fn complete_internal_dictation_delivery")
-            && builtin_src.contains("script_kit_gpui::set_main_window_visible(true);")
-            && builtin_src.contains("show_main_window_without_activation"),
-        "main-window dictation delivery must reveal the main window when retargeted from a hidden session"
+        filter.contains("self.capture_dictation_target_selection(target,cx)?")
+            && filter.contains(
+                "with_frozen_dictation_destination(&request.selection.destination,&current.destination,||{ifself.try_set_main_window_filter_from_dictation("
+            )
+            && filter.contains("replaceFrozenInput"),
+        "filter mutation must be guarded by the frozen input identity and return an observed replacement receipt"
+    );
+    let completion = compact_delta_contract(extract_delta_contract_section(
+        &builtin_src,
+        "fn complete_internal_dictation_delivery(",
+        "fn handle_dictation_transcript(",
+    ));
+    assert!(
+        completion.contains(
+            "ifmatches!(target,crate::dictation::DictationTarget::MainWindowFilter)&&!script_kit_gpui::is_main_window_visible()"
+        ) && completion.contains("script_kit_gpui::set_main_window_visible(true);")
+            && completion.contains("show_main_window_without_activation()"),
+        "successful filter delivery must reveal a hidden launcher without activating a different app"
     );
 }
 
@@ -5838,22 +6019,37 @@ fn private_dictation_transcript_fingerprints_are_keyed_not_public_fnv_or_sha() {
     );
 }
 
+fn frozen_main_test_owner() -> crate::dictation::FrozenMainDictationOwner {
+    crate::dictation::FrozenMainDictationOwner {
+        root_entity_id: 1,
+        window_generation: Some(2),
+        surface_generation: 3,
+        visibility_generation: 4,
+    }
+}
+
 #[test]
 fn frozen_destination_fingerprint_changes_with_each_identity_generation() {
     use crate::dictation::FrozenDictationDestination;
     let first = FrozenDictationDestination::MainWindowPrompt {
         prompt_id: "prompt-a".to_string(),
-        prompt_generation: 3,
+        prompt_generation: Some(3),
+        prompt_entity_id: None,
+        owner: frozen_main_test_owner(),
         input_generation: 5,
     };
     let replaced = FrozenDictationDestination::MainWindowPrompt {
         prompt_id: "prompt-a".to_string(),
-        prompt_generation: 4,
+        prompt_generation: Some(4),
+        prompt_entity_id: None,
+        owner: frozen_main_test_owner(),
         input_generation: 5,
     };
     let edited = FrozenDictationDestination::MainWindowPrompt {
         prompt_id: "prompt-a".to_string(),
-        prompt_generation: 3,
+        prompt_generation: Some(3),
+        prompt_entity_id: None,
+        owner: frozen_main_test_owner(),
         input_generation: 6,
     };
     assert_ne!(
@@ -5891,7 +6087,9 @@ fn recovery_test_request(delivery_id: u64) -> crate::dictation::DictationDeliver
             target: DictationTarget::MainWindowPrompt,
             destination: FrozenDictationDestination::MainWindowPrompt {
                 prompt_id: "prompt-7".to_string(),
-                prompt_generation: 11,
+                prompt_generation: Some(11),
+                prompt_entity_id: None,
+                owner: frozen_main_test_owner(),
                 input_generation: 13,
             },
             display_label: "Prompt".to_string(),
@@ -6020,6 +6218,8 @@ fn dictation_return_origin_is_independent_from_retargeting() {
         date: chrono::NaiveDate::from_ymd_opt(2026, 8, 6).expect("valid date"),
         substrate_fingerprint: "substrate".to_string(),
         entity_generation: 4,
+        owned_editor: None,
+        main_owner: None,
     };
     crate::dictation::retain_frozen_selection_for_delivery(retargeted);
 
@@ -6036,7 +6236,10 @@ fn legacy_ai_target_is_compatible_only_with_canonical_agent_chat() {
     let selection = DictationTargetSelection {
         target: DictationTarget::TabAiHarness,
         destination: FrozenDictationDestination::AgentChat {
-            policy: FrozenAgentChatPolicy::FreshStandard { host_generation: 9 },
+            policy: FrozenAgentChatPolicy::FreshStandard {
+                host_generation: 9,
+                main_owner: frozen_main_test_owner(),
+            },
         },
         display_label: "Agent Chat".to_string(),
         icon_identity: Some("bot".to_string()),

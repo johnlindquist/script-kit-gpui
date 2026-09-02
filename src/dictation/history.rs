@@ -3,6 +3,7 @@
 use crate::dictation::DictationTarget;
 use chrono::{Datelike, Local};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -22,6 +23,8 @@ type HistoryFileSignature = Option<(std::path::PathBuf, std::time::SystemTime, u
 #[derive(Clone)]
 struct DictationHistoryIndexCache {
     signature: HistoryFileSignature,
+    owned: bool,
+    owned_fresh: bool,
     entries: Vec<DictationHistoryEntry>,
 }
 
@@ -29,11 +32,19 @@ pub(crate) type RootDictationHistoryRefresh =
     crate::scripts::root_search_contract::RootOwnedProviderRefresh;
 
 pub(crate) struct RootDictationHistorySnapshot {
-    cache: DictationHistoryIndexCache,
+    cache: anyhow::Result<DictationHistoryIndexCache>,
+}
+
+impl RootDictationHistorySnapshot {
+    pub(crate) fn read_outcome(&self) -> Result<usize, &anyhow::Error> {
+        self.cache.as_ref().map(|cache| cache.entries.len())
+    }
 }
 
 static DICTATION_HISTORY_INDEX_CACHE: OnceLock<Mutex<Option<DictationHistoryIndexCache>>> =
     OnceLock::new();
+// Publication revision, advanced under DICTATION_HISTORY_INDEX_CACHE's lock.
+static DICTATION_HISTORY_CACHE_REVISION: AtomicU64 = AtomicU64::new(0);
 static DICTATION_HISTORY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static DICTATION_HISTORY_REFRESH_LIFECYCLE: OnceLock<
     Mutex<crate::scripts::root_search_contract::RootOwnedProviderRefreshLifecycle>,
@@ -355,6 +366,20 @@ fn with_history_write_lock<T>(
     operation()
 }
 
+pub fn seed_owned_dictation_history(entries: &[DictationHistoryEntry]) -> anyhow::Result<()> {
+    let scope = crate::runtime_policy::owned_evaluation()
+        .ok_or_else(|| anyhow::anyhow!("owned_history_required"))?;
+    scope.require_owned_path(&history_path())?;
+    anyhow::ensure!(entries.len() <= 32, "history_fixture_limit");
+    let current = load_history_result()?;
+    for entry in entries {
+        if !current.iter().any(|old| old.id == entry.id) {
+            save_history_entry(entry)?;
+        }
+    }
+    Ok(())
+}
+
 fn save_history_entry(entry: &DictationHistoryEntry) -> std::io::Result<()> {
     let path = history_path();
     with_history_write_lock(|| {
@@ -398,7 +423,7 @@ pub fn load_history_result() -> std::io::Result<Vec<DictationHistoryEntry>> {
 
 fn load_history_result_at(path: &std::path::Path) -> std::io::Result<Vec<DictationHistoryEntry>> {
     let exists = crate::atomic_file::inspect_private_file(path)?;
-    let signature = history_file_signature(path);
+    let signature = history_file_signature(path)?;
     if let Ok(guard) = dictation_history_index_cache().lock() {
         if let Some(cache) = guard.as_ref() {
             if cache.signature == signature {
@@ -416,8 +441,11 @@ fn load_history_result_at(path: &std::path::Path) -> std::io::Result<Vec<Dictati
     if let Ok(mut guard) = dictation_history_index_cache().lock() {
         *guard = Some(DictationHistoryIndexCache {
             signature,
+            owned: false,
+            owned_fresh: true,
             entries: entries.clone(),
         });
+        DICTATION_HISTORY_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
     }
 
     Ok(entries)
@@ -427,18 +455,20 @@ pub fn load_history() -> Vec<DictationHistoryEntry> {
     load_history_result().unwrap_or_default()
 }
 
-fn history_file_signature(path: &std::path::Path) -> HistoryFileSignature {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
+fn history_file_signature(path: &std::path::Path) -> std::io::Result<HistoryFileSignature> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return None;
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
-    Some((
+    Ok(Some((
         path.to_path_buf(),
-        metadata
-            .modified()
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        metadata.modified()?,
         metadata.len(),
-    ))
+    )))
 }
 
 fn migrate_history_entry(mut entry: DictationHistoryEntry) -> DictationHistoryEntry {
@@ -649,12 +679,30 @@ pub fn dictation_history_view_state(
     }
 }
 
+fn dictation_history_cache_is_fresh(cache: &DictationHistoryIndexCache) -> bool {
+    if crate::runtime_policy::is_owned_evaluation() {
+        return cache.owned && cache.owned_fresh;
+    }
+    history_file_signature(&history_path()).is_ok_and(|signature| cache.signature == signature)
+}
+
+/// Accepted snapshot publication revision and row count, never a worker identity.
+pub(crate) fn root_dictation_history_fresh_cache_status() -> Option<(u64, usize)> {
+    let lifecycle = dictation_history_refresh_lifecycle().try_lock().ok()?;
+    if lifecycle.in_flight.is_some() {
+        return None;
+    }
+    let guard = dictation_history_index_cache().try_lock().ok()?;
+    let cache = guard.as_ref()?;
+    let revision = DICTATION_HISTORY_CACHE_REVISION.load(Ordering::Relaxed);
+    (revision != 0 && dictation_history_cache_is_fresh(cache))
+        .then_some((revision, cache.entries.len()))
+}
+
 fn cached_history_entries_if_fresh() -> Option<Vec<DictationHistoryEntry>> {
-    let path = history_path();
-    let signature = history_file_signature(&path);
     let guard = dictation_history_index_cache().lock().ok()?;
     let cache = guard.as_ref()?;
-    (cache.signature == signature).then(|| cache.entries.clone())
+    dictation_history_cache_is_fresh(cache).then(|| cache.entries.clone())
 }
 
 pub(crate) fn root_dictation_history_cache_is_fresh() -> bool {
@@ -670,20 +718,28 @@ pub(crate) fn try_begin_root_dictation_history_refresh() -> Option<RootDictation
 }
 
 fn read_root_dictation_history_snapshot_at(path: &std::path::Path) -> RootDictationHistorySnapshot {
-    let parsed = crate::atomic_file::read_private_file(path)
-        .and_then(|content| parse_history_entries(&content));
-    let signature = if parsed.is_ok() {
-        history_file_signature(path)
-    } else {
-        None
+    let parsed = match crate::atomic_file::read_private_file(path) {
+        Ok(content) => parse_history_entries(&content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
     };
-    let entries = parsed.unwrap_or_default();
     RootDictationHistorySnapshot {
-        cache: DictationHistoryIndexCache { signature, entries },
+        cache: parsed.map_err(anyhow::Error::from).and_then(|entries| {
+            Ok(DictationHistoryIndexCache {
+                signature: history_file_signature(path)?,
+                owned: false,
+                owned_fresh: true,
+                entries,
+            })
+        }),
     }
 }
 
 pub(crate) fn read_root_dictation_history_snapshot() -> RootDictationHistorySnapshot {
+    assert!(
+        !crate::runtime_policy::is_owned_evaluation(),
+        "owned_source_snapshot_required"
+    );
     tracing::debug!(
         target: "script_kit::search",
         worker = ROOT_DICTATION_HISTORY_REFRESH_LABEL,
@@ -692,11 +748,72 @@ pub(crate) fn read_root_dictation_history_snapshot() -> RootDictationHistorySnap
     read_root_dictation_history_snapshot_at(&history_path())
 }
 
+pub(crate) fn owned_root_dictation_history_snapshot(
+    result: anyhow::Result<Vec<DictationHistoryEntry>>,
+) -> anyhow::Result<RootDictationHistorySnapshot> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    Ok(RootDictationHistorySnapshot {
+        cache: result.map(|entries| DictationHistoryIndexCache {
+            signature: None,
+            owned: true,
+            owned_fresh: true,
+            entries,
+        }),
+    })
+}
+
+pub(crate) fn invalidate_owned_root_dictation_history_freshness() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut lifecycle = dictation_history_refresh_lifecycle()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("dictation_lifecycle_poisoned"))?;
+    let mut cache = dictation_history_index_cache()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("dictation_cache_poisoned"))?;
+    lifecycle.next_generation = lifecycle
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("dictation_generation_exhausted"))?;
+    lifecycle.in_flight = None;
+    if let Some(cache) = cache.as_mut() {
+        cache.owned_fresh = false;
+    }
+    Ok(())
+}
+
+pub(crate) fn reset_owned_root_dictation_history() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut lifecycle = dictation_history_refresh_lifecycle()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("dictation_lifecycle_poisoned"))?;
+    let mut cache = dictation_history_index_cache()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("dictation_cache_poisoned"))?;
+    lifecycle.next_generation = lifecycle
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("dictation_generation_exhausted"))?;
+    lifecycle.in_flight = None;
+    *cache = None;
+    Ok(())
+}
+
 fn root_dictation_history_snapshot_is_current_at(
     snapshot: &RootDictationHistorySnapshot,
     path: &std::path::Path,
 ) -> bool {
-    snapshot.cache.signature == history_file_signature(path)
+    snapshot.cache.as_ref().is_ok_and(|cache| {
+        history_file_signature(path).is_ok_and(|signature| cache.signature == signature)
+    })
 }
 
 pub(crate) fn finish_root_dictation_history_refresh(
@@ -709,15 +826,22 @@ pub(crate) fn finish_root_dictation_history_refresh(
     if !lifecycle.finish(refresh) {
         return false;
     }
-    drop(lifecycle);
 
-    if !root_dictation_history_snapshot_is_current_at(&snapshot, &history_path()) {
+    let owned = crate::runtime_policy::is_owned_evaluation();
+    if !owned && !root_dictation_history_snapshot_is_current_at(&snapshot, &history_path()) {
+        return false;
+    }
+    let Ok(snapshot) = snapshot.cache else {
+        return false;
+    };
+    if snapshot.owned != owned {
         return false;
     }
     let Ok(mut cache) = dictation_history_index_cache().lock() else {
         return false;
     };
-    *cache = Some(snapshot.cache);
+    *cache = Some(snapshot);
+    DICTATION_HISTORY_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
     true
 }
 
@@ -792,7 +916,16 @@ pub fn search_root_dictation_history_cached(
         return Vec::new();
     }
 
-    let Some(entries) = cached_history_entries_if_fresh() else {
+    let entries = dictation_history_index_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .as_ref()
+                .filter(|cache| cache.owned == crate::runtime_policy::is_owned_evaluation())
+                .map(|cache| cache.entries.clone())
+        });
+    let Some(entries) = entries else {
         tracing::info!(
             category = "DICTATION",
             event = "root_dictation_history_search_cache_miss",
@@ -948,6 +1081,13 @@ pub fn delete_history_entry(entry_id: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn owned_dictation_snapshots_and_resets_require_runtime_authority() {
+        assert!(owned_root_dictation_history_snapshot(Ok(Vec::new())).is_err());
+        assert!(reset_owned_root_dictation_history().is_err());
+        assert!(invalidate_owned_root_dictation_history_freshness().is_err());
+    }
+
     struct TestEnv {
         _sk_path_lock: std::sync::MutexGuard<'static, ()>,
         _provider_json_lock: std::sync::MutexGuard<'static, ()>,
@@ -984,6 +1124,50 @@ mod tests {
             crate::mcp_resources::clear_provider_json_slots();
             let _ = &self.tempdir;
         }
+    }
+
+    #[test]
+    fn fresh_dictation_cache_proof_tracks_publication_freshness_and_worker_ownership() {
+        let _env = TestEnv::new();
+        invalidate_history_cache();
+        assert!(root_dictation_history_fresh_cache_status().is_none());
+        let refresh = try_begin_root_dictation_history_refresh().unwrap();
+        assert!(root_dictation_history_fresh_cache_status().is_none());
+        assert!(finish_root_dictation_history_refresh(
+            refresh,
+            read_root_dictation_history_snapshot()
+        ));
+        let (revision, count) = root_dictation_history_fresh_cache_status().unwrap();
+        assert!(revision > 0);
+        assert_eq!(count, 0);
+        {
+            let _cache = dictation_history_index_cache().lock().unwrap();
+            assert!(root_dictation_history_fresh_cache_status().is_none());
+        }
+        let worker = dictation_history_refresh_lifecycle()
+            .lock()
+            .unwrap()
+            .begin(
+                sk_protocol::command_contract::CommandSource::Dictation,
+                false,
+            )
+            .unwrap();
+        assert!(root_dictation_history_fresh_cache_status().is_none());
+        assert!(discard_root_dictation_history_refresh(worker));
+        assert_eq!(
+            root_dictation_history_fresh_cache_status(),
+            Some((revision, 0))
+        );
+        crate::atomic_file::write_private_atomic(&history_path(), b"").unwrap();
+        assert!(root_dictation_history_fresh_cache_status().is_none());
+        let refresh = try_begin_root_dictation_history_refresh().unwrap();
+        assert!(finish_root_dictation_history_refresh(
+            refresh,
+            read_root_dictation_history_snapshot()
+        ));
+        assert!(root_dictation_history_fresh_cache_status().unwrap().0 > revision);
+        invalidate_history_cache();
+        assert!(root_dictation_history_fresh_cache_status().is_none());
     }
 
     #[test]
@@ -1143,11 +1327,35 @@ mod tests {
 
         let snapshot = read_root_dictation_history_snapshot_at(&path);
 
-        assert!(snapshot.cache.entries.is_empty());
-        assert!(snapshot.cache.signature.is_none());
+        assert!(snapshot.read_outcome().is_err());
         assert!(!root_dictation_history_snapshot_is_current_at(
             &snapshot, &path
         ));
+    }
+
+    #[test]
+    fn dictation_read_outcome_distinguishes_failure_from_successful_empty() {
+        let failed = RootDictationHistorySnapshot {
+            cache: Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()),
+        };
+        assert_eq!(
+            failed
+                .read_outcome()
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let empty = RootDictationHistorySnapshot {
+            cache: Ok(DictationHistoryIndexCache {
+                signature: None,
+                owned: true,
+                owned_fresh: true,
+                entries: Vec::new(),
+            }),
+        };
+        assert_eq!(empty.read_outcome().unwrap(), 0);
     }
 
     #[test]
@@ -1328,7 +1536,7 @@ mod tests {
         save_history_entry_at(&path, &entry).expect("private snapshot seed");
 
         let snapshot = read_root_dictation_history_snapshot_at(&path);
-        assert_eq!(snapshot.cache.entries.len(), 1);
+        assert_eq!(snapshot.read_outcome().unwrap(), 1);
         assert!(root_dictation_history_snapshot_is_current_at(
             &snapshot, &path
         ));

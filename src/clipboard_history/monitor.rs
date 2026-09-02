@@ -101,6 +101,9 @@ fn clipboard_capture_fixture_state() -> &'static Mutex<ClipboardCaptureFixtureSt
 }
 
 fn clipboard_fixture_root() -> Result<PathBuf> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        return Ok(policy.root().to_path_buf());
+    }
     let root = std::env::var_os("SK_PATH")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".scriptkit")))
@@ -117,6 +120,9 @@ fn read_clipboard_fixture_text(payload: ClipboardCaptureFixturePayload) -> Resul
     match payload {
         ClipboardCaptureFixturePayload::Text { text } => Ok(text),
         ClipboardCaptureFixturePayload::TextFile { path } => {
+            if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+                policy.require_owned_path(&path)?;
+            }
             let root = clipboard_fixture_root()?;
             let resolved = path.canonicalize().with_context(|| {
                 format!("failed to resolve clipboard fixture {}", path.display())
@@ -238,6 +244,7 @@ pub fn inject_clipboard_capture_fixture(
 /// # Errors
 /// Returns error if database creation fails.
 pub fn init_clipboard_history() -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::GlobalMonitor)?;
     if std::env::var("SCRIPT_KIT_DISABLE_CLIPBOARD_MONITOR").is_ok_and(|value| value == "1") {
         info!("Clipboard monitor disabled for sandboxed DevTools fixture injection");
         return Ok(());
@@ -328,6 +335,7 @@ pub fn stop_clipboard_monitoring() {
 /// detection, copying the same text twice in a row doesn't update the timestamp.
 /// With change count detection, we detect all clipboard changes regardless of content.
 fn clipboard_monitor_loop(stop_flag: Arc<AtomicBool>) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     let mut clipboard = Clipboard::new().context("Failed to create clipboard instance")?;
     let mut change_detector = ClipboardChangeDetector::new();
 

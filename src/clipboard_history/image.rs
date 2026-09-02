@@ -238,7 +238,7 @@ fn decode_png_bytes_to_render_image_with_format(
     let img_height = rgba.height();
 
     // Convert RGBA to BGRA for Metal/GPUI (swap R and B channels)
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
 
@@ -304,7 +304,7 @@ fn decode_rgba_to_render_image(content: &str) -> Option<Arc<RenderImage>> {
     }
 
     // Convert RGBA to BGRA for Metal/GPUI (swap R and B channels)
-    for pixel in rgba_bytes.chunks_exact_mut(4) {
+    for pixel in rgba_bytes.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
 

@@ -129,6 +129,12 @@ pub fn record_rejection(reason: RejectionReason) {
 /// macOS NSPasteboard concealed/auto-generated marker types. Non-macOS: always false.
 #[cfg(target_os = "macos")]
 pub fn pasteboard_has_concealed_types() -> bool {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)
+    {
+        tracing::warn!(%error, "Pasteboard type probe refused");
+        return false;
+    }
     use cocoa::appkit::NSPasteboard;
     use cocoa::base::{id, nil};
     use objc::{msg_send, sel, sel_impl};

@@ -124,26 +124,6 @@ pub(crate) fn target_badge_frontmost_app_icon() -> Option<crate::app_launcher::D
     crate::app_launcher::cached_app_icon_for_bundle(bundle_id)
 }
 
-fn render_target_badge_content(target: crate::dictation::DictationTarget) -> AnyElement {
-    if matches!(target, crate::dictation::DictationTarget::ExternalApp) {
-        if let Some(icon) = target_badge_frontmost_app_icon() {
-            return crate::icons::render_image(icon, TARGET_BADGE_ICON_SIZE_PX, 1.0);
-        }
-    }
-
-    let theme = get_cached_theme();
-    div()
-        .text_size(px(STATUS_TEXT_SIZE_PX - 1.0))
-        .font_family(FONT_SYSTEM_UI)
-        .text_color(theme.colors.text.primary.with_opacity(OPACITY_ACTIVE))
-        .max_w(px(TARGET_BADGE_SLOT_WIDTH_PX - 18.0))
-        .overflow_hidden()
-        .text_ellipsis()
-        .whitespace_nowrap()
-        .child(destination_selector_spec(target).label)
-        .into_any_element()
-}
-
 /// Pulse cycle duration in seconds (matches vercel-voice 1.4s).
 pub(crate) const TRANSCRIBING_PULSE_PERIOD_SECS: f64 = 1.4;
 /// Stagger between consecutive dots in seconds (matches vercel-voice 0.2s).
@@ -341,6 +321,9 @@ static GLOBAL_ESCAPE_MONITOR: Mutex<Option<SendableId>> = Mutex::new(None);
 /// picks it up in GPUI context where it can safely mutate state.
 #[cfg(target_os = "macos")]
 fn install_global_escape_monitor() {
+    if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::GlobalMonitor).is_err() {
+        return;
+    }
     use cocoa::base::{id, nil};
     use objc::{class, msg_send, sel, sel_impl};
 
@@ -539,6 +522,13 @@ pub(crate) fn overlay_escape_action(phase: &DictationSessionPhase) -> OverlayEsc
 /// bottom descends.
 #[cfg(target_os = "macos")]
 fn resize_overlay_height(window: &mut Window, target_height: f32) {
+    if window.is_owned_hidden() {
+        window.resize(gpui::size(
+            window.bounds().size.width,
+            gpui::px(target_height),
+        ));
+        return;
+    }
     if let Ok(wh) = raw_window_handle::HasWindowHandle::window_handle(window) {
         if let raw_window_handle::RawWindowHandle::AppKit(appkit) = wh.as_raw() {
             use cocoa::base::id;
@@ -617,6 +607,8 @@ pub struct DictationOverlay {
     focus_handle: FocusHandle,
     destination_command_bar: crate::actions::CommandBar,
     microphone_popup_lifetime: Option<DictationMicrophonePopupLifetime>,
+    selected_microphone_semantic_id: Option<String>,
+    microphone_selection_count: u64,
     last_render_logged_phase: Option<DictationSessionPhase>,
     /// When the processing (transcribing/delivering) animation started, for
     /// dot-stagger and caption-pulse phase computation.
@@ -638,6 +630,9 @@ pub struct DictationOverlay {
     _animation_task: Option<Task<()>>,
     /// Drains native footer button clicks for the dictation window.
     _footer_action_task: Option<Task<()>>,
+    host_policy: crate::runtime_policy::WindowHostPolicy,
+    theme_revision_seen: u64,
+    semantic_revision: u64,
 }
 
 /// Phases where the app is working on the captured audio and the overlay
@@ -651,6 +646,19 @@ fn is_processing_phase(phase: &DictationSessionPhase) -> bool {
 
 impl DictationOverlay {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::from_presentation(
+            crate::runtime_policy::WindowHostPolicy::Interactive,
+            crate::platform::prefers_reduced_motion(),
+            cx,
+        )
+    }
+
+    /// Shared production root construction, before position/device/native work.
+    pub(crate) fn from_presentation(
+        host_policy: crate::runtime_policy::WindowHostPolicy,
+        reduced_motion: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             state: DictationOverlayState::default(),
             display_bars: silent_bars(),
@@ -661,15 +669,20 @@ impl DictationOverlay {
                 Arc::new(get_cached_theme()),
             ),
             microphone_popup_lifetime: None,
+            selected_microphone_semantic_id: None,
+            microphone_selection_count: 0,
             last_render_logged_phase: None,
             processing_started_at: None,
-            reduced_motion: crate::platform::prefers_reduced_motion(),
+            reduced_motion,
             caption: crate::dictation::live_caption::LiveCaption::default(),
             extra_caption_lines: 0,
             caption_scroll: gpui::ScrollHandle::new(),
             caption_scrolled_generation: 0,
             _animation_task: None,
             _footer_action_task: None,
+            host_policy,
+            theme_revision_seen: crate::theme::service::theme_revision(),
+            semantic_revision: 1,
         }
     }
 
@@ -688,26 +701,6 @@ impl DictationOverlay {
         crate::components::footer_chrome::remove_glass_capsule_window(window);
     }
 
-    /// Scrollable runtime caption container, sharing the preview block's
-    /// geometry. Content beyond the max window height scrolls; auto-follow
-    /// is driven by [`Self::sync_caption_follow`].
-    fn caption_scroll_container(&self) -> gpui::Stateful<Div> {
-        render_caption_block_container()
-            .id("dictation-caption-scroll")
-            .overflow_y_scroll()
-            .track_scroll(&self.caption_scroll)
-    }
-
-    /// Keep the caption scrolled to the newest text: fires once per caption
-    /// change so a user scrolling back is not fought mid-read, but every new
-    /// word snaps the view back to the live tail.
-    fn sync_caption_follow(&mut self) {
-        if self.caption.generation() != self.caption_scrolled_generation {
-            self.caption_scrolled_generation = self.caption.generation();
-            self.caption_scroll.scroll_to_bottom();
-        }
-    }
-
     fn transcript_armed(&self) -> bool {
         !self.caption.visible_text().trim().is_empty()
     }
@@ -717,18 +710,22 @@ impl DictationOverlay {
             return;
         }
 
-        let rx = crate::footer_popup::dictation_footer_action_channel()
-            .1
-            .clone();
+        let rx = crate::footer_popup::footer_action_receiver(window);
+        let lifetime = crate::footer_popup::footer_owner_subscription(window, cx);
         self._footer_action_task = Some(cx.spawn_in(window, async move |this, cx| {
-            while let Ok(action) = rx.recv().await {
+            let _lifetime = lifetime;
+            while let Ok(event) = rx.recv().await {
                 if let Err(error) = this.update_in(cx, |overlay, window, cx| {
+                    let Some(action) = event.accept(window) else {
+                        return;
+                    };
                     overlay.handle_native_footer_action(action, window, cx);
+                    event.complete(window);
                 }) {
                     tracing::warn!(
                         target: "script_kit::dictation",
                         event = "dictation_native_footer_action_dispatch_failed",
-                        action = ?action,
+                        action = ?event,
                         %error,
                         "Failed to dispatch native footer action into DictationOverlay"
                     );
@@ -850,7 +847,7 @@ impl DictationOverlay {
             return;
         }
 
-        let selection_mode = if dictation_overlay_fixture_mode() {
+        let selection_mode = if self.host_policy.is_hidden() || dictation_overlay_fixture_mode() {
             crate::dictation::DictationMicrophonePopupSelectionMode::FixtureNoPersistence
         } else {
             crate::dictation::DictationMicrophonePopupSelectionMode::Production
@@ -900,6 +897,12 @@ impl DictationOverlay {
         };
 
         let parent_bounds = window.bounds();
+        let Some(parent_generation) =
+            crate::windows::automation_window_by_id(DICTATION_OVERLAY_AUTOMATION_ID)
+                .and_then(|parent| parent.generation)
+        else {
+            return;
+        };
         let parent_window_handle = window.window_handle();
         let display = window.display(cx);
         let display_id = display.as_ref().map(|display| display.id());
@@ -935,6 +938,8 @@ impl DictationOverlay {
                     focus_return: crate::components::inline_popup_window::InlinePopupFocusReturn {
                         generation,
                         parent_automation_id: DICTATION_OVERLAY_AUTOMATION_ID.to_string(),
+                        parent_generation,
+                        host_policy: self.host_policy,
                         parent_window_handle,
                         focus_handle: self.focus_handle.clone(),
                         semantic_id: "input:dictation-overlay",
@@ -1057,9 +1062,18 @@ impl DictationOverlay {
     /// Play the Spotlight dematerialize (same as the main window's exit),
     /// then run the native close prep and remove the overlay window. Falls
     /// back to instant close when glass/morph is unavailable.
+    pub(crate) fn applied_theme_revision(&self) -> u64 {
+        self.theme_revision_seen
+    }
+
     fn dematerialize_then_remove_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.destination_command_bar.close(cx);
         set_dictation_overlay_fixture_mode(false);
+        if self.host_policy.is_hidden() {
+            clear_dictation_overlay_registration(window.window_handle());
+            window.remove_window();
+            return;
+        }
         if let Some(ticket) = crate::platform::begin_gpui_window_exit_with_ticket(
             window,
             "DICTATION",
@@ -1084,12 +1098,7 @@ impl DictationOverlay {
                         prepare_overlay_window_for_close(window);
                         window.remove_window();
                     });
-                    DICTATION_OVERLAY_WINDOW
-                        .get_or_init(|| Mutex::new(None))
-                        .lock()
-                        .take();
-                    crate::windows::remove_runtime_window_handle(DICTATION_OVERLAY_AUTOMATION_ID);
-                    crate::windows::remove_automation_window(DICTATION_OVERLAY_AUTOMATION_ID);
+                    clear_dictation_overlay_registration(any_handle);
                     DICTATION_OVERLAY_EXIT_IN_PROGRESS.store(false, Ordering::SeqCst);
                 });
             })
@@ -1098,12 +1107,7 @@ impl DictationOverlay {
             self.teardown_glass_button_host(window);
             prepare_overlay_window_for_close(window);
             window.remove_window();
-            DICTATION_OVERLAY_WINDOW
-                .get_or_init(|| Mutex::new(None))
-                .lock()
-                .take();
-            crate::windows::remove_runtime_window_handle(DICTATION_OVERLAY_AUTOMATION_ID);
-            crate::windows::remove_automation_window(DICTATION_OVERLAY_AUTOMATION_ID);
+            clear_dictation_overlay_registration(window.window_handle());
             DICTATION_OVERLAY_EXIT_IN_PROGRESS.store(false, Ordering::SeqCst);
         }
     }
@@ -1238,6 +1242,12 @@ impl DictationOverlay {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.state.phase != state.phase
+            || self.state.target != state.target
+            || self.state.transcript != state.transcript
+        {
+            self.semantic_revision = self.semantic_revision.wrapping_add(1).max(1);
+        }
         let previous_phase = self.state.phase.clone();
         let entering_processing =
             is_processing_phase(&state.phase) && !is_processing_phase(&self.state.phase);
@@ -1385,90 +1395,6 @@ impl DictationOverlay {
             .items_center()
             .justify_end()
             .child(badge)
-    }
-
-    /// Render the destination verb chips: Paste · Today · Ask · Send.
-    ///
-    /// Chip clicks follow [`chip_click_behavior`]: while Recording or
-    /// Confirming, a click only retargets the session (and becomes the new
-    /// sticky default). Stopping and delivery remain separate explicit
-    /// actions. The active chip stays highlighted so the destination is
-    /// always visible.
-    /// Targets outside the chip set (Notes, Prompt, Filter) highlight no
-    /// chip — the badge still tells the truth.
-    ///
-    /// While the app is processing the capture the chips stay in place but
-    /// go inert (`interactive: false`) so the layout never jumps.
-    fn render_destination_chip_row(
-        &self,
-        interactive: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .gap(px(6.));
-        let mut chips = Vec::new();
-
-        let theme = get_cached_theme();
-        let hover_bg = theme.colors.background.main.with_opacity(OPACITY_SELECTED);
-        for descriptor in crate::dictation::DictationTarget::quick_chip_descriptors() {
-            let target = descriptor.target;
-            let is_active = self.state.target == target;
-            let tooltip_label = chip_tooltip_label(target);
-            let Some(label) = descriptor.quick_chip_label else {
-                continue;
-            };
-            let mut chip = destination_chip_base(label, descriptor.icon, is_active, !interactive);
-            if interactive {
-                if !is_active {
-                    chip = chip.hover(move |style| style.bg(hover_bg));
-                }
-                chip = chip
-                    .cursor_pointer()
-                    .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(tooltip_label.clone())
-                            .build(window, cx)
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                            match chip_click_behavior(
-                                &this.state.phase,
-                                this.transcript_armed(),
-                                false,
-                            ) {
-                                ChipClickBehavior::Ignore => {}
-                                ChipClickBehavior::Retarget => {
-                                    this.select_destination(target, cx);
-                                }
-                            }
-                        }),
-                    );
-            }
-            chips.push(chip.into_any_element());
-        }
-
-        if interactive {
-            crate::components::footer_chrome::glass_capsule_row(
-                "dictation-header-targets",
-                0,
-                Some(999.0),
-                row,
-                chips,
-            )
-        } else {
-            let chip_count = chips.len();
-            crate::components::footer_chrome::glass_capsule_row(
-                "dictation-header-targets",
-                chip_count,
-                Some(999.0),
-                row.children(chips),
-                std::iter::empty(),
-            )
-        }
     }
 
     /// Apply an explicit destination pick from a verb chip: retarget the live
@@ -1808,16 +1734,22 @@ impl Focusable for DictationOverlay {
 
 impl Render for DictationOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let revision = crate::theme::service::theme_revision();
+        if revision != self.theme_revision_seen {
+            self.destination_command_bar
+                .set_theme(Arc::new(get_cached_theme()), cx);
+            self.theme_revision_seen = revision;
+        }
         self.sync_caption_follow();
         self.ensure_native_footer_action_listener(window, cx);
         let armed = self.transcript_armed();
         let footer_config =
             dictation_native_footer_config(&self.state.phase, armed, self.state.target);
-        let glass_in_window_footer = crate::platform::tahoe_liquid_glass_available()
+        let glass_in_window_footer = crate::platform::tahoe_native_glass_composition_available()
             && crate::theme::get_cached_theme().is_vibrancy_enabled();
         let glass_buttons_enabled = crate::components::footer_chrome::glass_capsules_enabled();
         if !glass_in_window_footer {
-            crate::footer_popup::sync_window_footer_popup(window, &footer_config);
+            crate::footer_popup::sync_window_footer_popup(window, &footer_config, cx);
         }
 
         let theme = get_cached_theme();
@@ -1975,6 +1907,7 @@ impl Render for DictationOverlay {
                 .h_full()
                 .child(
                     div()
+                        .debug_selector(|| "dictation-header".to_string())
                         .w_full()
                         .px(px(OVERLAY_HORIZONTAL_PADDING_PX))
                         .pt(px(5.0))
@@ -1982,6 +1915,7 @@ impl Render for DictationOverlay {
                 )
                 .child(
                     div()
+                        .debug_selector(|| "dictation-signal-band".to_string())
                         .flex_1()
                         .w_full()
                         .flex()
@@ -2014,6 +1948,7 @@ impl Render for DictationOverlay {
         // Capsule chrome only; the signal band uses the main-menu selected-row fill
         // and the action rail carries the launcher window surface underneath.
         let surface = div()
+            .debug_selector(|| "dictation-content".to_string())
             .flex()
             .flex_row()
             .items_center()
@@ -2059,6 +1994,7 @@ impl Render for DictationOverlay {
         // gutter; the shared per-button glass footer remains in the same
         // NSWindow below it, so no follower window can lag during a drag.
         div()
+            .debug_selector(|| "dictation-overlay".to_string())
             .track_focus(&self.focus_handle)
             .on_mouse_down(
                 MouseButton::Left,
@@ -2085,73 +2021,6 @@ pub(crate) const TRANSCRIPT_PREVIEW_MAX_CHARS: usize = 74;
 /// Live-transcription marker rendered after the newest word while recording
 /// (the Super Whisper "current word" cue).
 pub(crate) const LIVE_CAPTION_MARKER: &str = " \u{00B7}\u{00B7}\u{00B7}";
-
-/// Render waveform bars for the glass bar.
-///
-/// Uses theme success color when sound is detected, muted text when silent.
-fn render_waveform_bars(bars: &[f32; WAVEFORM_BAR_COUNT], active: bool) -> impl IntoElement {
-    let theme = get_cached_theme();
-    let bar_hex = if active {
-        theme.colors.ui.success
-    } else {
-        theme.colors.text.primary
-    };
-    let inactive_opacity_scale = if active {
-        1.0
-    } else {
-        theme.get_opacity().text_hint
-    };
-
-    let mut container = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(WAVEFORM_BAR_GAP_PX))
-        .h(px(WAVEFORM_BAR_MAX_HEIGHT_PX));
-
-    for &level in bars {
-        let bar_color = bar_hex.with_opacity(waveform_bar_opacity(level) * inactive_opacity_scale);
-        container = container.child(
-            div()
-                .w(px(WAVEFORM_BAR_WIDTH_PX))
-                .h(px(waveform_bar_height(level)))
-                .min_h(px(WAVEFORM_BAR_MIN_HEIGHT_PX))
-                .bg(bar_color)
-                .rounded(px(WAVEFORM_BAR_WIDTH_PX)),
-        );
-    }
-
-    container
-}
-
-/// Render dots for the transcribing state.
-///
-/// Uses theme success color at the given per-dot opacities.
-/// When animated, opacities come from `transcribing_dot_opacities_at()`;
-/// under reduced-motion, from `transcribing_dot_opacities_static()`.
-fn render_transcribing_dots(opacities: &[f32; TRANSCRIBING_DOT_COUNT]) -> impl IntoElement {
-    let theme = get_cached_theme();
-
-    let mut container = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(TRANSCRIBING_DOT_GAP_PX))
-        .h(px(WAVEFORM_BAR_MAX_HEIGHT_PX));
-
-    for &opacity in opacities {
-        let dot_color = theme.colors.ui.success.with_opacity(opacity);
-        container = container.child(
-            div()
-                .w(px(TRANSCRIBING_DOT_SIZE_PX))
-                .h(px(TRANSCRIBING_DOT_SIZE_PX))
-                .rounded(px(TRANSCRIBING_DOT_SIZE_PX / 2.0))
-                .bg(dot_color),
-        );
-    }
-
-    container
-}
 
 fn dictation_stop_keycap() -> SharedString {
     crate::config::load_config()
@@ -2284,6 +2153,7 @@ fn native_footer_spacer() -> impl IntoElement {
 
     div()
         .id("dictation-action-rail")
+        .debug_selector(|| "dictation-action-rail".to_string())
         .w_full()
         .h(px(rail_chrome.height_px))
         .min_h(px(rail_chrome.height_px))
@@ -2550,6 +2420,7 @@ fn render_static_target_badge_slot(
     let theme = get_cached_theme();
     let mut badge = div()
         .id("dictation-target-badge")
+        .debug_selector(|| "dictation-target-badge".to_string())
         .px(px(8.))
         .py(px(2.))
         .rounded(px(999.))
@@ -2677,7 +2548,7 @@ fn configure_overlay_window_surface(window: &mut Window) {
                 // the whole overlay as a dark slab over the glass — this
                 // runs AFTER configure_dictation_overlay_window, so it must
                 // preserve the glass base, not "restore" the blur-era one.
-                let glass_mode = crate::platform::tahoe_liquid_glass_available()
+                let glass_mode = crate::platform::tahoe_native_glass_composition_available()
                     && crate::theme::get_cached_theme().is_vibrancy_enabled();
                 if !glass_mode {
                     let window_bg_color: id = msg_send![class!(NSColor), windowBackgroundColor];
@@ -2763,6 +2634,27 @@ fn prepare_overlay_window_for_close(window: &mut Window) {
 #[cfg(not(target_os = "macos"))]
 fn prepare_overlay_window_for_close(_window: &mut Window) {}
 
+fn clear_dictation_overlay_registration(handle: gpui::AnyWindowHandle) {
+    let mut slot = DICTATION_OVERLAY_WINDOW
+        .get_or_init(|| Mutex::new(None))
+        .lock();
+    if slot
+        .as_ref()
+        .is_some_and(|current| gpui::AnyWindowHandle::from(*current) == handle)
+    {
+        slot.take();
+    }
+    if let Some(info) = crate::windows::automation_window_by_id(DICTATION_OVERLAY_AUTOMATION_ID) {
+        if let Some(generation) = info.generation {
+            if crate::windows::get_runtime_window_handle_for_generation(&info.id, generation)
+                == Some(handle)
+            {
+                crate::windows::remove_runtime_window_instance(&info.id, generation);
+            }
+        }
+    }
+}
+
 /// Open the dictation overlay as a compact floating pill.
 ///
 /// Creates a `WindowKind::PopUp` window with blurred background and vibrancy.
@@ -2770,7 +2662,23 @@ fn prepare_overlay_window_for_close(_window: &mut Window) {}
 pub fn open_dictation_overlay(
     cx: &mut App,
 ) -> anyhow::Result<gpui::WindowHandle<DictationOverlay>> {
+    open_dictation_overlay_with_policy(
+        crate::runtime_policy::WindowHostPolicy::Interactive,
+        None,
+        cx,
+    )
+}
+
+pub(crate) fn open_dictation_overlay_with_policy(
+    host_policy: crate::runtime_policy::WindowHostPolicy,
+    owned_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    cx: &mut App,
+) -> anyhow::Result<gpui::WindowHandle<DictationOverlay>> {
     use anyhow::Context as _;
+    host_policy.validate()?;
+    if !host_policy.is_hidden() {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)?;
+    }
 
     let generation = overlay_generation();
     tracing::info!(
@@ -2821,7 +2729,7 @@ pub fn open_dictation_overlay(
 
     let theme = get_cached_theme();
     let window_background = if theme.is_vibrancy_enabled() {
-        if crate::platform::tahoe_liquid_glass_available() {
+        if crate::platform::tahoe_native_glass_composition_available() {
             // Tahoe: the native glass backdrop supplies the material; Blurred
             // would cover it with the fork's NSVisualEffectView.
             gpui::WindowBackgroundAppearance::Transparent
@@ -2841,7 +2749,11 @@ pub fn open_dictation_overlay(
 
     // Bottom-center positioning matching vercel-voice: centered horizontally,
     // 15px above the bottom of the active display's visible area.
-    let bounds = calculate_overlay_bottom_center_bounds();
+    let bounds = if host_policy.is_hidden() {
+        owned_bounds.context("owned_dictation_bounds_required")?
+    } else {
+        calculate_overlay_bottom_center_bounds()
+    };
     tracing::info!(
         category = "DICTATION",
         generation,
@@ -2855,7 +2767,7 @@ pub fn open_dictation_overlay(
     // Snapshot main-window visibility BEFORE any native window operations.
     // If it was hidden, we must ensure it stays hidden after creating the
     // overlay — macOS may surface sibling panels at the same level.
-    let main_was_visible = crate::is_main_window_visible();
+    let main_was_visible = !host_policy.is_hidden() && crate::is_main_window_visible();
     tracing::info!(
         category = "DICTATION",
         generation,
@@ -2876,6 +2788,8 @@ pub fn open_dictation_overlay(
         show: false,
         kind: gpui::WindowKind::PopUp,
         is_resizable: false,
+        is_movable: !host_policy.is_hidden(),
+        is_minimizable: !host_policy.is_hidden(),
         ..Default::default()
     };
 
@@ -2888,7 +2802,15 @@ pub fn open_dictation_overlay(
         "Opening dictation overlay GPUI popup window"
     );
     let handle = cx
-        .open_window(window_options, |_window, cx| cx.new(DictationOverlay::new))
+        .open_window(window_options, |_window, cx| {
+            cx.new(|cx| {
+                DictationOverlay::from_presentation(
+                    host_policy,
+                    !host_policy.is_hidden() && crate::platform::prefers_reduced_motion(),
+                    cx,
+                )
+            })
+        })
         .context("Failed to open dictation overlay window")?;
     tracing::info!(
         category = "DICTATION",
@@ -2898,7 +2820,7 @@ pub fn open_dictation_overlay(
 
     // Configure vibrancy on macOS (never call setLevel on PopUp windows).
     #[cfg(target_os = "macos")]
-    {
+    if !host_policy.is_hidden() {
         tracing::info!(
             category = "DICTATION",
             generation,
@@ -2944,10 +2866,10 @@ pub fn open_dictation_overlay(
     // activation policy, so makeKeyWindow does not surface the main window
     // or activate the app.  When main is hidden, orderOut: is sent first
     // (below) to prevent sibling-panel flash.
-    let should_key_overlay = true;
+    let should_key_overlay = !host_policy.is_hidden();
 
     #[cfg(target_os = "macos")]
-    {
+    if !host_policy.is_hidden() {
         tracing::info!(
             category = "DICTATION",
             generation,
@@ -3042,20 +2964,29 @@ pub fn open_dictation_overlay(
         *guard = Some(handle);
     }
     let overlay_any: gpui::AnyWindowHandle = handle.into();
-    crate::windows::upsert_runtime_window_handle(DICTATION_OVERLAY_AUTOMATION_ID, overlay_any);
-    crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
-        id: DICTATION_OVERLAY_AUTOMATION_ID.to_string(),
-        kind: crate::protocol::AutomationWindowKind::Dictation,
-        title: Some("Script Kit Dictation".to_string()),
-        focused: should_key_overlay,
-        visible: true,
-        semantic_surface: Some("dictation".to_string()),
-        bounds: Some(dictation_automation_bounds(bounds)),
-        parent_window_id: None,
-        parent_kind: None,
-        pid: Some(std::process::id()),
-        generation: None,
-    });
+    let registration = crate::windows::register_runtime_window_instance(
+        crate::protocol::AutomationWindowInfo {
+            id: DICTATION_OVERLAY_AUTOMATION_ID.to_string(),
+            kind: crate::protocol::AutomationWindowKind::Dictation,
+            title: Some("Script Kit Dictation".to_string()),
+            focused: should_key_overlay,
+            visible: !host_policy.is_hidden(),
+            semantic_surface: Some("dictation".to_string()),
+            bounds: Some(dictation_automation_bounds(bounds)),
+            parent_window_id: None,
+            parent_kind: None,
+            parent_window_generation: None,
+            pid: Some(std::process::id()),
+            generation: None,
+        },
+        overlay_any,
+        cx,
+    );
+    if let Err(error) = registration {
+        clear_dictation_overlay_registration(overlay_any);
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        return Err(error);
+    }
     tracing::info!(
         category = "DICTATION",
         generation,
@@ -3064,7 +2995,9 @@ pub fn open_dictation_overlay(
 
     // Install global escape monitor so Escape works even when the overlay
     // doesn't have keyboard focus (user clicked on another app).
-    install_global_escape_monitor();
+    if !host_policy.is_hidden() {
+        install_global_escape_monitor();
+    }
 
     tracing::info!(
         category = "DICTATION",
@@ -3072,92 +3005,6 @@ pub fn open_dictation_overlay(
         "Dictation overlay window opened"
     );
     Ok(handle)
-}
-
-#[allow(
-    dead_code,
-    reason = "the separately compiled application binary owns the isolated dictation popup fixture command"
-)]
-pub(crate) fn open_dictation_microphone_popup_fixture(cx: &mut App) -> anyhow::Result<()> {
-    if !dictation_overlay_fixture_mode() {
-        anyhow::bail!("Dictation microphone fixture requires an active overlay fixture");
-    }
-    let handle = DICTATION_OVERLAY_WINDOW
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .as_ref()
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!("Dictation overlay fixture is not open"))?;
-    handle
-        .update(cx, |view, window, cx| {
-            view.open_microphone_picker(window, cx);
-        })
-        .map_err(|error| anyhow::anyhow!("Failed to open Dictation microphone fixture: {error}"))
-}
-
-fn synthetic_dictation_failure_state() -> crate::dictation::DictationFailureState {
-    let failure = crate::ai::reliability::destination_failure(
-        false,
-        "synthetic Dictation recovery fixture failure",
-    );
-    crate::dictation::DictationFailureState {
-        operation_id: 0,
-        destination_id: "fixture-destination".to_string(),
-        destination_label: "Fixture Destination".to_string(),
-        identity_generation: 1,
-        transcript_id: "fixture-transcript".to_string(),
-        history_entry_id: "fixture-history".to_string(),
-        failure,
-        retry_safety: sk_protocol::ai_reliability::RetrySafety::Never,
-        preservation_receipt: crate::dictation::DictationTranscriptPreservationReceipt {
-            transcript_id: "fixture-transcript".to_string(),
-            transcript_len: 0,
-            transcript_fingerprint: crate::dictation::redacted_transcript_fingerprint(""),
-            history_entry_id: "fixture-history".to_string(),
-            history_saved: true,
-        },
-        capabilities: crate::dictation::DictationFailureRecoveryCapabilities {
-            retry_same_destination: false,
-            choose_destination: true,
-            copy_transcript: true,
-            open_dictation_history: true,
-        },
-    }
-}
-
-fn apply_test_dictation_overlay_override(
-    mut state: DictationOverlayState,
-) -> DictationOverlayState {
-    if !dictation_overlay_fixture_mode()
-        || std::env::var("SCRIPT_KIT_TEST_STATUS").ok().as_deref() != Some("1")
-    {
-        return state;
-    }
-
-    if let Ok(phase) = std::env::var("SCRIPT_KIT_TEST_DICTATION_FIXTURE_PHASE") {
-        state.phase = match phase.as_str() {
-            "recording" => DictationSessionPhase::Recording,
-            "confirming" => DictationSessionPhase::Confirming,
-            "transcribing" => DictationSessionPhase::Transcribing,
-            "delivering" => DictationSessionPhase::Delivering,
-            "finished" => DictationSessionPhase::Finished,
-            "failed" => DictationSessionPhase::Failed(synthetic_dictation_failure_state()),
-            _ => state.phase,
-        };
-    }
-    if let Ok(target) = std::env::var("SCRIPT_KIT_TEST_DICTATION_FIXTURE_TARGET") {
-        if let Some(target) = crate::dictation::parse_dictation_target_label(&target) {
-            state.target = target;
-        }
-    }
-    if std::env::var("SCRIPT_KIT_TEST_DICTATION_FIXTURE_ARMED")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        state.transcript = "Synthetic armed fixture".into();
-    }
-    state
 }
 
 /// Push a new state snapshot into the overlay (no-op if overlay is not open).
@@ -3236,6 +3083,11 @@ pub fn close_dictation_overlay(cx: &mut App) -> anyhow::Result<()> {
         // Keep the native capsule host and owning handle registered throughout
         // the fade. A rapid reopen cancels this ticket and reuses the CGWindow.
         let result = handle.update(cx, |_view, window, cx| {
+            if window.is_owned_hidden() {
+                clear_dictation_overlay_registration(window.window_handle());
+                window.remove_window();
+                return;
+            }
             if let Some(ticket) = crate::platform::begin_gpui_window_exit_with_ticket(
                 window,
                 "DICTATION",
@@ -3262,14 +3114,7 @@ pub fn close_dictation_overlay(cx: &mut App) -> anyhow::Result<()> {
                             prepare_overlay_window_for_close(window);
                             window.remove_window();
                         });
-                        DICTATION_OVERLAY_WINDOW
-                            .get_or_init(|| Mutex::new(None))
-                            .lock()
-                            .take();
-                        crate::windows::remove_runtime_window_handle(
-                            DICTATION_OVERLAY_AUTOMATION_ID,
-                        );
-                        crate::windows::remove_automation_window(DICTATION_OVERLAY_AUTOMATION_ID);
+                        clear_dictation_overlay_registration(any_handle);
                         DICTATION_OVERLAY_EXIT_IN_PROGRESS.store(false, Ordering::SeqCst);
                     });
                 })
@@ -3278,12 +3123,7 @@ pub fn close_dictation_overlay(cx: &mut App) -> anyhow::Result<()> {
                 crate::components::footer_chrome::remove_glass_capsule_window(window);
                 prepare_overlay_window_for_close(window);
                 window.remove_window();
-                DICTATION_OVERLAY_WINDOW
-                    .get_or_init(|| Mutex::new(None))
-                    .lock()
-                    .take();
-                crate::windows::remove_runtime_window_handle(DICTATION_OVERLAY_AUTOMATION_ID);
-                crate::windows::remove_automation_window(DICTATION_OVERLAY_AUTOMATION_ID);
+                clear_dictation_overlay_registration(window.window_handle());
                 DICTATION_OVERLAY_EXIT_IN_PROGRESS.store(false, Ordering::SeqCst);
             }
         });
@@ -3325,22 +3165,6 @@ pub(crate) fn dictation_window_lifecycle_receipt() -> serde_json::Value {
     })
 }
 
-fn dictation_automation_bounds(
-    bounds: gpui::Bounds<gpui::Pixels>,
-) -> crate::protocol::AutomationWindowBounds {
-    crate::protocol::AutomationWindowBounds {
-        x: f32::from(bounds.origin.x) as f64,
-        y: f32::from(bounds.origin.y) as f64,
-        width: f32::from(bounds.size.width) as f64,
-        height: f32::from(bounds.size.height) as f64,
-    }
-}
-
-pub fn automation_layout_info(
-    resolved: &crate::protocol::AutomationWindowInfo,
-) -> crate::protocol::LayoutInfo {
-    automation_layout_info_with_radius(resolved, Some(OVERLAY_RADIUS_PX))
-}
 /// Check whether the dictation overlay window is currently open.
 ///
 /// Note: this only checks whether the slot holds a handle.  For true

@@ -25,6 +25,10 @@ use super::types::{
 /// Global database connection (thread-safe)
 static DB_CONNECTION: OnceLock<Arc<Mutex<Connection>>> = OnceLock::new();
 
+// An ordinary connection must never be reused after the irreversible owned
+// policy is installed, even if another caller initialized it beforehand.
+static OWNED_DB_CONNECTION: OnceLock<Arc<Mutex<Connection>>> = OnceLock::new();
+
 #[cfg(test)]
 static TEST_DB_CONNECTION: std::sync::Mutex<Option<Arc<Mutex<Connection>>>> =
     std::sync::Mutex::new(None);
@@ -44,8 +48,18 @@ pub fn compute_content_hash(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Get the database path (~/.scriptkit/db/clipboard-history.sqlite)
+fn owned_db_path(policy: &crate::runtime_policy::OwnedEvaluationPolicy) -> Result<PathBuf> {
+    let path = policy.root().join("clipboard/db/clipboard-history.sqlite");
+    policy.require_owned_path(&path)?;
+    Ok(path)
+}
+
+/// Get the policy-owned database path, or the ordinary ~/.scriptkit history path.
 pub fn get_db_path() -> Result<PathBuf> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        return owned_db_path(policy);
+    }
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     #[cfg(test)]
     if let Some(path) = get_test_db_path() {
         if let Some(parent) = path.parent() {
@@ -197,6 +211,14 @@ fn migrate_add_column_if_missing(conn: &Connection, column: &str, ddl: &str) -> 
 }
 
 fn open_and_init_connection(db_path: &Path) -> Result<Connection> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        anyhow::ensure!(
+            db_path == owned_db_path(policy)?,
+            "owned_clipboard_database_path_mismatch"
+        );
+    } else {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
+    }
     let conn = crate::utils::db_permissions::open_private_sqlite(db_path)
         .context("Failed to open private clipboard-history database")?;
 
@@ -222,27 +244,44 @@ fn open_and_init_connection(db_path: &Path) -> Result<Connection> {
 
 /// Get or create the database connection
 pub fn get_connection() -> Result<Arc<Mutex<Connection>>> {
-    #[cfg(test)]
-    {
-        if let Ok(guard) = TEST_DB_CONNECTION.lock() {
-            if let Some(conn) = guard.as_ref() {
-                return Ok(conn.clone());
+    let owned_path = crate::runtime_policy::owned_evaluation()
+        .map(owned_db_path)
+        .transpose()?;
+    let is_owned = owned_path.is_some();
+    let connection_slot = if is_owned {
+        &OWNED_DB_CONNECTION
+    } else {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
+        #[cfg(test)]
+        {
+            if let Ok(guard) = TEST_DB_CONNECTION.lock() {
+                if let Some(conn) = guard.as_ref() {
+                    return Ok(conn.clone());
+                }
             }
         }
-    }
+        &DB_CONNECTION
+    };
 
-    if let Some(conn) = DB_CONNECTION.get() {
+    if let Some(conn) = connection_slot.get() {
         return Ok(conn.clone());
     }
 
-    let db_path = get_db_path()?;
+    let db_path = match owned_path {
+        Some(path) => path,
+        None => get_db_path()?,
+    };
     let conn = Arc::new(Mutex::new(open_and_init_connection(&db_path)?));
+    if is_owned {
+        // Only in-memory caches are discarded. Cache database fallbacks drop
+        // their cache lock before calling us; no SQLite mutex is held here.
+        clear_all_caches();
+    }
 
-    if DB_CONNECTION.set(conn.clone()).is_err() {
-        return DB_CONNECTION
-            .get()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("DB_CONNECTION set failed but get() returned None"));
+    if connection_slot.set(conn.clone()).is_err() {
+        return connection_slot.get().cloned().ok_or_else(|| {
+            anyhow::anyhow!("clipboard connection set failed but get() returned None")
+        });
     }
 
     Ok(conn)
@@ -565,37 +604,16 @@ pub fn get_clipboard_history(limit: usize) -> Vec<ClipboardEntry> {
 ///
 /// This is memory-efficient for list views - doesn't load full content.
 /// Use `get_entry_content()` to fetch content when needed.
-pub fn get_clipboard_history_meta(limit: usize, offset: usize) -> Vec<ClipboardEntryMeta> {
-    let conn = match get_connection() {
-        Ok(c) => c,
-        Err(e) => {
-            error!(error = %e, "Failed to get database connection");
-            return Vec::new();
-        }
-    };
-
-    let conn = match conn.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            error!(error = %e, "Failed to lock database connection");
-            return Vec::new();
-        }
-    };
-
-    // Query only metadata columns - NO content column
-    let mut stmt = match conn.prepare(
+pub fn get_clipboard_history_meta(limit: usize, offset: usize) -> Result<Vec<ClipboardEntryMeta>> {
+    let conn = get_connection()?;
+    let conn = conn.lock().map_err(db_lock_err)?;
+    // Query only metadata columns - NO content column.
+    let mut stmt = conn.prepare(
         "SELECT id, content_type, timestamp, pinned, text_preview, image_width, image_height, byte_size, ocr_text
          FROM history
          ORDER BY pinned DESC, timestamp DESC
          LIMIT ? OFFSET ?",
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            error!(error = %e, "Failed to prepare metadata query");
-            return Vec::new();
-        }
-    };
-
+    ).context("Failed to prepare clipboard metadata query")?;
     let entries = stmt
         .query_map(params![limit as i64, offset as i64], |row| {
             Ok(ClipboardEntryMeta {
@@ -609,18 +627,13 @@ pub fn get_clipboard_history_meta(limit: usize, offset: usize) -> Vec<ClipboardE
                 byte_size: row.get::<_, Option<i64>>(7)?.unwrap_or(0) as usize,
                 ocr_text: row.get(8)?,
             })
-        })
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_else(|e| {
-            error!(error = %e, "Failed to query clipboard history metadata");
-            Vec::new()
-        });
-
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     debug!(
         count = entries.len(),
         limit, offset, "Retrieved clipboard history metadata"
     );
-    entries
+    Ok(entries)
 }
 
 /// Search recent clipboard metadata for root launcher rows without loading raw content.
@@ -633,7 +646,17 @@ pub fn search_root_clipboard_history_meta(
     }
 
     let query = query.trim().to_lowercase();
-    get_clipboard_history_meta(options.scan_limit, 0)
+    let entries = match get_clipboard_history_meta(options.scan_limit, 0) {
+        Ok(entries) => entries,
+        Err(error) => {
+            error!(
+                error_bytes = error.to_string().len(),
+                "Clipboard metadata search failed"
+            );
+            return Vec::new();
+        }
+    };
+    entries
         .into_iter()
         .filter(root_clipboard_entry_is_eligible)
         .filter(|entry| entry.text_preview.to_lowercase().contains(&query))
@@ -1005,6 +1028,145 @@ pub(crate) fn reset_test_clipboard_db() {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[cfg(feature = "owned-ui-evaluation")]
+    #[test]
+    fn owned_clipboard_storage_is_private_and_complete() {
+        // The policy is irreversible. Exercise the real globals in a child
+        // test process rather than changing the policy of parallel tests.
+        const CHILD: &str = "SCRIPT_KIT_OWNED_CLIPBOARD_STORAGE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let test_name = std::thread::current()
+                .name()
+                .expect("named test thread")
+                .to_owned();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(CHILD, "1")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("run isolated owned clipboard test");
+            let started = std::time::Instant::now();
+            let output = loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break child.wait_with_output().unwrap(),
+                    Ok(None) if started.elapsed() < std::time::Duration::from_secs(30) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    result => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("owned clipboard child failed to finish: {result:?}");
+                    }
+                }
+            };
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
+                "owned clipboard child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // Both the ordinary slot and test override contain synthetic data;
+        // this test must never resolve or open the operator's actual history.
+        let ordinary_dir = tempfile::tempdir().unwrap();
+        let ordinary_path = ordinary_dir.path().join("clipboard-history.sqlite");
+        set_test_db_path(Some(ordinary_path.clone()));
+        let ordinary_connection = get_connection().unwrap();
+        let ordinary_id = add_entry("Synthetic ordinary history", ContentType::Text).unwrap();
+        let override_path = ordinary_dir.path().join("override.sqlite");
+        init_test_clipboard_db(&override_path).unwrap();
+        let override_connection = get_connection().unwrap();
+        let override_id = add_entry("Synthetic test override", ContentType::Text).unwrap();
+
+        let owned_dir = tempfile::tempdir().unwrap();
+        let owned_root = owned_dir.path().canonicalize().unwrap();
+        let policy = crate::runtime_policy::OwnedEvaluationPolicy::new(
+            &owned_root,
+            "clipboard-storage-test".into(),
+            "clipboard-storage-generation".into(),
+        )
+        .unwrap();
+        crate::runtime_policy::install_owned_evaluation(policy).unwrap();
+
+        let owned_path = owned_root.join("clipboard/db/clipboard-history.sqlite");
+        assert_eq!(get_db_path().unwrap(), owned_path);
+        let owned_connection = get_connection().unwrap();
+        assert!(!Arc::ptr_eq(&owned_connection, &ordinary_connection));
+        assert!(!Arc::ptr_eq(&owned_connection, &override_connection));
+        assert!(Arc::ptr_eq(&owned_connection, &get_connection().unwrap()));
+        assert_eq!(get_total_entry_count(), 0);
+        assert!(crate::clipboard_history::get_cached_entries(32).is_empty());
+        assert_eq!(get_entry_content(&ordinary_id), None);
+        assert_eq!(get_entry_content(&override_id), None);
+        assert!(open_and_init_connection(&ordinary_path).is_err());
+        assert!(open_and_init_connection(&override_path).is_err());
+        assert!(open_and_init_connection(&owned_root.join("other.sqlite")).is_err());
+        assert!(!owned_root.join("other.sqlite").exists());
+
+        let payload = "Synthetic Ω clipboard payload beyond the metadata preview.\n".repeat(8);
+        let id = add_entry(&payload, ContentType::Text).unwrap();
+        assert_eq!(get_entry_content(&id).as_deref(), Some(payload.as_str()));
+        assert_eq!(add_entry(&payload, ContentType::Text).unwrap(), id);
+        let entries = get_clipboard_history_meta(32, 0).expect("read clipboard metadata");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, id);
+        assert!(entries[0].text_preview.len() < payload.len());
+        assert_eq!(entries[0].byte_size, payload.len());
+        assert_eq!(get_clipboard_history(32)[0].content, payload);
+        let cached = crate::clipboard_history::get_cached_entries(32);
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].id, id);
+
+        // A second real SQLite connection must see the full persisted bytes,
+        // not just the metadata/cache used to render the history list.
+        let reopened = open_and_init_connection(&owned_path).unwrap();
+        let persisted: String = reopened
+            .query_row("SELECT content FROM history WHERE id = ?1", [&id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(persisted, payload);
+        for connection in [&ordinary_connection, &override_connection] {
+            let count: i64 = connection
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM history", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 1, "owned writes must not mutate a previous store");
+        }
+        assert_eq!(
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)
+                .unwrap_err()
+                .code,
+            "system_clipboard_forbidden"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+            assert_eq!(
+                std::fs::metadata(&owned_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            std::fs::rename(
+                owned_root.join("clipboard"),
+                owned_root.join("clipboard-original"),
+            )
+            .unwrap();
+            symlink(ordinary_dir.path(), owned_root.join("clipboard")).unwrap();
+            assert!(get_db_path().is_err());
+            assert!(
+                get_connection().is_err(),
+                "cached connections still validate ownership"
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]

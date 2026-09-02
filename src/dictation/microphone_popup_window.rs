@@ -75,6 +75,7 @@ struct DictationMicrophonePopupSlot {
     handle: WindowHandle<DictationMicrophonePopupWindow>,
     parent_window_handle: AnyWindowHandle,
     generation: InlinePopupGeneration,
+    automation_generation: Option<u64>,
     lifecycle: InlinePopupLifecycleHandle,
 }
 
@@ -173,18 +174,24 @@ fn dictation_microphone_popup_bounds_above(
 }
 
 fn unregister_dictation_microphone_popup_automation_window(generation: InlinePopupGeneration) {
-    crate::windows::automation_surface_collector::remove_dictation_microphone_prompt_popup_snapshot_if_generation(
-        DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
-        generation.get(),
-    );
-    crate::windows::remove_runtime_window_handle_if_generation(
-        DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
-        generation.get(),
-    );
-    crate::windows::remove_automation_window_if_generation(
-        DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
-        generation.get(),
-    );
+    let registered = DICTATION_MICROPHONE_POPUP_WINDOW
+        .get()
+        .and_then(|storage| storage.lock().ok())
+        .and_then(|guard| {
+            guard
+                .as_ref()
+                .filter(|slot| slot.generation == generation)
+                .and_then(|slot| slot.automation_generation)
+        });
+    if let Some(registered) = registered {
+        crate::windows::automation_surface_collector::remove_dictation_microphone_prompt_popup_snapshot_if_generation(
+            DICTATION_MICROPHONE_POPUP_AUTOMATION_ID, registered,
+        );
+        crate::windows::remove_runtime_window_instance(
+            DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
+            registered,
+        );
+    }
 }
 
 fn clear_dictation_microphone_popup_window_slot(generation: InlinePopupGeneration) {
@@ -252,14 +259,17 @@ pub(crate) fn sync_dictation_microphone_popup_window(
                     cx.notify();
                 });
                 if update_result.is_ok() {
-                    if InlinePopupLifecycle::snapshot(&slot.lifecycle).1 == InlinePopupPhase::Open {
+                    if let Some(registered) = slot.automation_generation.filter(|_| {
+                        InlinePopupLifecycle::snapshot(&slot.lifecycle).1 == InlinePopupPhase::Open
+                    }) {
                         crate::windows::automation_surface_collector::upsert_dictation_microphone_prompt_popup_snapshot(
                             DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
-                            generation.get(),
+                            registered,
                             &snapshot,
                         );
-                        crate::windows::set_automation_bounds(
+                        crate::windows::set_automation_bounds_if_generation(
                             DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
+                            registered,
                             Some(crate::protocol::AutomationWindowBounds {
                                 x: f32::from(bounds.origin.x) as f64,
                                 y: f32::from(bounds.origin.y) as f64,
@@ -278,7 +288,7 @@ pub(crate) fn sync_dictation_microphone_popup_window(
         }
     }
 
-    let window_options = inline_popup_window_options(bounds, display_id);
+    let window_options = inline_popup_window_options(bounds, display_id, focus_return.host_policy);
     let native_source_view = source_view.clone();
     let native_lifecycle = lifecycle.clone();
     let native_focus_return = focus_return.clone();
@@ -317,6 +327,7 @@ pub(crate) fn sync_dictation_microphone_popup_window(
             handle,
             parent_window_handle,
             generation,
+            automation_generation: None,
             lifecycle: lifecycle.clone(),
         });
     }
@@ -324,31 +335,42 @@ pub(crate) fn sync_dictation_microphone_popup_window(
     let any_handle: AnyWindowHandle = handle.into();
     if let Err(error) = configure_inline_popup_window_lifecycle(
         handle,
-        parent_window_handle,
-        parent_automation_id.clone(),
+        crate::components::inline_popup_window::InlinePopupParent {
+            window_handle: parent_window_handle,
+            automation_id: parent_automation_id.clone(),
+            generation: focus_return.parent_generation,
+            host_policy: focus_return.host_policy,
+        },
         lifecycle.clone(),
         cx,
         move |result, cx| match result {
             InlinePopupAttachResult::Ready(receipt) => {
-                crate::windows::upsert_runtime_window_handle_instance(
-                    DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
+                let parent_kind = crate::windows::automation_window_by_id(&parent_automation_id)
+                    .map(|parent| parent.kind);
+                let registration = crate::windows::register_runtime_window_instance(
+                    crate::protocol::AutomationWindowInfo {
+                        id: DICTATION_MICROPHONE_POPUP_AUTOMATION_ID.into(),
+                        kind: crate::protocol::AutomationWindowKind::PromptPopup,
+                        title: Some("Dictation Microphones".into()),
+                        focused: false,
+                        visible: !focus_return.host_policy.is_hidden(),
+                        semantic_surface: Some("dictationMicrophonePopup".into()),
+                        bounds: Some(crate::protocol::AutomationWindowBounds {
+                            x: f32::from(bounds.origin.x) as f64,
+                            y: f32::from(bounds.origin.y) as f64,
+                            width: f32::from(bounds.size.width) as f64,
+                            height: f32::from(bounds.size.height) as f64,
+                        }),
+                        parent_window_id: Some(parent_automation_id.clone()),
+                        parent_kind,
+                        parent_window_generation: Some(focus_return.parent_generation),
+                        generation: None,
+                        pid: Some(std::process::id()),
+                    },
                     any_handle,
-                    Some(receipt.generation.get()),
+                    cx,
                 );
-                if let Err(error) = crate::windows::register_attached_popup_instance(
-                    DICTATION_MICROPHONE_POPUP_AUTOMATION_ID.to_string(),
-                    crate::protocol::AutomationWindowKind::PromptPopup,
-                    Some("Dictation Microphones".to_string()),
-                    Some("dictationMicrophonePopup".to_string()),
-                    Some(crate::protocol::AutomationWindowBounds {
-                        x: f32::from(bounds.origin.x) as f64,
-                        y: f32::from(bounds.origin.y) as f64,
-                        width: f32::from(bounds.size.width) as f64,
-                        height: f32::from(bounds.size.height) as f64,
-                    }),
-                    Some(parent_automation_id.as_str()),
-                    Some(receipt.generation.get()),
-                ) {
+                if let Err(error) = registration.as_ref() {
                     tracing::warn!(
                         target: "script_kit::automation",
                         event = "dictation_microphone_popup_registry_failed",
@@ -360,9 +382,20 @@ pub(crate) fn sync_dictation_microphone_popup_window(
                     });
                     return;
                 }
+                let Some(registered) = registration.ok().and_then(|info| info.generation) else {
+                    return;
+                };
+                if let Ok(mut guard) = storage.lock() {
+                    if let Some(slot) = guard
+                        .as_mut()
+                        .filter(|slot| slot.generation == receipt.generation)
+                    {
+                        slot.automation_generation = Some(registered);
+                    }
+                }
                 crate::windows::automation_surface_collector::upsert_dictation_microphone_prompt_popup_snapshot(
                     DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
-                    receipt.generation.get(),
+                    registered,
                     &automation_snapshot,
                 );
             }
@@ -399,6 +432,34 @@ pub(crate) fn close_dictation_microphone_popup_window(cx: &mut App) {
 
 pub(crate) fn close_dictation_microphone_popup_window_for_owner_loss(cx: &mut App) {
     close_dictation_microphone_popup_window_with_policy("owner_loss", false, cx);
+}
+
+pub(crate) fn dictation_microphone_popup_revision_facts(
+    generation: u64,
+    window: Option<&Window>,
+    cx: &App,
+) -> Option<(u64, u64, u64, u64)> {
+    let guard = DICTATION_MICROPHONE_POPUP_WINDOW.get()?.lock().ok()?;
+    let slot = guard.as_ref()?;
+    if slot.automation_generation != Some(generation)
+        || InlinePopupLifecycle::snapshot(&slot.lifecycle).1 != InlinePopupPhase::Open
+    {
+        return None;
+    }
+    crate::windows::automation_surface_collector::read_window_root(
+        slot.handle,
+        window,
+        cx,
+        |view, _| {
+            (
+                generation,
+                view.semantic_revision,
+                view.semantic_revision,
+                view.applied_theme_revision,
+            )
+        },
+    )
+    .ok()
 }
 
 fn close_dictation_microphone_popup_window_with_policy(
@@ -517,24 +578,37 @@ pub(crate) fn is_dictation_microphone_popup_window_open() -> bool {
 pub(crate) fn batch_select_dictation_microphone_popup_row_by_value(
     generation: u64,
     value: &str,
+    submit: bool,
     cx: &mut App,
-) -> Option<String> {
-    let storage = DICTATION_MICROPHONE_POPUP_WINDOW.get()?;
-    let slot = storage
-        .lock()
-        .ok()
-        .and_then(|guard| guard.as_ref().cloned())?;
-    if slot.generation.get() != generation
+) -> Result<Option<String>, crate::protocol::TransactionError> {
+    if !submit {
+        return Err(crate::protocol::TransactionError {
+            code: crate::protocol::TransactionErrorCode::UnsupportedCommand,
+            message: "selection_only_unsupported".into(),
+            suggestion: Some("Use explicit submit:true to choose a microphone".into()),
+        });
+    }
+    let slot = DICTATION_MICROPHONE_POPUP_WINDOW.get().and_then(|storage| {
+        storage
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned())
+    });
+    let Some(slot) = slot else {
+        return Ok(None);
+    };
+    if slot.automation_generation != Some(generation)
         || InlinePopupLifecycle::snapshot(&slot.lifecycle).1 != InlinePopupPhase::Open
     {
-        return None;
+        return Ok(None);
     }
-    slot.handle
+    Ok(slot
+        .handle
         .update(cx, |popup, window, cx| {
             popup.accept_value(value, window, cx)
         })
         .ok()
-        .flatten()
+        .flatten())
 }
 
 // See batch_select_dictation_microphone_popup_row_by_value.
@@ -542,24 +616,37 @@ pub(crate) fn batch_select_dictation_microphone_popup_row_by_value(
 pub(crate) fn batch_select_dictation_microphone_popup_row_by_semantic_id(
     generation: u64,
     semantic_id: &str,
+    submit: bool,
     cx: &mut App,
-) -> Option<String> {
-    let storage = DICTATION_MICROPHONE_POPUP_WINDOW.get()?;
-    let slot = storage
-        .lock()
-        .ok()
-        .and_then(|guard| guard.as_ref().cloned())?;
-    if slot.generation.get() != generation
+) -> Result<Option<String>, crate::protocol::TransactionError> {
+    if !submit {
+        return Err(crate::protocol::TransactionError {
+            code: crate::protocol::TransactionErrorCode::UnsupportedCommand,
+            message: "selection_only_unsupported".into(),
+            suggestion: Some("Use explicit submit:true to choose a microphone".into()),
+        });
+    }
+    let slot = DICTATION_MICROPHONE_POPUP_WINDOW.get().and_then(|storage| {
+        storage
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned())
+    });
+    let Some(slot) = slot else {
+        return Ok(None);
+    };
+    if slot.automation_generation != Some(generation)
         || InlinePopupLifecycle::snapshot(&slot.lifecycle).1 != InlinePopupPhase::Open
     {
-        return None;
+        return Ok(None);
     }
-    slot.handle
+    Ok(slot
+        .handle
         .update(cx, |popup, window, cx| {
             popup.accept_semantic_id(semantic_id, window, cx)
         })
         .ok()
-        .flatten()
+        .flatten())
 }
 
 impl Clone for DictationMicrophonePopupSlot {
@@ -568,6 +655,7 @@ impl Clone for DictationMicrophonePopupSlot {
             handle: self.handle,
             parent_window_handle: self.parent_window_handle,
             generation: self.generation,
+            automation_generation: self.automation_generation,
             lifecycle: self.lifecycle.clone(),
         }
     }
@@ -584,6 +672,9 @@ pub(crate) struct DictationMicrophonePopupWindow {
     focus_handle: FocusHandle,
     activation_subscription: Option<Subscription>,
     focus_pair_was_active: bool,
+    semantic_revision: u64,
+    last_semantic_token: Option<u64>,
+    applied_theme_revision: u64,
 }
 
 impl DictationMicrophonePopupWindow {
@@ -612,6 +703,9 @@ impl DictationMicrophonePopupWindow {
             focus_handle: cx.focus_handle(),
             activation_subscription: None,
             focus_pair_was_active: false,
+            semantic_revision: 1,
+            last_semantic_token: None,
+            applied_theme_revision: 0,
         }
     }
 
@@ -655,7 +749,14 @@ impl DictationMicrophonePopupWindow {
 
         let generation = self.generation;
         let lifecycle = self.lifecycle.clone();
+        let hidden = self.focus_return.host_policy.is_hidden();
         window.defer(cx, move |window, cx| {
+            if hidden {
+                window.remove_window();
+                let _ = InlinePopupLifecycle::mark_closed(&lifecycle, generation);
+                clear_dictation_microphone_popup_window_slot(generation);
+                return;
+            }
             crate::platform::dematerialize_then_remove_gpui_window_from_app(
                 window,
                 cx,
@@ -676,6 +777,9 @@ impl DictationMicrophonePopupWindow {
     }
 
     fn ensure_activation_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_return.host_policy.is_hidden() {
+            return;
+        }
         if self.activation_subscription.is_some() {
             return;
         }
@@ -752,6 +856,15 @@ impl DictationMicrophonePopupWindow {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<String> {
+        if InlinePopupLifecycle::snapshot(&self.lifecycle).1 != InlinePopupPhase::Open
+            || crate::windows::get_runtime_window_handle_for_generation(
+                &self.focus_return.parent_automation_id,
+                self.focus_return.parent_generation,
+            ) != Some(self.parent_window_handle)
+            || self.source_view.upgrade().is_none()
+        {
+            return None;
+        }
         let row = self.snapshot.rows.get(row_index)?.clone();
         if self.selection_mode.persists_selection() {
             if let Err(error) = apply_device_selection(&row.action) {
@@ -783,8 +896,8 @@ impl DictationMicrophonePopupWindow {
         }
         if let Some(view) = self.source_view.upgrade() {
             let _ = cx.update_window(self.parent_window_handle, |_entity, _window, cx| {
-                view.update(cx, |_overlay, cx| {
-                    cx.notify();
+                view.update(cx, |overlay, cx| {
+                    overlay.record_microphone_selection(row.semantic_id.clone(), cx);
                 });
             });
         }
@@ -884,6 +997,7 @@ impl DictationMicrophonePopupWindow {
             is_selected,
             colors,
         )
+        .debug_selector(move || format!("dictation-microphone-popup-row-{idx}"))
     }
 
     fn render_picker(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -901,6 +1015,7 @@ impl DictationMicrophonePopupWindow {
             .collect();
 
         let body = div()
+            .debug_selector(|| "dictation-microphone-popup-list".to_string())
             .size_full()
             .flex()
             .flex_col()
@@ -933,9 +1048,25 @@ impl Focusable for DictationMicrophonePopupWindow {
 
 impl Render for DictationMicrophonePopupWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.snapshot.selected_row_id.hash(&mut hash);
+        self.snapshot.visible_start.hash(&mut hash);
+        for row in &self.snapshot.rows {
+            row.row_id.hash(&mut hash);
+            row.title.hash(&mut hash);
+            row.is_selected.hash(&mut hash);
+        }
+        let token = hash.finish();
+        if self.last_semantic_token != Some(token) {
+            self.semantic_revision = self.semantic_revision.wrapping_add(1).max(1);
+            self.last_semantic_token = Some(token);
+        }
+        self.applied_theme_revision = crate::theme::get_theme_snapshot().revision;
         self.ensure_activation_subscription(window, cx);
 
         div()
+            .debug_selector(|| "dictation-microphone-popup".to_string())
             .size_full()
             .track_focus(&self.focus_handle)
             .on_mouse_down_out(

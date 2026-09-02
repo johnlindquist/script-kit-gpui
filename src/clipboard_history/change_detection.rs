@@ -20,6 +20,12 @@ use tracing::debug;
 /// without reading the actual clipboard payload.
 #[cfg(target_os = "macos")]
 pub fn get_pasteboard_change_count() -> Option<i64> {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)
+    {
+        tracing::warn!(%error, "Clipboard change-count access refused");
+        return None;
+    }
     use cocoa::appkit::NSPasteboard;
     use cocoa::base::nil;
     use objc::runtime::Object;

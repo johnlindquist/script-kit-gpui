@@ -269,6 +269,7 @@ pub fn start_capture(
     async_channel::Receiver<DictationCaptureEvent>,
     DictationCaptureHandle,
 )> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Device)?;
     static REGISTER: Once = Once::new();
     REGISTER.call_once(register_delegate_class);
 

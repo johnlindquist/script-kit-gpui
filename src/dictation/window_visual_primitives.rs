@@ -1,3 +1,23 @@
+fn render_target_badge_content(target: crate::dictation::DictationTarget) -> AnyElement {
+    if matches!(target, crate::dictation::DictationTarget::ExternalApp) {
+        if let Some(icon) = target_badge_frontmost_app_icon() {
+            return crate::icons::render_image(icon, TARGET_BADGE_ICON_SIZE_PX, 1.0);
+        }
+    }
+
+    let theme = get_cached_theme();
+    div()
+        .text_size(px(STATUS_TEXT_SIZE_PX - 1.0))
+        .font_family(FONT_SYSTEM_UI)
+        .text_color(theme.colors.text.primary.with_opacity(OPACITY_ACTIVE))
+        .max_w(px(TARGET_BADGE_SLOT_WIDTH_PX - 18.0))
+        .overflow_hidden()
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .child(destination_selector_spec(target).label)
+        .into_any_element()
+}
+
 /// Format elapsed duration as `M:SS` for the compact timer display.
 pub(crate) fn format_elapsed(elapsed: Duration) -> SharedString {
     let elapsed_secs = elapsed.as_secs();
@@ -306,7 +326,94 @@ fn render_static_header_row(state: &DictationOverlayState) -> impl IntoElement {
         .child(render_static_target_badge_slot(state.target, !live))
 }
 
+/// Render waveform bars for the glass bar.
+///
+/// Uses theme success color when sound is detected, muted text when silent.
+fn render_waveform_bars(bars: &[f32; WAVEFORM_BAR_COUNT], active: bool) -> impl IntoElement {
+    let theme = get_cached_theme();
+    let bar_hex = if active {
+        theme.colors.ui.success
+    } else {
+        theme.colors.text.primary
+    };
+    let inactive_opacity_scale = if active {
+        1.0
+    } else {
+        theme.get_opacity().text_hint
+    };
+
+    let mut container = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(WAVEFORM_BAR_GAP_PX))
+        .h(px(WAVEFORM_BAR_MAX_HEIGHT_PX));
+
+    for &level in bars {
+        let bar_color = bar_hex.with_opacity(waveform_bar_opacity(level) * inactive_opacity_scale);
+        container = container.child(
+            div()
+                .w(px(WAVEFORM_BAR_WIDTH_PX))
+                .h(px(waveform_bar_height(level)))
+                .min_h(px(WAVEFORM_BAR_MIN_HEIGHT_PX))
+                .bg(bar_color)
+                .rounded(px(WAVEFORM_BAR_WIDTH_PX)),
+        );
+    }
+
+    container
+}
+
+/// Render dots for the transcribing state.
+///
+/// Uses theme success color at the given per-dot opacities.
+/// When animated, opacities come from `transcribing_dot_opacities_at()`;
+/// under reduced-motion, from `transcribing_dot_opacities_static()`.
+fn render_transcribing_dots(opacities: &[f32; TRANSCRIBING_DOT_COUNT]) -> impl IntoElement {
+    let theme = get_cached_theme();
+
+    let mut container = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(TRANSCRIBING_DOT_GAP_PX))
+        .h(px(WAVEFORM_BAR_MAX_HEIGHT_PX));
+
+    for &opacity in opacities {
+        let dot_color = theme.colors.ui.success.with_opacity(opacity);
+        container = container.child(
+            div()
+                .w(px(TRANSCRIBING_DOT_SIZE_PX))
+                .h(px(TRANSCRIBING_DOT_SIZE_PX))
+                .rounded(px(TRANSCRIBING_DOT_SIZE_PX / 2.0))
+                .bg(dot_color),
+        );
+    }
+
+    container
+}
+
 impl DictationOverlay {
+    /// Scrollable runtime caption container, sharing the preview block's
+    /// geometry. Content beyond the max window height scrolls; auto-follow
+    /// is driven by [`Self::sync_caption_follow`].
+    fn caption_scroll_container(&self) -> gpui::Stateful<Div> {
+        render_caption_block_container()
+            .id("dictation-caption-scroll")
+            .overflow_y_scroll()
+            .track_scroll(&self.caption_scroll)
+    }
+
+    /// Keep the caption scrolled to the newest text: fires once per caption
+    /// change so a user scrolling back is not fought mid-read, but every new
+    /// word snaps the view back to the live tail.
+    fn sync_caption_follow(&mut self) {
+        if self.caption.generation() != self.caption_scrolled_generation {
+            self.caption_scrolled_generation = self.caption.generation();
+            self.caption_scroll.scroll_to_bottom();
+        }
+    }
+
     /// Render the caption band while the app processes the capture.
     ///
     /// While no text is recognized yet the status label ("Transcribing…",
@@ -426,5 +533,89 @@ impl DictationOverlay {
         }
 
         row.into_any_element()
+    }
+
+    /// Render the destination verb chips: Paste · Today · Ask · Send.
+    ///
+    /// Chip clicks follow [`chip_click_behavior`]: while Recording or
+    /// Confirming, a click only retargets the session (and becomes the new
+    /// sticky default). Stopping and delivery remain separate explicit
+    /// actions. The active chip stays highlighted so the destination is
+    /// always visible.
+    /// Targets outside the chip set (Notes, Prompt, Filter) highlight no
+    /// chip — the badge still tells the truth.
+    ///
+    /// While the app is processing the capture the chips stay in place but
+    /// go inert (`interactive: false`) so the layout never jumps.
+    fn render_destination_chip_row(
+        &self,
+        interactive: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap(px(6.));
+        let mut chips = Vec::new();
+
+        let theme = get_cached_theme();
+        let hover_bg = theme.colors.background.main.with_opacity(OPACITY_SELECTED);
+        for descriptor in crate::dictation::DictationTarget::quick_chip_descriptors() {
+            let target = descriptor.target;
+            let is_active = self.state.target == target;
+            let tooltip_label = chip_tooltip_label(target);
+            let Some(label) = descriptor.quick_chip_label else {
+                continue;
+            };
+            let mut chip = destination_chip_base(label, descriptor.icon, is_active, !interactive);
+            if interactive {
+                if !is_active {
+                    chip = chip.hover(move |style| style.bg(hover_bg));
+                }
+                chip = chip
+                    .cursor_pointer()
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(tooltip_label.clone())
+                            .build(window, cx)
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                            match chip_click_behavior(
+                                &this.state.phase,
+                                this.transcript_armed(),
+                                false,
+                            ) {
+                                ChipClickBehavior::Ignore => {}
+                                ChipClickBehavior::Retarget => {
+                                    this.select_destination(target, cx);
+                                }
+                            }
+                        }),
+                    );
+            }
+            chips.push(chip.into_any_element());
+        }
+
+        if interactive {
+            crate::components::footer_chrome::glass_capsule_row(
+                "dictation-header-targets",
+                0,
+                Some(999.0),
+                row,
+                chips,
+            )
+        } else {
+            let chip_count = chips.len();
+            crate::components::footer_chrome::glass_capsule_row(
+                "dictation-header-targets",
+                chip_count,
+                Some(999.0),
+                row.children(chips),
+                std::iter::empty(),
+            )
+        }
     }
 }

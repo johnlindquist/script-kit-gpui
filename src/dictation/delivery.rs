@@ -1,5 +1,63 @@
 use crate::dictation::{DictationTarget, FrozenDictationDestination};
 
+pub fn dictation_mutation_error_outcome(
+    detail: &str,
+) -> crate::dictation::DictationDeliveryOutcome {
+    if detail.starts_with("mutation_failed:") {
+        crate::dictation::DictationDeliveryOutcome::Failed {
+            failure: crate::ai::reliability::destination_failure(false, detail),
+            reason: crate::dictation::DictationDeliveryFailureReason::MutationOutcomeUnknown,
+            retry_safety: sk_protocol::ai_reliability::RetrySafety::Never,
+        }
+    } else {
+        crate::dictation::DictationDeliveryOutcome::Refused {
+            failure: crate::ai::reliability::destination_failure(true, detail),
+            reason: crate::dictation::DictationDeliveryFailureReason::DestinationStale,
+        }
+    }
+}
+
+pub fn with_frozen_dictation_destination<T>(
+    expected: &crate::dictation::FrozenDictationDestination,
+    current: &crate::dictation::FrozenDictationDestination,
+    mutate: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if expected != current {
+        return Err("The frozen Dictation destination changed".into());
+    }
+    mutate()
+}
+
+pub fn dictation_outcome_from_insertion_range(
+    request: &crate::dictation::DictationDeliveryRequest,
+    range: &serde_json::Value,
+) -> Result<crate::dictation::DictationDeliveryOutcome, String> {
+    let observed = |key: &str| {
+        range
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| format!("Missing observed Dictation mutation {key}"))
+    };
+    let start = observed("start")?;
+    let end = observed("end")?;
+    let inserted_length = observed("insertedLength")?;
+    if end.checked_sub(start) != Some(inserted_length) {
+        return Err("Inconsistent observed Dictation mutation range".into());
+    }
+    Ok(crate::dictation::DictationDeliveryOutcome::Delivered {
+        destination: request.selection.destination.clone(),
+        mutation_receipt: crate::dictation::DictationMutationReceipt {
+            delivery_id: request.delivery_id,
+            destination_kind: request.selection.destination.kind(),
+            identity_fingerprint: request.selection.destination.identity_fingerprint(),
+            insertion_start: Some(start),
+            insertion_end: Some(end),
+            inserted_length,
+            duplicate: false,
+        },
+    })
+}
 fn fingerprint(value: &str) -> String {
     crate::dictation::redacted_transcript_fingerprint(value)
 }
@@ -62,6 +120,8 @@ fn choose_external_window<'a>(
 
 #[cfg(target_os = "macos")]
 pub fn capture_frozen_external_destination() -> Result<FrozenDictationDestination, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemDiscovery)
+        .map_err(|error| error.to_string())?;
     let app = crate::frontmost_app_tracker::get_last_real_app()
         .ok_or_else(|| "No previously focused app is available".to_string())?;
     let windows = matching_external_windows(app.pid)?;
@@ -89,6 +149,8 @@ pub fn capture_frozen_external_destination() -> Result<FrozenDictationDestinatio
 pub fn validate_frozen_external_destination(
     destination: &FrozenDictationDestination,
 ) -> Result<(), String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)
+        .map_err(|error| error.to_string())?;
     let FrozenDictationDestination::ExternalApp {
         pid,
         bundle_fingerprint,
@@ -279,5 +341,188 @@ mod tests {
                 ..
             })
         ));
+    }
+}
+#[cfg(test)]
+mod dictation_delivery_coordinator_tests {
+    use super::{
+        dictation_mutation_error_outcome, dictation_outcome_from_insertion_range,
+        with_frozen_dictation_destination,
+    };
+    use crate::dictation::{
+        DictationDeliveryOutcome, DictationDeliveryRequest, DictationTarget,
+        DictationTargetSelection, FrozenDictationDestination, ImmutableDictationTranscript,
+    };
+
+    fn owner() -> crate::dictation::FrozenMainDictationOwner {
+        crate::dictation::FrozenMainDictationOwner {
+            root_entity_id: 1,
+            window_generation: Some(2),
+            surface_generation: 3,
+            visibility_generation: 4,
+        }
+    }
+
+    #[test]
+    fn failed_persistence_after_edit_is_not_a_safe_pre_mutation_refusal() {
+        assert!(matches!(
+            dictation_mutation_error_outcome("stale_destination: replaced host"),
+            DictationDeliveryOutcome::Refused {
+                reason: crate::dictation::DictationDeliveryFailureReason::DestinationStale,
+                ..
+            }
+        ));
+        assert!(matches!(
+            dictation_mutation_error_outcome("mutation_failed: canonical save failed"),
+            DictationDeliveryOutcome::Failed {
+                reason: crate::dictation::DictationDeliveryFailureReason::MutationOutcomeUnknown,
+                retry_safety: sk_protocol::ai_reliability::RetrySafety::Never,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stale_reopened_and_retargeted_destinations_never_enter_mutation() {
+        let frozen = FrozenDictationDestination::MainWindowPrompt {
+            prompt_id: "same-id".into(),
+            prompt_generation: Some(7),
+            input_generation: 11,
+            prompt_entity_id: Some(5),
+            owner: owner(),
+        };
+        let changed = [
+            FrozenDictationDestination::MainWindowPrompt {
+                prompt_id: "same-id".into(),
+                prompt_generation: Some(7),
+                input_generation: 12,
+                prompt_entity_id: Some(5),
+                owner: owner(),
+            },
+            FrozenDictationDestination::MainWindowPrompt {
+                prompt_id: "same-id".into(),
+                prompt_generation: Some(8),
+                input_generation: 11,
+                prompt_entity_id: Some(5),
+                owner: owner(),
+            },
+            FrozenDictationDestination::MainWindowPrompt {
+                prompt_id: "other-id".into(),
+                prompt_generation: Some(7),
+                input_generation: 11,
+                prompt_entity_id: Some(5),
+                owner: owner(),
+            },
+            FrozenDictationDestination::MainWindowFilter {
+                owner: owner(),
+                input_generation: 11,
+            },
+        ];
+        let mut text = String::from("untouched");
+        for current in changed {
+            assert!(with_frozen_dictation_destination(&frozen, &current, || {
+                text.push_str(" dictated");
+                Ok(())
+            })
+            .is_err());
+            assert_eq!(text, "untouched");
+        }
+        for changed_owner in [
+            crate::dictation::FrozenMainDictationOwner {
+                root_entity_id: 2,
+                ..owner()
+            },
+            crate::dictation::FrozenMainDictationOwner {
+                window_generation: Some(3),
+                ..owner()
+            },
+            crate::dictation::FrozenMainDictationOwner {
+                window_generation: None,
+                ..owner()
+            },
+            crate::dictation::FrozenMainDictationOwner {
+                surface_generation: 4,
+                ..owner()
+            },
+            crate::dictation::FrozenMainDictationOwner {
+                visibility_generation: 5,
+                ..owner()
+            },
+        ] {
+            let current = FrozenDictationDestination::MainWindowPrompt {
+                prompt_id: "same-id".into(),
+                prompt_generation: Some(7),
+                input_generation: 11,
+                prompt_entity_id: Some(5),
+                owner: changed_owner,
+            };
+            assert!(with_frozen_dictation_destination(&frozen, &current, || {
+                text.push_str(" wrong lifetime");
+                Ok(())
+            })
+            .is_err());
+            assert_eq!(text, "untouched");
+        }
+        with_frozen_dictation_destination(&frozen, &frozen, || {
+            text.push_str(" dictated");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(text, "untouched dictated");
+    }
+
+    fn request() -> DictationDeliveryRequest {
+        DictationDeliveryRequest {
+            delivery_id: 8,
+            session_generation: 4,
+            attempt: 1,
+            history_entry_id: String::new(),
+            selection: DictationTargetSelection {
+                target: DictationTarget::MainWindowFilter,
+                destination: FrozenDictationDestination::MainWindowFilter {
+                    owner: owner(),
+                    input_generation: 9,
+                },
+                display_label: "Filter".into(),
+                icon_identity: None,
+                selection_generation: 6,
+            },
+            transcript: ImmutableDictationTranscript::new("transcript", "one\r\ntwo".into()),
+        }
+    }
+
+    #[test]
+    fn mutation_receipt_reports_observed_sink_range_not_transcript_length() {
+        let request = request();
+        let outcome = dictation_outcome_from_insertion_range(
+            &request,
+            &serde_json::json!({
+                "start": 0, "end": 7, "insertedLength": 7,
+            }),
+        )
+        .unwrap();
+        let DictationDeliveryOutcome::Delivered {
+            destination,
+            mutation_receipt,
+        } = outcome
+        else {
+            panic!("expected delivered");
+        };
+        assert_eq!(destination, request.selection.destination);
+        assert_eq!(mutation_receipt.delivery_id, request.delivery_id);
+        assert_eq!(mutation_receipt.inserted_length, 7);
+        assert_ne!(mutation_receipt.inserted_length, request.transcript.len());
+        assert!(!mutation_receipt.duplicate);
+    }
+
+    #[test]
+    fn missing_or_inconsistent_mutation_evidence_cannot_report_delivery() {
+        for range in [
+            serde_json::json!({}),
+            serde_json::json!({"start": 4, "end": 3, "insertedLength": 1}),
+            serde_json::json!({"start": 0, "end": 3, "insertedLength": 8}),
+        ] {
+            assert!(dictation_outcome_from_insertion_range(&request(), &range).is_err());
+        }
     }
 }

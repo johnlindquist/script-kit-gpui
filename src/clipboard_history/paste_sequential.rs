@@ -306,6 +306,8 @@ fn paste_worker_sender() -> &'static std::sync::mpsc::SyncSender<String> {
 /// Error returned when enqueuing a paste job fails.
 #[derive(Debug, thiserror::Error)]
 pub enum EnqueuePasteError {
+    #[error("{0}")]
+    PolicyRefused(crate::runtime_policy::EffectRefusal),
     /// The paste worker thread has terminated unexpectedly.
     #[error("Paste worker disconnected")]
     WorkerDisconnected,
@@ -321,6 +323,8 @@ pub enum EnqueuePasteError {
 /// block briefly). Returns [`EnqueuePasteError::WorkerDisconnected`] if the
 /// worker thread is dead.
 pub fn enqueue_sequential_paste(entry_id: String) -> Result<(), EnqueuePasteError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)
+        .map_err(EnqueuePasteError::PolicyRefused)?;
     let tx = paste_worker_sender();
     match tx.try_send(entry_id.clone()) {
         Ok(()) => {

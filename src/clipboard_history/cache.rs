@@ -6,6 +6,7 @@ use gpui::RenderImage;
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tracing::debug;
 
@@ -37,6 +38,10 @@ static ENTRY_CACHE: OnceLock<Mutex<Arc<Vec<ClipboardEntryMeta>>>> = OnceLock::ne
 /// Timestamp of last cache update
 static CACHE_UPDATED: OnceLock<Mutex<i64>> = OnceLock::new();
 static ENTRY_CACHE_READY: OnceLock<Mutex<bool>> = OnceLock::new();
+static ENTRY_CACHE_INVALIDATED: AtomicBool = AtomicBool::new(false);
+// Advanced while holding ENTRY_CACHE whenever its published rows change.
+static ENTRY_CACHE_REVISION: AtomicU64 = AtomicU64::new(0);
+static ENTRY_CACHE_ACCEPTED: AtomicBool = AtomicBool::new(false);
 static ENTRY_CACHE_REFRESH_LIFECYCLE: OnceLock<
     Mutex<crate::scripts::root_search_contract::RootOwnedProviderRefreshLifecycle>,
 > = OnceLock::new();
@@ -45,7 +50,13 @@ pub(crate) type RootClipboardHistoryRefresh =
     crate::scripts::root_search_contract::RootOwnedProviderRefresh;
 
 pub(crate) struct RootClipboardHistorySnapshot {
-    entries: Vec<ClipboardEntryMeta>,
+    entries: anyhow::Result<Vec<ClipboardEntryMeta>>,
+}
+
+impl RootClipboardHistorySnapshot {
+    pub(crate) fn read_outcome(&self) -> Result<usize, &anyhow::Error> {
+        self.entries.as_ref().map(Vec::len)
+    }
 }
 
 /// Get the global image cache, initializing if needed
@@ -118,28 +129,57 @@ pub fn get_cached_entries(limit: usize) -> Vec<ClipboardEntryMeta> {
         return result;
     }
     drop(cache);
+    if crate::runtime_policy::is_owned_evaluation() {
+        return Vec::new();
+    }
     // Fall back to database (metadata-only query)
-    get_clipboard_history_meta(limit, 0)
+    get_clipboard_history_meta(limit, 0).unwrap_or_else(|error| {
+        tracing::warn!(
+            error_bytes = error.to_string().len(),
+            "clipboard_metadata_read_failed"
+        );
+        Vec::new()
+    })
 }
 
 /// Invalidate the entry cache (called when entries change)
 pub fn invalidate_entry_cache() {
     let mut cache = get_entry_cache().lock();
     *cache = Arc::new(Vec::new());
+    ENTRY_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
+    ENTRY_CACHE_ACCEPTED.store(false, Ordering::Relaxed);
     drop(cache);
     *entry_cache_ready().lock() = false;
 }
 
 /// Refresh the entry cache from database (metadata only, no content payload)
 pub fn refresh_entry_cache() {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)
+    {
+        tracing::warn!(%error, "Clipboard cache refresh refused");
+        return;
+    }
     // Use metadata-only query to avoid loading full content
-    let entries = get_clipboard_history_meta(MAX_CACHED_ENTRIES, 0);
+    let entries = match get_clipboard_history_meta(MAX_CACHED_ENTRIES, 0) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                error_bytes = error.to_string().len(),
+                "clipboard_metadata_refresh_failed"
+            );
+            return;
+        }
+    };
     let mut cache = get_entry_cache().lock();
     // Replace the Arc with a new one containing the refreshed entries
     *cache = Arc::new(entries);
+    ENTRY_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
+    ENTRY_CACHE_ACCEPTED.store(true, Ordering::Relaxed);
     debug!(count = cache.len(), "Refreshed entry metadata cache");
     drop(cache);
     *entry_cache_ready().lock() = true;
+    ENTRY_CACHE_INVALIDATED.store(false, Ordering::Relaxed);
     if let Some(updated) = CACHE_UPDATED.get() {
         let mut ts = updated.lock();
         *ts = chrono::Utc::now().timestamp_millis();
@@ -147,7 +187,27 @@ pub fn refresh_entry_cache() {
 }
 
 pub(crate) fn root_clipboard_history_cache_is_fresh() -> bool {
-    !get_entry_cache().lock().is_empty() || *entry_cache_ready().lock()
+    !ENTRY_CACHE_INVALIDATED.load(Ordering::Relaxed)
+        && (!get_entry_cache().lock().is_empty() || *entry_cache_ready().lock())
+}
+
+/// Accepted metadata cache revision and row count, observed under the owner locks.
+pub(crate) fn root_clipboard_history_fresh_cache_status() -> Option<(u64, usize)> {
+    let lifecycle = entry_cache_refresh_lifecycle().try_lock()?;
+    if lifecycle.in_flight.is_some() {
+        return None;
+    }
+    let cache = get_entry_cache().try_lock()?;
+    let ready = entry_cache_ready().try_lock()?;
+    let revision = ENTRY_CACHE_REVISION.load(Ordering::Relaxed);
+    if ENTRY_CACHE_INVALIDATED.load(Ordering::Relaxed)
+        || !ENTRY_CACHE_ACCEPTED.load(Ordering::Relaxed)
+        || (cache.is_empty() && !*ready)
+        || revision == 0
+    {
+        return None;
+    }
+    Some((revision, cache.len()))
 }
 
 pub(crate) fn try_begin_root_clipboard_history_refresh() -> Option<RootClipboardHistoryRefresh> {
@@ -159,6 +219,10 @@ pub(crate) fn try_begin_root_clipboard_history_refresh() -> Option<RootClipboard
 }
 
 pub(crate) fn read_root_clipboard_history_snapshot() -> RootClipboardHistorySnapshot {
+    assert!(
+        !crate::runtime_policy::is_owned_evaluation(),
+        "owned_source_snapshot_required"
+    );
     tracing::debug!(
         target: "script_kit::search",
         worker = ROOT_CLIPBOARD_HISTORY_REFRESH_LABEL,
@@ -169,18 +233,70 @@ pub(crate) fn read_root_clipboard_history_snapshot() -> RootClipboardHistorySnap
     }
 }
 
+pub(crate) fn owned_root_clipboard_history_snapshot(
+    result: anyhow::Result<Vec<ClipboardEntryMeta>>,
+) -> anyhow::Result<RootClipboardHistorySnapshot> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    Ok(RootClipboardHistorySnapshot { entries: result })
+}
+
+pub(crate) fn reset_owned_root_clipboard_history() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut lifecycle = entry_cache_refresh_lifecycle().lock();
+    lifecycle.next_generation = lifecycle
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("clipboard_generation_exhausted"))?;
+    lifecycle.in_flight = None;
+    invalidate_entry_cache();
+    ENTRY_CACHE_INVALIDATED.store(false, Ordering::Relaxed);
+    get_image_cache().lock().clear();
+    if let Some(updated) = CACHE_UPDATED.get() {
+        *updated.lock() = 0;
+    }
+    Ok(())
+}
+
+pub(crate) fn invalidate_owned_root_clipboard_history_freshness() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut lifecycle = entry_cache_refresh_lifecycle().lock();
+    lifecycle.next_generation = lifecycle
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("clipboard_generation_exhausted"))?;
+    lifecycle.in_flight = None;
+    ENTRY_CACHE_INVALIDATED.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
 pub(crate) fn finish_root_clipboard_history_refresh(
     refresh: RootClipboardHistoryRefresh,
     snapshot: RootClipboardHistorySnapshot,
 ) -> bool {
-    if !entry_cache_refresh_lifecycle().lock().finish(refresh) {
+    let mut lifecycle = entry_cache_refresh_lifecycle().lock();
+    if !lifecycle.finish(refresh) {
         return false;
     }
+    let Ok(entries) = snapshot.entries else {
+        return false;
+    };
     let mut cache = get_entry_cache().lock();
-    *cache = Arc::new(snapshot.entries);
+    *cache = Arc::new(entries);
+    ENTRY_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
+    ENTRY_CACHE_ACCEPTED.store(true, Ordering::Relaxed);
     let count = cache.len();
     drop(cache);
     *entry_cache_ready().lock() = true;
+    ENTRY_CACHE_INVALIDATED.store(false, Ordering::Relaxed);
     update_cache_timestamp();
     debug!(count, "Published owned clipboard metadata snapshot");
     true
@@ -274,6 +390,8 @@ pub fn upsert_entry_in_cache(entry: ClipboardEntryMeta) {
 
     // Replace the Arc with the modified Vec
     *cache_arc = Arc::new(cache);
+    ENTRY_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
+    ENTRY_CACHE_ACCEPTED.store(true, Ordering::Relaxed);
     drop(cache_arc);
 
     // Update timestamp
@@ -292,6 +410,7 @@ pub fn remove_entry_from_cache(id: &str) {
         debug!(id = %id, "Removed entry from cache");
         // Only update Arc if we actually removed something
         *cache_arc = Arc::new(cache);
+        ENTRY_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
     }
     drop(cache_arc);
     update_cache_timestamp();
@@ -315,6 +434,7 @@ pub fn update_pin_status_in_cache(id: &str, pinned: bool) {
     });
     debug!(id = %id, pinned = pinned, "Updated pin status in cache");
     *cache_arc = Arc::new(cache);
+    ENTRY_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
     drop(cache_arc);
     update_cache_timestamp();
 }
@@ -333,6 +453,7 @@ pub(crate) fn update_ocr_text_in_cache(id: &str, text: String) {
     if updated {
         debug!(id = %id, "Updated OCR text in cache");
         *cache_arc = Arc::new(cache);
+        ENTRY_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
         drop(cache_arc);
         update_cache_timestamp();
     }
@@ -360,6 +481,13 @@ pub fn clear_all_caches() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_clipboard_snapshots_and_resets_require_runtime_authority() {
+        assert!(owned_root_clipboard_history_snapshot(Ok(Vec::new())).is_err());
+        assert!(reset_owned_root_clipboard_history().is_err());
+        assert!(invalidate_owned_root_clipboard_history_freshness().is_err());
+    }
     use crate::clipboard_history::types::ContentType;
     use parking_lot::Mutex as ParkingMutex;
 
@@ -386,18 +514,32 @@ mod tests {
         let _lock = TEST_LOCK.lock();
         invalidate_entry_cache();
         assert!(!root_clipboard_history_cache_is_fresh());
+        assert!(root_clipboard_history_fresh_cache_status().is_none());
 
         let refresh = try_begin_root_clipboard_history_refresh()
             .expect("one owned worker for a cold clipboard cache");
         assert!(try_begin_root_clipboard_history_refresh().is_none());
+        assert!(root_clipboard_history_fresh_cache_status().is_none());
         assert!(finish_root_clipboard_history_refresh(
             refresh,
             RootClipboardHistorySnapshot {
-                entries: Vec::new()
+                entries: Ok(Vec::new())
             },
         ));
         assert!(root_clipboard_history_cache_is_fresh());
         assert!(try_begin_root_clipboard_history_refresh().is_none());
+        let (revision, count) =
+            root_clipboard_history_fresh_cache_status().expect("accepted empty cache");
+        assert!(revision > 0);
+        assert_eq!(count, 0);
+        {
+            let _cache_lock = get_entry_cache().lock();
+            assert!(root_clipboard_history_fresh_cache_status().is_none());
+        }
+        invalidate_entry_cache();
+        assert!(root_clipboard_history_fresh_cache_status().is_none());
+        remove_entry_from_cache("never-published");
+        assert!(root_clipboard_history_fresh_cache_status().is_none());
         invalidate_entry_cache();
     }
 
@@ -415,12 +557,46 @@ mod tests {
         assert!(!finish_root_clipboard_history_refresh(
             forged,
             RootClipboardHistorySnapshot {
-                entries: vec![make_meta("foreign-owner", 1, false)],
+                entries: Ok(vec![make_meta("foreign-owner", 1, false)]),
             },
         ));
         assert!(get_entry_cache().lock().is_empty());
         assert!(!root_clipboard_history_cache_is_fresh());
         assert!(discard_root_clipboard_history_refresh(refresh));
+        invalidate_entry_cache();
+    }
+
+    #[test]
+    fn root_clipboard_failed_read_preserves_last_good_and_releases_exact_worker() {
+        let _guard = TEST_LOCK.lock();
+        invalidate_entry_cache();
+        let refresh = try_begin_root_clipboard_history_refresh().unwrap();
+        *get_entry_cache().lock() = Arc::new(vec![make_meta("last-good", 1, false)]);
+        let snapshot = RootClipboardHistorySnapshot {
+            entries: Err(anyhow::anyhow!("read failed")),
+        };
+        assert!(snapshot.read_outcome().is_err());
+        assert!(!finish_root_clipboard_history_refresh(refresh, snapshot));
+        assert_eq!(get_entry_cache().lock()[0].id, "last-good");
+        assert!(entry_cache_refresh_lifecycle().lock().in_flight.is_none());
+        invalidate_entry_cache();
+    }
+
+    #[test]
+    fn root_clipboard_stale_discard_preserves_replacement_worker_and_rows() {
+        let _guard = TEST_LOCK.lock();
+        invalidate_entry_cache();
+        let stale = try_begin_root_clipboard_history_refresh().unwrap();
+        assert!(discard_root_clipboard_history_refresh(stale));
+        let current = try_begin_root_clipboard_history_refresh().unwrap();
+        *get_entry_cache().lock() = Arc::new(vec![make_meta("last-good", 1, false)]);
+        assert!(!discard_root_clipboard_history_refresh(stale));
+        assert_eq!(
+            entry_cache_refresh_lifecycle().lock().in_flight,
+            Some(current)
+        );
+        assert_eq!(get_entry_cache().lock()[0].id, "last-good");
+        assert!(discard_root_clipboard_history_refresh(current));
         invalidate_entry_cache();
     }
 

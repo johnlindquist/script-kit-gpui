@@ -57,6 +57,43 @@ struct DictationSession {
     last_partial_attempt_at: Option<Instant>,
 }
 
+impl DictationSession {
+    fn from_source(
+        target: DictationTarget,
+        event_rx: async_channel::Receiver<DictationCaptureEvent>,
+        capture_handle: Option<DictationCaptureHandle>,
+        active_device: Option<DictationDeviceInfo>,
+        live_preview: bool,
+        max_duration: Option<Duration>,
+    ) -> Self {
+        Self {
+            capture_handle,
+            event_rx,
+            chunks: Vec::new(),
+            last_bars: silent_bars(),
+            started_at: Instant::now(),
+            overlay_phase: DictationSessionPhase::Recording,
+            target,
+            selection: None,
+            target_cycle: vec![target],
+            active_device,
+            session_generation: SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1,
+            live_preview,
+            max_duration,
+            last_partial_attempt_at: None,
+        }
+    }
+}
+
+include!("runtime_owned_fixture.rs");
+
+fn destination_mutable(phase: &DictationSessionPhase) -> bool {
+    matches!(
+        phase,
+        DictationSessionPhase::Recording | DictationSessionPhase::Confirming
+    )
+}
+
 /// Global singleton guarded by a parking_lot Mutex.
 ///
 /// `None` means idle (no recording in progress).
@@ -105,7 +142,6 @@ pub enum BeginStopCapture {
     Started {
         request_id: u64,
         target: DictationTarget,
-        selection: Option<crate::dictation::DictationTargetSelection>,
         session_generation: u64,
         job: Box<DictationStopJob>,
     },
@@ -473,9 +509,9 @@ pub fn begin_stop_capture(reason: DictationStopReason) -> Result<BeginStopCaptur
 
     let request_id = STOP_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let target = session.target;
-    let selection = session.selection.clone();
     let session_generation = session.session_generation;
-    let target_label = selection
+    let target_label = session
+        .selection
         .as_ref()
         .map(|selection| selection.display_label.as_str())
         .unwrap_or_else(|| target.overlay_label());
@@ -484,7 +520,7 @@ pub fn begin_stop_capture(reason: DictationStopReason) -> Result<BeginStopCaptur
         request_id,
         reason,
         target,
-        selection: selection.clone(),
+        selection: session.selection.clone(),
         requested_at,
     });
     *LAST_STOP_RECEIPT.lock() = Some(serde_json::json!({
@@ -515,7 +551,6 @@ pub fn begin_stop_capture(reason: DictationStopReason) -> Result<BeginStopCaptur
     Ok(BeginStopCapture::Started {
         request_id,
         target,
-        selection,
         session_generation,
         job: Box::new(DictationStopJob { session }),
     })
@@ -625,6 +660,9 @@ pub fn set_dictation_session_selection(
 ) -> Option<crate::dictation::DictationTargetSelection> {
     let mut guard = SESSION.lock();
     let session = guard.as_mut()?;
+    if !destination_mutable(&session.overlay_phase) {
+        return None;
+    }
     if !session.target_cycle.contains(&selection.target) {
         session.target_cycle.push(selection.target);
     }
@@ -849,6 +887,9 @@ pub fn can_cycle_dictation_target() -> bool {
 pub fn set_dictation_session_target(target: DictationTarget) -> Option<DictationTarget> {
     let mut guard = SESSION.lock();
     let session = guard.as_mut()?;
+    if !destination_mutable(&session.overlay_phase) {
+        return None;
+    }
 
     if !session.target_cycle.contains(&target) {
         session.target_cycle.push(target);
@@ -873,6 +914,9 @@ pub fn set_dictation_session_target(target: DictationTarget) -> Option<Dictation
 pub fn cycle_dictation_target() -> Option<DictationTarget> {
     let mut guard = SESSION.lock();
     let session = guard.as_mut()?;
+    if !destination_mutable(&session.overlay_phase) {
+        return None;
+    }
 
     if session.target_cycle.len() < 2 {
         return Some(session.target);
@@ -1146,17 +1190,26 @@ pub fn automation_state() -> serde_json::Value {
         }
     };
 
-    let config = crate::config::load_config();
+    let config = if crate::runtime_policy::is_owned_evaluation() {
+        crate::config::Config::default()
+    } else {
+        crate::config::load_config()
+    };
     let prefs = crate::config::load_user_preferences();
     let selected_device_id = prefs.dictation.selected_device_id.as_deref();
     let selected_model_id = DictationModelId::from_preference(prefs.dictation.model.as_deref());
     let selected_model = dictation_model_entry(selected_model_id);
-    let permission = crate::dictation::microphone_permission_status();
-    let devices_result = if matches!(
-        permission,
-        crate::dictation::DictationMicrophonePermissionStatus::Granted
-            | crate::dictation::DictationMicrophonePermissionStatus::Unknown
-    ) {
+    let permission = if crate::runtime_policy::is_owned_evaluation() {
+        crate::dictation::DictationMicrophonePermissionStatus::Unknown
+    } else {
+        crate::dictation::microphone_permission_status()
+    };
+    let devices_result = if !crate::runtime_policy::is_owned_evaluation()
+        && matches!(
+            permission,
+            crate::dictation::DictationMicrophonePermissionStatus::Granted
+                | crate::dictation::DictationMicrophonePermissionStatus::Unknown
+        ) {
         crate::dictation::list_input_devices().map_err(|error| error.to_string())
     } else {
         Ok(Vec::new())
@@ -1264,7 +1317,7 @@ pub fn automation_state() -> serde_json::Value {
                 "status": microphone_status_label(&setup_state.microphone_status),
                 "deviceSnapshot": device_snapshot,
                 "generation": generation,
-                "source": "passiveAVFoundationEnumeration",
+                "source": if crate::runtime_policy::is_owned_evaluation() { "ownedFixture" } else { "passiveAVFoundationEnumeration" },
                 "noPermissionPrompt": true,
             },
             "hotkey": {
@@ -1616,6 +1669,7 @@ pub(crate) fn reset_cached_transcriber_for_tests() {
 // ---------------------------------------------------------------------------
 
 fn start_recording(target: DictationTarget) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Device)?;
     let active_device = resolve_preferred_device_info()?;
     let device_id = active_device.as_ref().map(|device| device.id.clone());
     let capture_config = DictationCaptureConfig::default();
@@ -1624,28 +1678,19 @@ fn start_recording(target: DictationTarget) -> Result<()> {
         .context("failed to start audio capture")?;
 
     let prefs = crate::config::load_user_preferences();
-    let session_generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     *PARTIAL_TRANSCRIPT.lock() = None;
     // A new session opens with the (possibly just-changed) saved preference,
     // so any pending-device note from the previous session is obsolete.
     *PENDING_DEVICE_LABEL.lock() = None;
 
-    let session = DictationSession {
-        capture_handle: Some(capture_handle),
-        event_rx,
-        chunks: Vec::new(),
-        last_bars: silent_bars(),
-        started_at: Instant::now(),
-        overlay_phase: DictationSessionPhase::Recording,
+    let session = DictationSession::from_source(
         target,
-        selection: None,
-        target_cycle: vec![target],
-        active_device: active_device.clone(),
-        session_generation,
-        live_preview: prefs.dictation.live_preview_enabled(),
-        max_duration: prefs.dictation.max_duration(),
-        last_partial_attempt_at: None,
-    };
+        event_rx,
+        Some(capture_handle),
+        active_device.clone(),
+        prefs.dictation.live_preview_enabled(),
+        prefs.dictation.max_duration(),
+    );
 
     *SESSION.lock() = Some(session);
     bump_dictation_state_generation();
@@ -1705,6 +1750,11 @@ fn stop_recording() -> Result<Option<CompletedDictationCapture>> {
 }
 
 impl DictationStopJob {
+    /// Transfer the frozen destination before handing collection to the worker.
+    pub fn take_selection(&mut self) -> Option<crate::dictation::DictationTargetSelection> {
+        self.session.selection.take()
+    }
+
     pub fn collect_with_deadline(
         mut self,
         timeout: Duration,

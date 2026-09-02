@@ -103,6 +103,12 @@ pub fn decide_sediment(text: &str, state: &SedimentState, today: &str) -> Sedime
 
 /// Apply sediment rules after a text entry is stored (post-rejection gate).
 pub fn process_text_sediment(entry_id: &str, text: &str, now: DateTime<Utc>) {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)
+    {
+        tracing::warn!(%error, "Clipboard sediment access refused");
+        return;
+    }
     let Some(state) = get_entry_sediment_state(entry_id) else {
         warn!(entry_id = %entry_id, "sediment skipped: entry not found");
         return;
@@ -165,6 +171,7 @@ fn keep_url(
 /// Clipboard History. Returns `false` when the entry was already brain-kept
 /// (no duplicate day-page line is written).
 pub fn keep_entry_in_today(entry_id: &str, now: DateTime<Utc>) -> anyhow::Result<bool> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     let state = get_entry_sediment_state(entry_id)
         .ok_or_else(|| anyhow::anyhow!("clipboard entry not found: {entry_id}"))?;
     if state.brain_kept {

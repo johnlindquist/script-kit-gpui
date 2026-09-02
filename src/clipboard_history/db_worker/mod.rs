@@ -109,6 +109,7 @@ pub enum DbRequest {
 
 /// Get the database path (~/.scriptkit/db/clipboard-history.sqlite)
 pub fn get_db_path() -> Result<PathBuf> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     let kit_dir = PathBuf::from(shellexpand::tilde("~/.scriptkit").as_ref());
     let db_dir = kit_dir.join("db");
     if !db_dir.exists() {
@@ -119,6 +120,7 @@ pub fn get_db_path() -> Result<PathBuf> {
 
 /// Start the database worker thread
 pub fn start_db_worker() -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     if WORKER_STARTED.get().is_some() {
         debug!("DB worker already started");
         return Ok(());
@@ -156,6 +158,7 @@ fn init_connection() -> Result<Connection> {
 }
 
 fn init_connection_at(db_path: &Path) -> Result<Connection> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     let conn = crate::utils::db_permissions::open_private_sqlite(db_path)
         .context("Failed to open private clipboard-worker database")?;
 

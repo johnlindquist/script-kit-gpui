@@ -140,21 +140,51 @@ pub enum DictationTarget {
     QuickAiQuestion,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrozenMainDictationOwner {
+    pub root_entity_id: u64,
+    pub window_generation: Option<u64>,
+    pub surface_generation: u64,
+    pub visibility_generation: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrozenAgentChatPolicy {
-    ExistingThread { thread_id: String, generation: u64 },
-    FreshStandard { host_generation: u64 },
+    ExistingThread {
+        thread_id: String,
+        generation: u64,
+        composer_semantic_token: Option<u64>,
+        chat_entity_id: Option<u64>,
+        data_generation: Option<u64>,
+        main_owner: FrozenMainDictationOwner,
+    },
+    FreshStandard {
+        host_generation: u64,
+        main_owner: FrozenMainDictationOwner,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DayPageDictationDestinationSnapshot {
+    pub instance_id: u64,
+    pub document_revision: u64,
+    pub editor_revision: u64,
+    pub document_path: std::path::PathBuf,
+    pub content_fingerprint: String,
+    pub insertion_anchor: std::ops::Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrozenDictationDestination {
     MainWindowFilter {
-        window_generation: u64,
+        owner: FrozenMainDictationOwner,
         input_generation: u64,
     },
     MainWindowPrompt {
         prompt_id: String,
-        prompt_generation: u64,
+        prompt_generation: Option<u64>,
+        prompt_entity_id: Option<u64>,
+        owner: FrozenMainDictationOwner,
         input_generation: u64,
     },
     NotesEditor {
@@ -177,6 +207,8 @@ pub enum FrozenDictationDestination {
         date: chrono::NaiveDate,
         substrate_fingerprint: String,
         entity_generation: u64,
+        owned_editor: Option<DayPageDictationDestinationSnapshot>,
+        main_owner: Option<FrozenMainDictationOwner>,
     },
     QuickAi {
         request_generation: u64,
@@ -223,14 +255,16 @@ impl FrozenDictationDestination {
     pub fn identity_fingerprint(&self) -> String {
         let identity = match self {
             Self::MainWindowFilter {
-                window_generation,
+                owner,
                 input_generation,
-            } => format!("filter:{window_generation}:{input_generation}"),
+            } => format!("filter:{owner:?}:{input_generation}"),
             Self::MainWindowPrompt {
                 prompt_id,
                 prompt_generation,
                 input_generation,
-            } => format!("prompt:{prompt_id}:{prompt_generation}:{input_generation}"),
+                owner,
+                prompt_entity_id,
+            } => format!("prompt:{owner:?}:{prompt_id}:{prompt_generation:?}:{prompt_entity_id:?}:{input_generation}"),
             Self::NotesEditor {
                 notes_instance_id,
                 document_id,
@@ -244,9 +278,13 @@ impl FrozenDictationDestination {
                 FrozenAgentChatPolicy::ExistingThread {
                     thread_id,
                     generation,
-                } => format!("agent-chat:existing:{thread_id}:{generation}"),
-                FrozenAgentChatPolicy::FreshStandard { host_generation } => {
-                    format!("agent-chat:fresh:{host_generation}")
+                    composer_semantic_token,
+                    chat_entity_id,
+                    data_generation,
+                    main_owner,
+                } => format!("agent-chat:existing:{main_owner:?}:{thread_id}:{generation}:{composer_semantic_token:?}:{chat_entity_id:?}:{data_generation:?}"),
+                FrozenAgentChatPolicy::FreshStandard { host_generation, main_owner } => {
+                    format!("agent-chat:fresh:{main_owner:?}:{host_generation}")
                 }
             },
             Self::ExternalApp {
@@ -259,7 +297,9 @@ impl FrozenDictationDestination {
                 date,
                 substrate_fingerprint,
                 entity_generation,
-            } => format!("day:{date}:{substrate_fingerprint}:{entity_generation}"),
+                owned_editor,
+                main_owner,
+            } => format!("day:{main_owner:?}:{date}:{substrate_fingerprint}:{entity_generation}:{owned_editor:?}"),
             Self::QuickAi { request_generation } => format!("quick-ai:{request_generation}"),
             Self::Unavailable {
                 target_id,

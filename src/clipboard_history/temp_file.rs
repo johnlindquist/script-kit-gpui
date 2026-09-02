@@ -13,6 +13,7 @@ use super::types::{ClipboardEntry, ContentType};
 /// Save a clipboard entry to a temp file and return its path.
 #[allow(dead_code)]
 pub fn save_entry_to_temp_file(entry: &ClipboardEntry) -> Result<PathBuf> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ExternalStorage)?;
     match entry.content_type {
         ContentType::Text | ContentType::Link | ContentType::File | ContentType::Color => {
             let mut temp_file = Builder::new()

@@ -73,7 +73,9 @@ pub use cache::{
 };
 pub(crate) use cache::{
     discard_root_clipboard_history_refresh, finish_root_clipboard_history_refresh,
-    read_root_clipboard_history_snapshot, root_clipboard_history_cache_is_fresh,
+    invalidate_owned_root_clipboard_history_freshness, owned_root_clipboard_history_snapshot,
+    read_root_clipboard_history_snapshot, reset_owned_root_clipboard_history,
+    root_clipboard_history_cache_is_fresh, root_clipboard_history_fresh_cache_status,
     try_begin_root_clipboard_history_refresh, RootClipboardHistorySnapshot,
 };
 

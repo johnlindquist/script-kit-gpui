@@ -29,11 +29,12 @@ pub use catalog::{
     DictationEngineKind, DictationModelCatalogEntry, DictationModelId,
 };
 pub use delivery::{
-    capture_frozen_external_destination, parse_dictation_target_label,
+    capture_frozen_external_destination, dictation_mutation_error_outcome,
+    dictation_outcome_from_insertion_range, parse_dictation_target_label,
     resolve_delivery_target_request, resolve_dictation_target_label,
-    validate_frozen_external_destination, DictationDeliveryTargetResolution,
-    DictationDeliveryTargetSource, DictationTargetLabelResolution, DictationWrongTargetReason,
-    DictationWrongTargetRefusalDraft,
+    validate_frozen_external_destination, with_frozen_dictation_destination,
+    DictationDeliveryTargetResolution, DictationDeliveryTargetSource,
+    DictationTargetLabelResolution, DictationWrongTargetReason, DictationWrongTargetRefusalDraft,
 };
 pub use device::{
     apply_device_selection, build_device_menu_items, default_input_device,
@@ -51,15 +52,17 @@ pub use history::{
     load_history, load_history_result, record_dictation_history,
     root_dictation_history_query_is_eligible, search_history, search_history_page,
     search_root_dictation_history, search_root_dictation_history_cached,
-    search_root_dictation_history_direct, DictationHistoryEntry, DictationHistoryPage,
-    DictationHistorySearchField, DictationHistorySearchHit, DictationHistoryViewState,
-    RootDictationHistorySearchHit, RootDictationHistorySectionOptions,
+    search_root_dictation_history_direct, seed_owned_dictation_history, DictationHistoryEntry,
+    DictationHistoryPage, DictationHistorySearchField, DictationHistorySearchHit,
+    DictationHistoryViewState, RootDictationHistorySearchHit, RootDictationHistorySectionOptions,
     DICTATION_HISTORY_ENTRY_VERSION, DICTATION_HISTORY_LEGACY_UNKNOWN_TARGET_ID,
     DICTATION_HISTORY_PAGE_SIZE,
 };
 pub(crate) use history::{
     discard_root_dictation_history_refresh, finish_root_dictation_history_refresh,
-    read_root_dictation_history_snapshot, root_dictation_history_cache_is_fresh,
+    invalidate_owned_root_dictation_history_freshness, owned_root_dictation_history_snapshot,
+    read_root_dictation_history_snapshot, reset_owned_root_dictation_history,
+    root_dictation_history_cache_is_fresh, root_dictation_history_fresh_cache_status,
     try_begin_root_dictation_history_refresh, RootDictationHistorySnapshot,
 };
 // The batch_select_* automation hooks are consumed by the binary crate
@@ -71,10 +74,11 @@ pub(crate) use microphone_popup_window::{
     batch_select_dictation_microphone_popup_row_by_value,
     build_dictation_microphone_popup_snapshot, close_dictation_microphone_popup_window,
     close_dictation_microphone_popup_window_for_owner_loss,
-    dismiss_dictation_microphone_popup_from_parent, is_dictation_microphone_popup_window_open,
-    sync_dictation_microphone_popup_window, DictationMicrophonePopupRequest,
-    DictationMicrophonePopupSelectionMode, DictationMicrophonePopupSnapshot,
-    DictationPopupDismissOutcome, DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
+    dictation_microphone_popup_revision_facts, dismiss_dictation_microphone_popup_from_parent,
+    is_dictation_microphone_popup_window_open, sync_dictation_microphone_popup_window,
+    DictationMicrophonePopupRequest, DictationMicrophonePopupSelectionMode,
+    DictationMicrophonePopupSnapshot, DictationPopupDismissOutcome,
+    DICTATION_MICROPHONE_POPUP_AUTOMATION_ID,
 };
 pub use runtime::{
     abort_dictation, automation_state, begin_stop_capture, can_cycle_dictation_target,
@@ -89,8 +93,9 @@ pub use runtime::{
     redacted_transcript_fingerprint, resolve_final_or_partial_transcript,
     set_dictation_session_selection, set_dictation_session_target, set_dictation_target_cycle,
     set_overlay_phase, set_pending_dictation_device_label, snapshot_overlay_state,
-    toggle_dictation, transcribe_captured_audio, BeginStopCapture, DictationStopJob,
-    DictationStopReason, DictationTranscriptResolution,
+    toggle_dictation, transcribe_captured_audio, validate_owned_dictation_delivery_request,
+    BeginStopCapture, DictationFixtureControl, DictationStopJob, DictationStopReason,
+    DictationTranscriptResolution,
 };
 pub(crate) use runtime::{
     clear_dictation_recovery_work, clear_dictation_return_origin, dictation_pipeline_failure_state,
@@ -110,16 +115,17 @@ pub use transcription::{
     PARAKEET_MODEL_ARCHIVE_SIZE, PARAKEET_MODEL_URL, WHISPER_MODEL_SIZE, WHISPER_MODEL_URL,
 };
 pub use types::{
-    CapturedAudioChunk, CompletedDictationCapture, DictationAutoSubmitPermission,
-    DictationCaptureConfig, DictationCaptureEvent, DictationDeliveryFailureReason,
-    DictationDeliveryOutcome, DictationDeliveryRequest, DictationDestination, DictationDeviceId,
-    DictationDeviceInfo, DictationDeviceTransport, DictationFailureRecoveryCapabilities,
-    DictationFailureState, DictationModelStatus, DictationMutationReceipt, DictationRecoveryAction,
-    DictationRecoveryCapabilities, DictationReturnOrigin, DictationSessionPhase,
-    DictationSessionResult, DictationTarget, DictationTargetDescriptor,
-    DictationTargetPersistenceClass, DictationTargetSelection, DictationToggleOutcome,
-    DictationTranscriptPreservationReceipt, FrozenAgentChatPolicy, FrozenDictationDestination,
-    ImmutableDictationTranscript, RawAudioChunk, ALL_DICTATION_TARGETS,
+    CapturedAudioChunk, CompletedDictationCapture, DayPageDictationDestinationSnapshot,
+    DictationAutoSubmitPermission, DictationCaptureConfig, DictationCaptureEvent,
+    DictationDeliveryFailureReason, DictationDeliveryOutcome, DictationDeliveryRequest,
+    DictationDestination, DictationDeviceId, DictationDeviceInfo, DictationDeviceTransport,
+    DictationFailureRecoveryCapabilities, DictationFailureState, DictationModelStatus,
+    DictationMutationReceipt, DictationRecoveryAction, DictationRecoveryCapabilities,
+    DictationReturnOrigin, DictationSessionPhase, DictationSessionResult, DictationTarget,
+    DictationTargetDescriptor, DictationTargetPersistenceClass, DictationTargetSelection,
+    DictationToggleOutcome, DictationTranscriptPreservationReceipt, FrozenAgentChatPolicy,
+    FrozenDictationDestination, FrozenMainDictationOwner, ImmutableDictationTranscript,
+    RawAudioChunk, ALL_DICTATION_TARGETS,
 };
 pub use visualizer::{animate_bars, silent_bars};
 pub use window::{
@@ -130,9 +136,11 @@ pub use window::{
     DictationOverlay, DictationOverlayState,
 };
 pub(crate) use window::{
-    destination_selector_spec, dictation_overlay_fixture_mode, dictation_window_lifecycle_receipt,
+    destination_selector_spec, dictation_overlay_fixture_mode, dictation_overlay_revision_facts,
+    dictation_window_lifecycle_receipt, get_dictation_overlay_state_for_instance,
     last_dictation_overlay_state, open_dictation_microphone_popup_fixture,
-    overlay_recovery_callback_installed, set_dictation_overlay_fixture_mode,
+    open_dictation_overlay_with_policy, overlay_recovery_callback_installed,
+    set_dictation_overlay_fixture_mode,
 };
 
 #[cfg(test)]

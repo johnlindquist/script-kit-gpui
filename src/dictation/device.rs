@@ -422,6 +422,7 @@ use objc::{class, msg_send, sel, sel_impl};
 
 #[cfg(target_os = "macos")]
 pub fn list_input_devices() -> Result<Vec<DictationDeviceInfo>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Device)?;
     unsafe {
         // SAFETY: AVFoundation device enumeration is performed via Objective-C messaging
         // with selectors documented for AVCaptureDevice. All returned objects are treated

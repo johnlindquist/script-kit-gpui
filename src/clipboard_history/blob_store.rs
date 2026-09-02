@@ -15,6 +15,7 @@ use tracing::{debug, error, warn};
 
 /// Get the blob storage directory path
 pub fn get_blob_dir() -> Result<PathBuf> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     let kit_dir = PathBuf::from(shellexpand::tilde("~/.scriptkit").as_ref());
     let blob_dir = kit_dir.join("clipboard").join("blobs");
     if !blob_dir.exists() {

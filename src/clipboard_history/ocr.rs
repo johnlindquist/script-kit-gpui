@@ -31,6 +31,7 @@ static OCR_WORKER_HANDLE: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::ne
 
 /// Start the clipboard OCR worker thread.
 pub fn start_ocr_worker() -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     if OCR_SENDER.get().is_some() {
         info!("clipboard_ocr_worker_start_skipped_already_started");
         return Ok(());
@@ -149,6 +150,7 @@ pub fn stop_ocr_worker() -> Result<()> {
 
 /// Queue an OCR job without blocking the caller.
 pub fn enqueue_ocr(id: String, content: String) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     let Some(sender) = OCR_SENDER.get() else {
         warn!(
             entry_id = %id,
@@ -289,6 +291,7 @@ extern "C" {}
 /// Run OCR on a blob image path using macOS Vision.
 #[cfg(all(target_os = "macos", feature = "ocr"))]
 pub fn run_vision_ocr(blob_path: &str) -> Result<String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ExternalStorage)?;
     // SAFETY: run_vision_ocr_inner uses objc messaging to Vision framework classes.
     // All ObjC objects are nil-checked. The autoreleasepool ensures proper cleanup.
     objc::rc::autoreleasepool(|| unsafe { run_vision_ocr_inner(blob_path) })

@@ -72,6 +72,7 @@ impl Drop for SuppressGuard {
 /// For legacy png: and rgba: formats, falls back to image-only pasting.
 #[allow(dead_code)]
 pub fn copy_entry_to_clipboard(id: &str) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)?;
     let conn = get_connection()?;
     let conn = conn
         .lock()
@@ -143,6 +144,11 @@ pub fn copy_entry_to_clipboard(id: &str) -> Result<()> {
 /// Returns typed [`ClipboardWriteError`] so callers can distinguish
 /// entry-not-found, lock failures, and clipboard API errors.
 pub(crate) fn write_entry_to_system_clipboard(id: &str) -> Result<(), ClipboardWriteError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard).map_err(
+        |error| ClipboardWriteError::ClipboardWriteFailed {
+            reason: error.to_string(),
+        },
+    )?;
     let conn = get_connection().map_err(|e| ClipboardWriteError::LockError {
         reason: format!("Failed to get DB connection: {e}"),
     })?;
