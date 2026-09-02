@@ -28,7 +28,7 @@ fn make_script(name: &str, body: Option<&str>) -> Arc<Script> {
         plugin_id: String::new(),
         plugin_title: None,
         kit_name: Some("test".to_string()),
-        body: body.map(|s| s.to_string()),
+        body: body.map(Into::into),
     })
 }
 
