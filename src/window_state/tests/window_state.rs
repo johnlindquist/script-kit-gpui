@@ -281,8 +281,8 @@ mod tests {
             "Day Page save flush must run BEFORE current_view is replaced (the entity drops with it)"
         );
         assert!(
-            body[flush..view_reset].contains("view.save(cx)"),
-            "Day Page flush must call view.save(cx) so the debounced autosave cannot be outrun by teardown"
+            body[flush..view_reset].contains("view.save_before_unmount(cx)"),
+            "Day Page flush must persist before unmount so debounced autosave cannot be outrun by teardown"
         );
     }
 

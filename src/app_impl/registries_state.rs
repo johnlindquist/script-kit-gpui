@@ -319,7 +319,7 @@ impl ScriptListApp {
         if let AppView::DayPage { entity, .. } = &self.current_view {
             entity.update(cx, |view, cx| {
                 if view.is_dirty() {
-                    let saved = view.save(cx);
+                    let saved = view.save_before_unmount(cx);
                     tracing::info!(
                         target: "script_kit::day_page",
                         event = "day_page_flushed_on_reset",

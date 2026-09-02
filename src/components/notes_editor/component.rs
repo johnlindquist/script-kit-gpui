@@ -208,6 +208,21 @@ impl NotesEditor {
         self.sync_markdown_link_highlights(cx);
     }
 
+    /// Adopt saved or externally merged content without moving the selection
+    /// or viewport. This does not focus the editor.
+    pub fn set_value_preserving_selection_and_scroll(
+        &mut self,
+        value: impl Into<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = value.into();
+        self.input_state.update(cx, |state, cx| {
+            state.set_value_preserving_selection_and_scroll(value, window, cx);
+        });
+        self.sync_markdown_link_highlights(cx);
+    }
+
     pub fn set_selection(
         &mut self,
         start: usize,

@@ -270,7 +270,7 @@ impl DayPageView {
         }
         self.spine_handoff
             .sync_with_markdown_references(&new_content);
-        self.schedule_autosave_flush(cx);
+        self.schedule_autosave_flush(window, cx);
         self.sync_footer(window, cx);
         cx.notify();
         true

@@ -527,7 +527,7 @@ impl DayPageView {
             self.refresh_fragment_open_targets(&fixed);
             self.spine_handoff.sync_with_markdown_references(&fixed);
             self.poll_external_disk_changes(window, cx);
-            self.schedule_autosave_flush(cx);
+            self.schedule_autosave_flush(window, cx);
             self.sync_footer(window, cx);
             cx.notify();
             return;
@@ -537,7 +537,7 @@ impl DayPageView {
         self.refresh_fragment_open_targets(&content);
         self.spine_handoff.sync_with_markdown_references(&content);
         self.poll_external_disk_changes(window, cx);
-        self.schedule_autosave_flush(cx);
+        self.schedule_autosave_flush(window, cx);
         self.sync_footer(window, cx);
         self.maybe_begin_day_page_context_round_trip_from_edit(previous_len, &content, window, cx);
         cx.notify();
@@ -564,7 +564,7 @@ impl DayPageView {
         }
         // `save` reads the editor buffer, applies it to the session, and writes
         // it to the currently-bound (yesterday's) path; a no-op when unchanged.
-        self.save(cx);
+        self.save(window, cx);
         // `bind_today` rebinds to the new day and loads its content into the
         // editor via `apply_loaded_content_to_editor`.
         self.bind_today(window, cx);
@@ -585,7 +585,7 @@ impl DayPageView {
             return;
         }
         self.last_autosave = Some(std::time::Instant::now());
-        if self.save(cx) {
+        if self.save(window, cx) {
             tracing::debug!(
                 target: "script_kit::day_page",
                 event = "day_page_autosaved",
@@ -594,21 +594,21 @@ impl DayPageView {
         self.sync_footer(window, cx);
     }
 
-    fn schedule_autosave_flush(&mut self, cx: &mut Context<Self>) {
+    fn schedule_autosave_flush(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.autosave_flush_scheduled {
             return;
         }
         self.autosave_flush_scheduled = true;
         let flush_delay = std::time::Duration::from_millis(Self::SAVE_DEBOUNCE_MS + 50);
         let document_revision = self.document_revision;
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(flush_delay).await;
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 this.autosave_flush_scheduled = false;
                 if this.document_revision == document_revision {
-                    this.save(cx);
+                    this.save(window, cx);
                 } else if this.session.is_dirty() {
-                    this.schedule_autosave_flush(cx);
+                    this.schedule_autosave_flush(window, cx);
                 }
                 cx.notify();
             })
@@ -642,7 +642,9 @@ impl DayPageView {
         }
     }
 
-    pub fn save(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Flush synchronously when the host is about to discard this editor.
+    /// Live hosts use `save` so subsequent edits see any committed merge.
+    pub fn save_before_unmount(&mut self, cx: &mut Context<Self>) -> bool {
         let content = self.notes_editor.read(cx).content(cx);
         let content = self.canonical_content_with_shelf(&content);
         self.session.apply_editor_content(&content);
@@ -660,8 +662,39 @@ impl DayPageView {
         }
     }
 
+    pub fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.save_before_unmount(cx) {
+            return false;
+        }
+        if self.session.last_save_merged().is_some() {
+            // Refresh now, not at the throttled poll: the next save must not
+            // overwrite the merged baseline with the old editor projection.
+            // This also acknowledges the file revision, avoiding a later
+            // ordinary refresh that would reset the restored selection.
+            let merged = match self.session.maybe_refresh_from_disk() {
+                Ok(content) => content,
+                Err(error) => {
+                    tracing::error!(error = %error, "Failed to refresh saved day page merge");
+                    None
+                }
+            }
+            .or_else(|| self.session.last_save_merged().map(str::to_owned));
+            if let Some(merged) = merged {
+                let content = self.adopt_clipboard_shelf_from(&merged);
+                self.last_editor_content_len = content.len();
+                self.refresh_fragment_open_targets(&content);
+                self.spine_handoff.sync_with_markdown_references(&content);
+                self.notes_editor.update(cx, |editor, cx| {
+                    editor.set_value_preserving_selection_and_scroll(content, window, cx);
+                });
+                cx.notify();
+            }
+        }
+        true
+    }
+
     pub fn save_and_sync_footer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let saved = self.save(cx);
+        let saved = self.save(window, cx);
         self.sync_footer(window, cx);
         cx.notify();
         saved
@@ -1129,7 +1162,7 @@ impl DayPageView {
             self.session.apply_editor_content(&canonical);
             self.refresh_fragment_open_targets(&content);
             self.spine_handoff.sync_with_markdown_references(&content);
-            self.schedule_autosave_flush(cx);
+            self.schedule_autosave_flush(window, cx);
             self.sync_footer(window, cx);
             tracing::info!(
                 target: "script_kit::day_page",

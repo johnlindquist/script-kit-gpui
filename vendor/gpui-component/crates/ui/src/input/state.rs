@@ -1294,12 +1294,45 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.set_value_with_selection_preserving_scroll(value, cursor..cursor, false, window, cx);
+    }
+
+    /// Adopt new content while retaining the selection, its direction, and
+    /// the viewport. Unlike `set_selection`, this does not focus or scroll.
+    pub fn set_value_preserving_selection_and_scroll(
+        &mut self,
+        value: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_value_with_selection_preserving_scroll(
+            value,
+            self.selection(),
+            self.selection_reversed,
+            window,
+            cx,
+        );
+    }
+
+    fn set_value_with_selection_preserving_scroll(
+        &mut self,
+        value: impl Into<SharedString>,
+        selection: std::ops::Range<usize>,
+        reversed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let selection_update = self.begin_selection_update();
         let offset = self.scroll_handle.offset();
         self.set_value(value, window, cx);
-        let cursor = cursor.min(self.text.len());
-        self.selected_range = (cursor..cursor).into();
-        self.selection_reversed = false;
+        let start = self
+            .text
+            .clip_offset(selection.start.min(self.text.len()), Bias::Left);
+        let end = self
+            .text
+            .clip_offset(selection.end.min(self.text.len()), Bias::Left);
+        self.selected_range = (start..end).into();
+        self.selection_reversed = reversed;
         self.end_selection_update(selection_update);
         self.update_scroll_offset(Some(offset), cx);
         self.deferred_scroll_offset = None;
