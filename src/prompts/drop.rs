@@ -108,6 +108,23 @@ impl DropPrompt {
         }
     }
 
+    pub fn with_owned_files(mut self, files: Vec<DroppedFile>) -> anyhow::Result<Self> {
+        let policy = crate::runtime_policy::owned_evaluation()
+            .ok_or_else(|| anyhow::anyhow!("owned_drop_policy_missing"))?;
+        for file in &files {
+            policy.require_owned_path(Path::new(&file.path))?;
+            anyhow::ensure!(
+                Path::new(&file.path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    == Some(file.name.as_str()),
+                "owned_drop_name_mismatch"
+            );
+        }
+        self.dropped_files = files;
+        Ok(self)
+    }
+
     /// Submit dropped files as JSON array
     pub(crate) fn submit(&mut self) {
         if !self.dropped_files.is_empty() {
@@ -135,6 +152,14 @@ impl DropPrompt {
 
     /// Handle native file drop paths from GPUI without reading file contents.
     pub(crate) fn handle_external_paths(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+        if let Err(error) =
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeInput)
+        {
+            self.hint = Some(error.to_string());
+            self.is_drag_over = false;
+            cx.notify();
+            return;
+        }
         let files: Vec<DroppedFile> = paths
             .paths()
             .iter()
@@ -278,5 +303,44 @@ impl Render for DropPrompt {
                     }
                 },
             )
+    }
+}
+
+#[cfg(test)]
+mod owned_metadata_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn drop_metadata_reaches_real_submit_handler(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let submitted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let output = submitted.clone();
+        let prompt = cx.new(|cx| {
+            DropPrompt::new(
+                "drop-local".into(),
+                None,
+                None,
+                cx.focus_handle(),
+                Arc::new(move |_, value| output.lock().push(value)),
+                Arc::new(theme::Theme::default()),
+            )
+        });
+        prompt.update(cx, |prompt, cx| {
+            prompt.submit();
+            assert!(submitted.lock().is_empty());
+            prompt.handle_drop(
+                vec![DroppedFile {
+                    path: "/owned/fixture.txt".into(),
+                    name: "fixture.txt".into(),
+                    size: 6,
+                }],
+                cx,
+            );
+            prompt.submit();
+        });
+        let result: serde_json::Value =
+            serde_json::from_str(submitted.lock()[0].as_deref().unwrap()).unwrap();
+        assert_eq!(result[0]["size"], 6);
+        assert_eq!(result[0]["name"], "fixture.txt");
     }
 }

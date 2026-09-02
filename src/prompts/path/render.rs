@@ -144,11 +144,21 @@ impl Render for PathPrompt {
                 || crate::components::render_simple_hint_strip(hints, None),
             );
 
-        let container = crate::components::render_minimal_list_prompt_shell_with_footer(
-            0.0, None, header, content, footer,
-        )
-        .id(gpui::ElementId::Name("window:path".into()))
-        .text_color(text.primary);
+        let container = if let Some(context) = &self.header_context {
+            let header = crate::components::main_view_chrome::MainViewHeaderChrome::canonical(
+                menu_def, context.render(&self.theme, menu_def), header,
+            );
+            div().id(gpui::ElementId::Name("window:path".into()))
+                .flex().flex_col().size_full().min_h(gpui::px(0.0))
+                .child(crate::components::main_view_chrome::render_main_view_header_with_context_outset(
+                    header, menu_def.header_info_bar.context_edge_outset_x,
+                ))
+                .child(content)
+                .when_some(footer, |root, footer| root.child(footer))
+        } else {
+            crate::components::render_minimal_list_prompt_shell_with_footer(0.0, None, header, content, footer)
+                .id(gpui::ElementId::Name("window:path".into()))
+        }.text_color(text.primary);
 
         FocusablePrompt::new(container)
             .key_context("path_prompt")

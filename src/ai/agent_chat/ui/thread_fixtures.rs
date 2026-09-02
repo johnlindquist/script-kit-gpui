@@ -1,4 +1,35 @@
 impl AgentChatThread {
+    pub(crate) fn hold_fixture_drain(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.streaming_text_drain_task.is_none(),
+            "fixture_drain_already_running"
+        );
+        self.fixture_control()
+            .ok_or_else(|| anyhow::anyhow!("not_a_fixture_connection"))?
+            .hold_drain(self.stream_generation)
+    }
+
+    pub(crate) fn retain_fixture_drain(&mut self) -> anyhow::Result<()> {
+        let control = self
+            .fixture_control()
+            .ok_or_else(|| anyhow::anyhow!("not_a_fixture_connection"))?;
+        anyhow::ensure!(
+            control
+                .drain_receipts()?
+                .iter()
+                .any(|drain| drain.stream_generation == self.stream_generation
+                    && drain.queued
+                    && !drain.released
+                    && !drain.retained),
+            "fixture_drain_not_retainable"
+        );
+        let task = self
+            .streaming_text_drain_task
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("fixture_drain_not_running"))?;
+        control.retain_drain(self.stream_generation, task)
+    }
+
     /// Install a synthetic transcript state for no-token Agent Chat UI proof.
     pub(crate) fn apply_test_fixture(
         &mut self,
@@ -15,6 +46,8 @@ impl AgentChatThread {
             return Err("setAgentChatTestFixture requires non-empty userText".to_string());
         }
 
+        self.bump_transcript_generation("fixture_replacement");
+        self.stream_generation = self.stream_generation.wrapping_add(1);
         self.stream_task = None;
         self.pending_permission = None;
         self.messages.clear();

@@ -893,7 +893,7 @@ fn deduplicate_search_results(
 
     // Preserve updated_at DESC order
     let mut results: Vec<ChatSearchResult> = seen.into_values().collect();
-    results.sort_by(|a, b| b.chat.updated_at.cmp(&a.chat.updated_at));
+    results.sort_by_key(|a| std::cmp::Reverse(a.chat.updated_at));
     results
 }
 

@@ -6,6 +6,7 @@
 //!   prompts for shell-style Up/Down recall across sessions
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 type HistoryFileSignature = Option<(std::path::PathBuf, std::time::SystemTime, u64)>;
@@ -15,6 +16,8 @@ const ROOT_AGENT_CHAT_HISTORY_REFRESH_LABEL: &str = "root-agent_chat-history-cac
 #[derive(Clone)]
 struct AgentChatHistoryIndexCache {
     signature: HistoryFileSignature,
+    owned: bool,
+    owned_fresh: bool,
     entries: Vec<AgentChatHistoryEntry>,
 }
 
@@ -24,11 +27,19 @@ pub(crate) type RootAgentChatHistoryRefresh =
     crate::scripts::root_search_contract::RootOwnedProviderRefresh;
 
 pub(crate) struct RootAgentChatHistorySnapshot {
-    cache: AgentChatHistoryIndexCache,
+    cache: anyhow::Result<AgentChatHistoryIndexCache>,
+}
+
+impl RootAgentChatHistorySnapshot {
+    pub(crate) fn read_outcome(&self) -> Result<usize, &anyhow::Error> {
+        self.cache.as_ref().map(|cache| cache.entries.len())
+    }
 }
 
 static AGENT_CHAT_HISTORY_INDEX_CACHE: OnceLock<Mutex<Option<AgentChatHistoryIndexCache>>> =
     OnceLock::new();
+// Publication revision, advanced under AGENT_CHAT_HISTORY_INDEX_CACHE's lock.
+static AGENT_CHAT_HISTORY_CACHE_REVISION: AtomicU64 = AtomicU64::new(0);
 static AGENT_CHAT_HISTORY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static AGENT_CHAT_HISTORY_REFRESH_LIFECYCLE: OnceLock<Mutex<AgentChatHistoryRefreshLifecycle>> =
     OnceLock::new();
@@ -371,12 +382,30 @@ pub(crate) fn search_history_direct(query: &str, limit: usize) -> Vec<AgentChatH
     search_history(query, limit)
 }
 
+fn agent_chat_history_cache_is_fresh(cache: &AgentChatHistoryIndexCache) -> bool {
+    if crate::runtime_policy::is_owned_evaluation() {
+        return cache.owned && cache.owned_fresh;
+    }
+    history_file_signature(&history_path()).is_ok_and(|signature| cache.signature == signature)
+}
+
+/// Accepted snapshot publication revision and row count, never a worker identity.
+pub(crate) fn root_agent_chat_history_fresh_cache_status() -> Option<(u64, usize)> {
+    let lifecycle = agent_chat_history_refresh_lifecycle().try_lock().ok()?;
+    if lifecycle.in_flight.is_some() {
+        return None;
+    }
+    let guard = agent_chat_history_index_cache().try_lock().ok()?;
+    let cache = guard.as_ref()?;
+    let revision = AGENT_CHAT_HISTORY_CACHE_REVISION.load(Ordering::Relaxed);
+    (revision != 0 && agent_chat_history_cache_is_fresh(cache))
+        .then_some((revision, cache.entries.len()))
+}
+
 fn cached_history_entries_if_fresh() -> Option<Vec<AgentChatHistoryEntry>> {
-    let path = history_path();
-    let signature = history_file_signature(&path);
     let guard = agent_chat_history_index_cache().lock().ok()?;
     let cache = guard.as_ref()?;
-    (cache.signature == signature).then(|| cache.entries.clone())
+    agent_chat_history_cache_is_fresh(cache).then(|| cache.entries.clone())
 }
 
 pub(crate) fn root_agent_chat_history_cache_is_fresh() -> bool {
@@ -394,20 +423,30 @@ pub(crate) fn try_begin_root_agent_chat_history_refresh() -> Option<RootAgentCha
 fn read_root_agent_chat_history_snapshot_at(
     path: &std::path::Path,
 ) -> RootAgentChatHistorySnapshot {
-    let parsed =
-        read_private_history_file(path).and_then(|content| parse_history_entries(&content));
-    let signature = if parsed.is_ok() {
-        history_file_signature(path)
-    } else {
-        None
+    let parsed = match read_private_history_file(path) {
+        Ok(content) => parse_history_entries(&content),
+        Err(AgentChatConversationPersistenceError::Io(std::io::ErrorKind::NotFound)) => {
+            Ok(Vec::new())
+        }
+        Err(error) => Err(error),
     };
-    let entries = parsed.unwrap_or_default();
     RootAgentChatHistorySnapshot {
-        cache: AgentChatHistoryIndexCache { signature, entries },
+        cache: parsed.map_err(anyhow::Error::from).and_then(|entries| {
+            Ok(AgentChatHistoryIndexCache {
+                signature: history_file_signature(path)?,
+                owned: false,
+                owned_fresh: true,
+                entries,
+            })
+        }),
     }
 }
 
 pub(crate) fn read_root_agent_chat_history_snapshot() -> RootAgentChatHistorySnapshot {
+    assert!(
+        !crate::runtime_policy::is_owned_evaluation(),
+        "owned_source_snapshot_required"
+    );
     tracing::debug!(
         target: "script_kit::search",
         worker = ROOT_AGENT_CHAT_HISTORY_REFRESH_LABEL,
@@ -416,11 +455,72 @@ pub(crate) fn read_root_agent_chat_history_snapshot() -> RootAgentChatHistorySna
     read_root_agent_chat_history_snapshot_at(&history_path())
 }
 
+pub(crate) fn owned_root_agent_chat_history_snapshot(
+    result: anyhow::Result<Vec<AgentChatHistoryEntry>>,
+) -> anyhow::Result<RootAgentChatHistorySnapshot> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    Ok(RootAgentChatHistorySnapshot {
+        cache: result.map(|entries| AgentChatHistoryIndexCache {
+            signature: None,
+            owned: true,
+            owned_fresh: true,
+            entries,
+        }),
+    })
+}
+
+pub(crate) fn invalidate_owned_root_agent_chat_history_freshness() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut lifecycle = agent_chat_history_refresh_lifecycle()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("conversation_lifecycle_poisoned"))?;
+    let mut cache = agent_chat_history_index_cache()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("conversation_cache_poisoned"))?;
+    lifecycle.next_generation = lifecycle
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("conversation_generation_exhausted"))?;
+    lifecycle.in_flight = None;
+    if let Some(cache) = cache.as_mut() {
+        cache.owned_fresh = false;
+    }
+    Ok(())
+}
+
+pub(crate) fn reset_owned_root_agent_chat_history() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut lifecycle = agent_chat_history_refresh_lifecycle()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("conversation_lifecycle_poisoned"))?;
+    let mut cache = agent_chat_history_index_cache()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("conversation_cache_poisoned"))?;
+    lifecycle.next_generation = lifecycle
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("conversation_generation_exhausted"))?;
+    lifecycle.in_flight = None;
+    *cache = None;
+    Ok(())
+}
+
 fn root_agent_chat_history_snapshot_is_current_at(
     snapshot: &RootAgentChatHistorySnapshot,
     path: &std::path::Path,
 ) -> bool {
-    snapshot.cache.signature == history_file_signature(path)
+    snapshot.cache.as_ref().is_ok_and(|cache| {
+        history_file_signature(path).is_ok_and(|signature| cache.signature == signature)
+    })
 }
 
 pub(crate) fn finish_root_agent_chat_history_refresh(
@@ -433,15 +533,22 @@ pub(crate) fn finish_root_agent_chat_history_refresh(
     if !lifecycle.finish(refresh) {
         return false;
     }
-    drop(lifecycle);
 
-    if !root_agent_chat_history_snapshot_is_current_at(&snapshot, &history_path()) {
+    let owned = crate::runtime_policy::is_owned_evaluation();
+    if !owned && !root_agent_chat_history_snapshot_is_current_at(&snapshot, &history_path()) {
+        return false;
+    }
+    let Ok(snapshot) = snapshot.cache else {
+        return false;
+    };
+    if snapshot.owned != owned {
         return false;
     }
     let Ok(mut cache) = agent_chat_history_index_cache().lock() else {
         return false;
     };
-    *cache = Some(snapshot.cache);
+    *cache = Some(snapshot);
+    AGENT_CHAT_HISTORY_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
     true
 }
 
@@ -455,11 +562,20 @@ pub(crate) fn discard_root_agent_chat_history_refresh(
 
 /// Cache-only Agent Chat history search for root launcher passive rows.
 ///
-/// A cold or stale JSONL index returns no hits without starting work or
-/// publishing a snapshot. The real input owner starts a generation-fenced
-/// refresh and explicitly reconciles the selected launcher row on completion.
+/// Read the last accepted JSONL index without IO, including while refresh is
+/// pending or failed. The input owner checks freshness and publishes only a
+/// successfully completed generation-fenced replacement.
 pub(crate) fn search_history_cached(query: &str, limit: usize) -> Vec<AgentChatHistorySearchHit> {
-    let Some(entries) = cached_history_entries_if_fresh() else {
+    let entries = agent_chat_history_index_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .as_ref()
+                .filter(|cache| cache.owned == crate::runtime_policy::is_owned_evaluation())
+                .map(|cache| cache.entries.clone())
+        });
+    let Some(entries) = entries else {
         tracing::info!(
             target: "script_kit::tab_ai",
             event = "root_agent_chat_history_search_cache_miss",
@@ -847,8 +963,23 @@ fn save_history_entry_at(
     Ok(())
 }
 
-/// Save a complete turn and its searchable index as one serialized ownership
-/// transaction. No corrupted index may silently erase or orphan a conversation.
+/// Seed bounded owned data through the production completed-turn transaction.
+pub(crate) fn seed_owned_history(conversations: &[SavedConversation]) -> anyhow::Result<()> {
+    let scope = crate::runtime_policy::owned_evaluation()
+        .ok_or_else(|| anyhow::anyhow!("owned_history_required"))?;
+    scope.require_owned_path(&crate::setup::get_kit_path())?;
+    anyhow::ensure!(conversations.len() <= 32, "history_fixture_limit");
+    for conversation in conversations {
+        let entry = build_history_entry(conversation)
+            .ok_or_else(|| anyhow::anyhow!("fixture_history_has_no_user_turn"))?;
+        if !conversation_exists(&conversation.session_id) {
+            save_completed_conversation(conversation, &entry)?;
+        }
+    }
+    Ok(())
+}
+
+/// Save a complete turn and its searchable index as one serialized transaction.
 pub(super) fn save_completed_conversation(
     conversation: &SavedConversation,
     entry: &AgentChatHistoryEntry,
@@ -905,44 +1036,57 @@ fn save_conversation_at(
 /// always see populated display fields.
 pub(crate) fn load_history() -> Vec<AgentChatHistoryEntry> {
     let path = history_path();
-    let mut signature = history_file_signature(&path);
+    let signature = history_file_signature(&path);
     if let Ok(guard) = agent_chat_history_index_cache().lock() {
         if let Some(cache) = guard.as_ref() {
-            if cache.signature == signature {
+            if signature
+                .as_ref()
+                .is_ok_and(|signature| &cache.signature == signature)
+            {
                 return cache.entries.clone();
             }
         }
     }
 
-    let parsed =
-        read_private_history_file(&path).and_then(|content| parse_history_entries(&content));
-    if parsed.is_err() {
-        signature = None;
-    }
-    let entries = parsed.unwrap_or_default();
+    let snapshot = read_root_agent_chat_history_snapshot_at(&path);
+    let snapshot = match snapshot.cache {
+        Ok(cache) => cache,
+        Err(error) => {
+            tracing::warn!(
+                error_bytes = error.to_string().len(),
+                "agent_chat_history_read_failed"
+            );
+            return agent_chat_history_index_cache()
+                .lock()
+                .ok()
+                .and_then(|cache| cache.as_ref().map(|cache| cache.entries.clone()))
+                .unwrap_or_default();
+        }
+    };
 
+    let entries = snapshot.entries.clone();
     if let Ok(mut guard) = agent_chat_history_index_cache().lock() {
-        *guard = Some(AgentChatHistoryIndexCache {
-            signature,
-            entries: entries.clone(),
-        });
+        *guard = Some(snapshot);
+        AGENT_CHAT_HISTORY_CACHE_REVISION.fetch_add(1, Ordering::Relaxed);
     }
 
     entries
 }
 
-fn history_file_signature(path: &std::path::Path) -> HistoryFileSignature {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
+fn history_file_signature(path: &std::path::Path) -> std::io::Result<HistoryFileSignature> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return None;
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     }
-    Some((
+    Ok(Some((
         path.to_path_buf(),
-        metadata
-            .modified()
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        metadata.modified()?,
         metadata.len(),
-    ))
+    )))
 }
 
 fn parse_history_entries(
@@ -1180,6 +1324,14 @@ fn cleanup_old_conversations_at(kit_root: &std::path::Path, keep: usize) {
     for (path, _) in files.iter().take(files.len() - keep) {
         let _ = std::fs::remove_file(path);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn owned_conversation_snapshots_and_resets_require_runtime_authority() {
+    assert!(owned_root_agent_chat_history_snapshot(Ok(Vec::new())).is_err());
+    assert!(reset_owned_root_agent_chat_history().is_err());
+    assert!(invalidate_owned_root_agent_chat_history_freshness().is_err());
 }
 
 #[cfg(test)]

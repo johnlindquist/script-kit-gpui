@@ -180,6 +180,8 @@ impl ScriptListApp {
         entity: Entity<PathPrompt>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let context = self.prompt_header_context(cx);
+        entity.update(cx, |prompt, _cx| prompt.set_header_context(context));
         tracing::info!(
             surface = "render_prompts::path",
             actions_open = self.show_actions_popup,

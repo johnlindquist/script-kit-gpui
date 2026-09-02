@@ -20,144 +20,11 @@ use std::time::Duration;
 
 use super::config::{default_models, DetectedKeys, ModelInfo, ProviderConfig};
 
-/// Extract a user-friendly error message from an API error response body.
-///
-/// Tries to parse JSON error responses from various AI providers and extract
-/// the most useful error message for display to users.
-fn extract_api_error_message(body: &str) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+mod diagnostics;
 
-    // OpenAI/Vercel format: {"error": {"message": "...", "type": "..."}}
-    if let Some(error) = parsed.get("error") {
-        let message = error.get("message").and_then(|m| m.as_str());
-        let error_type = error.get("type").and_then(|t| t.as_str());
-
-        return match (message, error_type) {
-            (Some(msg), Some(typ)) => Some(format!("{}: {}", typ, msg)),
-            (Some(msg), None) => Some(msg.to_string()),
-            _ => None,
-        };
-    }
-
-    // Anthropic format: {"type": "error", "error": {"type": "...", "message": "..."}}
-    if parsed.get("type").and_then(|t| t.as_str()) == Some("error") {
-        if let Some(error) = parsed.get("error") {
-            let message = error.get("message").and_then(|m| m.as_str());
-            let error_type = error.get("type").and_then(|t| t.as_str());
-
-            return match (message, error_type) {
-                (Some(msg), Some(typ)) => Some(format!("{}: {}", typ, msg)),
-                (Some(msg), None) => Some(msg.to_string()),
-                _ => None,
-            };
-        }
-    }
-
-    None
-}
-
-fn safe_provider_diagnostic_detail(raw: &str) -> String {
-    super::reliability::redact_diagnostic(raw)
-        .copyable_detail
-        .unwrap_or_else(|| "Provider diagnostic details were redacted".to_string())
-}
-
-fn provider_http_failure_message(status: u16, provider_name: &str, body: &str) -> String {
-    let error_detail = extract_api_error_message(body);
-
-    match status {
-        401 => {
-            let detail = error_detail.unwrap_or_else(|| "Invalid or missing API key".to_string());
-            format!(
-                "{} authentication failed: {}",
-                provider_name,
-                safe_provider_diagnostic_detail(&simplify_auth_error(&detail))
-            )
-        }
-        403 => {
-            let detail = error_detail.unwrap_or_else(|| "Access denied".to_string());
-            format!(
-                "{} access denied: {}",
-                provider_name,
-                safe_provider_diagnostic_detail(&detail)
-            )
-        }
-        404 => {
-            let detail = error_detail.unwrap_or_else(|| "Model or endpoint not found".to_string());
-            format!(
-                "{}: {}",
-                provider_name,
-                safe_provider_diagnostic_detail(&detail)
-            )
-        }
-        429 => {
-            let detail = error_detail.unwrap_or_else(|| "Too many requests".to_string());
-            format!(
-                "{} rate limited: {}",
-                provider_name,
-                safe_provider_diagnostic_detail(&detail)
-            )
-        }
-        500..=599 => {
-            let detail = error_detail.unwrap_or_else(|| "Server error".to_string());
-            format!(
-                "{} server error ({}): {}",
-                provider_name,
-                status,
-                safe_provider_diagnostic_detail(&detail)
-            )
-        }
-        _ => {
-            let detail = error_detail.unwrap_or_else(|| body.to_string());
-            format!(
-                "{} error (HTTP {}): {}",
-                provider_name,
-                status,
-                safe_provider_diagnostic_detail(&detail)
-            )
-        }
-    }
-}
-
-/// Handle HTTP response and return an error if status is not 2xx.
-///
-/// Reads the error body and extracts a user-friendly message.
-fn handle_http_response(
-    response: ureq::http::Response<ureq::Body>,
-    provider_name: &str,
-) -> Result<ureq::http::Response<ureq::Body>> {
-    let status = response.status().as_u16();
-
-    if (200..300).contains(&status) {
-        return Ok(response);
-    }
-
-    // Read the error body
-    let mut body = response.into_body();
-    let body_str = body.read_to_string().unwrap_or_default();
-
-    let user_message = provider_http_failure_message(status, provider_name, &body_str);
-    let diagnostic = super::reliability::redact_diagnostic(&body_str);
-
-    tracing::warn!(
-        status = status,
-        provider = provider_name,
-        diagnostic_fingerprint = %diagnostic.fingerprint.0,
-        response_bytes = body_str.len(),
-        "API request failed"
-    );
-
-    Err(anyhow!(user_message))
-}
-
-/// Simplify verbose authentication error messages for display.
-fn simplify_auth_error(detail: &str) -> String {
-    // Vercel OIDC errors are very verbose - simplify them
-    if detail.contains("OIDC") || detail.contains("VERCEL_OIDC_TOKEN") {
-        return "Vercel AI Gateway requires OIDC authentication. This is only available when running on Vercel. For local development, use direct API keys (SCRIPT_KIT_ANTHROPIC_API_KEY, SCRIPT_KIT_OPENAI_API_KEY).".to_string();
-    }
-    detail.to_string()
-}
+#[cfg(test)]
+use diagnostics::{extract_api_error_message, provider_http_failure_message, simplify_auth_error};
+use diagnostics::{handle_http_response, safe_provider_diagnostic_detail};
 
 /// Default timeouts for API requests
 const CONNECT_TIMEOUT_SECS: u64 = 10;
@@ -195,6 +62,7 @@ fn send_json_with_retry(
     operation: &str,
     make_request: impl Fn() -> std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error>,
 ) -> Result<ureq::http::Response<ureq::Body>> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
     let correlation_id = crate::logging::current_correlation_id();
 
     for attempt in 1..=HTTP_MAX_ATTEMPTS {
@@ -615,6 +483,7 @@ impl AiProvider for OpenAiProvider {
     }
 
     fn send_message(&self, messages: &[ProviderMessage], model_id: &str) -> Result<String> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         let body = self.build_request_body(messages, model_id, false);
 
         tracing::debug!(
@@ -670,6 +539,7 @@ impl AiProvider for OpenAiProvider {
         on_chunk: StreamCallback,
         _session_id: Option<&str>,
     ) -> Result<()> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         let body = self.build_request_body(messages, model_id, true);
 
         tracing::debug!(
@@ -882,6 +752,7 @@ impl AiProvider for AnthropicProvider {
     }
 
     fn send_message(&self, messages: &[ProviderMessage], model_id: &str) -> Result<String> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         let body = self.build_request_body(messages, model_id, false);
 
         tracing::debug!(
@@ -935,6 +806,7 @@ impl AiProvider for AnthropicProvider {
         on_chunk: StreamCallback,
         _session_id: Option<&str>,
     ) -> Result<()> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         let body = self.build_request_body(messages, model_id, true);
 
         tracing::debug!(
@@ -1101,6 +973,7 @@ impl AiProvider for GoogleProvider {
     }
 
     fn send_message(&self, messages: &[ProviderMessage], model_id: &str) -> Result<String> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         let body = self.build_request_body(messages);
         let url = self.api_url(model_id);
 
@@ -1157,6 +1030,7 @@ impl AiProvider for GoogleProvider {
         on_chunk: StreamCallback,
         _session_id: Option<&str>,
     ) -> Result<()> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         let body = self.build_request_body(messages);
         let url = self.stream_api_url(model_id);
 
@@ -1290,6 +1164,7 @@ impl AiProvider for GroqProvider {
     }
 
     fn send_message(&self, messages: &[ProviderMessage], model_id: &str) -> Result<String> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         let body = self.build_request_body(messages, model_id, false);
 
         tracing::debug!(
@@ -1343,6 +1218,7 @@ impl AiProvider for GroqProvider {
         on_chunk: StreamCallback,
         _session_id: Option<&str>,
     ) -> Result<()> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         let body = self.build_request_body(messages, model_id, true);
 
         tracing::debug!(
@@ -1611,6 +1487,7 @@ impl AiProvider for VercelGatewayProvider {
     }
 
     fn send_message(&self, messages: &[ProviderMessage], model_id: &str) -> Result<String> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         let body = self.build_request_body(messages, model_id, false);
 
         tracing::debug!(
@@ -1666,6 +1543,7 @@ impl AiProvider for VercelGatewayProvider {
         on_chunk: StreamCallback,
         _session_id: Option<&str>,
     ) -> Result<()> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         let body = self.build_request_body(messages, model_id, true);
 
         tracing::debug!(
@@ -1774,6 +1652,12 @@ impl ClaudeCodeProvider {
     ///
     /// Returns `None` if the provider is not enabled or `claude` is not found.
     pub fn from_config(config: &crate::config::ClaudeCodeConfig) -> Option<Self> {
+        if let Err(error) =
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+        {
+            tracing::warn!(%error, "CLI provider discovery refused");
+            return None;
+        }
         if !config.enabled {
             tracing::debug!("Claude Code CLI provider not enabled in config");
             return None;
@@ -1824,6 +1708,12 @@ impl ClaudeCodeProvider {
     ///
     /// Returns `None` if the provider is not enabled or `claude` is not found.
     pub fn detect_from_env() -> Option<Self> {
+        if let Err(error) =
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+        {
+            tracing::warn!(%error, "CLI provider discovery refused");
+            return None;
+        }
         use super::config::env_vars;
 
         // Check if explicitly enabled
@@ -1883,6 +1773,9 @@ impl ClaudeCodeProvider {
 
     /// Check if the `claude` CLI is available at the given path.
     fn is_available(path: &str) -> bool {
+        if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process).is_err() {
+            return false;
+        }
         use std::process::{Command, Stdio};
 
         Command::new(path)
@@ -1951,6 +1844,7 @@ impl ClaudeCodeProvider {
         on_chunk: &StreamCallback,
         is_resuming: bool,
     ) -> Result<String> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         use std::io::{BufRead, Write};
         use std::process::{Command, Stdio};
 
@@ -2261,6 +2155,7 @@ impl AiProvider for ClaudeCodeProvider {
     }
 
     fn send_message(&self, messages: &[ProviderMessage], model_id: &str) -> Result<String> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         // Generate a new session ID for this standalone request
         let session_id = uuid::Uuid::new_v4().to_string();
         let system_prompt = Self::extract_system_prompt(messages);
@@ -2286,6 +2181,7 @@ impl AiProvider for ClaudeCodeProvider {
         on_chunk: StreamCallback,
         session_id: Option<&str>,
     ) -> Result<()> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         // Use provided session ID for conversation continuity, or generate a new one
         let effective_session_id = session_id
             .map(|s| s.to_string())

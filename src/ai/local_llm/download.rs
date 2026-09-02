@@ -31,6 +31,12 @@ static DOWNLOAD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// model resolves on disk. Fire-and-forget: returns immediately, never blocks
 /// the caller, and silently respects the opt-out marker and 24h cooldown.
 pub(crate) fn ensure_ghost_model_in_background(config: &crate::config::Config) {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+    {
+        tracing::warn!(%error, "Local model download refused");
+        return;
+    }
     if super::model_locator::resolve_ghost_model(config).is_some() {
         return;
     }
@@ -83,6 +89,7 @@ fn mark_attempt(dir: &Path) -> Result<()> {
 }
 
 fn download_model(dir: &Path) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
     std::fs::create_dir_all(dir).context("create ghost models dir")?;
     let final_path = dir.join(MODEL_FILE);
     let partial_path = dir.join(format!("{MODEL_FILE}.partial"));

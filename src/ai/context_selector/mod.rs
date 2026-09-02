@@ -984,43 +984,25 @@ fn composer_catalog_subsearch_section_from_snapshot(
     )
 }
 
-fn inline_portal_scripts() -> &'static [Arc<crate::scripts::Script>] {
-    static CACHE: OnceLock<Vec<Arc<crate::scripts::Script>>> = OnceLock::new();
-    CACHE.get_or_init(crate::scripts::read_scripts).as_slice()
-}
-
-fn inline_portal_scriptlets() -> &'static [Arc<crate::scripts::Scriptlet>] {
-    static CACHE: OnceLock<Vec<Arc<crate::scripts::Scriptlet>>> = OnceLock::new();
-    CACHE
-        .get_or_init(crate::scripts::load_scriptlets)
-        .as_slice()
-}
-
-fn inline_portal_skills() -> &'static [Arc<crate::plugins::PluginSkill>] {
-    static CACHE: OnceLock<Vec<Arc<crate::plugins::PluginSkill>>> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            crate::plugins::discover_plugins()
-                .ok()
-                .and_then(|index| crate::plugins::discover_plugin_skills(&index).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .map(Arc::new)
-                .collect()
-        })
-        .as_slice()
-}
-
 fn collect_script_list_inline_items(
     inline_query: &InlinePortalQuery,
     items: &mut Vec<ContextSelectorRow>,
 ) {
+    let snapshot = launcher_catalog_store().snapshot();
+    collect_script_list_inline_items_from_snapshot(inline_query, items, &snapshot);
+}
+
+fn collect_script_list_inline_items_from_snapshot(
+    inline_query: &InlinePortalQuery,
+    items: &mut Vec<ContextSelectorRow>,
+    snapshot: &LauncherCatalogSnapshot,
+) {
     let results = crate::scripts::fuzzy_search_unified_all_with_skills(
-        inline_portal_scripts(),
-        inline_portal_scriptlets(),
+        &snapshot.scripts,
+        &snapshot.scriptlets,
         &[],
         &[],
-        inline_portal_skills(),
+        &snapshot.skills,
         &inline_query.query,
     );
 

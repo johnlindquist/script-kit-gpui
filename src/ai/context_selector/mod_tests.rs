@@ -165,6 +165,42 @@ mod launcher_catalog_snapshot_tests {
     }
 
     #[test]
+    fn inline_portals_follow_host_replacements_instead_of_process_lifetime_file_caches() {
+        let store = LauncherCatalogStore::default();
+        store.publish(
+            &[script("old-script")],
+            &[scriptlet("old-note")],
+            &[skill("old-skill")],
+        );
+        let previous = store.snapshot();
+        store.publish(
+            &[script("new-script")],
+            &[scriptlet("new-note")],
+            &[skill("new-skill")],
+        );
+        let current = store.snapshot();
+        for (kind, old_label, current_label) in [
+            (ContextPortalKind::ScriptSearch, "old-script", "new-script"),
+            (ContextPortalKind::ScriptletSearch, "old-note", "new-note"),
+            (ContextPortalKind::SkillSearch, "old-skill", "new-skill"),
+        ] {
+            let query = InlinePortalQuery {
+                kind,
+                prefix: portal_prefix_for_kind(kind),
+                query: String::new(),
+            };
+            let mut old_rows = Vec::new();
+            collect_script_list_inline_items_from_snapshot(&query, &mut old_rows, &previous);
+            assert_eq!(old_rows.len(), 1);
+            assert_eq!(old_rows[0].label.as_ref(), old_label);
+            let mut rows = Vec::new();
+            collect_script_list_inline_items_from_snapshot(&query, &mut rows, &current);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].label.as_ref(), current_label);
+        }
+    }
+
+    #[test]
     fn duplicate_launcher_skill_labels_attach_the_exact_selected_owner() {
         let first = Arc::new(crate::plugins::PluginSkill {
             plugin_id: "first-owner".to_owned(),

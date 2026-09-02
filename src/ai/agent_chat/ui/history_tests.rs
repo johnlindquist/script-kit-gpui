@@ -32,6 +32,57 @@ mod tests {
     }
 
     #[test]
+    fn fresh_conversation_cache_proof_tracks_publication_freshness_and_worker_ownership() {
+        let _guard = history_env_lock().lock().expect("history env lock");
+        let previous_sk_path = std::env::var(crate::setup::SK_PATH_ENV).ok();
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::env::set_var(crate::setup::SK_PATH_ENV, temp.path());
+        invalidate_history_cache();
+        assert!(root_agent_chat_history_fresh_cache_status().is_none());
+        let refresh = try_begin_root_agent_chat_history_refresh().unwrap();
+        assert!(root_agent_chat_history_fresh_cache_status().is_none());
+        assert!(finish_root_agent_chat_history_refresh(
+            refresh,
+            read_root_agent_chat_history_snapshot()
+        ));
+        let (revision, count) = root_agent_chat_history_fresh_cache_status().unwrap();
+        assert!(revision > 0);
+        assert_eq!(count, 0);
+        {
+            let _cache = agent_chat_history_index_cache().lock().unwrap();
+            assert!(root_agent_chat_history_fresh_cache_status().is_none());
+        }
+        let worker = agent_chat_history_refresh_lifecycle()
+            .lock()
+            .unwrap()
+            .begin(
+                sk_protocol::command_contract::CommandSource::Conversation,
+                false,
+            )
+            .unwrap();
+        assert!(root_agent_chat_history_fresh_cache_status().is_none());
+        assert!(discard_root_agent_chat_history_refresh(worker));
+        assert_eq!(
+            root_agent_chat_history_fresh_cache_status(),
+            Some((revision, 0))
+        );
+        crate::atomic_file::write_private_atomic(&history_path(), b"").unwrap();
+        assert!(root_agent_chat_history_fresh_cache_status().is_none());
+        let refresh = try_begin_root_agent_chat_history_refresh().unwrap();
+        assert!(finish_root_agent_chat_history_refresh(
+            refresh,
+            read_root_agent_chat_history_snapshot()
+        ));
+        assert!(root_agent_chat_history_fresh_cache_status().unwrap().0 > revision);
+        match previous_sk_path {
+            Some(path) => std::env::set_var(crate::setup::SK_PATH_ENV, path),
+            None => std::env::remove_var(crate::setup::SK_PATH_ENV),
+        }
+        invalidate_history_cache();
+        assert!(root_agent_chat_history_fresh_cache_status().is_none());
+    }
+
+    #[test]
     fn agent_chat_history_integrity_repairs_legacy_private_jsonl_boundaries() {
         let root = tempfile::tempdir().expect("isolated Agent Chat history root");
         let first = make_conversation(
@@ -190,11 +241,33 @@ mod tests {
 
         let snapshot = read_root_agent_chat_history_snapshot_at(&path);
 
-        assert!(snapshot.cache.entries.is_empty());
-        assert!(snapshot.cache.signature.is_none());
+        assert!(snapshot.read_outcome().is_err());
         assert!(!root_agent_chat_history_snapshot_is_current_at(
             &snapshot, &path
         ));
+    }
+
+    #[test]
+    fn conversation_read_outcome_distinguishes_failure_from_successful_empty() {
+        let failed = RootAgentChatHistorySnapshot {
+            cache: Err(AgentChatConversationPersistenceError::InvalidHistoryIndexPayload.into()),
+        };
+        assert_eq!(
+            failed
+                .read_outcome()
+                .unwrap_err()
+                .downcast_ref::<AgentChatConversationPersistenceError>(),
+            Some(&AgentChatConversationPersistenceError::InvalidHistoryIndexPayload)
+        );
+        let empty = RootAgentChatHistorySnapshot {
+            cache: Ok(AgentChatHistoryIndexCache {
+                signature: None,
+                owned: true,
+                owned_fresh: true,
+                entries: Vec::new(),
+            }),
+        };
+        assert_eq!(empty.read_outcome().unwrap(), 0);
     }
 
     #[test]
@@ -290,19 +363,19 @@ mod tests {
     }
 
     #[test]
-    fn root_history_refresh_generation_wrap_never_issues_the_unowned_zero_token() {
+    fn root_history_refresh_generation_exhaustion_refuses_ticket_reuse() {
         let mut lifecycle = AgentChatHistoryRefreshLifecycle {
             next_generation: u64::MAX,
             in_flight: None,
         };
-        let refresh = lifecycle
+        assert!(lifecycle
             .begin(
                 sk_protocol::command_contract::CommandSource::Conversation,
                 false,
             )
-            .expect("wrapped generation");
-        assert_eq!(refresh.generation, 1);
-        assert!(lifecycle.finish(refresh));
+            .is_none());
+        assert_eq!(lifecycle.next_generation, u64::MAX);
+        assert!(lifecycle.in_flight.is_none());
     }
 
     #[test]
@@ -318,8 +391,11 @@ mod tests {
         std::fs::write(&path, serde_json::to_string(&entry).unwrap()).unwrap();
 
         let snapshot = read_root_agent_chat_history_snapshot_at(&path);
-        assert_eq!(snapshot.cache.entries.len(), 1);
-        assert_eq!(snapshot.cache.entries[0].session_id, entry.session_id);
+        assert_eq!(snapshot.read_outcome().unwrap(), 1);
+        assert_eq!(
+            snapshot.cache.as_ref().unwrap().entries[0].session_id,
+            entry.session_id
+        );
         assert!(root_agent_chat_history_snapshot_is_current_at(
             &snapshot, &path
         ));

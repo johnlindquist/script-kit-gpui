@@ -19,31 +19,6 @@ enum PromptConversionSource {
     Sessionless,
 }
 
-fn reject_missing_prompt_popup_batch_target(
-    request_id: &str,
-    sender: Option<&std::sync::mpsc::SyncSender<crate::protocol::Message>>,
-) {
-    tracing::warn!(request_id, "automation.batch.prompt_popup_target_missing");
-    if let Some(sender) = sender {
-        let _ = sender.try_send(Message::batch_result(
-            request_id.to_string(),
-            false,
-            vec![protocol::BatchResultEntry {
-                index: 0,
-                success: false,
-                command: "target".to_string(),
-                elapsed: Some(0),
-                value: None,
-                error: Some(protocol::TransactionError::action_failed(
-                    "PromptPopup target is no longer available",
-                )),
-            }],
-            Some(0),
-            0,
-        ));
-    }
-}
-
 fn convert_protocol_prompt_message(
     message: crate::protocol::Message,
     _source: PromptConversionSource,
@@ -360,22 +335,20 @@ fn prompt_message_from_protocol_message(
             options,
             trace,
             target,
+            expected,
         } => Some(PromptMessage::Batch {
             request_id,
             commands,
             options,
             trace,
             target,
+            expected,
         }),
-        Message::SimulateGpuiEvent {
-            request_id,
-            target,
-            event,
-        } => Some(PromptMessage::SimulateGpuiEvent {
-            request_id,
-            target,
-            event,
-        }),
+        message @ (Message::SimulateGpuiEvent { .. } | Message::CancelGpuiEvent { .. }) => {
+            Some(PromptMessage::SimulateGpuiEvent {
+                message: Box::new(message),
+            })
+        }
         // Allow stdin/devtools to show HUD pills directly, matching the script
         // path; probes use this to exercise HUD stacking/dismissal behavior.
         Message::Hud { text, duration_ms } => Some(PromptMessage::ShowHud { text, duration_ms }),

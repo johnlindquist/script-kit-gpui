@@ -132,6 +132,7 @@ struct HelperClient {
 
 impl HelperClient {
     fn spawn() -> Result<Self> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         let helper_path = resolve_helper_path()?;
         let mut command = Command::new(&helper_path);
         command

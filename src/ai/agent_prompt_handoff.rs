@@ -445,6 +445,8 @@ pub(crate) fn compile_handoff_payload_from_spine_plan(
 fn launch_cmux_codex(
     payload: &AgentPromptHandoffPayload,
 ) -> Result<AgentPromptHandoffReceipt, AgentPromptHandoffError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| AgentPromptHandoffError::Spawn(error.to_string()))?;
     if payload.prompt.contains('\0') {
         return Err(AgentPromptHandoffError::UnsupportedPrompt(
             "NUL bytes cannot be passed to Codex argv".to_string(),
@@ -519,6 +521,8 @@ fn launch_command_target(
     payload: &AgentPromptHandoffPayload,
     target: &AgentPromptCommandTarget,
 ) -> Result<AgentPromptHandoffReceipt, AgentPromptHandoffError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| AgentPromptHandoffError::Spawn(error.to_string()))?;
     let dry_run = env_truthy(DRY_RUN_ENV);
     let cwd = target.cwd.clone().unwrap_or_else(|| payload.cwd.clone());
     let prompt_chars = payload.prompt.chars().count();
@@ -605,6 +609,8 @@ fn export_prompt_to_file(
     payload: &AgentPromptHandoffPayload,
     action: AgentPromptActionId,
 ) -> Result<AgentPromptExportReceipt, AgentPromptHandoffError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ExternalStorage)
+        .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
     let dry_run = env_truthy(DRY_RUN_ENV);
     let prompt_sha256 = sha256_hex(&payload.prompt);
     let export_dir = prompt_export_dir();
@@ -636,6 +642,8 @@ fn export_prompt_to_gist(
     payload: &AgentPromptHandoffPayload,
     action: AgentPromptActionId,
 ) -> Result<AgentPromptExportReceipt, AgentPromptHandoffError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| AgentPromptHandoffError::Spawn(error.to_string()))?;
     let dry_run = env_truthy(DRY_RUN_ENV);
     let prompt_sha256 = sha256_hex(&payload.prompt);
     let gh_binary = std::env::var(GH_BINARY_ENV).unwrap_or_else(|_| "gh".to_string());
@@ -685,6 +693,8 @@ fn copy_prompt_to_clipboard(
     payload: &AgentPromptHandoffPayload,
     action: AgentPromptActionId,
 ) -> Result<AgentPromptExportReceipt, AgentPromptHandoffError> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)
+        .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;
     copy_prompt_to_clipboard_with_writer(payload, action, |prompt| {
         let mut clipboard = arboard::Clipboard::new()
             .map_err(|error| AgentPromptHandoffError::Io(error.to_string()))?;

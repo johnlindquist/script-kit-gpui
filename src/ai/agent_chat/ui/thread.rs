@@ -52,13 +52,7 @@ use crate::ai::staged_context::{
     StageContextItemOutcome, StagedContextItem,
 };
 
-fn truncate_chars_for_title_prompt(value: &str, max_chars: usize) -> String {
-    let mut out: String = value.chars().take(max_chars).collect();
-    if value.chars().count() > max_chars {
-        out.push('\u{2026}');
-    }
-    out
-}
+mod persistence;
 
 /// Bootstrap state for deferred context capture.
 ///
@@ -396,15 +390,6 @@ impl AgentChatQueuedMessage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CompletedChatTurnIngest {
-    thread_id: String,
-    turn_index: usize,
-    user_text: String,
-    assistant_text: String,
-    trace_label: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum SkillContextStagedBy {
     MainMenu,
@@ -424,6 +409,15 @@ pub(crate) struct SkillContextIdentity {
 /// Holds durable message history, staged context blocks (consumed once on
 /// first submit), composer input, streaming status, and pending permission
 /// requests. Binds stream and permission listeners via `cx.spawn(...)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentChatLocalStopReceipt {
+    pub thread_id: String,
+    pub turn_id: u64,
+    pub local_stream_cancelled: bool,
+    pub remote_cancel_requested: bool,
+    pub remote_cancel_acknowledged: bool,
+}
+
 pub(crate) struct AgentChatThread {
     connection: Arc<dyn AgentChatConnection>,
     permission_rx: async_channel::Receiver<AgentChatApprovalRequest>,
@@ -543,6 +537,11 @@ pub(crate) struct AgentChatThread {
 
     /// Generation guard for async stream delivery into the transcript.
     transcript_generation: u64,
+    /// Advances for every bound stream and local Stop, independently of history.
+    stream_generation: u64,
+    /// Advances in mutation owners, independently of paint/observer scheduling.
+    semantic_revision: u64,
+    last_local_stop: Option<AgentChatLocalStopReceipt>,
 
     /// Monotonically increasing message ID counter.
     next_message_id: u64,
@@ -578,6 +577,103 @@ pub(crate) struct AgentChatThread {
 }
 
 impl AgentChatThread {
+    pub(crate) fn is_provider_free_fixture(&self) -> bool {
+        self.connection.is_provider_free_fixture()
+    }
+
+    pub(crate) fn fixture_control(&self) -> Option<super::mock_fixture::AgentChatFixtureControl> {
+        self.connection.fixture_control()
+    }
+
+    pub(crate) fn turn_identity(&self) -> (&str, u64, u64, u64) {
+        (
+            &self.ui_thread_id,
+            self.transcript_generation,
+            self.current_turn_id,
+            self.stream_generation,
+        )
+    }
+
+    /// Only a successfully started runtime turn produces this receipt.
+    pub(crate) fn accepted_submission(&self) -> Option<(u64, &str)> {
+        self.last_prepared_turn
+            .as_ref()
+            .filter(|_| self.current_turn_id > 0)
+            .map(|turn| (self.current_turn_id, turn.display_text.as_str()))
+    }
+    pub(crate) fn semantic_revision(&self) -> u64 {
+        self.semantic_revision.strict_add(self.input.revision())
+    }
+
+    pub(super) fn notify_semantic_change(&mut self, cx: &mut Context<Self>) {
+        self.semantic_revision = self.semantic_revision.strict_add(1);
+        cx.notify();
+    }
+
+    pub(crate) fn semantic_token(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.turn_identity().hash(&mut hash);
+        self.semantic_revision.hash(&mut hash);
+        self.cwd.hash(&mut hash);
+        self.profile_id.hash(&mut hash);
+        self.selected_model_id.hash(&mut hash);
+        self.active_mode_id.hash(&mut hash);
+        self.active_plan_entries.hash(&mut hash);
+        self.available_commands.hash(&mut hash);
+        self.usage_tokens.hash(&mut hash);
+        self.usage_cost_usd.map(f64::to_bits).hash(&mut hash);
+        self.setup_state
+            .as_ref()
+            .map(|state| state.reason_code)
+            .hash(&mut hash);
+        for model in &self.available_models {
+            model.id.hash(&mut hash);
+            model.display_name.hash(&mut hash);
+        }
+        for tool in &self.active_tool_calls {
+            tool.tool_call_id.hash(&mut hash);
+            tool.title.hash(&mut hash);
+            tool.status.hash(&mut hash);
+            tool.body.hash(&mut hash);
+            tool.subject.hash(&mut hash);
+            tool.diff.hash(&mut hash);
+            tool.is_error.hash(&mut hash);
+        }
+        self.input.text().hash(&mut hash);
+        self.input.revision().hash(&mut hash);
+        self.input.cursor().hash(&mut hash);
+        self.input.selection().anchor.hash(&mut hash);
+        std::mem::discriminant(&self.status).hash(&mut hash);
+        self.queued_messages.len().hash(&mut hash);
+        self.queue_paused.hash(&mut hash);
+        self.pending_permission
+            .as_ref()
+            .map(|request| request.id)
+            .hash(&mut hash);
+        for item in &self.pending_context_items {
+            item.id.as_str().hash(&mut hash);
+        }
+        for message in &self.messages {
+            message.id.hash(&mut hash);
+            std::mem::discriminant(&message.role).hash(&mut hash);
+            message.body.hash(&mut hash);
+            message.tool_call_id.hash(&mut hash);
+        }
+        hash.finish()
+    }
+
+    pub(crate) fn staged_context_identities(&self) -> Vec<ContextItemId> {
+        self.pending_context_items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect()
+    }
+
+    pub(crate) fn last_local_stop(&self) -> Option<&AgentChatLocalStopReceipt> {
+        self.last_local_stop.as_ref()
+    }
+
     fn provider_id_from_model(model_id: Option<&str>) -> Option<ProviderId> {
         model_id
             .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
@@ -699,7 +795,7 @@ impl AgentChatThread {
         let transition = transition(self.reliability_state.clone(), event)?;
         self.reliability_state = transition.next;
         self.sync_status_from_reliability();
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(transition.commands)
     }
 
@@ -984,7 +1080,7 @@ impl AgentChatThread {
             AgentChatThreadMessageRole::System,
             format!("{title}: {detail}"),
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1045,7 +1141,7 @@ impl AgentChatThread {
         );
         self.set_status(AgentChatThreadStatus::Idle);
         self.bump_transcript_generation("cwd_respawn");
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Create a new thread entity with optional initial input.
@@ -1155,6 +1251,9 @@ impl AgentChatThread {
             streaming_text_buffer: StreamingTextBuffer::default(),
             streaming_text_drain_task: None,
             transcript_generation: 0,
+            stream_generation: 0,
+            semantic_revision: 1,
+            last_local_stop: None,
             next_message_id: 1,
             host_window_state: None,
             notification_debounce: AgentChatNotificationDebounce::default(),
@@ -1175,94 +1274,6 @@ impl AgentChatThread {
         };
         this.bind_permission_listener(cx);
         this
-    }
-
-    fn maybe_spawn_auto_title(&mut self, conversation: &super::history::SavedConversation) {
-        if self.llm_title_attempted || conversation.custom_title.is_some() {
-            return;
-        }
-        if !conversation
-            .messages
-            .iter()
-            .any(|message| message.role.eq_ignore_ascii_case("assistant"))
-        {
-            return;
-        }
-
-        let Some(first_user) = conversation
-            .messages
-            .iter()
-            .find(|message| message.role.eq_ignore_ascii_case("user"))
-            .map(|message| message.body.clone())
-        else {
-            return;
-        };
-        let Some(first_assistant) = conversation
-            .messages
-            .iter()
-            .find(|message| message.role.eq_ignore_ascii_case("assistant"))
-            .map(|message| message.body.clone())
-        else {
-            return;
-        };
-
-        self.llm_title_attempted = true;
-        let session_id = conversation.session_id.clone();
-        let user_excerpt = truncate_chars_for_title_prompt(&first_user, 400);
-        let assistant_excerpt = truncate_chars_for_title_prompt(&first_assistant, 400);
-
-        let spawn_result = std::thread::Builder::new()
-            .name("agent_chat-auto-title".to_string())
-            .spawn(move || {
-                let registry =
-                    crate::ai::providers::ProviderRegistry::from_environment_with_config(None);
-                if !registry.has_any_provider() {
-                    return;
-                }
-
-                let result = (|| -> anyhow::Result<()> {
-                    let (model, provider) =
-                        crate::ai::script_generation::select_generation_model(&registry)?;
-                    let messages = vec![
-                        crate::ai::providers::ProviderMessage::system(
-                            "You title chat conversations. Reply with ONLY a concise 3-6 word title. No quotes, no punctuation at the end.",
-                        ),
-                        crate::ai::providers::ProviderMessage::user(format!(
-                            "User: {user_excerpt}\nAssistant: {assistant_excerpt}"
-                        )),
-                    ];
-                    let raw = provider.send_message(&messages, &model.id)?;
-                    let title = super::history::sanitize_conversation_title(&raw);
-                    if title.is_empty() {
-                        return Ok(());
-                    }
-                    super::history::rename_conversation(&session_id, &title)?;
-                    Ok(())
-                })();
-
-                if let Err(error) = result {
-                    let safe_error =
-                        crate::logging::log_private_user_value(&error.to_string());
-                    tracing::debug!(
-                        target: "script_kit::tab_ai",
-                        event = "agent_chat_auto_title_failed",
-                        session_id = %session_id,
-                        error_bytes = safe_error.raw_bytes,
-                        error_sha256 = %safe_error.sha256,
-                    );
-                }
-            });
-
-        if let Err(error) = spawn_result {
-            let safe_error = crate::logging::log_private_user_value(&error.to_string());
-            tracing::debug!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_auto_title_spawn_failed",
-                session_id = %conversation.session_id,
-                error_bytes = safe_error.raw_bytes,
-                error_sha256 = %safe_error.sha256,
-            );
-        }
     }
 
     pub(crate) fn set_host_window_state(
@@ -1307,6 +1318,14 @@ impl AgentChatThread {
         title: &'static str,
         body: String,
     ) {
+        if self.is_provider_free_fixture() || crate::runtime_policy::is_owned_evaluation() {
+            return;
+        }
+        if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Notification)
+            .is_err()
+        {
+            return;
+        }
         // Content-bearing OS notifications leak the full response/error text
         // into Notification Center history — that is automatic egress, denied
         // for zero-retention Quick AI (WP-B1, Oracle phase-b audit).
@@ -1501,7 +1520,7 @@ impl AgentChatThread {
         let cursor = value.chars().count();
         self.input.set_text(value);
         self.input.set_cursor(cursor);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Recall the latest user-authored turn into the composer.
@@ -1530,7 +1549,7 @@ impl AgentChatThread {
             }
             self.push_message(AgentChatThreadMessageRole::Assistant, body);
         }
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -1544,7 +1563,7 @@ impl AgentChatThread {
         cx: &mut Context<Self>,
     ) {
         self.push_message(AgentChatThreadMessageRole::Assistant, body);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(crate) fn recall_last_user_message(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1568,7 +1587,7 @@ impl AgentChatThread {
 
         self.input.set_text(body);
         self.input.set_cursor(0);
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -1610,7 +1629,7 @@ impl AgentChatThread {
         // Feed the shell-style Up/Down prompt recall (view-level cycling
         // reads this store lazily). Queued submits count too — the user
         // typed and sent them. Zero-retention sessions contribute nothing.
-        if self.session_policy.allows_automatic_transcript_retention() {
+        if self.retains_history() {
             if let Err(error) = super::history::append_prompt_history(trimmed) {
                 tracing::warn!(
                     target: "script_kit::tab_ai",
@@ -1632,7 +1651,7 @@ impl AgentChatThread {
             AgentChatThreadStatus::Streaming | AgentChatThreadStatus::WaitingForPermission
         ) {
             self.queue_current_composer(trimmed.to_string());
-            cx.notify();
+            self.notify_semantic_change(cx);
             return Ok(());
         }
 
@@ -1644,7 +1663,7 @@ impl AgentChatThread {
             self.queued_submit_while_bootstrapping = true;
             self.context_bootstrap_note =
                 Some("Queued \u{00b7} sending when context is attached\u{2026}".into());
-            cx.notify();
+            self.notify_semantic_change(cx);
             return Ok(());
         }
 
@@ -1871,7 +1890,7 @@ impl AgentChatThread {
 
         self.setup_state = None;
         self.bind_stream(rx, cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(())
     }
 
@@ -1992,7 +2011,7 @@ impl AgentChatThread {
             });
         })
         .detach();
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(())
     }
 
@@ -2117,6 +2136,8 @@ impl AgentChatThread {
 
 include!("thread_context_resolution.rs");
 
+include!("thread_streaming.rs");
+
 impl AgentChatThread {
     /// Flush a queued submit if conditions allow, otherwise just notify.
     fn flush_bootstrap_queue(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
@@ -2131,7 +2152,7 @@ impl AgentChatThread {
         if submit_now {
             return self.submit_input(cx);
         }
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(())
     }
 
@@ -2246,7 +2267,9 @@ impl AgentChatThread {
     }
 
     fn should_stage_brain_recall(&self) -> bool {
-        self.profile_id == crate::ai::agent_chat::profiles::BUILTIN_BRAIN_PROFILE_ID
+        !self.is_provider_free_fixture()
+            && !crate::runtime_policy::is_owned_evaluation()
+            && self.profile_id == crate::ai::agent_chat::profiles::BUILTIN_BRAIN_PROFILE_ID
     }
 
     /// Build the content blocks for a turn AND return the resolution receipt
@@ -2337,53 +2360,6 @@ impl AgentChatThread {
         }
     }
 
-    fn completed_chat_turn_ingest(
-        &self,
-        history_trace_label: Option<String>,
-    ) -> Option<CompletedChatTurnIngest> {
-        // Zero-retention sessions produce NO automatic memory: Brain ingestion
-        // and the day trace are retention, same as the history files (Oracle
-        // phase-b-counters-quickai-audit P0 — this ran unconditionally and
-        // turned every Quick AI "quick question" into recallable Brain state).
-        if !self.session_policy.allows_automatic_transcript_retention() {
-            return None;
-        }
-        let user_text = self
-            .messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.role, AgentChatThreadMessageRole::User))
-            .map(|m| m.body.to_string())?;
-        let assistant_text = self
-            .messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.role, AgentChatThreadMessageRole::Assistant))
-            .map(|m| m.body.to_string())
-            .unwrap_or_default();
-        let trace_label = history_trace_label.unwrap_or_else(|| {
-            self.messages
-                .iter()
-                .find(|m| matches!(m.role, AgentChatThreadMessageRole::User))
-                .map(|m| m.body.to_string())
-                .unwrap_or_default()
-        });
-        let turn_index = self
-            .messages
-            .iter()
-            .filter(|m| matches!(m.role, AgentChatThreadMessageRole::User))
-            .count()
-            .saturating_sub(1);
-
-        Some(CompletedChatTurnIngest {
-            thread_id: self.ui_thread_id.clone(),
-            turn_index,
-            user_text,
-            assistant_text,
-            trace_label,
-        })
-    }
-
     /// Update `context_bootstrap_note` with a partial-failure summary when
     /// some provider-backed mentions failed to resolve.
     fn set_context_resolution_note(
@@ -2426,6 +2402,10 @@ impl AgentChatThread {
     fn bind_stream(&mut self, rx: AgentChatEventRx, cx: &mut Context<Self>) {
         let entity = cx.entity().downgrade();
         let generation = self.transcript_generation;
+        self.stream_generation = self.stream_generation.wrapping_add(1);
+        let stream_generation = self.stream_generation;
+        let turn_id = self.current_turn_id;
+        let thread_id = self.ui_thread_id.clone();
         self.stream_task = Some(cx.spawn(async move |_this, cx| {
             let mut terminal_event_seen = false;
             while let Ok(event) = rx.recv().await {
@@ -2449,7 +2429,11 @@ impl AgentChatThread {
                             // (size 1 here; the delta coalescing that shrinks
                             // real work happens in `streaming_text_buffer`).
                             crate::chat_hot_counters::record_agent_foreground_batch(1);
-                            if this.transcript_generation != generation {
+                            if this.transcript_generation != generation
+                                || this.stream_generation != stream_generation
+                                || this.current_turn_id != turn_id
+                                || this.ui_thread_id != thread_id
+                            {
                                 tracing::debug!(
                                     target: "script_kit::tab_ai",
                                     event = "agent_chat_stream_event_discarded_stale_generation",
@@ -2481,11 +2465,15 @@ impl AgentChatThread {
                 cx.update(|cx| {
                     if let Some(entity) = entity_ref.upgrade() {
                         entity.update(cx, |this, cx| {
-                            if this.transcript_generation != generation {
+                            if this.transcript_generation != generation
+                                || this.stream_generation != stream_generation
+                                || this.current_turn_id != turn_id
+                                || this.ui_thread_id != thread_id
+                            {
                                 return;
                             }
                             if this.finish_stream_closed_without_terminal_with_context(cx) {
-                                cx.notify();
+                                this.notify_semantic_change(cx);
                             }
                         });
                     }
@@ -2550,64 +2538,12 @@ impl AgentChatThread {
                                 "Agent Chat — approval needed",
                                 body,
                             );
-                            cx.notify();
+                            this.notify_semantic_change(cx);
                         });
                     }
                 });
             }
         }));
-    }
-
-    fn start_streaming_text_drain_if_needed(&mut self, cx: &mut Context<Self>) {
-        if self.streaming_text_buffer.is_empty() || self.streaming_text_drain_task.is_some() {
-            return;
-        }
-
-        let generation = self.transcript_generation;
-        self.streaming_text_drain_task = Some(cx.spawn(async move |this, cx| loop {
-            Timer::after(std::time::Duration::from_millis(16)).await;
-
-            let should_continue = this
-                .update(cx, |this, cx| {
-                    if this.transcript_generation != generation {
-                        this.streaming_text_buffer.flush_all();
-                        this.streaming_text_drain_task = None;
-                        return false;
-                    }
-
-                    let changed = this.drain_streaming_text_once();
-                    if changed {
-                        cx.notify();
-                    }
-
-                    if this.streaming_text_buffer.is_empty() {
-                        this.streaming_text_drain_task = None;
-                        false
-                    } else {
-                        true
-                    }
-                })
-                .unwrap_or(false);
-
-            if !should_continue {
-                break;
-            }
-        }));
-    }
-
-    fn drain_streaming_text_once(&mut self) -> bool {
-        let budget = self.streaming_text_buffer.drain_budget_for_tick();
-        let Some(delta) = self.streaming_text_buffer.drain_next(budget) else {
-            return false;
-        };
-        let delta_bytes = delta.len();
-        let changed = self.append_assistant_stream_delta(delta);
-        if changed {
-            // WP-B3: a drained delta that actually mutated a visible row, plus
-            // the committed byte count.
-            crate::chat_hot_counters::record_agent_assistant_commit(delta_bytes);
-        }
-        changed
     }
 
     fn append_assistant_stream_delta(&mut self, delta: String) -> bool {
@@ -2616,21 +2552,6 @@ impl AgentChatThread {
         let changed = self.append_chunk(AgentChatThreadMessageRole::Assistant, delta.clone());
         if changed {
             crate::ai::subscriptions::publish_stream_chunk(&self.ui_thread_id, delta, accumulated);
-        }
-        changed
-    }
-
-    fn flush_streaming_text_buffer(&mut self) -> bool {
-        let delta = self.streaming_text_buffer.flush_all();
-        self.streaming_text_drain_task = None;
-        if delta.is_empty() {
-            return false;
-        }
-        let delta_bytes = delta.len();
-        let changed = self.append_assistant_stream_delta(delta);
-        if changed {
-            // WP-B3: a synchronous flush that committed buffered text to a row.
-            crate::chat_hot_counters::record_agent_assistant_commit(delta_bytes);
         }
         changed
     }
@@ -2804,9 +2725,7 @@ impl AgentChatThread {
                 // Build a rich index entry from the full conversation so
                 // search_history() can match on later transcript content.
                 // Zero-retention sessions (Quick AI) skip both writes.
-                let history_trace_label = if self
-                    .session_policy
-                    .allows_automatic_transcript_retention()
+                let history_trace_label = if self.retains_history()
                     && self
                         .messages
                         .iter()
@@ -3001,7 +2920,7 @@ impl AgentChatThread {
         }
 
         if changed {
-            cx.notify();
+            self.notify_semantic_change(cx);
         }
     }
 
@@ -3401,7 +3320,7 @@ impl AgentChatThread {
             needs_image = self.launch_requirements.needs_image,
         );
         self.selected_agent = next;
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Runtime setup state armed by `AgentChatEvent::SetupRequired`.
@@ -3448,7 +3367,7 @@ impl AgentChatThread {
             catalog_count = next.catalog_entries.len(),
         );
         self.setup_state = Some(next);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Full agent catalog for runtime recovery.
@@ -3502,7 +3421,7 @@ impl AgentChatThread {
         self.profile_id = profile_id;
         self.profile_display_name = Some(profile_display_name);
         self.profile_icon_name = profile_icon_name;
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Short display name for the currently selected model, or the agent name if none selected.
@@ -3614,7 +3533,7 @@ impl AgentChatThread {
         cx: &mut Context<Self>,
     ) {
         self.push_message(AgentChatThreadMessageRole::System, body);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Clear all messages for a fresh conversation within the same session.
@@ -3636,7 +3555,7 @@ impl AgentChatThread {
             target: "script_kit::tab_ai",
             event = "agent_chat_thread_cleared",
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 }
 
@@ -3651,7 +3570,7 @@ impl AgentChatThread {
     /// starts from the new intent alone.
     pub(crate) fn clear_pending_context_for_new_entry_intent(&mut self, cx: &mut Context<Self>) {
         self.reset_pending_context_for_new_entry_intent();
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(crate) fn stop_streaming(&mut self, cx: &mut Context<Self>) {
@@ -3662,13 +3581,22 @@ impl AgentChatThread {
         self.queue_paused = true;
         self.context_resolution_id = self.context_resolution_id.wrapping_add(1);
         let _ = self.transition_reliability(AiOperationEvent::StopRequested, cx);
-        if let Err(error) = self.connection.cancel_turn(self.ui_thread_id.clone()) {
-            tracing::warn!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_stop_turn_enqueue_failed",
-                error_code = ?error.code(),
-            );
-        }
+        let remote_cancel_requested = match self.connection.cancel_turn(self.ui_thread_id.clone()) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(target: "script_kit::tab_ai",
+                    event = "agent_chat_stop_turn_enqueue_failed", error_code = ?error.code());
+                false
+            }
+        };
+        self.last_local_stop = Some(AgentChatLocalStopReceipt {
+            thread_id: self.ui_thread_id.clone(),
+            turn_id: self.current_turn_id,
+            local_stream_cancelled: true,
+            remote_cancel_requested,
+            remote_cancel_acknowledged: false,
+        });
+        self.stream_generation = self.stream_generation.wrapping_add(1);
         self.stream_task = None;
         self.stream_started_at = None;
         let partial = self
@@ -3682,73 +3610,6 @@ impl AgentChatThread {
             })
             .unwrap_or(PartialOutputState::None);
         let _ = self.transition_reliability(AiOperationEvent::RuntimeStopped { partial }, cx);
-    }
-
-    fn clear_context_for_saved_messages(&mut self) {
-        // Pending context has never been part of the persisted Agent Chat
-        // history schema. Fail closed at the reload boundary: neither a stale
-        // in-memory draft nor an accepted retry payload can become sendable in
-        // the loaded conversation.
-        self.clear_all_pending_context("load_saved_messages");
-        self.context_receipts.clear();
-        self.last_prepared_turn = None;
-    }
-
-    /// Load saved messages from a conversation history file.
-    /// Replaces current messages with the saved ones (read-only view).
-    /// Clears all pending context state so loaded history does not inherit
-    /// stale chips from the previous conversation.
-    pub(crate) fn load_saved_messages(
-        &mut self,
-        saved: &[super::history::SavedMessage],
-        cx: &mut Context<Self>,
-    ) {
-        // Restoring a saved conversation into a zero-retention thread would
-        // resurrect retained content the policy forbids. Fail closed — Quick
-        // AI never loads history (WP-B1). Full surfaces are unaffected.
-        if !self.session_policy.allows_automatic_transcript_retention() {
-            tracing::warn!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_saved_message_load_denied_by_policy",
-                policy = ?self.session_policy,
-                saved_message_count = saved.len(),
-            );
-            return;
-        }
-        self.bump_transcript_generation("load_saved_messages");
-        self.flush_streaming_text_buffer();
-        self.stream_task = None;
-        self.stream_started_at = None;
-        self.pending_permission = None;
-        self.status = AgentChatThreadStatus::Idle;
-        self.active_plan_entries.clear();
-        self.active_tool_calls.clear();
-        self.tool_call_lookup.clear();
-        self.standing_approvals.clear();
-        self.active_mode_id = None;
-        self.available_commands.clear();
-        self.usage_tokens = None;
-        self.usage_cost_usd = None;
-        self.next_message_id = 1;
-        self.clear_context_for_saved_messages();
-        self.messages.clear();
-        for msg in saved {
-            let role = match msg.role.as_str() {
-                "User" => AgentChatThreadMessageRole::User,
-                "Assistant" => AgentChatThreadMessageRole::Assistant,
-                "Thought" => AgentChatThreadMessageRole::Thought,
-                "Tool" => AgentChatThreadMessageRole::Tool,
-                "System" => AgentChatThreadMessageRole::System,
-                "Error" => AgentChatThreadMessageRole::Error,
-                _ => AgentChatThreadMessageRole::System,
-            };
-            let id = self.alloc_id();
-            self.messages
-                .push(AgentChatThreadMessage::new(id, role, msg.body.clone()));
-        }
-        self.context_bootstrap_state = AgentChatContextBootstrapState::Ready;
-        self.context_bootstrap_note = None;
-        cx.notify();
     }
 
     pub(crate) fn draft_snapshot(&self) -> AgentChatThreadDraftSnapshot {
@@ -3766,7 +3627,7 @@ impl AgentChatThread {
         cx: &mut Context<Self>,
     ) {
         self.restore_draft_snapshot_inner(snapshot);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn restore_draft_snapshot_inner(&mut self, snapshot: AgentChatThreadDraftSnapshot) {
@@ -3865,14 +3726,14 @@ impl AgentChatThread {
     pub(crate) fn remove_queued_message(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.queued_messages.len() {
             self.queued_messages.remove(index);
-            cx.notify();
+            self.notify_semantic_change(cx);
         }
     }
 
     pub(crate) fn clear_queued_messages(&mut self, cx: &mut Context<Self>) {
         if !self.queued_messages.is_empty() {
             self.queued_messages.clear();
-            cx.notify();
+            self.notify_semantic_change(cx);
         }
     }
 
@@ -4009,7 +3870,7 @@ impl AgentChatThread {
             pending_part_count = self.pending_context_items.len(),
             pending_block_count = self.pending_context_blocks.len(),
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok((outcome, winner_id))
     }
 
@@ -4096,7 +3957,7 @@ impl AgentChatThread {
             part_count = self.pending_context_items.len(),
             ambient_enabled = self.pending_ambient_context_enabled,
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn replace_pending_context_parts_inner(
@@ -4168,7 +4029,7 @@ impl AgentChatThread {
             );
         } else {
             self.arm_pending_context("remove_context_part");
-            cx.notify();
+            self.notify_semantic_change(cx);
         }
         tracing::info!(
             target: "script_kit::tab_ai",

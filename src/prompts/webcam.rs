@@ -55,6 +55,102 @@ impl WebcamPrompt {
         }
     }
 
+    /// Feed an owned NV12 frame through the same CVPixelBuffer/Metal surface
+    /// as live camera frames. This allocates media memory only; no device opens.
+    pub fn from_nv12_frame(
+        id: String,
+        focus_handle: FocusHandle,
+        on_submit: SubmitCallback,
+        theme: std::sync::Arc<theme::Theme>,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+    ) -> anyhow::Result<Self> {
+        use core_foundation::{
+            base::{CFType, TCFType},
+            boolean::CFBoolean,
+            dictionary::CFDictionary,
+            string::CFString,
+        };
+        use core_video::pixel_buffer::{
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, CVPixelBufferKeys,
+        };
+        anyhow::ensure!(
+            width > 0
+                && height > 0
+                && width.is_multiple_of(2)
+                && height.is_multiple_of(2)
+                && u64::from(width) * u64::from(height) <= 4_194_304,
+            "invalid_webcam_frame_size"
+        );
+        let row_bytes = width as usize;
+        let luma_len = row_bytes * height as usize;
+        anyhow::ensure!(
+            bytes.len() == luma_len + luma_len / 2,
+            "invalid_webcam_frame_bytes"
+        );
+        let surface_options = CFDictionary::<CFString, CFType>::from_CFType_pairs(&[]);
+        let options = CFDictionary::from_CFType_pairs(&[
+            (
+                CFString::from(CVPixelBufferKeys::IOSurfaceProperties),
+                surface_options.as_CFType(),
+            ),
+            (
+                CFString::from(CVPixelBufferKeys::MetalCompatibility),
+                CFBoolean::true_value().as_CFType(),
+            ),
+        ]);
+        let buffer = CVPixelBuffer::new(
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            width as usize,
+            height as usize,
+            Some(&options),
+        )
+        .map_err(|code| anyhow::anyhow!("webcam_frame_allocation_failed:{code}"))?;
+        anyhow::ensure!(buffer.lock_base_address(0) == 0, "webcam_frame_lock_failed");
+        // SAFETY: both planes belong to a newly allocated, locked NV12 buffer.
+        // Each copy fits CoreVideo's stride and the validated source slice.
+        let copy_result = (|| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                buffer.is_planar() && buffer.get_plane_count() == 2,
+                "webcam_frame_invalid_planes"
+            );
+            for plane in 0..2 {
+                let rows = if plane == 0 {
+                    height as usize
+                } else {
+                    height as usize / 2
+                };
+                let source_offset = if plane == 0 { 0 } else { luma_len };
+                let stride = buffer.get_bytes_per_row_of_plane(plane);
+                let base = unsafe { buffer.get_base_address_of_plane(plane).cast::<u8>() };
+                anyhow::ensure!(
+                    !base.is_null() && stride >= row_bytes,
+                    "webcam_frame_invalid_storage"
+                );
+                for row in 0..rows {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            bytes.as_ptr().add(source_offset + row * row_bytes),
+                            base.add(row * stride),
+                            row_bytes,
+                        );
+                    }
+                }
+            }
+            Ok(())
+        })();
+        let unlocked = buffer.unlock_base_address(0);
+        copy_result?;
+        anyhow::ensure!(unlocked == 0, "webcam_frame_unlock_failed");
+        let mut prompt = Self::new(id, focus_handle, on_submit, theme);
+        prompt.pixel_buffer = Some(buffer);
+        prompt.frame_width = width;
+        prompt.frame_height = height;
+        prompt.state = WebcamState::Live;
+        Ok(prompt)
+    }
+
     /// Set the latest CVPixelBuffer from camera (zero-copy)
     pub fn set_pixel_buffer(&mut self, buf: CVPixelBuffer, cx: &mut Context<Self>) {
         let Ok(frame_width) = u32::try_from(buf.get_width()) else {

@@ -23,6 +23,12 @@ const PREFERRED_FAST_MODEL: &str = "Qwen3-0.6B-Q4_K_M.gguf";
 
 /// Resolve the best available ghost model, or `None` when nothing is on disk.
 pub(crate) fn resolve_ghost_model(_config: &crate::config::Config) -> Option<ResolvedLocalModel> {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+    {
+        tracing::warn!(%error, "Local model discovery refused");
+        return None;
+    }
     let sampling = GhostSamplingParams::default();
     for candidate in candidate_paths() {
         if candidate.is_file() {

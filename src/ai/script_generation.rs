@@ -427,6 +427,9 @@ fn write_generated_script_receipt(
     receipt_path: &Path,
     receipt: &GeneratedScriptReceipt,
 ) -> Result<()> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy.require_owned_path(receipt_path)?;
+    }
     let json = serde_json::to_string_pretty(receipt)
         .context("Failed to serialize generated script receipt")?;
     ensure_safe_receipt_destination(receipt_path)?;
@@ -516,6 +519,10 @@ fn verification_output_path(script_path: &Path) -> PathBuf {
 fn verify_generated_script_with_bun_build(
     script_path: &Path,
 ) -> GeneratedScriptVerificationReceipt {
+    if let Err(error) = crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+    {
+        return GeneratedScriptVerificationReceipt::blocked(error.to_string(), "runtime_policy");
+    }
     let output_path = verification_output_path(script_path);
     let command = vec![
         "bun".to_string(),
@@ -645,6 +652,9 @@ pub(crate) fn write_script_creation_receipt_for_path(
     model_id: &str,
     provider_id: &str,
 ) -> Result<GeneratedScriptReceipt> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy.require_owned_path(script_path)?;
+    }
     let source = fs::read_to_string(script_path).with_context(|| {
         format!(
             "Failed reading created script for verification receipt (state=script_creation_receipt_read_failed, path={})",
@@ -716,6 +726,7 @@ pub fn generate_script_from_prompt_with_receipt(
     prompt: &str,
     config: Option<&crate::config::Config>,
 ) -> Result<(GeneratedScriptOutput, GeneratedScriptReceipt)> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
     let normalized_prompt = prompt.trim();
     if normalized_prompt.is_empty() {
         anyhow::bail!("AI script generation requires a non-empty prompt");
@@ -957,11 +968,19 @@ pub(crate) fn save_generated_script_from_response(
 /// thread and `bun build` can take up to its 15s timeout. The receipt is
 /// written immediately with a skipped/pending marker and rewritten with the
 /// real verification result when the background run completes.
+/// Owned evaluation keeps the same contract/persistence pipeline but records
+/// `not_run_owned_fixture` and never schedules external verification.
 pub(crate) fn save_generated_script_from_response_with_slug(
     prompt: &str,
     raw_response: &str,
     slug_override: Option<&str>,
 ) -> Result<PathBuf> {
+    let owned_scope = crate::runtime_policy::owned_evaluation();
+    if let Some(scope) = owned_scope {
+        scope.require_owned_path(&crate::script_creation::scripts_dir())?;
+    } else {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ExternalStorage)?;
+    }
     let prepared = prepare_script_from_ai_response_with_contract(prompt, raw_response)?;
     let persistence_plan =
         generated_script_persistence_plan(prompt, &prepared.source, &prepared.slug, slug_override)?;
@@ -987,6 +1006,9 @@ pub(crate) fn save_generated_script_from_response_with_slug(
     let slug = generated_script_created_slug(&script_path)?;
 
     let receipt_path = generated_script_receipt_path(&script_path);
+    if let Some(scope) = owned_scope {
+        scope.require_owned_path(&receipt_path)?;
+    }
     let mut receipt = GeneratedScriptReceipt {
         schema_version: AI_GENERATED_SCRIPT_RECEIPT_SCHEMA_VERSION,
         prompt: safe_generated_script_detail(prompt.trim()),
@@ -999,12 +1021,18 @@ pub(crate) fn save_generated_script_from_response_with_slug(
         receipt_path: receipt_path.display().to_string(),
         shell_execution_warning: persistence_plan.shell_execution_warning,
         contract: prepared.contract,
-        verification: GeneratedScriptVerificationReceipt::skipped(
-            "bun_build_running_in_background",
-        ),
+        verification: GeneratedScriptVerificationReceipt::skipped(if owned_scope.is_some() {
+            "not_run_owned_fixture"
+        } else {
+            "bun_build_running_in_background"
+        }),
         current_app_recipe: None,
     };
     write_generated_script_receipt(&receipt_path, &receipt)?;
+    if owned_scope.is_some() {
+        crate::runtime_policy::record_completed_fixture_effect();
+        return Ok(script_path);
+    }
 
     let verify_script_path = script_path.clone();
     let verify_receipt_path = receipt_path;

@@ -369,6 +369,8 @@ impl ScriptListApp {
                 self.has_nonempty_sdk_actions(),
             ),
         );
+        let context = self.prompt_header_context(cx);
+        entity.update(cx, |prompt, _cx| prompt.set_header_context(context));
         self.render_entity_owned_prompt_host(
             entity,
             Self::other_prompt_shell_handle_key_default,
@@ -476,33 +478,6 @@ impl ScriptListApp {
         let focus_handle = entity.read(cx).focus_handle.clone();
         window.focus(&focus_handle, cx);
 
-        let completed = entity.read(cx).shortcut.is_complete();
-        if completed {
-            if let AppView::HotkeyPrompt { id, .. } = &self.current_view {
-                let value = entity.read(cx).shortcut.to_hotkey_info_json();
-                self.submit_prompt_response(id.clone(), Some(value), cx);
-            }
-        }
-
-        let pending_action = entity.update(cx, |recorder, _cx| recorder.take_pending_action());
-        if let Some(action) = pending_action {
-            let prompt_id = match &self.current_view {
-                AppView::HotkeyPrompt { id, .. } => Some(id.clone()),
-                _ => None,
-            };
-            if let Some(id) = prompt_id {
-                match action {
-                    crate::components::shortcut_recorder::RecorderAction::Save(recorded) => {
-                        let value = recorded.to_hotkey_info_json();
-                        self.submit_prompt_response(id, Some(value), cx);
-                    }
-                    crate::components::shortcut_recorder::RecorderAction::Cancel => {
-                        self.submit_prompt_response(id, None, cx);
-                        self.cancel_script_execution(cx);
-                    }
-                }
-            }
-        }
 
         let footer = self.main_window_footer_slot(crate::components::render_simple_hint_strip(
             vec!["Esc Cancel".into()],

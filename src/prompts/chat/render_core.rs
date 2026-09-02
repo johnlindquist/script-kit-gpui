@@ -151,6 +151,12 @@ impl Focusable for ChatPrompt {
 
 impl Render for ChatPrompt {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let published = crate::theme::get_theme_snapshot();
+        if self.theme_revision_seen != published.revision {
+            self.theme_revision_seen = published.revision;
+            self.theme = published.theme.clone();
+            self.prompt_colors = self.theme.colors.prompt_colors();
+        }
         // Resolve the chrome + key-handler + LIFECYCLE ownership plan as the
         // FIRST operation, so a transcript-only host (flow session) suppresses
         // ALL local chrome, key handlers, AND lifecycle work in every body

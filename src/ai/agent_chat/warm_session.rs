@@ -830,7 +830,7 @@ impl AgentChatWarmSessionManager {
                         // `AiAdapterError`. Formatting it printed the internal
                         // `ai_adapter_error:<Code>` marker on screen; carry the
                         // record instead.
-                        (AgentChatWarmSessionState::Failed, Some(error.failure))
+                        (AgentChatWarmSessionState::Failed, Some(*error.failure))
                     }
                 };
 

@@ -23,173 +23,34 @@ struct ChatWindowState {
     /// Automation window ID registered in the runtime handle registry.
     /// Stored so we can remove the exact handle on close.
     automation_id: Option<String>,
+    automation_generation: u64,
+    host_policy: crate::runtime_policy::WindowHostPolicy,
 }
 
 /// Global handle to the detached Agent Chat Chat window.
+pub(crate) fn get_agent_chat_view_for_instance(
+    id: &str,
+    generation: u64,
+) -> Option<Entity<AgentChatView>> {
+    let slot = CHAT_WINDOW.get()?.lock().ok()?;
+    let state = slot.as_ref()?;
+    if state.automation_id.as_deref() != Some(id)
+        || state.automation_generation != generation
+        || crate::windows::get_runtime_window_handle_for_generation(id, generation)
+            != Some(state.handle)
+    {
+        return None;
+    }
+    state.view_entity.as_ref()?.upgrade()
+}
+
 static CHAT_WINDOW: OnceLock<Mutex<Option<ChatWindowState>>> = OnceLock::new();
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ConfirmedAgentChatHistoryDeletion;
+mod history_deletion;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentChatHistoryDeletionTarget {
-    HistoryIndex,
-    Conversations,
-    PromptHistory,
-    HistoryAttachments,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentChatHistoryDeletionError {
-    ConfirmationRequired,
-    UnsafeTarget(AgentChatHistoryDeletionTarget),
-    InspectFailed(AgentChatHistoryDeletionTarget, std::io::ErrorKind),
-    RemoveFailed(AgentChatHistoryDeletionTarget, std::io::ErrorKind),
-}
-
-impl AgentChatHistoryDeletionError {
-    const fn safe_code(self) -> &'static str {
-        match self {
-            Self::ConfirmationRequired => "confirmation_required",
-            Self::UnsafeTarget(AgentChatHistoryDeletionTarget::HistoryIndex) => {
-                "unsafe_history_index"
-            }
-            Self::UnsafeTarget(AgentChatHistoryDeletionTarget::Conversations) => {
-                "unsafe_conversations_directory"
-            }
-            Self::UnsafeTarget(AgentChatHistoryDeletionTarget::PromptHistory) => {
-                "unsafe_prompt_history"
-            }
-            Self::UnsafeTarget(AgentChatHistoryDeletionTarget::HistoryAttachments) => {
-                "unsafe_history_attachments_directory"
-            }
-            Self::InspectFailed(AgentChatHistoryDeletionTarget::HistoryIndex, _) => {
-                "history_index_inspection_failed"
-            }
-            Self::InspectFailed(AgentChatHistoryDeletionTarget::Conversations, _) => {
-                "conversations_directory_inspection_failed"
-            }
-            Self::InspectFailed(AgentChatHistoryDeletionTarget::PromptHistory, _) => {
-                "prompt_history_inspection_failed"
-            }
-            Self::InspectFailed(AgentChatHistoryDeletionTarget::HistoryAttachments, _) => {
-                "history_attachments_directory_inspection_failed"
-            }
-            Self::RemoveFailed(AgentChatHistoryDeletionTarget::HistoryIndex, _) => {
-                "history_index_removal_failed"
-            }
-            Self::RemoveFailed(AgentChatHistoryDeletionTarget::Conversations, _) => {
-                "conversations_directory_removal_failed"
-            }
-            Self::RemoveFailed(AgentChatHistoryDeletionTarget::PromptHistory, _) => {
-                "prompt_history_removal_failed"
-            }
-            Self::RemoveFailed(AgentChatHistoryDeletionTarget::HistoryAttachments, _) => {
-                "history_attachments_directory_removal_failed"
-            }
-        }
-    }
-
-    const fn io_error_kind(self) -> Option<std::io::ErrorKind> {
-        match self {
-            Self::InspectFailed(_, kind) | Self::RemoveFailed(_, kind) => Some(kind),
-            Self::ConfirmationRequired | Self::UnsafeTarget(_) => None,
-        }
-    }
-}
-
-fn inspect_agent_chat_history_deletion_target(
-    path: &std::path::Path,
-    target: AgentChatHistoryDeletionTarget,
-) -> Result<bool, AgentChatHistoryDeletionError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            let expected_type = match target {
-                AgentChatHistoryDeletionTarget::HistoryIndex
-                | AgentChatHistoryDeletionTarget::PromptHistory => metadata.is_file(),
-                AgentChatHistoryDeletionTarget::Conversations
-                | AgentChatHistoryDeletionTarget::HistoryAttachments => metadata.is_dir(),
-            };
-            if metadata.file_type().is_symlink() || !expected_type {
-                Err(AgentChatHistoryDeletionError::UnsafeTarget(target))
-            } else {
-                Ok(true)
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(AgentChatHistoryDeletionError::InspectFailed(
-            target,
-            error.kind(),
-        )),
-    }
-}
-
-/// Delete only the exact detached Agent Chat history targets. All filesystem
-/// types are checked without following symlinks before any target is touched.
-fn clear_agent_chat_history_at(
-    kit_path: &std::path::Path,
-    confirmation: Option<ConfirmedAgentChatHistoryDeletion>,
-) -> Result<(), AgentChatHistoryDeletionError> {
-    if confirmation.is_none() {
-        return Err(AgentChatHistoryDeletionError::ConfirmationRequired);
-    }
-
-    let history_path = kit_path.join("agent_chat-history.jsonl");
-    let conversations_path = kit_path.join("agent_chat-conversations");
-    let prompt_history_path = kit_path.join("agent_chat-prompt-history.jsonl");
-    let attachments_path = kit_path.join("agent_chat-history-attachments");
-    let history_exists = inspect_agent_chat_history_deletion_target(
-        &history_path,
-        AgentChatHistoryDeletionTarget::HistoryIndex,
-    )?;
-    let conversations_exist = inspect_agent_chat_history_deletion_target(
-        &conversations_path,
-        AgentChatHistoryDeletionTarget::Conversations,
-    )?;
-    let prompt_history_exists = inspect_agent_chat_history_deletion_target(
-        &prompt_history_path,
-        AgentChatHistoryDeletionTarget::PromptHistory,
-    )?;
-    let attachments_exist = inspect_agent_chat_history_deletion_target(
-        &attachments_path,
-        AgentChatHistoryDeletionTarget::HistoryAttachments,
-    )?;
-
-    if history_exists {
-        std::fs::remove_file(&history_path).map_err(|error| {
-            AgentChatHistoryDeletionError::RemoveFailed(
-                AgentChatHistoryDeletionTarget::HistoryIndex,
-                error.kind(),
-            )
-        })?;
-    }
-    if conversations_exist {
-        std::fs::remove_dir_all(&conversations_path).map_err(|error| {
-            AgentChatHistoryDeletionError::RemoveFailed(
-                AgentChatHistoryDeletionTarget::Conversations,
-                error.kind(),
-            )
-        })?;
-    }
-    if prompt_history_exists {
-        std::fs::remove_file(&prompt_history_path).map_err(|error| {
-            AgentChatHistoryDeletionError::RemoveFailed(
-                AgentChatHistoryDeletionTarget::PromptHistory,
-                error.kind(),
-            )
-        })?;
-    }
-    if attachments_exist {
-        std::fs::remove_dir_all(&attachments_path).map_err(|error| {
-            AgentChatHistoryDeletionError::RemoveFailed(
-                AgentChatHistoryDeletionTarget::HistoryAttachments,
-                error.kind(),
-            )
-        })?;
-    }
-
-    Ok(())
-}
+use history_deletion::{clear_agent_chat_history_at, ConfirmedAgentChatHistoryDeletion};
+#[cfg(test)]
+use history_deletion::{AgentChatHistoryDeletionError, AgentChatHistoryDeletionTarget};
 
 /// Check if the detached Agent Chat Chat window is open.
 pub fn is_chat_window_open() -> bool {
@@ -206,19 +67,6 @@ pub fn is_chat_window(window: &gpui::Window) -> bool {
         .as_ref()
         .map(|state| window.window_handle() == state.handle)
         .unwrap_or(false)
-}
-
-/// Clear the global chat window handle (called when the view closes itself).
-pub fn clear_chat_window_handle() {
-    let slot = CHAT_WINDOW.get_or_init(|| Mutex::new(None));
-    if let Ok(mut g) = slot.lock() {
-        if let Some(state) = g.take() {
-            if let Some(ref id) = state.automation_id {
-                crate::windows::remove_runtime_window_handle(id);
-                crate::windows::remove_automation_window(id);
-            }
-        }
-    }
 }
 
 /// Build standard window options for the detached chat window.
@@ -269,23 +117,33 @@ fn automation_bounds_from_window_bounds(
     })
 }
 
-fn upsert_agent_chat_detached_automation_window(
+fn register_agent_chat_detached_window(
     automation_id: &str,
+    handle: AnyWindowHandle,
     bounds: Option<crate::protocol::AutomationWindowBounds>,
-) {
-    crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
-        id: automation_id.to_string(),
-        kind: crate::protocol::AutomationWindowKind::AgentChatDetached,
-        title: Some("Script Kit Agent Chat".to_string()),
-        focused: true,
-        visible: true,
-        semantic_surface: Some("agentChatChat".to_string()),
-        bounds,
-        parent_window_id: None,
-        parent_kind: None,
-        pid: Some(std::process::id()),
-        generation: None,
-    });
+    host_policy: crate::runtime_policy::WindowHostPolicy,
+    cx: &mut App,
+) -> anyhow::Result<u64> {
+    let info = crate::windows::register_runtime_window_instance(
+        crate::protocol::AutomationWindowInfo {
+            id: automation_id.to_string(),
+            kind: crate::protocol::AutomationWindowKind::AgentChatDetached,
+            title: Some("Script Kit Agent Chat".to_string()),
+            focused: !host_policy.is_hidden(),
+            visible: !host_policy.is_hidden(),
+            semantic_surface: Some("agentChatChat".to_string()),
+            bounds,
+            parent_window_id: None,
+            parent_kind: None,
+            parent_window_generation: None,
+            pid: Some(std::process::id()),
+            generation: None,
+        },
+        handle,
+        cx,
+    )?;
+    info.generation
+        .ok_or_else(|| anyhow::anyhow!("detached_generation_missing"))
 }
 
 /// Move the detached Agent Chat window to deterministic bounds for visual proof.
@@ -380,6 +238,24 @@ pub fn open_chat_window_with_thread(
     inherit_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     cx: &mut App,
 ) -> anyhow::Result<()> {
+    open_chat_window_with_thread_and_policy(
+        thread,
+        inherit_bounds,
+        crate::runtime_policy::WindowHostPolicy::Interactive,
+        cx,
+    )
+}
+
+pub(crate) fn open_chat_window_with_thread_and_policy(
+    thread: Entity<AgentChatThread>,
+    inherit_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    host_policy: crate::runtime_policy::WindowHostPolicy,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    host_policy.validate()?;
+    if host_policy.is_hidden() {
+        anyhow::ensure!(inherit_bounds.is_some(), "owned_chat_bounds_required");
+    }
     // Close existing if any
     if is_chat_window_open() {
         close_chat_window(cx);
@@ -397,7 +273,15 @@ pub fn open_chat_window_with_thread(
 
     let window_bounds = chat_window_bounds(inherit_bounds);
     let automation_bounds = automation_bounds_from_window_bounds(window_bounds);
-    let handle = cx.open_window(chat_window_options(inherit_bounds), |window, cx| {
+    let mut options = chat_window_options(inherit_bounds);
+    if host_policy.is_hidden() {
+        options.show = false;
+        options.focus = false;
+        options.is_movable = false;
+        options.is_resizable = false;
+        options.is_minimizable = false;
+    }
+    let handle = cx.open_window(options, |window, cx| {
         // Save bounds and clear handle when window closes
         window.on_window_should_close(cx, move |window, cx| {
             let close_allowed = if let Ok(slot) = view_entity_slot_on_close.lock() {
@@ -413,11 +297,12 @@ pub fn open_chat_window_with_thread(
                 return false;
             }
 
-            let wb = window.window_bounds();
-            crate::window_state::save_window_from_gpui(
-                crate::window_state::WindowRole::AgentChat,
-                wb,
-            );
+            if !host_policy.is_hidden() {
+                crate::window_state::save_window_from_gpui(
+                    crate::window_state::WindowRole::AgentChat,
+                    window.window_bounds(),
+                );
+            }
             if let Ok(slot) = view_entity_slot_on_close.lock() {
                 if let Some(entity) = slot.as_ref().and_then(|weak| weak.upgrade()) {
                     entity.update(cx, |view, cx| {
@@ -428,12 +313,17 @@ pub fn open_chat_window_with_thread(
             // Clear the global handle and remove the runtime automation handle
             let slot = CHAT_WINDOW.get_or_init(|| Mutex::new(None));
             if let Ok(mut g) = slot.lock() {
-                if let Some(state) = g.take() {
+                if let Some(state) = g.take_if(|state| state.handle == window.window_handle()) {
                     if let Some(ref id) = state.automation_id {
-                        crate::windows::remove_runtime_window_handle(id);
-                        crate::windows::remove_automation_window(id);
+                        crate::windows::remove_runtime_window_instance(
+                            id,
+                            state.automation_generation,
+                        );
                     }
                 }
+            }
+            if host_policy.is_hidden() {
+                return true;
             }
             if crate::platform::begin_gpui_window_exit_dematerialize(
                 window,
@@ -505,6 +395,19 @@ pub fn open_chat_window_with_thread(
 
     let any_handle: AnyWindowHandle = handle.into();
     let automation_id = format!("agentChatDetached:{ui_thread_id}");
+    let automation_generation = match register_agent_chat_detached_window(
+        &automation_id,
+        any_handle,
+        automation_bounds,
+        host_policy,
+        cx,
+    ) {
+        Ok(generation) => generation,
+        Err(error) => {
+            let _ = any_handle.update(cx, |_, window, _| window.remove_window());
+            return Err(error);
+        }
+    };
 
     {
         let slot = CHAT_WINDOW.get_or_init(|| Mutex::new(None));
@@ -513,31 +416,21 @@ pub fn open_chat_window_with_thread(
                 handle: any_handle,
                 view_entity: view_weak,
                 automation_id: Some(automation_id.clone()),
+                automation_generation,
+                host_policy,
             });
         }
     }
 
-    // Register the exact runtime handle so simulateGpuiEvent can target
-    // this window by its automation ID without collapsing to WindowRole.
-    crate::windows::upsert_runtime_window_handle(&automation_id, any_handle);
-
-    // Also register the window in the automation metadata registry so that
-    // `listAutomationWindows` and target-resolution by kind=agentChatDetached can
-    // find it. Runtime handle registry and metadata registry are separate —
-    // a missing metadata entry makes the window invisible to discovery even
-    // when the runtime handle exists.
-    upsert_agent_chat_detached_automation_window(&automation_id, automation_bounds);
-
-    // Activate the detached window so it gets keyboard focus immediately.
-    activate_chat_window(cx);
-
-    // Configure vibrancy to match main window appearance
-    configure_agent_chat_vibrancy(cx);
+    if !host_policy.is_hidden() {
+        activate_chat_window(cx);
+        configure_agent_chat_vibrancy(any_handle, cx);
+    }
 
     tracing::info!(
         event = "agent_chat_window_opened_with_thread",
         has_inherited_bounds,
-        activated = true,
+        activated = !host_policy.is_hidden(),
     );
     Ok(())
 }
@@ -831,11 +724,14 @@ pub fn close_chat_window(cx: &mut App) {
         // window's titlebar (on_close fires first) or from an outside
         // TriggerAction / automation path (this helper fires first).
         if let Some(ref id) = state.automation_id {
-            crate::windows::remove_runtime_window_handle(id);
-            crate::windows::remove_automation_window(id);
+            crate::windows::remove_runtime_window_instance(id, state.automation_generation);
         }
 
         let _ = state.handle.update(cx, |_root, window, _cx| {
+            if state.host_policy.is_hidden() {
+                window.remove_window();
+                return;
+            }
             // Save window bounds before closing
             let wb = window.window_bounds();
             crate::window_state::save_window_from_gpui(
@@ -943,7 +839,9 @@ pub(crate) fn activate_chat_window(cx: &mut App) {
     };
     if let Some((handle, view_entity)) = state {
         let _ = handle.update(cx, |_root, window, cx| {
-            window.activate_window();
+            if !window.is_owned_hidden() {
+                window.activate_window();
+            }
             if let Some(ref entity) = view_entity {
                 let focus_handle = entity.read(cx).focus_handle(cx);
                 window.focus(&focus_handle, cx);
@@ -1164,15 +1062,32 @@ pub fn toggle_detached_actions(cx: &mut App) {
         }));
     });
 
-    let parent_automation_id = crate::windows::focused_automation_window_id();
+    let parent_automation_id = crate::windows::list_automation_windows()
+        .into_iter()
+        .find(|info| {
+            crate::windows::get_runtime_window_handle(&info.id) == Some(parent_window_handle)
+        })
+        .map(|info| info.id);
+    let host_policy = parent_window_handle
+        .update(cx, |_, window, _| {
+            if window.is_owned_hidden() {
+                crate::runtime_policy::WindowHostPolicy::OwnedHidden
+            } else {
+                crate::runtime_policy::WindowHostPolicy::Interactive
+            }
+        })
+        .unwrap_or(crate::runtime_policy::WindowHostPolicy::Interactive);
     let actions_handle = match actions::open_actions_window(
         cx,
-        parent_window_handle,
-        bounds,
-        display_id,
+        actions::ActionsWindowPlacement {
+            parent_window_handle,
+            main_bounds: bounds,
+            display_id,
+        },
         dialog,
         WindowPosition::TopRight,
         parent_automation_id.as_deref(),
+        host_policy,
     ) {
         Ok(handle) => handle,
         Err(e) => {
@@ -1182,7 +1097,9 @@ pub fn toggle_detached_actions(cx: &mut App) {
     };
 
     let _ = actions_handle.update(cx, |_root, window, _cx| {
-        window.activate_window();
+        if !window.is_owned_hidden() {
+            window.activate_window();
+        }
     });
 
     tracing::info!(
@@ -1317,15 +1234,32 @@ fn open_detached_history_actions(cx: &mut App) -> bool {
         }));
     });
 
-    let parent_automation_id = crate::windows::focused_automation_window_id();
+    let parent_automation_id = crate::windows::list_automation_windows()
+        .into_iter()
+        .find(|info| {
+            crate::windows::get_runtime_window_handle(&info.id) == Some(parent_window_handle)
+        })
+        .map(|info| info.id);
+    let host_policy = parent_window_handle
+        .update(cx, |_, window, _| {
+            if window.is_owned_hidden() {
+                crate::runtime_policy::WindowHostPolicy::OwnedHidden
+            } else {
+                crate::runtime_policy::WindowHostPolicy::Interactive
+            }
+        })
+        .unwrap_or(crate::runtime_policy::WindowHostPolicy::Interactive);
     let actions_handle = match actions::open_actions_window(
         cx,
-        parent_window_handle,
-        bounds,
-        display_id,
+        actions::ActionsWindowPlacement {
+            parent_window_handle,
+            main_bounds: bounds,
+            display_id,
+        },
         dialog,
         WindowPosition::TopRight,
         parent_automation_id.as_deref(),
+        host_policy,
     ) {
         Ok(handle) => handle,
         Err(e) => {
@@ -1335,7 +1269,9 @@ fn open_detached_history_actions(cx: &mut App) -> bool {
     };
 
     let _ = actions_handle.update(cx, |_root, window, _cx| {
-        window.activate_window();
+        if !window.is_owned_hidden() {
+            window.activate_window();
+        }
     });
 
     cx.spawn(async move |cx: &mut gpui::AsyncApp| {
@@ -1929,67 +1865,38 @@ const AGENT_CHAT_WINDOW_TITLE: &str = "Script Kit Agent Chat";
 
 /// Configure vibrancy on the Agent Chat chat window to match the main window appearance.
 ///
-/// Sets the NSWindow title (invisible since titlebar is None), then finds the
-/// window by title and applies the same vibrancy material as Notes/AI windows.
+/// Uses the exact live GPUI handle; titles never establish native identity.
 #[cfg(target_os = "macos")]
-fn configure_agent_chat_vibrancy(cx: &mut App) {
+fn configure_agent_chat_vibrancy(handle: AnyWindowHandle, cx: &mut App) {
     use objc::{msg_send, sel, sel_impl};
-
-    let handle = {
-        let slot = CHAT_WINDOW.get_or_init(|| Mutex::new(None));
-        slot.lock().ok().and_then(|g| g.as_ref().map(|s| s.handle))
-    };
-
-    let Some(handle) = handle else { return };
-
-    // First, set the window title via the GPUI handle so we can find it by title.
+    use raw_window_handle::HasWindowHandle;
     let _ = handle.update(cx, |_root, window, _cx| {
-        // SAFETY: GPUI Window exposes the title setter.
+        if window.is_owned_hidden() {
+            return;
+        }
         window.set_window_title(&gpui::SharedString::from(AGENT_CHAT_WINDOW_TITLE));
-    });
-
-    // Now find it by title, same pattern as Notes/AI windows.
-    // SAFETY: We're on the main thread (GPUI guarantees this for App callbacks).
-    // All NSWindow pointers are nil-checked. Title string pointer is nil-checked.
-    unsafe {
-        use cocoa::appkit::NSApp;
-        use cocoa::base::nil;
-        use std::ffi::CStr;
-
-        let app = NSApp();
-        let windows: cocoa::base::id = msg_send![app, windows];
-        let count: usize = msg_send![windows, count];
-
-        for i in 0..count {
-            let window: cocoa::base::id = msg_send![windows, objectAtIndex: i];
-            let title: cocoa::base::id = msg_send![window, title];
-
-            if title != nil {
-                let title_cstr: *const i8 = msg_send![title, UTF8String];
-                if !title_cstr.is_null() {
-                    let title_str = CStr::from_ptr(title_cstr).to_string_lossy();
-
-                    if title_str == AGENT_CHAT_WINDOW_TITLE {
-                        let theme = crate::theme::get_cached_theme();
-                        let is_dark = theme.should_use_dark_vibrancy();
+        if let Ok(raw) = HasWindowHandle::window_handle(window) {
+            if let raw_window_handle::RawWindowHandle::AppKit(appkit) = raw.as_raw() {
+                // SAFETY: the NSView belongs to this exact live GPUI window;
+                // AppKit access remains on the main foreground thread.
+                unsafe {
+                    let view = appkit.ns_view.as_ptr() as cocoa::base::id;
+                    let native: cocoa::base::id = msg_send![view, window];
+                    if !native.is_null() {
                         crate::platform::configure_secondary_window_vibrancy(
-                            window,
+                            native,
                             "Agent Chat",
-                            is_dark,
+                            crate::theme::get_cached_theme().should_use_dark_vibrancy(),
                         );
-                        tracing::info!("agent_chat_vibrancy_configured");
-                        return;
                     }
                 }
             }
         }
-
-        tracing::warn!("agent_chat_window_not_found_for_vibrancy");
-    }
+    });
 }
 
 #[cfg(not(target_os = "macos"))]
-fn configure_agent_chat_vibrancy(_cx: &mut App) {}
+fn configure_agent_chat_vibrancy(_handle: AnyWindowHandle, _cx: &mut App) {}
 
 #[cfg(test)]
 include!("chat_window_tests.rs");

@@ -521,9 +521,7 @@ pub(crate) fn part_to_inline_token(part: &AiContextPart) -> Option<String> {
             };
             Some(format_typed_label_mention_token("skill", name))
         }
-        AiContextPart::FocusedTarget {
-            target, label: _, ..
-        } => {
+        AiContextPart::FocusedTarget { target, .. } => {
             // File/directory targets use canonical @file: / @dir: prefixes with the full basename.
             if let Some(path) = (target.kind == "file" || target.kind == "directory")
                 .then_some(target.metadata.as_ref())

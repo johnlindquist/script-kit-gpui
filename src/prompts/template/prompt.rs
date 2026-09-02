@@ -18,6 +18,7 @@ pub struct TemplatePrompt {
     pub validation_errors: Vec<Option<String>>,
     /// Currently focused input index
     pub current_input: usize,
+    input_revision: u64,
     /// Focus handle for keyboard input
     pub focus_handle: FocusHandle,
     /// Callback when user submits
@@ -36,6 +37,25 @@ pub(super) struct TemplatePlaceholderMatch {
 }
 
 impl TemplatePrompt {
+    pub(crate) fn dictation_input_revision(&self, _cx: &gpui::App) -> u64 {
+        self.input_revision
+    }
+
+    fn advance_input_revision(&mut self) {
+        assert!(
+            self.input_revision < u64::MAX,
+            "template input revision exhausted"
+        );
+        self.input_revision += 1;
+    }
+
+    pub(super) fn set_current_input(&mut self, index: usize) {
+        if self.current_input != index {
+            self.advance_input_revision();
+            self.current_input = index;
+        }
+    }
+
     pub fn new(
         id: String,
         template: String,
@@ -60,6 +80,7 @@ impl TemplatePrompt {
             values,
             validation_errors,
             current_input: 0,
+            input_revision: 0,
             focus_handle,
             on_submit,
             theme,
@@ -303,7 +324,11 @@ impl TemplatePrompt {
         for idx in 0..self.inputs.len() {
             let value = self.values.get(idx).map(String::as_str).unwrap_or_default();
             let validation = Self::validate_input_value(&self.inputs[idx], value);
-            self.validation_errors[idx] = validation.err();
+            let error = validation.err();
+            if self.validation_errors[idx] != error {
+                self.validation_errors[idx] = error;
+                self.advance_input_revision();
+            }
             if self.validation_errors[idx].is_some() {
                 is_valid = false;
             }
@@ -366,6 +391,7 @@ impl TemplatePrompt {
                 self.validation_errors[self.current_input] =
                     Self::validate_input_value(input, value).err();
             }
+            self.advance_input_revision();
             cx.notify();
         }
     }
@@ -374,7 +400,7 @@ impl TemplatePrompt {
     pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
         if !self.validate_all_inputs() {
             if let Some(first_invalid) = self.validation_errors.iter().position(Option::is_some) {
-                self.current_input = first_invalid;
+                self.set_current_input(first_invalid);
             }
             cx.notify();
             return;
@@ -394,6 +420,7 @@ impl TemplatePrompt {
                 .unwrap_or_else(|| raw_placeholder.to_string())
         });
         (self.on_submit)(self.id.clone(), Some(result));
+        cx.notify();
     }
 
     /// Cancel - submit None
@@ -404,7 +431,7 @@ impl TemplatePrompt {
     /// Move to next input (Tab)
     pub(crate) fn next_input(&mut self, cx: &mut Context<Self>) {
         if !self.inputs.is_empty() {
-            self.current_input = (self.current_input + 1) % self.inputs.len();
+            self.set_current_input((self.current_input + 1) % self.inputs.len());
             cx.notify();
         }
     }
@@ -413,24 +440,31 @@ impl TemplatePrompt {
     pub(crate) fn prev_input(&mut self, cx: &mut Context<Self>) {
         if !self.inputs.is_empty() {
             if self.current_input == 0 {
-                self.current_input = self.inputs.len() - 1;
+                self.set_current_input(self.inputs.len() - 1);
             } else {
-                self.current_input -= 1;
+                self.set_current_input(self.current_input - 1);
             }
             cx.notify();
         }
     }
 
-    /// Handle character input for current field
-    pub(crate) fn handle_char(&mut self, ch: char, cx: &mut Context<Self>) {
+    /// Append committed text to the current field, ignoring control characters.
+    pub(crate) fn handle_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         if let Some(value) = self.values.get_mut(self.current_input) {
-            value.push(ch);
+            let previous_len = value.len();
+            value.extend(text.chars().filter(|ch| !ch.is_control()));
+            if value.len() == previous_len {
+                return false;
+            }
             if let Some(input) = self.inputs.get(self.current_input) {
                 self.validation_errors[self.current_input] =
                     Self::validate_input_value(input, value).err();
             }
+            self.advance_input_revision();
             cx.notify();
+            return true;
         }
+        false
     }
 
     /// Handle backspace for current field
@@ -442,8 +476,298 @@ impl TemplatePrompt {
                     self.validation_errors[self.current_input] =
                         Self::validate_input_value(input, value).err();
                 }
+                self.advance_input_revision();
                 cx.notify();
             }
         }
     }
+}
+
+#[cfg(test)]
+mod seeded_behavior_tests {
+    use super::*;
+    use gpui::{Entity, KeyDownEvent, Keystroke, PlatformInput, TestAppContext, WindowHandle};
+
+    fn template_window(
+        cx: &mut TestAppContext,
+        template: &str,
+        on_submit: SubmitCallback,
+    ) -> WindowHandle<TemplatePrompt> {
+        cx.update(gpui_component::init);
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| {
+                    TemplatePrompt::new(
+                        "template-local".into(),
+                        template.into(),
+                        cx.focus_handle(),
+                        on_submit,
+                        Arc::new(theme::Theme::default()),
+                    )
+                })
+            })
+            .expect("template test window should open")
+        });
+        window
+            .update(cx, |prompt, window, cx| {
+                window.focus(&prompt.focus_handle, cx);
+            })
+            .expect("template test window should focus");
+        cx.run_until_parked();
+        window
+    }
+
+    fn dispatch_template_key<V: Render + 'static>(
+        cx: &mut TestAppContext,
+        window: WindowHandle<V>,
+        key: &str,
+        text: Option<&str>,
+    ) -> bool {
+        let mut keystroke = Keystroke::parse(key).expect("valid template test key");
+        keystroke.key_char = text.map(str::to_owned);
+        let consumed = cx
+            .update_window(*window, |_, window, cx| {
+                !window
+                    .dispatch_event(
+                        PlatformInput::KeyDown(KeyDownEvent {
+                            keystroke,
+                            is_held: false,
+                            prefer_character_input: false,
+                        }),
+                        cx,
+                    )
+                    .propagate
+            })
+            .expect("template event should dispatch");
+        cx.run_until_parked();
+        consumed
+    }
+
+    struct TemplateWithTabStop {
+        prompt: Entity<TemplatePrompt>,
+        competing_focus: FocusHandle,
+    }
+
+    impl Render for TemplateWithTabStop {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().child(self.prompt.clone()).child(
+                div()
+                    .track_focus(&self.competing_focus.clone().tab_stop(true))
+                    .child("Competing tab stop"),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn template_traversal_preserves_values_and_validates_before_submit(cx: &mut TestAppContext) {
+        let submitted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let output = submitted.clone();
+        cx.update(gpui_component::init);
+        let (window, prompt) = cx.update(|cx| {
+            let prompt = cx.new(|cx| {
+                TemplatePrompt::new(
+                    "template-local".into(),
+                    "Hello {{script_name}}, {{email}}".into(),
+                    cx.focus_handle(),
+                    Arc::new(move |_, value| output.lock().push(value)),
+                    Arc::new(theme::Theme::default()),
+                )
+            });
+            let host = cx.new(|cx| TemplateWithTabStop {
+                prompt: prompt.clone(),
+                competing_focus: cx.focus_handle(),
+            });
+            let window = cx
+                .open_window(Default::default(), |window, cx| {
+                    cx.new(|cx| gpui_component::Root::new(host, window, cx))
+                })
+                .expect("Root-wrapped template should open");
+            (window, prompt)
+        });
+        window
+            .update(cx, |_, window, cx| {
+                let focus = prompt.read(cx).focus_handle.clone();
+                window.focus(&focus, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(dispatch_template_key(cx, window, "enter", None));
+        assert!(submitted.lock().is_empty());
+        prompt.read_with(cx, |prompt, _| {
+            assert!(prompt.validation_errors[0].is_some());
+        });
+        assert!(dispatch_template_key(
+            cx,
+            window,
+            "e",
+            Some("edited-fixture")
+        ));
+        assert!(dispatch_template_key(cx, window, "tab", None));
+        window
+            .update(cx, |_, window, cx| {
+                let prompt = prompt.read(cx);
+                assert_eq!(prompt.current_input, 1);
+                assert!(prompt.focus_handle.is_focused(window));
+                assert!(prompt.validation_errors[0].is_none());
+            })
+            .unwrap();
+        assert!(dispatch_template_key(
+            cx,
+            window,
+            "a",
+            Some("ada@example.invalid"),
+        ));
+        assert!(dispatch_template_key(cx, window, "shift-tab", None));
+        window
+            .update(cx, |_, window, cx| {
+                let prompt = prompt.read(cx);
+                assert_eq!(prompt.current_input, 0);
+                assert!(prompt.focus_handle.is_focused(window));
+                assert_eq!(prompt.values, ["edited-fixture", "ada@example.invalid"]);
+            })
+            .unwrap();
+        assert!(dispatch_template_key(cx, window, "enter", None));
+        assert_eq!(
+            *submitted.lock(),
+            vec![Some("Hello edited-fixture, ada@example.invalid".into())]
+        );
+    }
+
+    #[gpui::test]
+    fn template_committed_unicode_filters_controls_and_revises_once(cx: &mut TestAppContext) {
+        let window = template_window(cx, "{{name}}", Arc::new(|_, _| {}));
+        let unicode = "e\u{301}東京\u{1f980}";
+        assert!(dispatch_template_key(cx, window, "e", Some(unicode)));
+        window
+            .read_with(cx, |prompt, cx| {
+                assert_eq!(prompt.values[0], unicode);
+                assert_eq!(prompt.dictation_input_revision(cx), 1);
+            })
+            .unwrap();
+        for text in ["", "\n\r\t\u{7f}"] {
+            assert!(!dispatch_template_key(cx, window, "a", Some(text)));
+        }
+        assert!(!dispatch_template_key(cx, window, "a", None));
+        window
+            .read_with(cx, |prompt, cx| {
+                assert_eq!(prompt.values[0], unicode);
+                assert_eq!(prompt.dictation_input_revision(cx), 1);
+            })
+            .unwrap();
+        assert!(dispatch_template_key(cx, window, "backspace", None));
+        assert!(dispatch_template_key(cx, window, "alt-e", Some("é")));
+        assert!(dispatch_template_key(cx, window, "a", Some("\nA\tB\u{7f}")));
+        window
+            .read_with(cx, |prompt, cx| {
+                assert_eq!(prompt.values[0], "e\u{301}東京éAB");
+                assert_eq!(prompt.dictation_input_revision(cx), 4);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn template_passes_shortcuts_without_mutating_or_submitting(cx: &mut TestAppContext) {
+        let submitted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let output = submitted.clone();
+        let window = template_window(
+            cx,
+            "{{name}} {{email}}",
+            Arc::new(move |_, value| output.lock().push(value)),
+        );
+        for key in ["cmd-w", "cmd-k", "cmd-q", "cmd-v", "ctrl-a", "fn-a"] {
+            assert!(!dispatch_template_key(cx, window, key, Some("ignored")));
+        }
+        for key in [
+            "cmd-tab",
+            "ctrl-tab",
+            "alt-tab",
+            "cmd-enter",
+            "ctrl-enter",
+            "alt-enter",
+            "alt-backspace",
+        ] {
+            assert!(!dispatch_template_key(cx, window, key, None));
+        }
+        window
+            .update(cx, |prompt, window, cx| {
+                assert_eq!(prompt.values, ["", ""]);
+                assert_eq!(prompt.current_input, 0);
+                assert_eq!(prompt.dictation_input_revision(cx), 0);
+                assert!(prompt.focus_handle.is_focused(window));
+            })
+            .unwrap();
+        assert!(submitted.lock().is_empty());
+    }
+}
+
+#[cfg(test)]
+#[gpui::test]
+fn template_revision_tracks_field_focus_and_text_aba(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let prompt = cx.new(|cx| {
+        TemplatePrompt::new(
+            "epoch".into(),
+            "{{name}} {{author}}".into(),
+            cx.focus_handle(),
+            Arc::new(|_, _| {}),
+            Arc::new(theme::Theme::default()),
+        )
+    });
+    prompt.update(cx, |prompt, cx| {
+        let initial = prompt.dictation_input_revision(cx);
+        prompt.set_input(String::new(), cx);
+        prompt.handle_backspace(cx);
+        prompt.set_current_input(0);
+        assert_eq!(prompt.dictation_input_revision(cx), initial);
+        prompt.set_input("cat".into(), cx);
+        let original = prompt.dictation_input_revision(cx);
+        prompt.set_input("dog".into(), cx);
+        let changed = prompt.dictation_input_revision(cx);
+        assert!(changed > original);
+        prompt.set_input("cat".into(), cx);
+        assert!(prompt.dictation_input_revision(cx) > changed);
+        let before_focus = prompt.dictation_input_revision(cx);
+        prompt.next_input(cx);
+        prompt.prev_input(cx);
+        assert_eq!(prompt.current_input, 0);
+        assert!(prompt.dictation_input_revision(cx) > before_focus);
+        let before_read = prompt.dictation_input_revision(cx);
+        prompt.filled_template();
+        assert_eq!(prompt.dictation_input_revision(cx), before_read);
+    });
+}
+
+#[cfg(test)]
+#[gpui::test]
+fn template_submission_advances_bound_completion_without_text_mutation(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::prompt_completion::{PromptCompletionBinding, PromptOutcome, SubmissionError};
+    use gpui::AppContext as _;
+    let binding = PromptCompletionBinding::local("template-completion-epoch".into());
+    let prompt = cx.new(|cx| {
+        TemplatePrompt::new(
+            binding.instance().id.clone(),
+            "fixed output".into(),
+            cx.focus_handle(),
+            binding.submit_callback(),
+            Arc::new(theme::Theme::default()),
+        )
+    });
+    prompt.update(cx, |prompt, cx| {
+        let input_revision = prompt.dictation_input_revision(cx);
+        let before = binding.semantic_revision();
+        prompt.submit(cx);
+        let completed = binding.semantic_revision();
+        assert!(completed > before);
+        assert_eq!(prompt.dictation_input_revision(cx), input_revision);
+        let receipt = binding.observation().receipt.unwrap();
+        assert_eq!(receipt.sequence, 1);
+        assert!(matches!(receipt.outcome, PromptOutcome::Submitted(crate::protocol::SubmitValue::Text(value)) if value == "fixed output"));
+        prompt.submit(cx);
+        let duplicate = binding.observation();
+        assert_eq!(duplicate.error, Some(SubmissionError::AlreadyCompleted));
+        assert_eq!(duplicate.receipt.unwrap().sequence, 1);
+    });
 }

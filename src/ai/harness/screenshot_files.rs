@@ -303,7 +303,7 @@ pub fn cleanup_old_tab_ai_screenshot_files(max_keep: usize) -> Result<()> {
     }
 
     // Sort newest first
-    screenshot_files.sort_by(|a, b| b.1.cmp(&a.1));
+    screenshot_files.sort_by_key(|a| std::cmp::Reverse(a.1));
 
     // Remove everything beyond max_keep
     for (path, _) in screenshot_files.iter().skip(max_keep) {
@@ -360,7 +360,7 @@ pub fn cleanup_old_tab_ai_screenshot_files_in_dir(
     }
 
     // Sort newest first
-    screenshot_files.sort_by(|a, b| b.1.cmp(&a.1));
+    screenshot_files.sort_by_key(|a| std::cmp::Reverse(a.1));
 
     // Remove everything beyond max_keep
     for (path, _) in screenshot_files.iter().skip(max_keep) {

@@ -89,6 +89,7 @@ pub struct SelectPrompt {
     pub hovered_index: Option<usize>,
     /// Filter text
     pub filter_text: String,
+    input_revision: u64,
     /// Whether multiple selection is allowed
     pub multiple: bool,
     /// Focus handle for keyboard input
@@ -101,8 +102,49 @@ pub struct SelectPrompt {
     pub design_variant: DesignVariant,
     /// Scroll handle for virtualized choices list
     pub list_scroll_handle: UniformListScrollHandle,
+    pub(crate) header_context: Option<crate::prompts::base::PromptHeaderContext>,
+    pub(crate) disabled_choices: HashSet<usize>,
 }
 impl SelectPrompt {
+    pub(crate) fn dictation_input_revision(&self, _cx: &gpui::App) -> u64 {
+        self.input_revision
+    }
+
+    fn advance_input_revision(&mut self) {
+        assert!(
+            self.input_revision < u64::MAX,
+            "select input revision exhausted"
+        );
+        self.input_revision += 1;
+    }
+
+    pub(super) fn set_focused_index(&mut self, index: usize) {
+        if self.focused_index != index {
+            self.advance_input_revision();
+            self.focused_index = index;
+        }
+    }
+
+    pub(crate) fn set_header_context(
+        &mut self,
+        context: crate::prompts::base::PromptHeaderContext,
+    ) {
+        self.header_context = Some(context);
+    }
+    pub fn with_disabled_choices(mut self, indices: impl IntoIterator<Item = usize>) -> Self {
+        self.disabled_choices = indices
+            .into_iter()
+            .filter(|index| *index < self.choices.len())
+            .collect();
+        let previous_len = self.selected.len();
+        self.selected
+            .retain(|index| !self.disabled_choices.contains(index));
+        if self.selected.len() != previous_len {
+            self.advance_input_revision();
+        }
+        self
+    }
+
     pub fn new(
         id: String,
         placeholder: Option<String>,
@@ -138,10 +180,13 @@ impl SelectPrompt {
             choice_index,
             selected: HashSet::new(),
             submission_hint: None,
+            header_context: None,
+            disabled_choices: HashSet::new(),
             filtered_choices,
             focused_index: 0,
             hovered_index: None,
             filter_text: String::new(),
+            input_revision: 0,
             multiple,
             focus_handle,
             on_submit,
@@ -156,7 +201,7 @@ impl SelectPrompt {
         let trimmed_filter = self.filter_text.trim();
         if trimmed_filter.is_empty() {
             self.filtered_choices = (0..self.choices.len()).collect();
-            self.focused_index = 0;
+            self.set_focused_index(0);
             self.hovered_index = None;
             return;
         }
@@ -182,7 +227,7 @@ impl SelectPrompt {
         });
 
         self.filtered_choices = scored_matches.into_iter().map(|(idx, _)| idx).collect();
-        self.focused_index = 0;
+        self.set_focused_index(0);
         self.hovered_index = None;
     }
 
@@ -193,6 +238,7 @@ impl SelectPrompt {
         }
 
         self.filter_text = text;
+        self.advance_input_revision();
         self.refilter();
         self.list_scroll_handle
             .scroll_to_item(0, ScrollStrategy::Top);
@@ -202,7 +248,11 @@ impl SelectPrompt {
     /// Toggle selection of currently focused item
     pub(super) fn toggle_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(&choice_idx) = self.filtered_choices.get(self.focused_index) {
+            if self.disabled_choices.contains(&choice_idx) {
+                return;
+            }
             if toggle_choice_selection(&mut self.selected, choice_idx, self.multiple) {
+                self.advance_input_revision();
                 self.submission_hint = None;
                 cx.notify();
             }
@@ -210,7 +260,7 @@ impl SelectPrompt {
     }
 
     /// Submit selected items as JSON array
-    pub(super) fn submit(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn submit(&mut self, cx: &mut Context<Self>) -> bool {
         if !select_submission_is_allowed(self.multiple, self.selected.len()) {
             self.submission_hint = Some("Select at least one item".to_string());
             cx.notify();
@@ -221,6 +271,15 @@ impl SelectPrompt {
         let focused_choice_index = self.filtered_choices.get(self.focused_index).copied();
         let resolved_indices =
             resolve_submission_indices(self.multiple, &selected_indices, focused_choice_index);
+        if resolved_indices.is_empty()
+            || resolved_indices
+                .iter()
+                .any(|index| self.disabled_choices.contains(index))
+        {
+            self.submission_hint = Some("Choose an available item".to_string());
+            cx.notify();
+            return false;
+        }
 
         let selected_values: Vec<String> = resolved_indices
             .iter()
@@ -240,7 +299,7 @@ impl SelectPrompt {
     /// Move focus up
     pub(super) fn move_up(&mut self, cx: &mut Context<Self>) {
         if self.focused_index > 0 {
-            self.focused_index -= 1;
+            self.set_focused_index(self.focused_index - 1);
             self.hovered_index = None;
             self.list_scroll_handle
                 .scroll_to_item(self.focused_index, ScrollStrategy::Nearest);
@@ -251,7 +310,7 @@ impl SelectPrompt {
     /// Move focus down
     pub(super) fn move_down(&mut self, cx: &mut Context<Self>) {
         if self.focused_index < self.filtered_choices.len().saturating_sub(1) {
-            self.focused_index += 1;
+            self.set_focused_index(self.focused_index + 1);
             self.hovered_index = None;
             self.list_scroll_handle
                 .scroll_to_item(self.focused_index, ScrollStrategy::Nearest);
@@ -265,6 +324,7 @@ impl SelectPrompt {
             return;
         }
         self.filter_text.push(ch);
+        self.advance_input_revision();
         self.refilter();
         self.list_scroll_handle
             .scroll_to_item(0, ScrollStrategy::Top);
@@ -275,6 +335,7 @@ impl SelectPrompt {
     pub(super) fn handle_backspace(&mut self, cx: &mut Context<Self>) {
         if !self.filter_text.is_empty() {
             self.filter_text.pop();
+            self.advance_input_revision();
             self.refilter();
             self.list_scroll_handle
                 .scroll_to_item(0, ScrollStrategy::Top);
@@ -287,14 +348,25 @@ impl SelectPrompt {
         &self,
         limit: usize,
     ) -> (Vec<crate::protocol::ElementInfo>, usize) {
-        collect_select_prompt_elements(
+        let (mut elements, total) = collect_select_prompt_elements(
             &self.filter_text,
             &self.choices,
             &self.filtered_choices,
             &self.selected,
             self.focused_index,
             limit,
-        )
+        );
+        for element in &mut elements {
+            if let Some(index) = element
+                .index
+                .and_then(|index| self.filtered_choices.get(index))
+            {
+                let disabled = self.disabled_choices.contains(index);
+                element.action_disabled = disabled.then(|| "choice_disabled".to_string());
+                element.selectable = Some(!disabled);
+            }
+        }
+        (elements, total)
     }
 
     /// Select all choices (Ctrl+A)
@@ -303,7 +375,16 @@ impl SelectPrompt {
             return;
         }
 
-        toggle_filtered_selection(&mut self.selected, &self.filtered_choices);
+        let enabled: Vec<usize> = self
+            .filtered_choices
+            .iter()
+            .copied()
+            .filter(|index| !self.disabled_choices.contains(index))
+            .collect();
+        toggle_filtered_selection(&mut self.selected, &enabled);
+        if !enabled.is_empty() {
+            self.advance_input_revision();
+        }
         cx.notify();
     }
 }

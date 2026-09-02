@@ -32,6 +32,7 @@ pub(crate) mod history_popup;
 pub(crate) mod hosted;
 pub(crate) mod labels;
 pub(crate) mod layout;
+pub(crate) mod mock_fixture;
 pub(crate) mod notifications;
 pub(crate) mod permission_broker;
 pub(crate) mod popup_automation;

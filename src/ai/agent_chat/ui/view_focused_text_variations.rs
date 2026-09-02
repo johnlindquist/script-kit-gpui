@@ -68,7 +68,7 @@ impl AgentChatView {
             variation.status = FocusedTextVariationStatus::Error;
             variation.error = Some(error);
         }
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn sync_balanced_focused_text_variation(
@@ -117,7 +117,7 @@ impl AgentChatView {
         }
 
         self.select_first_completed_focused_text_variation();
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn apply_focused_text_variation_event(
@@ -145,7 +145,7 @@ impl AgentChatView {
                     variation.status = FocusedTextVariationStatus::Complete;
                     variation.error = None;
                 }
-                cx.notify();
+                self.notify_semantic_change(cx);
             }
             return;
         }
@@ -198,7 +198,7 @@ impl AgentChatView {
         }
 
         self.select_first_completed_focused_text_variation();
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn spawn_focused_text_variation_task(
@@ -306,7 +306,7 @@ impl AgentChatView {
             status = self.focused_text_variations[index].status.state_id(),
             text_len = self.focused_text_variations[index].text.chars().count(),
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -417,7 +417,7 @@ impl AgentChatView {
             self.focused_text_selected_variation = None;
             self.focused_text_editing_variation = None;
             self.select_first_completed_focused_text_variation();
-            cx.notify();
+            self.notify_semantic_change(cx);
             return true;
         }
 
@@ -427,7 +427,7 @@ impl AgentChatView {
         self.focused_text_selected_variation = None;
         self.focused_text_editing_variation = None;
         self.select_first_completed_focused_text_variation();
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 

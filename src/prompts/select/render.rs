@@ -272,6 +272,7 @@ impl Render for SelectPrompt {
                                         let is_focused = visual_row_state.is_focused;
                                         let is_selected = visual_row_state.is_selected;
                                         let is_hovered = visual_row_state.is_hovered;
+                                        let is_disabled = this.disabled_choices.contains(&choice_idx);
                                         let semantic_id =
                                             select_choice_semantic_id(choice, choice_idx);
                                         let leading = if this.multiple {
@@ -332,6 +333,9 @@ impl Render for SelectPrompt {
                                                           _event,
                                                           _window,
                                                           cx| {
+                                                        if this.disabled_choices.contains(&choice_idx) {
+                                                            return;
+                                                        }
                                                         if this
                                                             .filtered_choices
                                                             .get(display_idx)
@@ -340,7 +344,7 @@ impl Render for SelectPrompt {
                                                             return;
                                                         }
 
-                                                        this.focused_index = display_idx;
+                                                        this.set_focused_index(display_idx);
                                                         this.hovered_index = Some(display_idx);
                                                         if this.multiple {
                                                             this.toggle_selection(cx);
@@ -361,7 +365,7 @@ impl Render for SelectPrompt {
                                                 .state(ItemState {
                                                     is_selected: is_focused || is_selected,
                                                     is_hovered,
-                                                    is_disabled: false,
+                                                    is_disabled,
                                                 })
                                                 .density(Density::Comfortable)
                                                 .with_direct_hover(false)
@@ -400,11 +404,21 @@ impl Render for SelectPrompt {
                 || crate::components::render_simple_hint_strip(hints, None),
             );
 
-        let container = crate::components::render_minimal_list_prompt_shell_with_footer(
-            0.0, None, header, content, footer,
-        )
-        .id(gpui::ElementId::Name("window:select".into()))
-        .text_color(text_color);
+        let container = if let Some(context) = &self.header_context {
+            let header = crate::components::main_view_chrome::MainViewHeaderChrome::canonical(
+                menu_def, context.render(&self.theme, menu_def), header,
+            );
+            div().id(gpui::ElementId::Name("window:select".into()))
+                .flex().flex_col().size_full().min_h(px(0.0))
+                .child(crate::components::main_view_chrome::render_main_view_header_with_context_outset(
+                    header, menu_def.header_info_bar.context_edge_outset_x,
+                ))
+                .child(content)
+                .when_some(footer, |root, footer| root.child(footer))
+        } else {
+            crate::components::render_minimal_list_prompt_shell_with_footer(0.0, None, header, content, footer)
+                .id(gpui::ElementId::Name("window:select".into()))
+        }.text_color(text_color);
 
         FocusablePrompt::new(container)
             .key_context("select_prompt")

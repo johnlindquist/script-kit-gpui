@@ -37,7 +37,21 @@ fn style_span(
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.7))
                     .on_click(move |_, _window, _cx| {
-                        let _ = open::that(&url_owned);
+                        if let Err(error) = crate::runtime_policy::check(
+                            crate::runtime_policy::ExternalEffect::OpenExternal,
+                        ) {
+                            crate::logging::log(
+                                "MARKDOWN",
+                                &format!("Failed to open link: {error}"),
+                            );
+                            return;
+                        }
+                        if let Err(error) = open::that(&url_owned) {
+                            crate::logging::log(
+                                "MARKDOWN",
+                                &format!("Failed to open link: {error}"),
+                            );
+                        }
                     })
                     .when(style.bold, |d| d.font_weight(FontWeight::BOLD))
                     .when(style.italic, |d| d.italic())

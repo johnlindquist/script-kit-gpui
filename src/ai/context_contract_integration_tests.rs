@@ -58,8 +58,8 @@ fn explicit_context_surfaces_share_one_contract_end_to_end() {
         receipt.context.failed
     );
 
-    // Verify the final content contains all three expected context URIs
-    // plus the cleaned user text at the end.
+    // Context source URIs are XML attributes: query separators must be escaped.
+    // The cleaned user text remains at the end.
     assert!(
         receipt
             .final_user_content
@@ -68,9 +68,9 @@ fn explicit_context_surfaces_share_one_contract_end_to_end() {
     );
     assert!(
         receipt.final_user_content.contains(
-            "kit://context?selectedText=0&frontmostApp=0&menuBar=0&browserUrl=1&focusedWindow=0"
+            "source=\"kit://context?selectedText=0&amp;frontmostApp=0&amp;menuBar=0&amp;browserUrl=1&amp;focusedWindow=0\""
         ),
-        "final content should contain browser context URI"
+        "final content should contain the XML-escaped browser context source URI"
     );
     assert!(
         receipt

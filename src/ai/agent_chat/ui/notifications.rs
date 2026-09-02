@@ -58,6 +58,9 @@ pub(crate) fn truncate_notification_body(text: &str) -> String {
 }
 
 pub(crate) fn dispatch_agent_chat_notification(title: &'static str, body: String) {
+    if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Notification).is_err() {
+        return;
+    }
     tracing::info!(
         target: "script_kit::agent_chat",
         event = "agent_chat_os_notification_dispatch",

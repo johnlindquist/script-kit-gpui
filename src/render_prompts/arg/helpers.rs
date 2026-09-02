@@ -326,6 +326,18 @@ fn arg_prompt_hints(has_actions: bool) -> Vec<gpui::SharedString> {
 }
 
 impl ScriptListApp {
+    /// Every selection owner (keys, automation, filtering and reset) uses this
+    /// transition so moving away and back still invalidates retained authority.
+    pub(crate) fn set_arg_selected_index(&mut self, index: usize) -> bool {
+        if self.arg_selected_index == index {
+            return false;
+        }
+        self.arg_selected_index = index;
+        self.arg_selection_revision = self.arg_selection_revision.strict_add(1);
+        self.mark_main_data_changed();
+        true
+    }
+
     #[inline]
     fn arg_prompt_has_choices(&self) -> bool {
         matches!(&self.current_view, AppView::ArgPrompt { choices, .. } if !choices.is_empty())
@@ -353,7 +365,7 @@ impl ScriptListApp {
             (new_idx, filtered.len())
         };
 
-        self.arg_selected_index = new_selected_idx;
+        self.set_arg_selected_index(new_selected_idx);
 
         // Defer resize through window_ops to avoid RefCell borrow conflicts during native callbacks.
         // GEO-002: ask the shared Arg resolver for the current target height

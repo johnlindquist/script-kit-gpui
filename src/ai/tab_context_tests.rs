@@ -1898,8 +1898,8 @@ mod tab_ai_apply_back_route_tests {
 
     #[test]
     fn tab_ai_apply_back_uses_running_command_prompt_reinjection() {
-        let source = std::fs::read_to_string("src/app_impl/agent_handoff/mod.rs")
-            .expect("read agent_handoff.rs");
+        let source = std::fs::read_to_string("src/app_impl/agent_handoff/apply_back.rs")
+            .expect("read apply_back.rs");
         assert!(
             source.contains("self.try_set_prompt_input(text.clone(), cx)"),
             "RunningCommand apply-back must reuse try_set_prompt_input"
@@ -1908,8 +1908,8 @@ mod tab_ai_apply_back_route_tests {
 
     #[test]
     fn tab_ai_frontmost_apply_back_hides_before_paste() {
-        let source = std::fs::read_to_string("src/app_impl/agent_handoff/mod.rs")
-            .expect("read agent_handoff.rs");
+        let source = std::fs::read_to_string("src/app_impl/agent_handoff/apply_back.rs")
+            .expect("read apply_back.rs");
         let hide_pos = source
             .find("crate::platform::defer_hide_main_window(cx)")
             .expect("apply-back must defer-hide the main window");

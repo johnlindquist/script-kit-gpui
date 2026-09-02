@@ -80,18 +80,10 @@ impl ScriptListApp {
                 };
                 match form_enter_behavior(key, has_cmd, focused_field_is_textarea) {
                     FormEnterBehavior::Submit => {
-                        let validation_message = {
-                            let form = entity_for_submit.read(cx);
-                            form.submit_validation_message(cx)
-                        };
-                        if let Some(message) = validation_message {
-                            this.show_hud(message, Some(HUD_LONG_MS), cx);
-                            return;
+                        let values = entity_for_submit.update(cx, |form, cx| form.validated_submit_value(cx));
+                        if let Some(values) = values {
+                            this.submit_prompt_response(prompt_id_for_key.clone(), Some(values), cx);
                         }
-
-                        logging::log("KEY", "Enter in FormPrompt - submitting form");
-                        let values = entity_for_submit.read(cx).collect_values(cx);
-                        this.submit_prompt_response(prompt_id_for_key.clone(), Some(values), cx);
                         return;
                     }
                     FormEnterBehavior::ForwardToField => {

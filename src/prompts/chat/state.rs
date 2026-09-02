@@ -529,6 +529,8 @@ impl ChatPrompt {
         position: ChatMessagePosition,
         cx: &mut Context<Self>,
     ) {
+        self.stream_generation = self.stream_generation.wrapping_add(1);
+        self.stream_flush_pending = false;
         let role = match position {
             ChatMessagePosition::Right => Some(ChatMessageRole::User),
             ChatMessagePosition::Left => Some(ChatMessageRole::Assistant),
@@ -592,9 +594,13 @@ impl ChatPrompt {
         }
         self.stream_flush_pending = true;
         let delay = STREAM_FLUSH_INTERVAL.saturating_sub(elapsed.unwrap_or_default());
+        let generation = self.stream_generation;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
             this.update(cx, |this, cx| {
+                if this.stream_generation != generation {
+                    return;
+                }
                 this.stream_flush_pending = false;
                 // A completed/stopped stream already flushed its final state.
                 if this.streaming_message_id.is_some() {
@@ -626,6 +632,8 @@ impl ChatPrompt {
             msg.streaming = false;
         }
         if self.streaming_message_id.as_deref() == Some(message_id) {
+            self.stream_generation = self.stream_generation.wrapping_add(1);
+            self.stream_flush_pending = false;
             self.streaming_message_id = None;
         }
         // WP-B3: terminal flush — forces a final rebuild off the scheduled clock.
@@ -638,6 +646,8 @@ impl ChatPrompt {
 
     pub fn clear_messages(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();
+        self.stream_generation = self.stream_generation.wrapping_add(1);
+        self.stream_flush_pending = false;
         self.streaming_message_id = None;
         self.pending_prepared_request = None;
         self.prepared_requests_by_assistant_id.clear();
@@ -658,6 +668,8 @@ impl ChatPrompt {
     /// Explicitly stop the current response while preserving exact visible
     /// partial output. Dismissal never calls this method.
     pub fn stop_streaming(&mut self, cx: &mut Context<Self>) {
+        self.stream_generation = self.stream_generation.wrapping_add(1);
+        self.stream_flush_pending = false;
         logging::log("CHAT", "Explicit Stop requested");
 
         if let Some(signal) = self.builtin_cancel_signal.take() {
@@ -892,6 +904,8 @@ impl ChatPrompt {
             msg.streaming = false; // Stop streaming indicator
         }
         if self.streaming_message_id.as_deref() == Some(message_id) {
+            self.stream_generation = self.stream_generation.wrapping_add(1);
+            self.stream_flush_pending = false;
             self.streaming_message_id = None;
         }
         self.mark_conversation_turns_dirty();

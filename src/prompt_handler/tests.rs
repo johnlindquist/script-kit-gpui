@@ -10,6 +10,7 @@ mod prompt_handler_message_tests {
     use crate::ai::providers::OpenAiProvider;
     use crate::PromptMessage;
 
+
     #[test]
     fn test_handle_prompt_message_routes_confirm_request_to_confirm_window() {
         let message = PromptMessage::ShowConfirm {

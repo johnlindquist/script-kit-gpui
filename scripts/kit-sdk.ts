@@ -3583,6 +3583,7 @@ interface SubmitMessage {
 interface FileSearchResultMessage {
   type: 'fileSearchResult';
   requestId: string;
+  error?: string;
   files: Array<{
     path: string;
     name: string;
@@ -8984,11 +8985,15 @@ globalThis.fileSearch = async function fileSearch(query: string, options?: FindO
         )),
   };
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     addPending(id, (msg: ResponseMessage) => {
       // Handle FileSearchResult message type
       if (msg.type === 'fileSearchResult') {
         const resultMsg = msg as FileSearchResultMessage;
+        if (resultMsg.error != null) {
+          reject(new Error(resultMsg.error));
+          return;
+        }
         resolve(resultMsg.files.map((file) => ({
           path: file.path ?? '',
           name: file.name ?? '',

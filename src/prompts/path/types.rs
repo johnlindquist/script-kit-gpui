@@ -63,6 +63,7 @@ pub struct PathPrompt {
     pub path_prefix: String,
     /// Filter text for narrowing down results
     pub filter_text: String,
+    pub(super) input_revision: u64,
     /// Currently selected index in the list
     pub selected_index: usize,
     /// List of entries in current directory
@@ -95,6 +96,7 @@ pub struct PathPrompt {
     /// Cached render-row data rebuilt when filtered_entries changes,
     /// avoiding a per-render Vec allocation inside the list closure.
     pub render_rows: Arc<Vec<PathEntryRenderRow>>,
+    pub(crate) header_context: Option<crate::prompts::base::PromptHeaderContext>,
 }
 
 /// Lightweight row data for the uniform_list closure.

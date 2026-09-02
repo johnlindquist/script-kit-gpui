@@ -217,7 +217,7 @@ impl AgentChatThread {
         }
 
         if changed {
-            cx.notify();
+            self.notify_semantic_change(cx);
         }
     }
 
@@ -316,7 +316,7 @@ impl AgentChatThread {
             lines.join("\n")
         };
         self.push_message(AgentChatThreadMessageRole::System, body);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn permission_notification_body(&self, request: &AgentChatApprovalRequest) -> String {

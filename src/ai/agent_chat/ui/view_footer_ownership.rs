@@ -1,4 +1,13 @@
 impl AgentChatView {
+    fn is_main_footer_host(window: &Window) -> bool {
+        let handle = window.window_handle();
+        crate::windows::list_automation_windows().iter().any(|info| {
+            info.kind == crate::protocol::AutomationWindowKind::Main
+                && info.generation.is_some_and(|generation| crate::windows::get_runtime_window_handle_for_generation(&info.id, generation) == Some(handle))
+        }) || (!crate::runtime_policy::is_owned_evaluation()
+            && crate::get_main_window_handle().is_some_and(|main| main == handle))
+    }
+
     /// The footer-owner decision inputs, resolved once from the live window and
     /// host state. Shared by `render_resolved_footer` (the paint path) and
     /// `automation_layout_info` (the measure path) so both agree on the footer
@@ -7,12 +16,11 @@ impl AgentChatView {
         &self,
         window: &Window,
     ) -> crate::ai::agent_chat::ui::layout::AgentChatFooterInputs {
-        let is_main_window =
-            crate::get_main_window_handle().is_some_and(|handle| handle == window.window_handle());
+        let is_main_window = Self::is_main_footer_host(window);
 
         #[cfg(target_os = "macos")]
         let glass_in_window_footer = !is_main_window
-            && crate::platform::tahoe_liquid_glass_available()
+            && crate::platform::tahoe_native_glass_composition_available()
             && crate::theme::get_cached_theme().is_vibrancy_enabled();
         #[cfg(not(target_os = "macos"))]
         let glass_in_window_footer = false;
@@ -77,8 +85,7 @@ impl AgentChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let is_main_window =
-            crate::get_main_window_handle().is_some_and(|handle| handle == window.window_handle());
+        let is_main_window = Self::is_main_footer_host(window);
         // The native config is materialised only when a DETACHED window owns the
         // native footer — that is the sole case with native lifecycle effects.
         let native_config = (desired == AgentChatFooterOwner::Native && !is_main_window)
@@ -87,6 +94,7 @@ impl AgentChatView {
             owner: desired,
             is_main_window,
             native_config,
+            theme_revision: crate::theme::service::theme_revision(),
         };
 
         // Keep the C-R5 owner mirror current every frame (cheap; read by the
@@ -104,14 +112,14 @@ impl AgentChatView {
             // be torn down when we move off it. `clear_window_footer_popup`
             // guards on the current window and no-ops for the shared main-window
             // host, and the listener is dropped since nothing drives it now.
-            crate::footer_popup::clear_window_footer_popup(window);
+            crate::footer_popup::clear_window_footer_popup(window, cx);
             self._footer_action_task = None;
         }
 
         if lifecycle.sync_next_native {
             self.ensure_native_footer_action_listener(window, cx);
             if let Some(config) = next.native_config.as_ref() {
-                crate::footer_popup::sync_window_footer_popup(window, config);
+                crate::footer_popup::sync_window_footer_popup(window, config, cx);
             }
         }
 
@@ -140,18 +148,20 @@ impl AgentChatView {
             return;
         }
 
-        let rx = crate::footer_popup::agent_chat_footer_action_channel()
-            .1
-            .clone();
+        let rx = crate::footer_popup::footer_action_receiver(window);
+        let lifetime = crate::footer_popup::footer_owner_subscription(window, cx);
         self._footer_action_task = Some(cx.spawn_in(window, async move |this, cx| {
-            while let Ok(action) = rx.recv().await {
+            let _lifetime = lifetime;
+            while let Ok(event) = rx.recv().await {
                 if let Err(error) = this.update_in(cx, |view, window, cx| {
+                    let Some(action) = event.accept(window) else { return; };
                     view.dispatch_footer_button(action, window, cx);
+                    event.complete(window);
                 }) {
                     tracing::warn!(
                         target: "script_kit::agent_chat",
                         event = "agent_chat_native_footer_action_dispatch_failed",
-                        action = ?action,
+                        action = ?event,
                         %error,
                         "Failed to dispatch native footer action into AgentChatView"
                     );

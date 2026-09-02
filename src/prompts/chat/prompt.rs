@@ -40,6 +40,8 @@ pub struct ChatPrompt {
         Option<crate::components::conversation_actions::ConversationCopyReceipt>,
     pub(super) command_status: Option<String>,
     pub(super) pending_prepared_request: Option<ChatPromptPreparedRequest>,
+    pub(super) stream_generation: u64,
+    pub(super) theme_revision_seen: u64,
     pub(super) prepared_requests_by_assistant_id: HashMap<String, ChatPromptPreparedRequest>,
     pub(super) builtin_replay_payloads:
         HashMap<sk_protocol::ai_reliability::TurnRequestRef, BuiltinPreparedPayload>,
@@ -182,6 +184,8 @@ impl ChatPrompt {
             last_copy_receipt: None,
             command_status: None,
             pending_prepared_request: None,
+            stream_generation: 0,
+            theme_revision_seen: crate::theme::service::theme_revision(),
             prepared_requests_by_assistant_id: HashMap::new(),
             builtin_replay_payloads: HashMap::new(),
             terminal_outcomes: HashMap::new(),
@@ -223,6 +227,115 @@ impl ChatPrompt {
             host_mode: ChatPromptHostMode::Standalone { mini: false },
             empty_state_note: None,
         }
+    }
+
+    /// SDK-owned chat never constructs a provider. History policy is explicit
+    /// before the first message can be submitted or appended.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_sdk(
+        id: String,
+        placeholder: Option<String>,
+        messages: Vec<ChatPromptMessage>,
+        hint: Option<String>,
+        footer: Option<String>,
+        focus_handle: FocusHandle,
+        on_submit: Option<ChatSubmitCallback>,
+        save_history: bool,
+        theme: Arc<theme::Theme>,
+    ) -> Self {
+        Self::new(
+            id,
+            placeholder,
+            messages,
+            hint,
+            footer,
+            focus_handle,
+            on_submit,
+            theme,
+        )
+        .with_save_history(save_history)
+    }
+
+    pub(crate) fn saves_history(&self) -> bool {
+        self.save_history
+    }
+
+    pub(crate) fn accepted_sdk_request(&self) -> Option<&ChatPromptPreparedRequest> {
+        self.pending_prepared_request.as_ref()
+    }
+
+    pub(crate) fn current_stream_message_id(&self) -> Option<&str> {
+        self.streaming_message_id.as_deref()
+    }
+
+    pub(crate) fn input_text(&self) -> &str {
+        self.input.text()
+    }
+
+    pub(crate) fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub(crate) fn applied_theme_revision(&self) -> u64 {
+        self.theme_revision_seen
+    }
+    pub(crate) fn semantic_token(&self, _cx: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.id.hash(&mut hash);
+        self.input.text().hash(&mut hash);
+        self.input.revision().hash(&mut hash);
+        self.input.cursor().hash(&mut hash);
+        self.input.selection().anchor.hash(&mut hash);
+        self.selected_model
+            .as_ref()
+            .map(|model| {
+                (
+                    &model.id,
+                    &model.display_name,
+                    &model.provider,
+                    model.supports_streaming,
+                    model.context_window,
+                )
+            })
+            .hash(&mut hash);
+        self.streaming_message_id.hash(&mut hash);
+        self.command_status.hash(&mut hash);
+        for message in &self.messages {
+            message.id.hash(&mut hash);
+            message.get_content().hash(&mut hash);
+            message
+                .role
+                .as_ref()
+                .map(std::mem::discriminant)
+                .hash(&mut hash);
+            message.streaming.hash(&mut hash);
+            message.error.hash(&mut hash);
+        }
+        hash.finish()
+    }
+
+    pub(crate) fn start_sdk_response(
+        &mut self,
+        request: ChatPromptPreparedRequest,
+        message_id: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if request.prompt_id() != self.id
+            || !(self
+                .pending_prepared_request
+                .as_ref()
+                .is_some_and(|pending| pending.request_ref() == request.request_ref())
+                || self
+                    .prepared_requests_by_assistant_id
+                    .values()
+                    .any(|prior| prior.request_ref() == request.request_ref()))
+        {
+            return Err("stale_sdk_chat_request".to_string());
+        }
+        self.pending_prepared_request = Some(request);
+        self.start_streaming(message_id, ChatMessagePosition::Left, cx);
+        Ok(())
     }
 
     /// Set the callback for showing actions dialog
@@ -364,26 +477,25 @@ impl ChatPrompt {
 
     /// Paste text from clipboard while preserving line breaks.
     pub(super) fn paste_text_from_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            if let Ok(text) = clipboard.get_text() {
-                let normalized = Self::normalize_pasted_text(&text);
-                if !normalized.is_empty() {
-                    let prepared = crate::pasted_text::prepare_pasted_text(
-                        &normalized,
-                        &self.pasted_text_tokens,
-                    );
-                    if let Some(token) = prepared.token {
-                        self.pasted_text_tokens.push(token);
-                    }
-                    self.input.insert_str(&prepared.insertion_text);
-                    self.sync_pasted_text_tokens();
-                    self.reset_cursor_blink();
-                    cx.notify();
-                    return true;
-                }
-            }
+        // The GPUI boundary owns interactive pasteboards and evaluator-local
+        // stores alike. Never bypass it through arboard.
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return false;
+        };
+        let normalized = Self::normalize_pasted_text(&text);
+        if normalized.is_empty() {
+            return false;
         }
-        false
+        let prepared =
+            crate::pasted_text::prepare_pasted_text(&normalized, &self.pasted_text_tokens);
+        if let Some(token) = prepared.token {
+            self.pasted_text_tokens.push(token);
+        }
+        self.input.insert_str(&prepared.insertion_text);
+        self.sync_pasted_text_tokens();
+        self.reset_cursor_blink();
+        cx.notify();
+        true
     }
 
     pub(super) fn sync_pasted_text_tokens(&mut self) {

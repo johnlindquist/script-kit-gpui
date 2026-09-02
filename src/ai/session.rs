@@ -71,6 +71,12 @@ const CLAUDE_SYSTEM_PROMPT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// fields.  Returns a `serde_json::Value::Object` with only the whitelisted keys
 /// that were present, or an empty object if the file doesn't exist / can't be read.
 pub fn read_user_credential_settings() -> serde_json::Value {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Credentials)
+    {
+        tracing::warn!(%error, "Claude credential settings access refused");
+        return serde_json::json!({});
+    }
     let settings_path = dirs::home_dir()
         .map(|h| h.join(".claude").join("settings.json"))
         .unwrap_or_default();
@@ -569,6 +575,7 @@ impl ClaudeSession {
         content: &str,
         on_chunk: impl Fn(&str) -> bool,
     ) -> Result<String> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         self.last_activity = Instant::now();
 
         // Build and send the JSONL message
@@ -767,8 +774,16 @@ impl ClaudeSessionManager {
     pub fn global() -> &'static Self {
         static INSTANCE: OnceLock<ClaudeSessionManager> = OnceLock::new();
         INSTANCE.get_or_init(|| {
-            let claude_path = std::env::var("SCRIPT_KIT_CLAUDE_CODE_PATH")
-                .unwrap_or_else(|_| "claude".to_string());
+            let claude_path =
+                match crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+                {
+                    Ok(()) => std::env::var("SCRIPT_KIT_CLAUDE_CODE_PATH")
+                        .unwrap_or_else(|_| "claude".to_string()),
+                    Err(error) => {
+                        tracing::warn!(%error, "Claude session discovery refused");
+                        String::new()
+                    }
+                };
 
             ClaudeSessionManager {
                 sessions: Mutex::new(HashMap::new()),
@@ -799,6 +814,7 @@ impl ClaudeSessionManager {
         system_prompt: Option<&str>,
         on_chunk: impl Fn(&str) -> bool,
     ) -> Result<String> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         tracing::debug!(
             session_id = %session_id,
             content_len = content.len(),
@@ -913,6 +929,7 @@ impl ClaudeSessionManager {
         model_id: &str,
         system_prompt: Option<&str>,
     ) -> Result<ClaudeSession> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         // Check if this session was created before (to use --resume vs --session-id)
         let session_existed = self
             .created_sessions

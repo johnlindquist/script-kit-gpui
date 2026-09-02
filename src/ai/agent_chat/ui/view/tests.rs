@@ -129,6 +129,91 @@ fn recovery_actions_use_shared_semantic_ids() {
     );
 }
 
+#[gpui::test]
+fn initial_and_runtime_setup_project_the_rendered_card(cx: &mut gpui::TestAppContext) {
+    use crate::ai::agent_chat::ui::layout::AgentChatBodyKind;
+    use crate::ai::agent_chat::ui::AgentChatSession;
+    use crate::windows::automation_surface_collector::{
+        collect_agent_chat_conversation_elements, collect_agent_chat_detached_elements,
+    };
+    use gpui::AppContext;
+
+    let target = crate::protocol::AutomationWindowInfo {
+        id: "main".into(),
+        kind: crate::protocol::AutomationWindowKind::Main,
+        title: None,
+        focused: false,
+        visible: false,
+        semantic_surface: Some("agentChat".into()),
+        bounds: None,
+        parent_window_id: None,
+        parent_window_generation: None,
+        parent_kind: None,
+        pid: None,
+        generation: Some(1),
+    };
+    let setup = crate::ai::agent_chat::ui::AgentChatInlineSetupState::from_runtime_setup_required(
+        None,
+        Vec::new(),
+        Default::default(),
+        "auth_required",
+        &["Fixture sign-in".into()],
+    );
+    let initial = cx.new(|cx| AgentChatView::new_setup(setup, cx));
+    let thread = cx.new(|_cx| AgentChatThread::test_new(Vec::new(), None));
+    let runtime = cx.new(|cx| AgentChatView::new(thread.clone(), cx));
+    runtime.update(cx, |view, cx| {
+        assert!(!view.shows_setup_card(cx));
+        assert_eq!(
+            view.automation_render_plan(&target, cx).body,
+            AgentChatBodyKind::Conversation
+        );
+    });
+    thread.update(cx, |thread, cx| {
+        thread.apply_event_test(crate::ai::agent_chat::ui::AgentChatEvent::SetupRequired {
+            reason: "auth_required".into(),
+            auth_methods: vec!["Fixture sign-in".into()],
+        });
+        assert!(thread.recovery_card_spec().is_some());
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    for (entity, body) in [
+        (initial, AgentChatBodyKind::InitialSetup),
+        (runtime, AgentChatBodyKind::RuntimeSetup),
+    ] {
+        entity.update(cx, |view, cx| {
+            assert!(view.shows_setup_card(cx));
+            assert_eq!(
+                view.is_setup_mode(),
+                body == AgentChatBodyKind::InitialSetup
+            );
+            assert_eq!(view.automation_render_plan(&target, cx).body, body);
+            let setup = match &view.session {
+                AgentChatSession::Setup(setup) => setup.as_ref().clone(),
+                AgentChatSession::Live(thread) => thread.read(cx).setup_state().unwrap().clone(),
+            };
+            view.ensure_setup_card(&setup, cx);
+        });
+        cx.update(|cx| {
+            for elements in [
+                collect_agent_chat_conversation_elements(&entity, cx),
+                collect_agent_chat_detached_elements(&entity, 100, cx).elements,
+            ] {
+                assert!(elements
+                    .iter()
+                    .any(|element| { element.semantic_id == "agent-chat-setup-primary-action" }));
+                assert!(!elements.iter().any(|element| {
+                    element.semantic_id.starts_with("ai-recovery-")
+                        || element.semantic_id.contains("composer")
+                        || element.semantic_id.contains("messages")
+                }));
+            }
+        });
+    }
+}
+
 fn cmd_modifiers() -> Modifiers {
     Modifiers {
         platform: true,

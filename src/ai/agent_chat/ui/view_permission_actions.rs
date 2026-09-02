@@ -113,7 +113,7 @@ impl AgentChatView {
         }
 
         self.permission_options_open = !self.permission_options_open;
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -183,7 +183,7 @@ impl AgentChatView {
             self.permission_index =
                 Self::step_permission_index(self.permission_index, option_count, true);
             self.permission_options_open = option_count > 1;
-            cx.notify();
+            self.notify_semantic_change(cx);
             return true;
         }
 
@@ -191,7 +191,7 @@ impl AgentChatView {
             self.permission_index =
                 Self::step_permission_index(self.permission_index, option_count, false);
             self.permission_options_open = option_count > 1;
-            cx.notify();
+            self.notify_semantic_change(cx);
             return true;
         }
 
@@ -201,14 +201,14 @@ impl AgentChatView {
                 self.permission_index =
                     Self::step_permission_index(self.permission_index, option_count, false);
                 self.permission_options_open = option_count > 1;
-                cx.notify();
+                self.notify_semantic_change(cx);
                 return true;
             }
             "k" | "K" => {
                 self.permission_index =
                     Self::step_permission_index(self.permission_index, option_count, true);
                 self.permission_options_open = option_count > 1;
-                cx.notify();
+                self.notify_semantic_change(cx);
                 return true;
             }
             _ => {}
@@ -216,7 +216,7 @@ impl AgentChatView {
 
         if crate::ui_foundation::is_key_escape(key) && self.permission_options_open {
             self.permission_options_open = false;
-            cx.notify();
+            self.notify_semantic_change(cx);
             return true;
         }
 

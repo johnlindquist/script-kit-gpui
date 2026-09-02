@@ -73,7 +73,7 @@ impl ScriptListApp {
                 // Arrow up/down for hidden selection navigation
                 if ui_foundation::is_key_up(key) && !modifiers.shift {
                     if this.arg_selected_index > 0 {
-                        this.arg_selected_index -= 1;
+                        this.set_arg_selected_index(this.arg_selected_index - 1);
                         cx.notify();
                     }
                     cx.stop_propagation();
@@ -83,7 +83,7 @@ impl ScriptListApp {
                 if ui_foundation::is_key_down(key) && !modifiers.shift {
                     let filtered = this.filtered_arg_choices();
                     if this.arg_selected_index < filtered.len().saturating_sub(1) {
-                        this.arg_selected_index += 1;
+                        this.set_arg_selected_index(this.arg_selected_index + 1);
                         cx.notify();
                     }
                     cx.stop_propagation();
@@ -127,7 +127,7 @@ impl ScriptListApp {
                                 0
                             }
                         };
-                        this.arg_selected_index = new_selected_idx;
+                        this.set_arg_selected_index(new_selected_idx);
                     }
                     cx.notify();
                 } else {

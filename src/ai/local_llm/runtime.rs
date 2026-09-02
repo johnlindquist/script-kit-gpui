@@ -19,8 +19,9 @@ use super::subprocess_backend::LoadedLocalLlm;
 static LOCAL_GHOST_LLM: OnceLock<LocalLlmActor> = OnceLock::new();
 
 /// The lazily-started global runtime actor.
-pub(crate) fn global() -> &'static LocalLlmActor {
-    LOCAL_GHOST_LLM.get_or_init(LocalLlmActor::start)
+pub(crate) fn global() -> Result<&'static LocalLlmActor> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
+    Ok(LOCAL_GHOST_LLM.get_or_init(LocalLlmActor::start))
 }
 
 /// Drops the loaded model on the actor thread and joins it. Must be called
@@ -131,6 +132,7 @@ impl LocalLlmActor {
         config: crate::config::Config,
         request: LocalGhostRequest,
     ) -> Result<LocalGhostResponse> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
         if request.cancel.load(Ordering::Relaxed) {
             anyhow::bail!("ghost_local_llm_cancelled");
         }

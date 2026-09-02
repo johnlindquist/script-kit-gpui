@@ -1,4 +1,67 @@
 use super::*;
+
+#[gpui::test]
+fn sdk_submit_rejection_preserves_composer_and_request_ownership(cx: &mut gpui::TestAppContext) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let attempts = std::sync::Arc::new(AtomicUsize::new(0));
+    let submission_attempts = attempts.clone();
+    cx.update(|cx| {
+        let prompt = cx.new(|cx| {
+            ChatPrompt::new_sdk(
+                "owned-sdk".into(),
+                None,
+                Vec::new(),
+                None,
+                None,
+                cx.focus_handle(),
+                Some(std::sync::Arc::new(move |_| {
+                    submission_attempts.fetch_add(1, Ordering::Relaxed);
+                    Err("response_channel_full".into())
+                })),
+                false,
+                std::sync::Arc::new(crate::theme::Theme::default()),
+            )
+        });
+        prompt.update(cx, |prompt, cx| {
+            prompt.input.set_text("keep this exact draft");
+            prompt.handle_submit(cx);
+            assert_eq!(attempts.load(Ordering::Relaxed), 1);
+            assert_eq!(prompt.input.text(), "keep this exact draft");
+            assert!(prompt.pending_prepared_request.is_none());
+            assert!(prompt.messages.is_empty());
+            assert!(!prompt.save_history);
+        });
+    });
+}
+
+#[gpui::test]
+fn sdk_semantic_token_tracks_same_length_content_not_theme(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        let prompt = cx.new(|cx| {
+            ChatPrompt::new_sdk(
+                "owned-sdk".into(),
+                None,
+                vec![ChatPromptMessage::assistant("first")],
+                None,
+                None,
+                cx.focus_handle(),
+                Some(std::sync::Arc::new(|_| Ok(()))),
+                false,
+                std::sync::Arc::new(crate::theme::Theme::default()),
+            )
+        });
+        prompt.update(cx, |prompt, cx| {
+            let original = prompt.semantic_token(cx);
+            prompt.theme_revision_seen += 1;
+            assert_eq!(original, prompt.semantic_token(cx));
+            prompt.messages[0].set_content("other");
+            assert_ne!(original, prompt.semantic_token(cx));
+            let revised = prompt.semantic_token(cx);
+            prompt.input.set_text("new draft");
+            assert_ne!(revised, prompt.semantic_token(cx));
+        });
+    });
+}
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod tests {
@@ -699,7 +762,7 @@ mod chat_prompt_host_mode_lifecycle {
                 None,
                 None,
                 cx.focus_handle(),
-                Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                Some(Arc::new(|_| Ok(())) as ChatSubmitCallback),
                 Arc::new(theme::Theme::default()),
             )
             .with_host_mode(TRANSCRIPT_ONLY)
@@ -712,7 +775,7 @@ mod chat_prompt_host_mode_lifecycle {
                 None,
                 None,
                 cx.focus_handle(),
-                Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                Some(Arc::new(|_| Ok(())) as ChatSubmitCallback),
                 Arc::new(theme::Theme::default()),
             )
             .with_mini_mode(true)
@@ -748,7 +811,7 @@ mod chat_prompt_host_mode_lifecycle {
                         None,
                         None,
                         focus_handle,
-                        Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                        Some(Arc::new(|_| Ok(())) as ChatSubmitCallback),
                         Arc::new(theme::Theme::default()),
                     )
                     .with_host_mode(TRANSCRIPT_ONLY)
@@ -801,7 +864,7 @@ mod chat_prompt_host_mode_lifecycle {
                         None,
                         None,
                         focus_handle,
-                        Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                        Some(Arc::new(|_| Ok(())) as ChatSubmitCallback),
                         Arc::new(theme::Theme::default()),
                     )
                     // TranscriptOnly, like every real host of this prompt.
@@ -867,7 +930,7 @@ mod chat_prompt_host_mode_lifecycle {
                 None,
                 None,
                 focus_handle,
-                Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                Some(Arc::new(|_| Ok(())) as ChatSubmitCallback),
                 Arc::new(theme::Theme::default()),
             )
             .with_host_mode(TRANSCRIPT_ONLY);
@@ -948,7 +1011,7 @@ mod chat_prompt_host_mode_lifecycle {
                         None,
                         None,
                         focus_handle,
-                        Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                        Some(Arc::new(|_| Ok(())) as ChatSubmitCallback),
                         Arc::new(theme::Theme::default()),
                     )
                     // TranscriptOnly, like every real host of this prompt.
@@ -1005,6 +1068,7 @@ mod chat_prompt_host_mode_lifecycle {
                 cx.new(|_| {
                     let on_submit: ChatSubmitCallback = Arc::new(move |_request| {
                         submits_cb.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
                     });
                     let mut prompt = ChatPrompt::new(
                         "hosted".to_string(),
@@ -1116,7 +1180,7 @@ mod chat_prompt_host_mode_lifecycle {
                     None,
                     None,
                     cx.focus_handle(),
-                    Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                    Some(Arc::new(|_| Ok(())) as ChatSubmitCallback),
                     Arc::new(theme::Theme::default()),
                 )
                 .with_save_history(false)
@@ -1200,7 +1264,7 @@ mod chat_prompt_host_mode_lifecycle {
                     None,
                     None,
                     cx.focus_handle(),
-                    Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                    Some(Arc::new(|_| Ok(())) as ChatSubmitCallback),
                     Arc::new(theme::Theme::default()),
                 )
                 .with_retry_callback(Arc::new(move |request| {
@@ -1250,7 +1314,7 @@ mod chat_prompt_host_mode_lifecycle {
                     None,
                     None,
                     cx.focus_handle(),
-                    Some(Arc::new(|_| {}) as ChatSubmitCallback),
+                    Some(Arc::new(|_| Ok(())) as ChatSubmitCallback),
                     Arc::new(theme::Theme::default()),
                 )
                 .with_save_history(false)

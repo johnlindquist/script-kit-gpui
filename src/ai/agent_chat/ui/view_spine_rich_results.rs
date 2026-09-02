@@ -32,7 +32,10 @@ impl AgentChatView {
 
                 return match source {
                     crate::spine::catalog_subsearch::ContextSubsearchSource::File => {
-                        let files = crate::file_search::search_files(rich_query, None, 10);
+                        let files = match crate::file_search::search_files(rich_query, None, 10) {
+                            Ok(files) => files,
+                            Err(error) => return vec![Self::agent_chat_file_source_error_section("file", &error)],
+                        };
                         vec![self.agent_chat_rich_file_subsearch_section(
                             rich_query,
                             segment_index,
@@ -52,8 +55,10 @@ impl AgentChatView {
                             .or_else(|| {
                                 dirs::home_dir().map(|home| home.to_string_lossy().to_string())
                             });
-                        let files =
-                            crate::file_search::search_files(rich_query, scope.as_deref(), 10);
+                        let files = match crate::file_search::search_files(rich_query, scope.as_deref(), 10) {
+                            Ok(files) => files,
+                            Err(error) => return vec![Self::agent_chat_file_source_error_section("project", &error)],
+                        };
                         vec![self.agent_chat_rich_project_subsearch_section(
                             rich_query,
                             segment_index,
@@ -138,6 +143,48 @@ impl AgentChatView {
         // (cwd) or the profile trigger cannot even DISPLAY, let alone select,
         // an affordance the session policy denies (Quick AI).
         self.filter_agent_chat_spine_sections_by_policy(sections)
+    }
+
+    fn agent_chat_file_source_error_section(
+        source: &str,
+        error: &crate::file_search::SearchFailure,
+    ) -> SpineListSection {
+        let id = SharedString::from(format!("agent_chat-spine:{source}:source-error"));
+        let mut hint =
+            Self::agent_chat_spine_hint_row("File search failed", &error.to_string(), Some("file"));
+        hint.id = id.clone();
+        SpineListSection {
+            id,
+            title: SharedString::from(format!("@{source}:")),
+            subtitle: Some(SharedString::from("Source failed")),
+            icon: Some(SharedString::from("file")),
+            rows: vec![hint],
+        }
+    }
+
+    pub(crate) fn spine_hint_semantic_elements(&self) -> Vec<crate::protocol::ElementInfo> {
+        if !self.agent_chat_spine_owns_list() {
+            return Vec::new();
+        }
+        self.agent_chat_spine_sections()
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .filter(|row| matches!(row.kind, SpineListRowKind::Hint))
+            .map(|row| {
+                let mut element = crate::protocol::ElementInfo::panel(&row.id);
+                element.text = Some(match row.subtitle {
+                    Some(subtitle) => format!("{}: {subtitle}", row.title),
+                    None => row.title.to_string(),
+                });
+                element.role = Some("spineHint".to_string());
+                element.kind = Some("hint".to_string());
+                element.source = Some("AgentChatSpine".to_string());
+                element.selectable = Some(false);
+                element.status_kind = Some("disabled".to_string());
+                element.action_disabled = Some("spine_hint_row".to_string());
+                element
+            })
+            .collect()
     }
 
     /// C-R3 projection guard: drop CWD/profile rows the session policy forbids

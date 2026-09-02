@@ -40,6 +40,9 @@ fn default_icon() -> String {
 
 /// Get the path to the AI presets file (`~/.scriptkit/ai-presets.json`).
 pub fn get_presets_path() -> PathBuf {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        return policy.root().join("ai-presets.json");
+    }
     let kit_dir = crate::setup::get_kit_path();
     kit_dir.join("ai-presets.json")
 }
@@ -54,6 +57,9 @@ pub fn load_presets() -> Result<Vec<SavedAiPreset>> {
 }
 
 fn load_presets_at(path: &Path) -> Result<Vec<SavedAiPreset>> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy.require_owned_path(path)?;
+    }
     if !crate::atomic_file::inspect_private_file(path).context("Inspect private AI preset store")? {
         info!("No AI preset store found, returning empty list");
         return Ok(Vec::new());
@@ -81,10 +87,14 @@ pub fn save_presets(presets: &[SavedAiPreset]) -> Result<()> {
 }
 
 fn save_presets_at(path: &Path, presets: &[SavedAiPreset]) -> Result<()> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy.require_owned_path(path)?;
+    }
     let json = serde_json::to_vec_pretty(presets).context("Serialize private AI presets")?;
 
     crate::atomic_file::write_private_atomic(path, &json)
         .context("Atomically write owner-only AI presets")?;
+    crate::runtime_policy::record_completed_fixture_effect();
 
     info!(count = presets.len(), "Saved private AI presets to disk");
 

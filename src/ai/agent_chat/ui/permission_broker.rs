@@ -294,6 +294,27 @@ impl AgentChatPermissionBroker {
         )
     }
 
+    /// Nonblocking producer used by controlled sources; the real permission
+    /// listener and approval handler still own presentation and completion.
+    pub(crate) fn try_request(
+        &self,
+        input: AgentChatApprovalRequestInput,
+    ) -> anyhow::Result<async_channel::Receiver<Option<String>>> {
+        let (reply_tx, reply_rx) = async_channel::bounded(1);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        self.tx
+            .try_send(AgentChatApprovalRequest {
+                id,
+                title: input.title,
+                body: input.body,
+                preview: input.preview,
+                options: input.options,
+                reply_tx,
+            })
+            .map_err(|_| anyhow::anyhow!("approval_queue_full_or_closed"))?;
+        Ok(reply_rx)
+    }
+
     /// Submit a permission request and block until the UI responds.
     ///
     /// Returns `Some(option_id)` if the user selected an option, or

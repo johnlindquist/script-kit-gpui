@@ -338,6 +338,9 @@ fn test_thread_with_profile(
         streaming_text_buffer: StreamingTextBuffer::default(),
         streaming_text_drain_task: None,
         transcript_generation: 0,
+        stream_generation: 0,
+        semantic_revision: 1,
+        last_local_stop: None,
         next_message_id: 1,
         host_window_state: None,
         notification_debounce: AgentChatNotificationDebounce::default(),
@@ -2588,12 +2591,10 @@ fn quick_ai_literal_flow_staging_remains_plain_user_text() {
 // ===========================================================================
 // WP-B3 real-stream behavior contracts
 //
-// These drive the SAME reduction the live `bind_stream` drain task feeds — the
-// `StreamingTextBuffer` push/drain and `append_assistant_stream_delta` /
-// `append_chunk` coalescing — synchronously, so they are deterministic (the
-// live 16 ms `smol::Timer` drain loop cannot run under gpui's deterministic
-// test scheduler; the channel+spawn ingress is exercised end-to-end by the
-// runtime probes). Every assertion is on the EXACT final source text/bytes.
+// Ownership tests below run the production bind_stream channel task and the
+// production 16 ms drain timer with GPUI's deterministic executor. Byte-level
+// coalescing cases additionally drive the same reduction synchronously. None
+// of these tests rely on the fixture adapter's stale-event rejection.
 // ===========================================================================
 
 /// Drive the real per-tick drain to completion, exactly as the live drain task
@@ -2622,6 +2623,184 @@ fn assistant_body(thread: &AgentChatThread) -> String {
         .find(|m| m.role == AgentChatThreadMessageRole::Assistant)
         .map(|m| m.body.to_string())
         .unwrap_or_default()
+}
+
+#[gpui::test]
+fn stale_scheduled_drain_cannot_touch_replacement_buffer_or_task(cx: &mut gpui::TestAppContext) {
+    for changed_owner in 0..4 {
+        let thread = cx.new(|_| test_thread(Vec::new(), false));
+        thread.update(cx, |thread, cx| {
+            thread.streaming_text_buffer.push_chunk("old".into());
+            thread.start_streaming_text_drain_if_needed(cx);
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(8));
+        let (stale_task, expected_buffer, epoch) = thread.update(cx, |thread, cx| {
+            // Retain the already scheduled old task as though its callback was
+            // queued before cancellation. The replacement gets its own slot.
+            let stale_task = thread.streaming_text_drain_task.take().unwrap();
+            match changed_owner {
+                0 => thread.ui_thread_id.push_str("-replacement"),
+                1 => thread.transcript_generation += 1,
+                2 => thread.current_turn_id += 1,
+                _ => thread.stream_generation += 1,
+            }
+            thread.streaming_text_buffer = StreamingTextBuffer::default();
+            thread.streaming_text_buffer.push_chunk("new".into());
+            let expected_buffer = thread.streaming_text_buffer.clone();
+            thread.start_streaming_text_drain_if_needed(cx);
+            (stale_task, expected_buffer, thread.semantic_revision())
+        });
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(8));
+        cx.run_until_parked();
+        thread.update(cx, |thread, _| {
+            assert_eq!(thread.streaming_text_buffer, expected_buffer);
+            assert!(thread.streaming_text_drain_task.is_some());
+            assert!(thread.messages.is_empty());
+            assert_eq!(thread.semantic_revision(), epoch);
+        });
+        for _ in 0..4 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.run_until_parked();
+        }
+        thread.update(cx, |thread, _| {
+            assert_eq!(assistant_body(thread), "new");
+            assert!(thread.streaming_text_buffer.is_empty());
+            assert!(thread.streaming_text_drain_task.is_none());
+            assert!(thread.semantic_revision() > epoch);
+        });
+        drop(stale_task);
+    }
+}
+
+#[gpui::test]
+fn fixture_retains_real_old_turn_drain_across_stop_and_replacement(cx: &mut gpui::TestAppContext) {
+    let (thread, control) = cx.update(|cx| {
+        super::super::mock_fixture::create_mock_fixture_thread(
+            "held-drain-regression",
+            AgentChatSessionPolicy::Full,
+            cx,
+        )
+    });
+    let old_stream = thread.update(cx, |thread, cx| {
+        thread.input.set_text("old request");
+        thread.submit_input(cx).unwrap();
+        thread.hold_fixture_drain().unwrap();
+        thread.stream_generation
+    });
+    control
+        .emit(
+            control.latest_generation().unwrap(),
+            AgentChatEvent::AgentMessageDelta("old".into()),
+        )
+        .unwrap();
+    cx.run_until_parked();
+    assert!(control.drain_receipts().unwrap()[0].queued);
+    let replacement = thread.update(cx, |thread, cx| {
+        thread.retain_fixture_drain().unwrap();
+        thread.stop_streaming(cx);
+        assert!(!thread.last_local_stop().unwrap().remote_cancel_acknowledged);
+        thread.input.set_text("replacement request");
+        thread.submit_input(cx).unwrap();
+        thread.hold_fixture_drain().unwrap();
+        thread.stream_generation
+    });
+    control
+        .emit(
+            control.latest_generation().unwrap(),
+            AgentChatEvent::AgentMessageDelta("replacement".into()),
+        )
+        .unwrap();
+    cx.run_until_parked();
+    control.release_drain(old_stream).unwrap();
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    let receipts = control.drain_receipts().unwrap();
+    let old = &receipts[0];
+    assert_eq!(old.callbacks, 1);
+    assert!(old.retained && old.stale_rejected);
+    assert_eq!(old.replacement_stream_generation, replacement);
+    assert!(
+        old.replacement_buffer_unchanged
+            && old.replacement_task_present
+            && old.replacement_task_preserved
+            && old.replacement_transcript_unchanged
+    );
+    assert_eq!(receipts[1].callbacks, 0);
+    control.release_drain(replacement).unwrap();
+    for _ in 0..16 {
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+    }
+    control
+        .emit(
+            control.latest_generation().unwrap(),
+            AgentChatEvent::completed("fixture"),
+        )
+        .unwrap();
+    cx.run_until_parked();
+    thread.update(cx, |thread, _| {
+        assert_eq!(assistant_body(thread), "replacement");
+        assert!(thread.streaming_text_buffer.is_empty());
+        assert!(thread.streaming_text_drain_task.is_none());
+    });
+}
+
+#[gpui::test]
+fn stale_production_stream_ingress_and_eof_leave_replacement_untouched(
+    cx: &mut gpui::TestAppContext,
+) {
+    let thread = cx.new(|_| test_thread(Vec::new(), false));
+    let (old_sender, old_receiver) = async_channel::unbounded();
+    thread.update(cx, |thread, cx| thread.bind_stream(old_receiver, cx));
+    cx.run_until_parked();
+    let (new_sender, new_receiver) = async_channel::unbounded();
+    let (stale_task, epoch, pending) = thread.update(cx, |thread, cx| {
+        let stale_task = thread.stream_task.take().unwrap();
+        thread.bind_stream(new_receiver, cx);
+        thread
+            .streaming_text_buffer
+            .push_chunk("replacement".into());
+        thread.start_streaming_text_drain_if_needed(cx);
+        (
+            stale_task,
+            thread.semantic_revision(),
+            thread.streaming_text_buffer.clone(),
+        )
+    });
+    old_sender
+        .try_send(AgentChatEvent::UserMessageDelta(
+            "stale queued event".into(),
+        ))
+        .unwrap();
+    drop(old_sender); // Exercises the production no-terminal/EOF callback too.
+    cx.run_until_parked();
+    thread.update(cx, |thread, _| {
+        assert!(thread.messages.is_empty());
+        assert_eq!(thread.streaming_text_buffer, pending);
+        assert!(thread.stream_task.is_some());
+        assert!(thread.streaming_text_drain_task.is_some());
+        assert_eq!(thread.semantic_revision(), epoch);
+    });
+    new_sender
+        .try_send(AgentChatEvent::UserMessageDelta(
+            "current queued event".into(),
+        ))
+        .unwrap();
+    cx.run_until_parked();
+    thread.update(cx, |thread, _| {
+        assert_eq!(thread.messages.len(), 1);
+        assert_eq!(thread.messages[0].body.as_ref(), "current queued event");
+        assert!(thread.semantic_revision() > epoch);
+    });
+    drop(stale_task);
 }
 
 #[test]

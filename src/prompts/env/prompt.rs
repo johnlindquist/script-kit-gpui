@@ -4,6 +4,33 @@ use super::*;
 ///
 /// Prompts for environment variable values and stores them securely
 /// in the local age-encrypted secrets file. Useful for API keys, tokens, and secrets.
+#[derive(Clone)]
+pub enum EnvStorage {
+    Encrypted,
+    Local(Arc<parking_lot::Mutex<Option<String>>>),
+}
+
+impl EnvStorage {
+    fn write(&self, key: &str, value: Option<&str>) -> Result<(), String> {
+        match self {
+            Self::Encrypted => {
+                crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Credentials)
+                    .map_err(|error| error.to_string())?;
+                match value {
+                    Some(value) => {
+                        secrets::set_secret(key, value).map_err(|error| error.to_string())
+                    }
+                    None => secrets::delete_secret(key).map_err(|error| error.to_string()),
+                }
+            }
+            Self::Local(store) => {
+                *store.lock() = value.map(str::to_owned);
+                Ok(())
+            }
+        }
+    }
+}
+
 pub struct EnvPrompt {
     /// Unique ID for this prompt instance
     pub id: String,
@@ -41,9 +68,14 @@ pub struct EnvPrompt {
     pub(super) reveal_secret: bool,
     /// Monotonic counter used to cancel stale auto-hide timers
     pub(super) reveal_generation: u64,
+    storage: EnvStorage,
 }
 
 impl EnvPrompt {
+    pub(crate) fn dictation_input_revision(&self, _cx: &gpui::App) -> u64 {
+        self.input.revision()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
@@ -90,7 +122,14 @@ impl EnvPrompt {
             validation_error: None,
             reveal_secret: false,
             reveal_generation: 0,
+            storage: EnvStorage::Encrypted,
         }
+    }
+
+    /// Inject local secret facts before any persistence or auto-submission.
+    pub fn with_local_storage(mut self, storage: Arc<parking_lot::Mutex<Option<String>>>) -> Self {
+        self.storage = EnvStorage::Local(storage);
+        self
     }
 
     pub(super) fn correlation_id(&self) -> String {
@@ -99,6 +138,10 @@ impl EnvPrompt {
 
     pub fn input_text(&self) -> &str {
         self.input.text()
+    }
+
+    pub(crate) fn validation_message(&self) -> Option<&str> {
+        self.validation_error.as_deref()
     }
 
     /// Returns true if the script provided contextual prompt or title text,
@@ -190,7 +233,7 @@ impl EnvPrompt {
                 return;
             }
 
-            if let Err(e) = secrets::set_secret(&self.key, text) {
+            if let Err(e) = self.storage.write(&self.key, Some(text)) {
                 self.validation_error =
                     Some("Failed to store secret. Check logs and try again.".to_string());
                 cx.notify();
@@ -272,7 +315,7 @@ impl EnvPrompt {
         );
 
         // Delete from keyring
-        if let Err(e) = secrets::delete_secret(&self.key) {
+        if let Err(e) = self.storage.write(&self.key, None) {
             self.validation_error =
                 Some("Failed to delete stored value. Check logs and try again.".to_string());
             cx.notify();
@@ -325,5 +368,96 @@ impl EnvPrompt {
     pub(super) fn render_input_text(&self, text_primary: u32, accent_color: u32) -> Div {
         let text = self.display_text();
         self.render_text_with_cursor_and_selection(&text, text_primary, accent_color)
+    }
+}
+
+#[cfg(test)]
+mod local_storage_tests {
+    use super::*;
+
+    #[test]
+    fn local_secret_storage_writes_and_deletes_without_keyring() {
+        let value = Arc::new(parking_lot::Mutex::new(None));
+        let storage = EnvStorage::Local(value.clone());
+        storage.write("FIXTURE", Some("local value")).unwrap();
+        assert_eq!(value.lock().as_deref(), Some("local value"));
+        storage.write("FIXTURE", None).unwrap();
+        assert!(value.lock().is_none());
+    }
+
+    #[gpui::test]
+    fn env_validation_precedes_local_storage_and_submission(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let stored = Arc::new(parking_lot::Mutex::new(None));
+        let submitted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let output = submitted.clone();
+        let prompt = cx.new(|cx| {
+            EnvPrompt::new(
+                "env-local".into(),
+                "FIXTURE".into(),
+                Some("Value".into()),
+                None,
+                true,
+                cx.focus_handle(),
+                Arc::new(move |_, value| output.lock().push(value)),
+                Arc::new(theme::Theme::default()),
+                false,
+                None,
+                None,
+                None,
+            )
+            .with_local_storage(stored.clone())
+        });
+        prompt.update(cx, |prompt, cx| {
+            prompt.set_input("   ".into(), cx);
+            prompt.submit(cx);
+        });
+        assert!(stored.lock().is_none());
+        assert!(submitted.lock().is_empty());
+        prompt.update(cx, |prompt, cx| {
+            prompt.set_input("local value".into(), cx);
+            prompt.submit(cx);
+        });
+        assert_eq!(stored.lock().as_deref(), Some("local value"));
+        assert_eq!(*submitted.lock(), vec![Some("local value".into())]);
+    }
+
+    #[gpui::test]
+    fn env_revision_tracks_effective_input_not_theme_or_reads(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let prompt = cx.new(|cx| {
+            EnvPrompt::new(
+                "epoch".into(),
+                "FIXTURE".into(),
+                None,
+                None,
+                false,
+                cx.focus_handle(),
+                Arc::new(|_, _| {}),
+                Arc::new(theme::Theme::default()),
+                false,
+                None,
+                None,
+                None,
+            )
+        });
+        prompt.update(cx, |prompt, cx| {
+            prompt.set_input("cat".into(), cx);
+            let before = prompt.dictation_input_revision(cx);
+            prompt.set_input("cat".into(), cx);
+            assert_eq!(prompt.dictation_input_revision(cx), before);
+            prompt.set_input("dog".into(), cx);
+            let changed = prompt.dictation_input_revision(cx);
+            assert!(changed > before);
+            prompt.set_input("cat".into(), cx);
+            assert!(prompt.dictation_input_revision(cx) > changed);
+            prompt.input.move_to_end(false);
+            let at_end = prompt.dictation_input_revision(cx);
+            prompt.input.move_left(true);
+            assert!(prompt.dictation_input_revision(cx) > at_end);
+            let selected = prompt.dictation_input_revision(cx);
+            prompt.theme = Arc::new(theme::Theme::default());
+            assert_eq!(prompt.dictation_input_revision(cx), selected);
+        });
     }
 }

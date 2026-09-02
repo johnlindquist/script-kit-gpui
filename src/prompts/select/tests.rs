@@ -492,3 +492,85 @@ fn test_select_prompt_get_elements_reflects_selection_state() {
     assert_eq!(elements[2].selected, Some(false)); // Apple not selected
     assert_eq!(elements[3].selected, Some(true)); // Banana selected
 }
+
+#[gpui::test]
+fn real_select_filters_toggles_and_refuses_disabled_values(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let submitted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let output = submitted.clone();
+    let prompt = cx.new(|cx| {
+        SelectPrompt::new(
+            "select-local".into(),
+            None,
+            vec![
+                choice("Alpha", "a", None),
+                choice("Beta", "b", None),
+                choice("Unavailable", "c", None),
+            ],
+            true,
+            cx.focus_handle(),
+            Arc::new(move |_, value| output.lock().push(value)),
+            Arc::new(theme::Theme::default()),
+        )
+        .with_disabled_choices([2])
+    });
+    prompt.update(cx, |prompt, cx| {
+        assert!(!prompt.submit(cx));
+        prompt.set_input("Beta".into(), cx);
+        assert_eq!(prompt.filtered_choices, vec![1]);
+        prompt.toggle_selection(cx);
+        prompt.set_input(String::new(), cx);
+        prompt.set_focused_index(2);
+        prompt.toggle_selection(cx);
+        assert!(!prompt.selected.contains(&2));
+        let (elements, _) = prompt.collect_elements(20);
+        assert_eq!(
+            elements.last().unwrap().action_disabled,
+            Some("choice_disabled".to_string())
+        );
+        assert!(prompt.submit(cx));
+    });
+    assert_eq!(*submitted.lock(), vec![Some("[\"b\"]".into())]);
+}
+
+#[gpui::test]
+fn select_revision_tracks_text_and_selection_aba_not_no_ops(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let prompt = cx.new(|cx| {
+        SelectPrompt::new(
+            "epoch".into(),
+            None,
+            vec![choice("Alpha", "a", None), choice("Beta", "b", None)],
+            true,
+            cx.focus_handle(),
+            Arc::new(|_, _| {}),
+            Arc::new(theme::Theme::default()),
+        )
+    });
+    prompt.update(cx, |prompt, cx| {
+        let initial = prompt.dictation_input_revision(cx);
+        prompt.set_input(String::new(), cx);
+        prompt.handle_backspace(cx);
+        prompt.move_up(cx);
+        assert_eq!(prompt.dictation_input_revision(cx), initial);
+        prompt.set_input("a".into(), cx);
+        let filtered = prompt.dictation_input_revision(cx);
+        prompt.set_input("b".into(), cx);
+        assert!(prompt.dictation_input_revision(cx) > filtered);
+        prompt.set_input("a".into(), cx);
+        assert!(prompt.dictation_input_revision(cx) > filtered);
+        prompt.set_input(String::new(), cx);
+        let before_focus = prompt.dictation_input_revision(cx);
+        prompt.move_down(cx);
+        prompt.move_up(cx);
+        assert!(prompt.dictation_input_revision(cx) > before_focus);
+        let before_toggle = prompt.dictation_input_revision(cx);
+        prompt.toggle_selection(cx);
+        prompt.toggle_selection(cx);
+        assert!(prompt.selected.is_empty());
+        assert!(prompt.dictation_input_revision(cx) > before_toggle);
+        let before_read = prompt.dictation_input_revision(cx);
+        prompt.collect_elements(20);
+        assert_eq!(prompt.dictation_input_revision(cx), before_read);
+    });
+}

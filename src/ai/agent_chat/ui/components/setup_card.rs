@@ -33,6 +33,7 @@ pub struct AgentChatSetupCard {
     state: AgentChatInlineSetupState,
     pub(crate) agent_picker: Option<AgentChatSetupAgentPickerState>,
     focus_handle: FocusHandle,
+    interaction_revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +67,14 @@ fn setup_action_control(action: AgentChatSetupAction) -> SetupActionControl {
 }
 
 impl AgentChatSetupCard {
+    pub(crate) fn interaction_revision(&self) -> u64 {
+        self.interaction_revision
+    }
+
+    fn advance_interaction_revision(&mut self) {
+        self.interaction_revision = self.interaction_revision.strict_add(1);
+    }
+
     pub fn new(
         state: AgentChatInlineSetupState,
         agent_picker: Option<AgentChatSetupAgentPickerState>,
@@ -75,6 +84,7 @@ impl AgentChatSetupCard {
             state,
             agent_picker,
             focus_handle: cx.focus_handle(),
+            interaction_revision: 0,
         }
     }
 
@@ -88,19 +98,103 @@ impl AgentChatSetupCard {
         picker: Option<AgentChatSetupAgentPickerState>,
         cx: &mut Context<Self>,
     ) {
+        if self.agent_picker.is_none() && picker.is_none() {
+            return;
+        }
         self.agent_picker = picker;
+        self.advance_interaction_revision();
         cx.notify();
     }
 
     pub fn select_agent_by_id(&mut self, agent_id: &str, cx: &mut Context<Self>) -> bool {
         if let Some(ref mut picker) = self.agent_picker {
             if let Some(idx) = picker.items.iter().position(|item| item.id == agent_id) {
-                picker.selected_index = idx;
+                if picker.selected_index != idx {
+                    picker.selected_index = idx;
+                    self.advance_interaction_revision();
+                }
                 cx.notify();
                 return true;
             }
         }
         false
+    }
+
+    /// Project only the controls the card currently renders, using its real
+    /// action mapping and picker state rather than the view's legacy picker.
+    pub(crate) fn collect_semantic_elements(&self) -> Vec<crate::protocol::ElementInfo> {
+        use crate::protocol::{ElementContentKind, ElementInfo, ElementType};
+
+        let control_element = |semantic_id, element_type, text, kind: &str| ElementInfo {
+            semantic_id,
+            element_type,
+            text: Some(text),
+            value: None,
+            content: None,
+            selected: None,
+            focused: None,
+            index: None,
+            role: Some("agentChatSetupControl".into()),
+            kind: Some(kind.into()),
+            source: Some("AgentChatSetupCard".into()),
+            source_name: None,
+            selectable: Some(true),
+            status_kind: None,
+            action_disabled: None,
+            style: None,
+        };
+
+        if let Some(picker) = &self.agent_picker {
+            return picker
+                .items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let mut element = control_element(
+                        format!("agent_chat-setup-agent-{index}"),
+                        ElementType::Choice,
+                        item.display_name.to_string(),
+                        "selectAgent",
+                    );
+                    element.value = Some(item.id.to_string());
+                    element.selected = Some(index == picker.selected_index);
+                    element.index = Some(index);
+                    element.status_kind = Some(format_setup_agent_picker_status(
+                        item,
+                        self.state.launch_requirements,
+                    ));
+                    element.redact_content(ElementContentKind::UserContent)
+                })
+                .collect();
+        }
+
+        [
+            Some((
+                "agent-chat-setup-primary-action",
+                self.state.primary_action,
+                Some("↵"),
+            )),
+            self.state
+                .secondary_action
+                .map(|action| ("agent-chat-setup-secondary-action", action, None)),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|(id, action, shortcut)| {
+            let control = setup_action_control(action);
+            let kind = match control.activation {
+                AgentChatSetupAction::Retry => "retry",
+                AgentChatSetupAction::Install => "install",
+                AgentChatSetupAction::Authenticate => "authenticate",
+                AgentChatSetupAction::OpenCatalog => "openCatalog",
+                AgentChatSetupAction::SelectAgent => "selectAgent",
+            };
+            let mut element =
+                control_element(id.into(), ElementType::Button, control.label.into(), kind);
+            element.value = shortcut.map(str::to_string);
+            element
+        })
+        .collect()
     }
 
     pub fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
@@ -110,6 +204,7 @@ impl AgentChatSetupCard {
             if ui_foundation::is_key_up(key) {
                 if picker.selected_index > 0 {
                     picker.selected_index -= 1;
+                    self.advance_interaction_revision();
                 }
                 cx.notify();
                 return true;
@@ -117,6 +212,7 @@ impl AgentChatSetupCard {
             if ui_foundation::is_key_down(key) {
                 if picker.selected_index + 1 < picker.items.len() {
                     picker.selected_index += 1;
+                    self.advance_interaction_revision();
                 }
                 cx.notify();
                 return true;
@@ -129,6 +225,7 @@ impl AgentChatSetupCard {
             }
             if ui_foundation::is_key_escape(key) {
                 self.agent_picker = None;
+                self.advance_interaction_revision();
                 cx.emit(AgentChatSetupCardEvent::CancelPicker);
                 cx.notify();
                 return true;

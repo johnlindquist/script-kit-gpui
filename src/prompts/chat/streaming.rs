@@ -3,36 +3,53 @@ use super::*;
 impl ChatPrompt {
     pub(super) fn handle_submit(&mut self, cx: &mut Context<Self>) {
         let display_text = self.input.text().to_string();
-        let outbound_text = self.expand_pasted_text_tokens(&display_text);
-        let pending_image = self.pending_image.take();
-        let pending_render = self.pending_image_render.take();
-
-        if display_text.trim().is_empty() && pending_image.is_none() {
+        if display_text.trim().is_empty() && self.pending_image.is_none() {
             return;
         }
-        let prepared =
-            ChatPromptPreparedRequest::new(&self.id, display_text.clone(), outbound_text.clone());
-        logging::log(
-            "CHAT",
-            &format!(
-                "User submitted: bytes={} fingerprint={}",
-                prepared.outbound_text().len(),
-                prepared.payload_fingerprint().0
-            ),
-        );
-        self.input.clear();
-        self.pasted_text_tokens.clear();
-        self.clear_script_generation_status();
-
-        // If built-in AI mode is enabled, handle the AI call directly
+        let outbound_text = self.expand_pasted_text_tokens(&display_text);
+        let prepared = ChatPromptPreparedRequest::new(&self.id, display_text, outbound_text);
         if self.has_builtin_ai() {
-            // Cache the render image for conversation history display
-            // We need the user message ID, which will be generated in handle_builtin_ai_submit
+            if self.builtin_is_streaming {
+                return;
+            }
+            if let Err(error) =
+                crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+            {
+                self.command_status = Some(error.code.to_string());
+                cx.notify();
+                return;
+            }
+            let pending_image = self.pending_image.take();
+            let pending_render = self.pending_image_render.take();
+            self.input.clear();
+            self.pasted_text_tokens.clear();
+            self.clear_script_generation_status();
             self.handle_builtin_ai_submit(prepared, pending_image, pending_render, cx);
-        } else if let Some(callback) = self.on_submit.as_ref() {
-            // External hosts receive the exact immutable request accepted here.
-            self.pending_prepared_request = Some(prepared.clone());
-            callback(prepared);
+        } else {
+            let result = self
+                .on_submit
+                .as_ref()
+                .ok_or_else(|| "chat_submission_sink_missing".to_string())
+                .and_then(|callback| callback(prepared.clone()));
+            match result {
+                Ok(()) => {
+                    self.pending_prepared_request = Some(prepared);
+                    self.input.clear();
+                    self.pending_image = None;
+                    self.pending_image_render = None;
+                    self.pasted_text_tokens.clear();
+                    self.clear_script_generation_status();
+                    self.command_status = None;
+                }
+                Err(error) => {
+                    let failure = crate::ai::reliability::runtime_closed_failure(
+                        sk_protocol::ai_reliability::ProtocolComponent::Provider,
+                        &error,
+                    );
+                    self.command_status = Some(failure.primary_message().to_string());
+                }
+            }
+            cx.notify();
         }
     }
 

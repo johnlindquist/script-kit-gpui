@@ -791,7 +791,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// A bare-prose URL is no longer accepted just because a search ran.
     ///
     /// This test previously asserted the opposite. "A search completed, so any

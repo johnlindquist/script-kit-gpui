@@ -227,6 +227,12 @@ pub mod env_vars {
 ///
 /// Returns `None` if the variable is not set, is empty after trimming, or contains only whitespace.
 fn read_env_nonempty(name: &str) -> Option<String> {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Credentials)
+    {
+        tracing::warn!(%error, "Provider environment access refused");
+        return None;
+    }
     env::var(name)
         .ok()
         .map(|s| s.trim().to_string())
@@ -241,6 +247,12 @@ fn read_env_nonempty(name: &str) -> Option<String> {
 ///
 /// Returns the first non-empty value found, or `None` if not configured.
 fn read_key_env_or_keyring(name: &str) -> Option<String> {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Credentials)
+    {
+        tracing::warn!(%error, "Provider credential discovery refused");
+        return None;
+    }
     // First check environment variable
     if let Some(value) = read_env_nonempty(name) {
         tracing::info!(target: "ai::config", key_name = %name, source = "env", "Found API key");

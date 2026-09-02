@@ -1,6 +1,6 @@
 mod __render_prompts_mini_docs {
-    //! Mini prompt rendering: compact single-line input with reduced chrome.
-    //! No list display, minimal padding, optional footer.
+    //! Mini prompt rendering: canonical context/input header and a five-row viewport.
+    //! Choice editing and nearest-row reveal share the Arg controller.
     //! This fragment is included via include!() macro in main.rs.
 }
 
@@ -64,7 +64,7 @@ impl ScriptListApp {
                 // viewport.
                 if ui_foundation::is_key_up(key) && !modifiers.shift {
                     if this.arg_selected_index > 0 {
-                        this.arg_selected_index -= 1;
+                        this.set_arg_selected_index(this.arg_selected_index - 1);
                         this.arg_list_scroll_handle.scroll_to_item(
                             this.arg_selected_index,
                             gpui::ScrollStrategy::Nearest,
@@ -78,7 +78,7 @@ impl ScriptListApp {
                 if ui_foundation::is_key_down(key) && !modifiers.shift {
                     let filtered = this.filtered_arg_choices();
                     if this.arg_selected_index < filtered.len().saturating_sub(1) {
-                        this.arg_selected_index += 1;
+                        this.set_arg_selected_index(this.arg_selected_index + 1);
                         this.arg_list_scroll_handle.scroll_to_item(
                             this.arg_selected_index,
                             gpui::ScrollStrategy::Nearest,
@@ -199,19 +199,32 @@ impl ScriptListApp {
         );
         let footer = self.main_window_footer_slot(gpui_footer);
 
-        crate::components::render_minimal_list_prompt_shell_with_footer(
-            0.0,
-            crate::ui_foundation::get_vibrancy_background(&self.theme),
+        let header = crate::components::main_view_chrome::MainViewHeaderChrome::canonical(
+            menu_def,
+            self.render_clickable_main_view_context_zone(menu_def, cx),
             header,
-            content,
-            footer,
+        );
+        crate::components::main_view_chrome::render_main_view_chrome_footer_flush(
+            crate::components::main_view_chrome::render_main_view_shell()
+                .text_color(rgb(text_primary))
+                .font_family(design_typography.font_family)
+                .key_context("mini_prompt")
+                .track_focus(&self.focus_handle)
+                .capture_key_down(handle_key),
+            theme,
+            menu_def,
+            crate::components::main_view_chrome::MainViewChrome {
+                header,
+                divider: crate::components::main_view_chrome::MainViewDividerChrome {
+                    margin_x: menu_def.shell.divider_margin_x,
+                    height: menu_def.shell.divider_height,
+                    visible: false,
+                },
+                main: content.into_any_element(),
+                footer,
+                overlays: Vec::new(),
+            },
         )
-        .text_color(rgb(text_primary))
-        .font_family(design_typography.font_family)
-        .key_context("mini_prompt")
-        .track_focus(&self.focus_handle)
-        .capture_key_down(handle_key)
-        .into_any_element()
     }
 }
 
@@ -219,17 +232,6 @@ impl ScriptListApp {
 mod mini_prompt_render_tests {
     const MINI_SOURCE: &str = include_str!("mini.rs");
 
-    #[test]
-    fn mini_prompt_has_compact_padding() {
-        assert!(
-            MINI_SOURCE.contains("main_layout::HEADER_PADDING_X"),
-            "mini prompt should use shared mini layout horizontal padding token"
-        );
-        assert!(
-            MINI_SOURCE.contains("render_minimal_list_prompt_shell_with_footer("),
-            "mini prompt should let the shared minimal-list shell own header padding"
-        );
-    }
 
     #[test]
     fn mini_prompt_header_does_not_double_pad_shared_shell() {
@@ -265,11 +267,6 @@ mod mini_prompt_render_tests {
 
     #[test]
     fn mini_prompt_uses_shared_shell_with_universal_hints() {
-        assert!(
-            MINI_SOURCE.contains("render_minimal_list_prompt_shell(")
-                || MINI_SOURCE.contains("render_minimal_list_prompt_shell_with_footer("),
-            "mini prompt should use the shared prompt shell"
-        );
         assert!(
             MINI_SOURCE.contains("universal_prompt_hints()"),
             "mini prompt should use the canonical three-key hint strip"

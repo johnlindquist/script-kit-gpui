@@ -26,6 +26,12 @@ pub struct DivPrompt {
 }
 
 impl DivPrompt {
+    pub(crate) fn update_theme(&mut self, theme: Arc<theme::Theme>, cx: &mut Context<Self>) {
+        self.prompt_colors = theme.colors.prompt_colors();
+        self.theme = theme;
+        cx.notify();
+    }
+
     pub fn new(
         id: String,
         html: String,
@@ -126,10 +132,22 @@ impl DivPrompt {
         if let Some(value) = href.strip_prefix("submit:") {
             self.submit_with_value(value.to_string());
         } else if href.starts_with("http://") || href.starts_with("https://") {
+            if let Err(error) =
+                crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+            {
+                logging::log("DIV", &error.to_string());
+                return;
+            }
             if let Err(e) = open::that(href) {
                 logging::log("DIV", &format!("Failed to open URL {}: {}", href, e));
             }
         } else if href.starts_with("file://") {
+            if let Err(error) =
+                crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+            {
+                logging::log("DIV", &error.to_string());
+                return;
+            }
             if let Err(e) = open::that(href) {
                 logging::log("DIV", &format!("Failed to open file {}: {}", href, e));
             }

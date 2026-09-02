@@ -1,6 +1,6 @@
 use super::*;
 use crate::components::{FocusablePrompt, FocusablePromptInterceptedKey};
-use crate::ui_foundation::{is_key_backspace, is_key_enter, is_key_tab, printable_char};
+use crate::ui_foundation::{is_key_backspace, is_key_enter};
 use gpui::FontWeight;
 use gpui_component::scroll::ScrollableElement;
 
@@ -147,7 +147,7 @@ impl Render for TemplatePrompt {
                     if let Some(entity) = handle_select.upgrade() {
                         entity.update(cx, |this, cx| {
                             if this.current_input != idx {
-                                this.current_input = idx;
+                                this.set_current_input(idx);
                                 cx.notify();
                             }
                         });
@@ -191,22 +191,53 @@ impl Render for TemplatePrompt {
                     _ => false,
                 },
                 |this, event, _window, cx| {
-                    let key_str = event.keystroke.key.as_str();
+                    let modifiers = &event.keystroke.modifiers;
+                    if modifiers.platform || modifiers.control || modifiers.function {
+                        return;
+                    }
 
-                    if is_key_tab(key_str) {
-                        if event.keystroke.modifiers.shift {
-                            this.prev_input(cx);
-                        } else {
-                            this.next_input(cx);
-                        }
-                    } else if is_key_enter(key_str) {
-                        this.submit(cx);
-                    } else if is_key_backspace(key_str) {
+                    if is_key_backspace(&event.keystroke.key) && !modifiers.alt {
                         this.handle_backspace(cx);
-                    } else if let Some(ch) = printable_char(event.keystroke.key_char.as_deref()) {
-                        this.handle_char(ch, cx);
+                        cx.stop_propagation();
+                    } else if let Some(text) = event.keystroke.key_char.as_deref() {
+                        // Use committed text, including Option-produced Unicode, never key names.
+                        if this.handle_text(text, cx) {
+                            cx.stop_propagation();
+                        }
                     }
                 },
+            )
+            // Keymap actions run before raw key capture; consume traversal here
+            // before the ancestor Root can move focus outside the template.
+            .on_action(cx.listener(|this, _: &gpui_component::Tab, _window, cx| {
+                this.next_input(cx);
+                cx.stop_propagation();
+            }))
+            .on_action(
+                cx.listener(|this, _: &gpui_component::TabPrev, _window, cx| {
+                    this.prev_input(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .capture_key_down(
+                cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
+                    let modifiers = &event.keystroke.modifiers;
+                    if modifiers.platform
+                        || modifiers.control
+                        || modifiers.alt
+                        || modifiers.function
+                    {
+                        return;
+                    }
+
+                    let key = event.keystroke.key.as_str();
+                    if is_key_enter(key) {
+                        this.submit(cx);
+                    } else {
+                        return;
+                    }
+                    cx.stop_propagation();
+                }),
             )
     }
 }
@@ -308,7 +339,7 @@ mod tests {
             "template fields should scroll when placeholders exceed available height"
         );
         assert!(
-            SOURCE.contains(".on_click(") && SOURCE.contains("current_input = idx"),
+            SOURCE.contains(".on_click(") && SOURCE.contains("set_current_input(idx)"),
             "template fields should be clickable and move the current input"
         );
     }

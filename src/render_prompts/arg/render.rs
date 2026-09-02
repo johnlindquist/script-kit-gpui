@@ -125,7 +125,7 @@ impl ScriptListApp {
                 // Arrow up/down: list navigation
                 if ui_foundation::is_key_up(key) && !modifiers.shift {
                     if this.arg_selected_index > 0 {
-                        this.arg_selected_index -= 1;
+                        this.set_arg_selected_index(this.arg_selected_index - 1);
                         this.arg_list_scroll_handle
                             .scroll_to_item(this.arg_selected_index, ScrollStrategy::Nearest);
                         cx.notify();
@@ -137,7 +137,7 @@ impl ScriptListApp {
                 if ui_foundation::is_key_down(key) && !modifiers.shift {
                     let filtered = this.filtered_arg_choices();
                     if this.arg_selected_index < filtered.len().saturating_sub(1) {
-                        this.arg_selected_index += 1;
+                        this.set_arg_selected_index(this.arg_selected_index + 1);
                         this.arg_list_scroll_handle
                             .scroll_to_item(this.arg_selected_index, ScrollStrategy::Nearest);
                         cx.notify();
@@ -271,36 +271,48 @@ impl ScriptListApp {
         );
         let footer = self.main_window_footer_slot(gpui_footer);
 
-        crate::components::render_minimal_list_prompt_shell_with_footer(
-            0.0,
-            crate::ui_foundation::get_vibrancy_background(&self.theme),
+        let header = crate::components::main_view_chrome::MainViewHeaderChrome::canonical(
+            menu_def,
+            self.render_clickable_main_view_context_zone(menu_def, cx),
             header,
-            content,
-            footer,
-        )
-        .relative()
-        .text_color(rgb(text_primary))
-        .font_family(design_typography.font_family)
-        .key_context("arg_prompt")
-        .track_focus(&self.focus_handle)
-        .capture_key_down(handle_key)
-        .when_some(
-            render_actions_backdrop(
-                self.show_actions_popup,
-                self.actions_dialog.clone(),
-                actions_dialog_top,
-                actions_dialog_right,
-                ActionsBackdropConfig {
-                    backdrop_id: "arg-actions-backdrop",
-                    close_host: ActionsDialogHost::ArgPrompt,
-                    backdrop_log_message: "Arg actions backdrop clicked - dismissing dialog",
-                    show_pointer_cursor: true,
+        );
+        let mut overlays = Vec::new();
+        if let Some(backdrop) = render_actions_backdrop(
+            self.show_actions_popup,
+            self.actions_dialog.clone(),
+            actions_dialog_top,
+            actions_dialog_right,
+            ActionsBackdropConfig {
+                backdrop_id: "arg-actions-backdrop",
+                close_host: ActionsDialogHost::ArgPrompt,
+                backdrop_log_message: "Arg actions backdrop clicked - dismissing dialog",
+                show_pointer_cursor: true,
+            },
+            cx,
+        ) {
+            overlays.push(backdrop.into_any_element());
+        }
+        crate::components::main_view_chrome::render_main_view_chrome_footer_flush(
+            crate::components::main_view_chrome::render_main_view_shell()
+                .text_color(rgb(text_primary))
+                .font_family(design_typography.font_family)
+                .key_context("arg_prompt")
+                .track_focus(&self.focus_handle)
+                .capture_key_down(handle_key),
+            theme,
+            menu_def,
+            crate::components::main_view_chrome::MainViewChrome {
+                header,
+                divider: crate::components::main_view_chrome::MainViewDividerChrome {
+                    margin_x: menu_def.shell.divider_margin_x,
+                    height: menu_def.shell.divider_height,
+                    visible: false,
                 },
-                cx,
-            ),
-            |d, backdrop_overlay| d.child(backdrop_overlay),
+                main: content.into_any_element(),
+                footer,
+                overlays,
+            },
         )
-        .into_any_element()
     }
 }
 

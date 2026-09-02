@@ -173,12 +173,14 @@ pub(crate) fn protocol_failure(
 /// is captured through the diagnostic boundary and never becomes primary UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AiAdapterError {
-    pub failure: AppFailureRecord,
+    pub failure: Box<AppFailureRecord>,
 }
 
 impl AiAdapterError {
     pub(crate) fn from_record(failure: AppFailureRecord) -> Self {
-        Self { failure }
+        Self {
+            failure: Box::new(failure),
+        }
     }
 
     pub(crate) fn code(&self) -> AiFailureCode {

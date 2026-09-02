@@ -157,7 +157,7 @@ impl NamingPrompt {
         cx.notify();
     }
 
-    pub(super) fn submit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
         self.refresh_derived_state();
 
         if self.validation_error.is_some() {
@@ -211,5 +211,37 @@ impl NamingPrompt {
         } else {
             format!(".{}", self.extension)
         }
+    }
+}
+
+#[cfg(test)]
+mod seeded_behavior_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn naming_validates_and_submits_without_creating_artifact(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let directory = tempfile::tempdir().unwrap();
+        let submitted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let output = submitted.clone();
+        let prompt = cx.new(|cx| {
+            NamingPrompt::new(
+                "naming-local".into(),
+                NamingPromptConfig::new(NamingTarget::Script, directory.path().to_owned(), "ts"),
+                cx.focus_handle(),
+                Arc::new(move |_, value| output.lock().push(value)),
+                Arc::new(theme::Theme::default()),
+            )
+        });
+        prompt.update(cx, |prompt, cx| {
+            prompt.submit(cx);
+            assert!(submitted.lock().is_empty());
+            prompt.set_input("Daily Report".into(), cx);
+            prompt.submit(cx);
+            assert!(!directory.path().join(&prompt.filename).exists());
+        });
+        let value: serde_json::Value =
+            serde_json::from_str(submitted.lock()[0].as_deref().unwrap()).unwrap();
+        assert_eq!(value["friendly_name"], "Daily Report");
     }
 }

@@ -231,7 +231,8 @@ impl ChatPromptPreparedRequest {
     }
 }
 
-pub type ChatSubmitCallback = Arc<dyn Fn(ChatPromptPreparedRequest) + Send + Sync>;
+pub type ChatSubmitCallback =
+    Arc<dyn Fn(ChatPromptPreparedRequest) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub struct ChatPromptStopRequest {
@@ -241,7 +242,7 @@ pub struct ChatPromptStopRequest {
 }
 
 pub type ChatStopCallback = Arc<
-    dyn Fn(ChatPromptStopRequest) -> Result<(), crate::ai::reliability::AppFailureRecord>
+    dyn Fn(ChatPromptStopRequest) -> Result<(), Box<crate::ai::reliability::AppFailureRecord>>
         + Send
         + Sync,
 >;
@@ -254,7 +255,7 @@ pub struct ChatPromptRetryRequest {
 }
 
 pub type ChatRetryCallback = Arc<
-    dyn Fn(ChatPromptRetryRequest) -> Result<(), crate::ai::reliability::AppFailureRecord>
+    dyn Fn(ChatPromptRetryRequest) -> Result<(), Box<crate::ai::reliability::AppFailureRecord>>
         + Send
         + Sync,
 >;
@@ -263,7 +264,7 @@ pub type ChatRecoveryCallback = Arc<
     dyn Fn(
             String,
             sk_protocol::ai_reliability::AiRecoveryAction,
-        ) -> Result<(), crate::ai::reliability::AppFailureRecord>
+        ) -> Result<(), Box<crate::ai::reliability::AppFailureRecord>>
         + Send
         + Sync,
 >;

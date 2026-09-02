@@ -40,7 +40,8 @@ pub(crate) fn generate_ghost_completion(
     config: &crate::config::Config,
     request: LocalGhostRequest,
 ) -> anyhow::Result<LocalGhostResponse> {
-    runtime::global().generate(config.clone(), request)
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
+    runtime::global()?.generate(config.clone(), request)
 }
 
 /// Drop the loaded on-device model and join the runtime actor. Call before app

@@ -83,6 +83,8 @@ pub(crate) struct PiRpcRuntime {
 
 impl PiRpcRuntime {
     pub(crate) fn spawn(spec: PiRpcLaunchSpec) -> Result<Self> {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)?;
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)?;
         let spec = Arc::new(spec);
         let worker_spec = spec.clone();
         let (tx, rx) = async_channel::bounded::<PiRpcRuntimeCommand>(8);
@@ -342,8 +344,14 @@ async fn run_pi_rpc_event_loop(
                             }
                             Err(error) => {
                                 applied_model = None;
-                                send_event_traced(&event_tx, &trace, pi_transport_failure(error))
-                                    .await;
+                                send_event_traced(
+                                    &event_tx,
+                                    &trace,
+                                    AgentChatEvent::TurnFailed {
+                                        failure: *error.failure,
+                                    },
+                                )
+                                .await;
                                 continue;
                             }
                         }
@@ -423,7 +431,7 @@ async fn run_pi_rpc_event_loop(
         }
     }
 
-    let _ = child.kill().await;
+    stop_pi_child(&mut child).await?;
     Ok(())
 }
 
@@ -546,7 +554,7 @@ async fn run_pi_rpc_single_turn(
                     pi_failure(format!("Invalid Pi model selection: {error}")),
                 )
                 .await;
-                let _ = child.kill().await;
+                stop_pi_child(&mut child).await?;
                 return Ok(());
             }
         };
@@ -559,8 +567,15 @@ async fn run_pi_rpc_single_turn(
         )
         .await
         {
-            send_event_traced(&event_tx, &trace, pi_transport_failure(error)).await;
-            let _ = child.kill().await;
+            send_event_traced(
+                &event_tx,
+                &trace,
+                AgentChatEvent::TurnFailed {
+                    failure: *error.failure,
+                },
+            )
+            .await;
+            stop_pi_child(&mut child).await?;
             return Ok(());
         }
     }
@@ -580,7 +595,7 @@ async fn run_pi_rpc_single_turn(
         Ok(payload) => payload,
         Err(error) => {
             send_event_traced(&event_tx, &trace, pi_failure(error.to_string())).await;
-            let _ = child.kill().await;
+            stop_pi_child(&mut child).await?;
             return Ok(());
         }
     };
@@ -594,7 +609,7 @@ async fn run_pi_rpc_single_turn(
 
     if let Err(error) = write_json(&mut stdin, &build_prompt_command(prompt_id, payload)).await {
         send_event_traced(&event_tx, &trace, pi_transport_failure(&error)).await;
-        let _ = child.kill().await;
+        stop_pi_child(&mut child).await?;
         return Err(error);
     }
 
@@ -609,7 +624,11 @@ async fn run_pi_rpc_single_turn(
                         target: "script_kit::tab_ai",
                         event = "pi_rpc_isolated_turn_cancelled",
                     );
-                    let _ = event_tx.send(cancelled_outcome()).await;
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        event_tx.send(cancelled_outcome()),
+                    )
+                    .await;
                     break;
                 }
                 if tokio::time::Instant::now() >= deadline {
@@ -622,7 +641,7 @@ async fn run_pi_rpc_single_turn(
         }
     }
 
-    let _ = child.kill().await;
+    stop_pi_child(&mut child).await?;
     Ok(())
 }
 
@@ -667,9 +686,9 @@ async fn read_single_turn_stdout<R>(
                 }
             }
 
-            if response.command.as_deref() == Some("prompt") && !response.success {
-                send_to_active(
-                    &active_turn,
+            if let Some(active) = take_failed_prompt_response(response, &active_turn) {
+                deliver_terminal_to_turn(
+                    active,
                     pi_failure(
                         response
                             .error
@@ -691,9 +710,12 @@ async fn read_single_turn_stdout<R>(
                 AgentChatEvent::TurnCompleted { .. } | AgentChatEvent::TurnFailed { .. }
             )
         });
-        // Clone the whole active-turn record, not just the sender: the trace
-        // lives beside it and the streaming milestones are recorded here.
-        let active = active_turn.lock().as_ref().cloned();
+        // Take terminal ownership before awaiting: cleanup cannot erase a new turn.
+        let active = if closes_turn {
+            active_turn.lock().take()
+        } else {
+            active_turn.lock().as_ref().cloned()
+        };
         if let Some(active) = active {
             send_events_traced(&active.event_tx, &active.trace, events).await;
             if closes_turn {
@@ -701,7 +723,6 @@ async fn read_single_turn_stdout<R>(
             }
         }
         if closes_turn {
-            active_turn.lock().take();
             terminal_event_seen = true;
             break;
         }
@@ -735,40 +756,116 @@ where
         .context("Failed to flush Pi RPC command")
 }
 
+async fn stop_pi_child(child: &mut tokio::process::Child) -> Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    child.start_kill().context("Pi child kill failed")?;
+    tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+        .await
+        .context("Pi child teardown timed out")?
+        .context("Pi child reap failed")?;
+    Ok(())
+}
+
+fn validate_set_model_response(
+    expected_id: &str,
+    response: PiRpcResponse,
+) -> crate::ai::reliability::AiAdapterResult<()> {
+    use crate::ai::reliability::{AiAdapterError, ProtocolFailureFacts};
+    use sk_protocol::ai_reliability::ProtocolComponent;
+    if response.id.as_deref() != Some(expected_id)
+        || response.command.as_deref() != Some("set_model")
+    {
+        return Err(AiAdapterError::from_record(
+            crate::ai::reliability::protocol_failure_with_detail(
+                ProtocolComponent::Pi,
+                ProtocolFailureFacts::MalformedResponse,
+                "Pi set_model response identity mismatch",
+            ),
+        ));
+    }
+    if !response.success {
+        return Err(AiAdapterError::from_record(
+            crate::ai::reliability::provider_failure(
+                ProtocolComponent::Pi,
+                response
+                    .error
+                    .as_deref()
+                    .unwrap_or("Pi RPC set_model failed"),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 async fn send_set_model_and_wait<W>(
     writer: &mut W,
     pending: &PendingResponses,
     id: String,
     selection: &PiRpcModelSelection,
-) -> Result<()>
+) -> crate::ai::reliability::AiAdapterResult<()>
 where
     W: AsyncWrite + Unpin,
 {
+    use crate::ai::reliability::AiAdapterError;
+    use sk_protocol::ai_reliability::ProtocolComponent;
     let (response_tx, response_rx) = oneshot::channel();
     pending
         .lock()
         .insert(id.clone(), PendingResponse::Rpc(response_tx));
-
     if let Err(error) = write_json(writer, &build_set_model_command(id.clone(), selection)).await {
         pending.lock().remove(&id);
-        return Err(error);
+        return Err(AiAdapterError::from_record(
+            crate::ai::reliability::runtime_closed_failure(
+                ProtocolComponent::Pi,
+                &error.to_string(),
+            ),
+        ));
     }
+    let awaited = tokio::time::timeout(std::time::Duration::from_secs(10), response_rx).await;
+    pending.lock().remove(&id);
+    let response = match awaited {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            return Err(AiAdapterError::from_record(
+                crate::ai::reliability::runtime_closed_failure(
+                    ProtocolComponent::Pi,
+                    &error.to_string(),
+                ),
+            ))
+        }
+        Err(_) => {
+            return Err(AiAdapterError::from_record(
+                crate::ai::reliability::provider_failure(
+                    ProtocolComponent::Pi,
+                    "Pi RPC set_model timed out",
+                ),
+            ))
+        }
+    };
+    validate_set_model_response(&id, response)
+}
 
-    let response = tokio::time::timeout(std::time::Duration::from_secs(10), response_rx)
-        .await
-        .context("Pi RPC set_model timed out")?
-        .context("Pi RPC set_model response channel closed")?;
-
-    if response.success {
-        return Ok(());
+/// Untagged Pi event frames still cannot prove cross-turn identity. Only RPC
+/// replies carrying the exact current prompt ID may claim terminal ownership.
+fn take_failed_prompt_response(
+    response: &PiRpcResponse,
+    active_turn: &ActiveTurn,
+) -> Option<ActiveTurnState> {
+    if response.success || response.command.as_deref() != Some("prompt") {
+        return None;
     }
-
-    anyhow::bail!(
-        "{}",
-        response
-            .error
-            .unwrap_or_else(|| "Pi RPC set_model failed".to_string())
-    )
+    let mut active = active_turn.lock();
+    if response
+        .id
+        .as_deref()
+        .is_some_and(|id| active.as_ref().is_some_and(|turn| turn.prompt_id == id))
+    {
+        active.take()
+    } else {
+        None
+    }
 }
 
 fn log_pi_rpc_stderr_line(line: &str) {
@@ -881,9 +978,9 @@ async fn read_stdout<R>(
                 }
             }
 
-            if response.command.as_deref() == Some("prompt") && !response.success {
-                send_to_active(
-                    &active_turn,
+            if let Some(active) = take_failed_prompt_response(response, &active_turn) {
+                deliver_terminal_to_turn(
+                    active,
                     pi_failure(
                         response
                             .error
@@ -903,17 +1000,16 @@ async fn read_stdout<R>(
                 AgentChatEvent::TurnCompleted { .. } | AgentChatEvent::TurnFailed { .. }
             )
         });
-        // Clone the whole active-turn record, not just the sender: the trace
-        // lives beside it and the streaming milestones are recorded here.
-        let active = active_turn.lock().as_ref().cloned();
+        let active = if closes_turn {
+            active_turn.lock().take()
+        } else {
+            active_turn.lock().as_ref().cloned()
+        };
         if let Some(active) = active {
             send_events_traced(&active.event_tx, &active.trace, events).await;
             if closes_turn {
                 active.trace.teardown();
             }
-        }
-        if closes_turn {
-            active_turn.lock().take();
         }
     }
 
@@ -1003,7 +1099,7 @@ fn trace_agent_chat_event(trace: &PhaseTrace, event: &AgentChatEvent) {
 /// bypass instrumentation entirely.
 async fn send_event_traced(event_tx: &AgentChatEventTx, trace: &PhaseTrace, event: AgentChatEvent) {
     trace_agent_chat_event(trace, &event);
-    let _ = event_tx.send(event).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), event_tx.send(event)).await;
 }
 
 async fn send_events(event_tx: &AgentChatEventTx, events: Vec<AgentChatEvent>) {
@@ -1035,7 +1131,12 @@ async fn send_events_traced(
             reveal_index < reveal_count
         };
         trace_agent_chat_event(trace, &event);
-        let _ = event_tx.send(event).await;
+        if tokio::time::timeout(std::time::Duration::from_secs(2), event_tx.send(event))
+            .await
+            .is_err()
+        {
+            break;
+        }
         if sleep_after {
             tokio::time::sleep(std::time::Duration::from_millis(PI_REVEAL_CHUNK_DELAY_MS)).await;
         }
@@ -1049,13 +1150,21 @@ async fn send_events_traced(
 /// active turn here rather than passed in. `teardown` fires because reaching
 /// this function means the turn's transport resources are being released.
 async fn send_to_active(active_turn: &ActiveTurn, event: AgentChatEvent) {
-    let active = active_turn.lock().as_ref().cloned();
+    let active = active_turn.lock().take();
     if let Some(active) = active {
-        trace_agent_chat_event(&active.trace, &event);
-        let _ = active.event_tx.send(event).await;
-        active.trace.teardown();
+        deliver_terminal_to_turn(active, event).await;
     }
-    active_turn.lock().take();
+}
+
+async fn deliver_terminal_to_turn(active: ActiveTurnState, event: AgentChatEvent) {
+    trace_agent_chat_event(&active.trace, &event);
+    // A blocked consumer must not hold transport teardown forever.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        active.event_tx.send(event),
+    )
+    .await;
+    active.trace.teardown();
 }
 
 async fn fail_pending_responses(
@@ -1068,11 +1177,13 @@ async fn fail_pending_responses(
     for (id, pending_response) in pending_responses {
         match pending_response {
             PendingResponse::Events(event_tx) => {
-                let _ = event_tx
-                    .send(AgentChatEvent::TurnFailed {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    event_tx.send(AgentChatEvent::TurnFailed {
                         failure: failure.clone(),
-                    })
-                    .await;
+                    }),
+                )
+                .await;
             }
             PendingResponse::Rpc(response_tx) => {
                 let _ = response_tx.send(PiRpcResponse {
@@ -1319,8 +1430,104 @@ mod tests {
                 &selection,
             )
             .await;
-            let error = result.unwrap_err().to_string();
-            assert!(error.contains("model unavailable"));
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.code(),
+                sk_protocol::ai_reliability::AiFailureCode::ModelUnavailable
+            );
+        });
+    }
+
+    #[test]
+    fn production_story_pi_reply_identity() {
+        let response = |id: Option<&str>, command: Option<&str>, success| PiRpcResponse {
+            id: id.map(str::to_string),
+            command: command.map(str::to_string),
+            success,
+            data: None,
+            error: (!success).then(|| "model unavailable".into()),
+            raw: json!({}),
+        };
+        assert!(validate_set_model_response(
+            "current",
+            response(Some("current"), Some("set_model"), true)
+        )
+        .is_ok());
+        assert_eq!(
+            validate_set_model_response(
+                "current",
+                response(Some("current"), Some("set_model"), false)
+            )
+            .unwrap_err()
+            .code(),
+            sk_protocol::ai_reliability::AiFailureCode::ModelUnavailable
+        );
+        for malformed in [
+            response(None, Some("set_model"), true),
+            response(Some("old"), Some("set_model"), true),
+            response(Some("current"), None, true),
+            response(Some("current"), Some("prompt"), true),
+        ] {
+            assert_eq!(
+                validate_set_model_response("current", malformed)
+                    .unwrap_err()
+                    .code(),
+                sk_protocol::ai_reliability::AiFailureCode::ProtocolMalformedResponse
+            );
+        }
+        let (tx, _rx) = async_channel::bounded(1);
+        let active: ActiveTurn = Arc::new(Mutex::new(Some(ActiveTurnState {
+            ui_thread_id: "thread".into(),
+            prompt_id: "current".into(),
+            event_tx: tx,
+            trace: PhaseTrace::disabled(),
+        })));
+        assert!(take_failed_prompt_response(
+            &response(Some("old"), Some("prompt"), false),
+            &active
+        )
+        .is_none());
+        assert!(
+            take_failed_prompt_response(&response(None, Some("prompt"), false), &active).is_none()
+        );
+        assert!(take_failed_prompt_response(
+            &response(Some("current"), Some("prompt"), true),
+            &active
+        )
+        .is_none());
+        assert!(take_failed_prompt_response(
+            &response(Some("current"), Some("set_model"), false),
+            &active
+        )
+        .is_none());
+        assert!(active.lock().is_some());
+        assert_eq!(
+            take_failed_prompt_response(&response(Some("current"), Some("prompt"), false), &active)
+                .unwrap()
+                .prompt_id,
+            "current"
+        );
+        assert!(active.lock().is_none());
+    }
+
+    #[test]
+    fn read_stdout_teardown_does_not_wait_forever_for_full_pending_consumer() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
+            let active_turn: ActiveTurn = Arc::new(Mutex::new(None));
+            let (event_tx, event_rx) = async_channel::bounded(1);
+            event_tx.try_send(AgentChatEvent::AgentMessageDelta("occupied".into())).unwrap();
+            pending.lock().insert("models-full".into(), PendingResponse::Events(event_tx));
+            tokio::time::timeout(std::time::Duration::from_secs(4),
+                read_stdout(tokio::io::empty(), pending.clone(), active_turn, None))
+                .await.expect("Pi stdout teardown must bound pending consumer delivery");
+            assert!(pending.lock().is_empty());
+            assert!(matches!(event_rx.try_recv().unwrap(), AgentChatEvent::AgentMessageDelta(text) if text == "occupied"));
+            assert!(event_rx.is_closed());
         });
     }
 

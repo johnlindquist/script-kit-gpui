@@ -377,7 +377,7 @@ impl AgentChatView {
             .cursor_pointer()
             .on_click(cx.listener(|this, _event, _window, cx| {
                 this.message_queue_expanded = !this.message_queue_expanded;
-                cx.notify();
+                this.notify_semantic_change(cx);
             }))
             .child(
                 div()

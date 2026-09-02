@@ -33,6 +33,29 @@ use crate::theme;
 
 use super::SubmitCallback;
 
+/// The main host supplies its live context descriptors and the same action
+/// dispatcher it uses for launcher chips; prompt entities own input and footer.
+#[derive(Clone)]
+pub(crate) struct PromptHeaderContext {
+    pub(crate) zone: crate::components::main_view_chrome::MainViewContextZoneSpec,
+    pub(crate) on_action: crate::components::main_view_chrome::SemanticChipActionHandler,
+}
+
+impl PromptHeaderContext {
+    pub(crate) fn render(
+        &self,
+        theme: &theme::Theme,
+        def: crate::designs::MainMenuThemeDef,
+    ) -> gpui::AnyElement {
+        crate::components::main_view_chrome::render_main_view_context_zone_required(
+            theme,
+            def,
+            self.zone.clone(),
+            self.on_action.clone(),
+        )
+    }
+}
+
 /// Common fields shared by all prompt types
 ///
 /// This struct centralizes the fields that every prompt needs:

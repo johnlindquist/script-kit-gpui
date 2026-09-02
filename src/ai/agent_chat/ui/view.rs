@@ -74,10 +74,15 @@ use super::components::setup_card::{
 };
 use super::components::transcript::{AgentChatTranscript, AgentChatTranscriptEvent};
 
+mod footer_presentation;
 mod portal_host;
 mod slash_and_skills;
 mod types_local;
 
+use footer_presentation::{
+    combined_agent_model_header_label, desired_footer_owner_for_plan, plan_footer_owner_transition,
+    plan_native_footer_lifecycle, AgentChatFooterOwner, AgentChatFooterPresentationState,
+};
 use portal_host::AgentChatPortalHandler;
 use slash_and_skills::parse_skill_description;
 pub(crate) use slash_and_skills::{
@@ -440,18 +445,6 @@ impl AgentChatFooterSnapshot {
     }
 }
 
-fn combined_agent_model_header_label(profile: &str, model: &str) -> String {
-    let profile = profile.trim();
-    let model = model.trim();
-    match (profile.is_empty(), model.is_empty(), profile == model) {
-        (false, false, true) => profile.to_string(),
-        (false, false, false) => format!("{profile} · {model}"),
-        (false, true, _) => profile.to_string(),
-        (true, false, _) => model.to_string(),
-        (true, true, _) => String::new(),
-    }
-}
-
 #[derive(Clone, Debug)]
 struct FocusedTextAgentChatState {
     snapshot: crate::platform::accessibility::FocusedTextSnapshot,
@@ -702,155 +695,6 @@ struct PermissionPreviewChrome {
     subject_text_rgba: u32,
 }
 
-/// The single footer owner an Agent Chat surface reconciles to per frame (C-R5).
-///
-/// This is the imperative counterpart to
-/// [`crate::ai::agent_chat::ui::layout::AgentChatFooterPresentation`]: the
-/// presentation says WHAT band is reserved; the owner says WHO drives the
-/// native host and owns the transition side-effects (install / clear). Routing
-/// every footer branch (normal, setup, runtime-setup, FocusedTextMini,
-/// bottom-dock) through the one reconcile step guarantees a single owner is
-/// live at a time — a detached window can never leave an orphan native footer
-/// host behind after switching to an inline rail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentChatFooterOwner {
-    /// An external host (portal / prompt shell) owns the footer.
-    External,
-    /// The native footer popup owns the pixels; the shell reserves a spacer.
-    Native,
-    /// Agent Chat renders its own in-flow config rail.
-    Inline,
-}
-
-impl AgentChatFooterOwner {
-    fn from_presentation(
-        presentation: crate::ai::agent_chat::ui::layout::AgentChatFooterPresentation,
-    ) -> Self {
-        use crate::ai::agent_chat::ui::layout::AgentChatFooterPresentation;
-        match presentation {
-            AgentChatFooterPresentation::ExternalHost => Self::External,
-            AgentChatFooterPresentation::NativeSpacer => Self::Native,
-            AgentChatFooterPresentation::InlineConfigRail => Self::Inline,
-        }
-    }
-
-    /// The automation string repr, consumed by the layout probe.
-    fn automation_repr(self) -> &'static str {
-        match self {
-            Self::External => "external",
-            Self::Native => "native",
-            Self::Inline => "inline",
-        }
-    }
-
-    /// How many in-shell footer bands this owner reserves — 0 for External, 1
-    /// for Native/Inline. Mirrors `AgentChatFooterPresentation::reserved_band_count`.
-    fn reserved_band_count(self) -> usize {
-        match self {
-            Self::External => 0,
-            Self::Native | Self::Inline => 1,
-        }
-    }
-}
-
-/// The pure outcome of transitioning the footer owner from `previous` to
-/// `desired`. Kept side-effect-free so the whole transition matrix is covered
-/// by unit tests: exactly one owner survives, the native host is explicitly
-/// cleared on any Native→non-Native move, and the reserved band count is 0 only
-/// for External.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AgentChatFooterOwnerTransition {
-    owner: AgentChatFooterOwner,
-    /// The native footer host must be explicitly torn down this frame.
-    clears_native_host: bool,
-    reserved_bands: usize,
-}
-
-/// The memoized native-footer presentation state (BC-2, Oracle seat 3). Captures
-/// everything a footer lifecycle side-effect depends on: the resolved owner, the
-/// host-window class (native side-effects apply only to detached windows), and
-/// the synced native config (`Some` only while a detached window owns the native
-/// footer). `transition_footer_owner` compares the next state against this so it
-/// installs / tears down / re-syncs the native host ONLY on an actual change,
-/// instead of re-driving those side-effects every render frame.
-#[derive(Clone, PartialEq)]
-struct AgentChatFooterPresentationState {
-    owner: AgentChatFooterOwner,
-    is_main_window: bool,
-    native_config: Option<crate::footer_popup::MainWindowFooterConfig>,
-}
-
-/// The pure native-footer lifecycle decision for a presentation transition
-/// (BC-2, Oracle seat 3). Kept side-effect-free so the memoization matrix is
-/// unit-tested: an unchanged presentation does nothing; leaving a detached
-/// native footer tears the previous host down; entering (or re-configuring) a
-/// detached native footer syncs it. Only DETACHED windows carry native
-/// side-effects — the embedded main window's native footer is owned elsewhere.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NativeFooterLifecycle {
-    /// The presentation is byte-for-byte identical to the last applied one — no
-    /// side-effects run this frame (this is what stops the per-frame re-sync).
-    unchanged: bool,
-    /// Tear down the detached native footer host installed by the previous
-    /// presentation (and drop its action listener).
-    tear_down_previous_native: bool,
-    /// Ensure the action listener and sync the native popup for the next
-    /// presentation.
-    sync_next_native: bool,
-}
-
-fn plan_native_footer_lifecycle(
-    previous: Option<&AgentChatFooterPresentationState>,
-    next: &AgentChatFooterPresentationState,
-) -> NativeFooterLifecycle {
-    if previous == Some(next) {
-        return NativeFooterLifecycle {
-            unchanged: true,
-            tear_down_previous_native: false,
-            sync_next_native: false,
-        };
-    }
-    let previous_installed_detached_native = previous
-        .is_some_and(|prev| prev.owner == AgentChatFooterOwner::Native && !prev.is_main_window);
-    let next_owns_detached_native =
-        next.owner == AgentChatFooterOwner::Native && !next.is_main_window;
-    NativeFooterLifecycle {
-        unchanged: false,
-        tear_down_previous_native: previous_installed_detached_native && !next_owns_detached_native,
-        sync_next_native: next_owns_detached_native,
-    }
-}
-
-fn plan_footer_owner_transition(
-    previous: Option<AgentChatFooterOwner>,
-    desired: AgentChatFooterOwner,
-) -> AgentChatFooterOwnerTransition {
-    // Leaving Native for any non-native owner requires an explicit host
-    // teardown; entering or staying Native re-syncs the host instead.
-    let clears_native_host =
-        previous == Some(AgentChatFooterOwner::Native) && desired != AgentChatFooterOwner::Native;
-    AgentChatFooterOwnerTransition {
-        owner: desired,
-        clears_native_host,
-        reserved_bands: desired.reserved_band_count(),
-    }
-}
-
-/// The footer owner a render plan reconciles to. The conversation shell maps
-/// its resolved footer presentation to an owner; every other body (setup,
-/// runtime-setup, focused-text mini) reserves no in-shell band and reconciles
-/// to `External`, which tears down any orphan native footer host on a detached
-/// window while leaving the host window's own native footer surface untouched.
-fn desired_footer_owner_for_plan(
-    plan: crate::ai::agent_chat::ui::layout::ResolvedAgentChatRenderPlan,
-) -> AgentChatFooterOwner {
-    if plan.body.renders_conversation_shell() {
-        AgentChatFooterOwner::from_presentation(plan.footer)
-    } else {
-        AgentChatFooterOwner::External
-    }
-}
-
 /// The automation-facing projection of the resolved render plan (C-R7). Both
 /// `automation_layout_info` and the layout probe consume this SINGLE
 /// projection, so the measured geometry is always a function of the same plan
@@ -870,34 +714,6 @@ pub(crate) struct AgentChatAutomationProjection {
     pub(crate) show_variant_badge: bool,
 }
 
-impl AgentChatAutomationProjection {
-    fn from_plan(plan: crate::ai::agent_chat::ui::layout::ResolvedAgentChatRenderPlan) -> Self {
-        use crate::ai::agent_chat::ui::layout::{AgentChatComposerSlot, AgentChatTranscriptAnchor};
-        use crate::ai::agent_chat::ui::ui_variant::AgentChatChromeDensity;
-        let owner = desired_footer_owner_for_plan(plan);
-        Self {
-            body_kind: plan.body.automation_repr(),
-            composer_slot: match plan.layout.composer_slot {
-                AgentChatComposerSlot::Header => "header",
-                AgentChatComposerSlot::Bottom => "bottom",
-            },
-            transcript_anchor: match plan.layout.transcript_anchor {
-                AgentChatTranscriptAnchor::Top => "top",
-                AgentChatTranscriptAnchor::Bottom => "bottom",
-            },
-            density: match plan.layout.density {
-                AgentChatChromeDensity::Default => "default",
-                AgentChatChromeDensity::Compact => "compact",
-                AgentChatChromeDensity::Mini => "mini",
-            },
-            footer_owner: owner.automation_repr(),
-            reserved_footer_bands: plan.reserved_footer_band_count(),
-            show_sidecar: plan.layout.show_sidecar,
-            show_variant_badge: plan.layout.show_variant_badge,
-        }
-    }
-}
-
 #[derive(Clone)]
 struct AgentChatHistoryPopupLifetime {
     lifecycle: crate::components::inline_popup_window::InlinePopupLifecycleHandle,
@@ -909,6 +725,16 @@ impl AgentChatHistoryPopupLifetime {
     fn generation(&self) -> crate::components::inline_popup_window::InlinePopupGeneration {
         crate::components::inline_popup_window::InlinePopupLifecycle::generation(&self.lifecycle)
     }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AgentChatOwnedDictationObservation {
+    pub input: String,
+    pub selection_start: usize,
+    pub selection_end: usize,
+    pub parent_window_id: Option<String>,
+    pub parent_window_generation: Option<u64>,
 }
 
 /// GPUI view entity wrapping an `AgentChatThread` for the Tab AI surface.
@@ -1099,6 +925,10 @@ pub(crate) struct AgentChatView {
     /// or portal staged against the errored chat never lingers over the setup
     /// card.
     runtime_setup_active_seen: bool,
+    rendered_theme_revision: Option<u64>,
+    semantic_revision: u64,
+    /// Mutation notification deduplication; never sampled or advanced by Render.
+    last_notified_semantic_state: Option<u64>,
 }
 
 /// Bounded ring buffer for Agent Chat test probe events.
@@ -1233,7 +1063,7 @@ impl AgentChatView {
             event = "agent_chat_ui_variant_changed",
             agent_chat_ui_variant = ui_variant.state_id(),
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
         AgentChatRestyleOutcome::Applied
     }
 
@@ -1333,6 +1163,9 @@ impl AgentChatView {
     }
 
     fn ensure_host_activation_subscription(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.is_owned_hidden() {
+            return;
+        }
         if self.host_activation_subscription.is_some() {
             return;
         }
@@ -1352,7 +1185,7 @@ impl AgentChatView {
     fn mark_history_popup_closed(&mut self, cx: &mut Context<Self>) {
         self.history_menu = None;
         self.history_closed_at = Some(Instant::now());
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(crate) fn close_history_popup_for_owner_transition(
@@ -1609,7 +1442,7 @@ impl AgentChatView {
                 cx,
             );
         });
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(crate) fn set_on_focused_text_expand_requested(
@@ -1678,10 +1511,7 @@ impl AgentChatView {
         };
         let is_main_window = target.kind == crate::protocol::AutomationWindowKind::Main;
         let is_setup_mode = self.is_setup_mode();
-        let runtime_setup_active = !is_setup_mode && {
-            let thread = self.live_thread().read(cx);
-            thread.setup_state().is_some() && thread.recovery_card_spec().is_none()
-        };
+        let runtime_setup_active = !is_setup_mode && self.shows_setup_card(cx);
         let focused_text_active = self.is_focused_text_mini() && !is_setup_mode;
         let footer_inputs = AgentChatFooterInputs {
             uses_external_footer_host: false,
@@ -2594,7 +2424,7 @@ text_style.text_inset_left,
         if let Some(transcript) = &self.transcript {
             transcript.update(cx, |transcript, cx| transcript.clear_collapsed_ids(cx));
         }
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -3017,7 +2847,7 @@ text_style.text_inset_left,
             if let Some(state) = self.focused_text.as_mut() {
                 state.last_action_receipt = Some(receipt.clone());
             }
-            cx.notify();
+            self.notify_semantic_change(cx);
             return receipt;
         };
 
@@ -3079,7 +2909,7 @@ text_style.text_inset_left,
                 );
                 state.last_apply_receipt = Some(receipt);
                 state.last_action_receipt = Some(action_receipt.clone());
-                cx.notify();
+                self.notify_semantic_change(cx);
                 action_receipt
             }
             Err(error) => {
@@ -3102,7 +2932,7 @@ text_style.text_inset_left,
                     error = %error,
                 );
                 state.last_action_receipt = Some(action_receipt.clone());
-                cx.notify();
+                self.notify_semantic_change(cx);
                 action_receipt
             }
         }
@@ -3192,7 +3022,7 @@ text_style.text_inset_left,
             error_code = ?receipt.error_code,
         );
 
-        cx.notify();
+        self.notify_semantic_change(cx);
         receipt
     }
 
@@ -3313,9 +3143,9 @@ text_style.text_inset_left,
             self.live_thread().update(cx, |thread, cx| {
                 thread.input.set_text(text);
                 thread.input.set_cursor(cursor);
-                cx.notify();
+                thread.notify_semantic_change(cx);
             });
-            cx.notify();
+            self.notify_semantic_change(cx);
             return true;
         }
 
@@ -3325,9 +3155,9 @@ text_style.text_inset_left,
         self.live_thread().update(cx, |thread, cx| {
             thread.input.set_text(text);
             thread.input.set_cursor(cursor);
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -3380,10 +3210,10 @@ text_style.text_inset_left,
             self.reset_composer_prompt_history_navigation();
             self.live_thread().update(cx, |thread, cx| {
                 thread.input.clear();
-                cx.notify();
+                thread.notify_semantic_change(cx);
             });
             self.refresh_agent_chat_spine_from_composer(cx);
-            cx.notify();
+            self.notify_semantic_change(cx);
             return true;
         }
 
@@ -3397,10 +3227,10 @@ text_style.text_inset_left,
         self.live_thread().update(cx, |thread, cx| {
             thread.input.set_text(text);
             thread.input.set_cursor(cursor);
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
         self.refresh_agent_chat_spine_from_composer(cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -4085,7 +3915,7 @@ text_style.text_inset_left,
 
         self.live_thread().update(cx, move |thread, cx| {
             thread.input.insert_str(&insertion_text);
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
 
         let part = crate::ai::message_parts::AiContextPart::FilePath {
@@ -4128,7 +3958,7 @@ text_style.text_inset_left,
 
         self.live_thread().update(cx, move |thread, cx| {
             thread.input.insert_str(&insertion_text);
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
 
         if let Some(token) = token {
@@ -4318,7 +4148,7 @@ text_style.text_inset_left,
                     target: "script_kit::keyboard",
                     event = "agent_chat_cmd_0_reset_agent_chat_zoom",
                 );
-                cx.notify();
+                self.notify_semantic_change(cx);
             }
             Err(error) => {
                 tracing::warn!(
@@ -4418,12 +4248,12 @@ text_style.text_inset_left,
                 thread.update(cx, |thread, cx| {
                     thread.input.set_text(String::new());
                     thread.input.set_cursor(0);
-                    cx.notify();
+                    thread.notify_semantic_change(cx);
                 });
             }
         }
         self.sync_agent_chat_popup_windows_from_cached_parent(cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn check_for_transient_exit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -4541,14 +4371,14 @@ text_style.text_inset_left,
 
     pub(crate) fn toggle_expanded_composer(&mut self, cx: &mut Context<Self>) {
         self.expanded_composer = !self.expanded_composer;
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(super) fn refresh_composer_picker_state_after_parent_change(
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Convert recent history entries into neutral hits (score 0, Title field).
@@ -4627,6 +4457,18 @@ text_style.text_inset_left,
                             return;
                         }
                     };
+                let Some(parent_generation) =
+                    crate::windows::automation_window_by_id(&parent_automation_id)
+                        .and_then(|parent| parent.generation)
+                else {
+                    return;
+                };
+                let Ok(host_policy) = crate::windows::runtime_window_host_policy(
+                    &parent_automation_id,
+                    parent_generation,
+                ) else {
+                    return;
+                };
                 let lifecycle = crate::components::inline_popup_window::InlinePopupLifecycle::new();
                 let generation =
                     crate::components::inline_popup_window::InlinePopupLifecycle::generation(
@@ -4636,6 +4478,8 @@ text_style.text_inset_left,
                     focus_return: crate::components::inline_popup_window::InlinePopupFocusReturn {
                         generation,
                         parent_automation_id: parent_automation_id.clone(),
+                        parent_generation,
+                        host_policy,
                         parent_window_handle: parent.handle,
                         focus_handle: self.focus_handle.clone(),
                         semantic_id: "input:agent-chat-composer",
@@ -4702,7 +4546,7 @@ text_style.text_inset_left,
                 callback(selected_profile_id.clone(), cx);
             });
         }
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(crate) fn select_history_from_popup(
@@ -4752,10 +4596,10 @@ text_style.text_inset_left,
         } else {
             self.live_thread().update(cx, |thread, cx| {
                 thread.input.set_text(entry.first_message.clone());
-                cx.notify();
+                thread.notify_semantic_change(cx);
             });
         }
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(crate) fn select_history_session_by_id(
@@ -4842,7 +4686,7 @@ text_style.text_inset_left,
             label_sha256 = %safe_label.sha256,
         );
 
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(())
     }
 
@@ -4875,7 +4719,7 @@ text_style.text_inset_left,
             hits,
         });
         self.sync_agent_chat_popup_windows_from_cached_parent(cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -4909,7 +4753,7 @@ text_style.text_inset_left,
             query,
             hits,
         });
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(crate) fn sync_history_popup_selection_from_window(
@@ -4936,7 +4780,7 @@ text_style.text_inset_left,
             selected_index.min(menu.hits.len().saturating_sub(1))
         };
         self.history_closed_at = None;
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(crate) fn open_history_popup_from_host(
@@ -4968,7 +4812,7 @@ text_style.text_inset_left,
             let hits = Self::recent_history_hits();
             if hits.is_empty() {
                 self.sync_history_popup_window_from_cached_parent(cx);
-                cx.notify();
+                self.notify_semantic_change(cx);
                 return;
             }
 
@@ -4983,7 +4827,7 @@ text_style.text_inset_left,
         }
 
         self.sync_agent_chat_popup_windows_from_cached_parent(cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn toggle_history_popup_from_cached_parent(&mut self, cx: &mut Context<Self>) {
@@ -5013,7 +4857,7 @@ text_style.text_inset_left,
             }
         }
         self.sync_agent_chat_popup_windows_from_cached_parent(cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(crate) fn toggle_history_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5042,7 +4886,7 @@ text_style.text_inset_left,
 
         if self.attach_menu_open {
             self.attach_menu_open = false;
-            cx.notify();
+            self.notify_semantic_change(cx);
             return true;
         }
 
@@ -5109,7 +4953,7 @@ text_style.text_inset_left,
         match decision {
             ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::BlockingModal) => {
                 self.permission_options_open = false;
-                cx.notify();
+                self.notify_semantic_change(cx);
                 ConversationCommandExecution::Executed
             }
             ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::Actions) => {
@@ -5120,7 +4964,7 @@ text_style.text_inset_left,
                 ConversationOverlayKind::AttachmentPortal,
             ) => {
                 self.pending_portal_session = None;
-                cx.notify();
+                self.notify_semantic_change(cx);
                 ConversationCommandExecution::Executed
             }
             ConversationDismissDecision::DismissOverlay(
@@ -5134,7 +4978,7 @@ text_style.text_inset_left,
             }
             ConversationDismissDecision::Blocked(reason) => {
                 self.command_status = Some(reason.as_str());
-                cx.notify();
+                self.notify_semantic_change(cx);
                 ConversationCommandExecution::Disabled(reason)
             }
             ConversationDismissDecision::DismissConversation => {
@@ -5170,7 +5014,7 @@ text_style.text_inset_left,
         ) {
             ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::BlockingModal) => {
                 self.permission_options_open = false;
-                cx.notify();
+                self.notify_semantic_change(cx);
                 false
             }
             ConversationDismissDecision::DismissOverlay(ConversationOverlayKind::Actions) => {
@@ -5181,7 +5025,7 @@ text_style.text_inset_left,
                 ConversationOverlayKind::AttachmentPortal,
             ) => {
                 self.pending_portal_session = None;
-                cx.notify();
+                self.notify_semantic_change(cx);
                 false
             }
             ConversationDismissDecision::DismissOverlay(
@@ -5192,7 +5036,7 @@ text_style.text_inset_left,
             }
             ConversationDismissDecision::Blocked(reason) => {
                 self.command_status = Some(reason.as_str());
-                cx.notify();
+                self.notify_semantic_change(cx);
                 false
             }
             ConversationDismissDecision::DismissConversation => {
@@ -5266,14 +5110,14 @@ text_style.text_inset_left,
                         thread.input.set_text(String::new());
                         thread.input.set_cursor(0);
                     }
-                    cx.notify();
+                    thread.notify_semantic_change(cx);
                 });
             }
             if insert_slash_input {
                 self.live_thread().update(cx, |thread, cx| {
                     thread.input.set_text("/".to_string());
                     thread.input.set_cursor(1);
-                    cx.notify();
+                    thread.notify_semantic_change(cx);
                 });
             }
         }
@@ -5284,7 +5128,7 @@ text_style.text_inset_left,
             self.sync_agent_chat_popup_windows_from_cached_parent(cx);
         }
         if notify {
-            cx.notify();
+            self.notify_semantic_change(cx);
         }
 
         accepted_session
@@ -5360,7 +5204,10 @@ text_style.text_inset_left,
 
     /// Set the context capture pending state (drives footer loading dot).
     pub(crate) fn set_context_capture_pending(&mut self, pending: bool) {
-        self.context_capture_pending = pending;
+        if self.context_capture_pending != pending {
+            self.context_capture_pending = pending;
+            self.advance_semantic_revision();
+        }
     }
 
     /// Prime the slash command picker to show `/{slash_name}` on first open.
@@ -5373,7 +5220,7 @@ text_style.text_inset_left,
         self.live_thread().update(cx, |thread, cx| {
             thread.input.set_text(prefill.clone());
             thread.input.set_cursor(prefill.chars().count());
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
         self.refresh_agent_chat_spine_from_composer(cx);
         self.refresh_composer_picker_session(cx);
@@ -5519,7 +5366,7 @@ text_style.text_inset_left,
         // One observer pass resyncs transcript/toolbar/composer from the
         // newly active thread.
         thread.update(cx, |_, cx| cx.notify());
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Start a fresh thread on a new Pi connection. The current thread keeps
@@ -6057,13 +5904,28 @@ text_style.text_inset_left,
             } => resolution_source.as_ref(),
             SpineListAction::OpenModeExit { .. } => "openModeExit",
             SpineListAction::OpenFileSearchPortal { .. } => "openFileSearchPortal",
+            SpineListAction::AcceptMenuSyntaxTrigger { .. } => "acceptMenuSyntaxTrigger",
+            SpineListAction::AcceptMenuSyntaxObject { .. } => "acceptMenuSyntaxObject",
+            SpineListAction::AttachContextResult { .. } => "attachContextResult",
             SpineListAction::Noop => "noop",
+        };
+        let owner_payload = match &row.action {
+            SpineListAction::AcceptMenuSyntaxTrigger { row_id }
+            | SpineListAction::AcceptMenuSyntaxObject { row_id } => row_id.as_ref(),
+            SpineListAction::AttachContextResult { source } => source.as_ref(),
+            _ => "",
         };
         Self::agent_chat_spine_hash_parts(&[
             row.id.to_string(),
+            row.title.to_string(),
+            row.subtitle
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
             kind.to_string(),
             row.is_selectable.to_string(),
             action.to_string(),
+            owner_payload.to_string(),
         ])
     }
 
@@ -6148,59 +6010,6 @@ text_style.text_inset_left,
         specs
     }
 
-    /// Redacted per-part identity for automation: kind/label/source, plus the
-    /// focused-target identity so probes can prove the RIGHT chip is staged
-    /// (e.g. the notes→main handoff's note part). Never part content.
-    fn context_part_identity_snapshot(
-        item: &crate::ai::staged_context::StagedContextItem,
-    ) -> crate::protocol::AgentChatContextPartSnapshot {
-        use crate::ai::message_parts::AiContextPart;
-        let part = &item.part;
-        let kind = match part {
-            AiContextPart::ResourceUri { .. } => "resourceUri",
-            AiContextPart::FilePath { .. } => "filePath",
-            AiContextPart::SkillFile { .. } => "skillFile",
-            AiContextPart::FocusedTarget { .. } => "focusedTarget",
-            AiContextPart::AmbientContext { .. } => "ambientContext",
-            AiContextPart::TextBlock { .. } => "textBlock",
-        };
-        let (target_kind, target_source, target_semantic_id) = match part {
-            AiContextPart::FocusedTarget { target, .. } => (
-                Some(target.kind.clone()),
-                Some(target.source.clone()),
-                Some(target.semantic_id.clone()),
-            ),
-            _ => (None, None, None),
-        };
-        let failure = item.state.failure();
-        let source_kind = format!("{:?}", item.source_kind());
-        crate::protocol::AgentChatContextPartSnapshot {
-            id: item.id.0.clone(),
-            kind: kind.to_string(),
-            label: item.display_label(),
-            source: source_kind,
-            source_fingerprint: crate::ai::reliability::redacted_fingerprint(part.source()),
-            provenance: item.provenance.as_str().to_string(),
-            role: item.role.as_str().to_string(),
-            state: item.state.as_str().to_string(),
-            lifetime: item.lifetime.as_str().to_string(),
-            removable: item.can_remove(),
-            generation: item.generation,
-            failure_code: failure.map(|record| format!("{:?}", record.failure.code)),
-            diagnostic_fingerprint: failure
-                .and_then(|record| record.failure.diagnostic.as_ref())
-                .map(|diagnostic| diagnostic.fingerprint.0.clone()),
-            target_kind,
-            target_source,
-            target_semantic_id: target_semantic_id.map(|semantic_id| {
-                format!(
-                    "fingerprint:{}",
-                    crate::ai::reliability::redacted_fingerprint(&semantic_id)
-                )
-            }),
-        }
-    }
-
     fn build_agent_chat_context_summary(
         pending_items: &[crate::ai::staged_context::StagedContextItem],
     ) -> Option<String> {
@@ -6276,7 +6085,7 @@ text_style.text_inset_left,
             if !is_session_thread {
                 // Background thread streamed; repaint so any visible unread
                 // badge stays current, but leave the shared UI alone.
-                cx.notify();
+                this.notify_semantic_change(cx);
                 return;
             }
 
@@ -6349,7 +6158,7 @@ text_style.text_inset_left,
                     event = "focused_text_mini_input_unlocked_focus_restore_queued",
                     phase = ?focused_text_phase,
                 );
-                cx.notify();
+                this.notify_semantic_change(cx);
             }
             this.focused_text_mini_input_locked =
                 focused_text_mini_active && focused_text_input_locked;
@@ -6400,11 +6209,12 @@ text_style.text_inset_left,
         // thread owns the immutable launch policy, so a live view can never be
         // constructed with a policy that diverges from the thread it wraps.
         let session_policy = thread.read(cx).session_policy();
+        let fixture_sources = thread.read(cx).is_provider_free_fixture();
         // Preflight only when launch did not already provide a model list. Quick AI
         // launches with a pinned model and auto-submits immediately; an unnecessary
         // refresh can queue ahead of that turn and make the following set_model RPC
         // hit its timeout while dynamic model discovery is still running.
-        if thread.read(cx).available_models().is_empty() {
+        if !fixture_sources && thread.read(cx).available_models().is_empty() {
             thread.update(cx, |thread, cx| thread.refresh_models(cx));
         }
 
@@ -6420,6 +6230,9 @@ text_style.text_inset_left,
         // Defer slash command discovery (filesystem I/O) to after the first
         // render frame so the view switch is not blocked by skill enumeration.
         let slash_task = cx.spawn(async move |this, cx| {
+            if fixture_sources {
+                return;
+            }
             // Yield to let the initial render happen first.
             cx.background_executor()
                 .timer(Duration::from_millis(1))
@@ -6432,7 +6245,7 @@ text_style.text_inset_left,
                     if !view.agent_chat_spine_owns_list() {
                         view.refresh_composer_picker_session(cx);
                     }
-                    cx.notify();
+                    view.notify_semantic_change(cx);
                 })
             });
         });
@@ -6455,7 +6268,14 @@ text_style.text_inset_left,
             attach_menu_open: false,
             message_queue_expanded: false,
             search_state: None,
-            cached_slash_commands: Vec::new(),
+            cached_slash_commands: if fixture_sources {
+                Self::DEFAULT_SLASH_COMMANDS
+                    .iter()
+                    .map(|command| SlashCommandEntry::default_command(command))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             _slash_discovery_task: slash_task,
             composer_picker_session: None,
             expanded_composer: false,
@@ -6483,7 +6303,7 @@ text_style.text_inset_left,
             focused_text_instruction_history: Vec::new(),
             focused_text_instruction_history_index: None,
             focused_text_instruction_history_draft: None,
-            composer_prompt_history: None,
+            composer_prompt_history: fixture_sources.then(|| vec!["Fixture follow-up".to_string()]),
             composer_prompt_history_index: None,
             scope_input: String::new(),
             scope_visible: false,
@@ -6517,6 +6337,9 @@ text_style.text_inset_left,
             footer_owner: None,
             last_footer_presentation: None,
             runtime_setup_active_seen: false,
+            rendered_theme_revision: None,
+            semantic_revision: 1,
+            last_notified_semantic_state: None,
         }
     }
 
@@ -6631,6 +6454,9 @@ text_style.text_inset_left,
             footer_owner: None,
             last_footer_presentation: None,
             runtime_setup_active_seen: false,
+            rendered_theme_revision: None,
+            semantic_revision: 1,
+            last_notified_semantic_state: None,
         }
     }
 
@@ -6874,7 +6700,7 @@ text_style.text_inset_left,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.is_setup_mode() {
-            cx.notify();
+            self.notify_semantic_change(cx);
             return true;
         }
 
@@ -6890,7 +6716,7 @@ text_style.text_inset_left,
             self.permission_index =
                 Self::step_permission_index(self.permission_index, option_count, has_shift);
             self.permission_options_open = option_count > 1;
-            cx.notify();
+            self.notify_semantic_change(cx);
             return true;
         }
 
@@ -6944,7 +6770,7 @@ text_style.text_inset_left,
             return true;
         }
 
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -7092,6 +6918,73 @@ text_style.text_inset_left,
         self.set_input(value, cx);
     }
 
+    pub(crate) fn owned_dictation_observation(
+        &self,
+        cx: &App,
+    ) -> Option<AgentChatOwnedDictationObservation> {
+        let thread = self.thread()?;
+        let thread = thread.read(cx);
+        let selection = thread.input.selection();
+        let parent = self.composer_parent_window.as_ref().and_then(|parent| {
+            crate::windows::automation_runtime_handles::runtime_window_instances()
+                .into_iter()
+                .find(|(id, generation, _)| {
+                    crate::windows::automation_runtime_handles::get_runtime_window_handle_for_generation(id, *generation)
+                        == Some(parent.handle)
+                })
+        });
+        let (parent_window_id, parent_window_generation) = parent
+            .map(|(id, generation, _)| (Some(id), Some(generation)))
+            .unwrap_or((None, None));
+        Some(AgentChatOwnedDictationObservation {
+            input: thread.input.text().to_owned(),
+            selection_start: selection.anchor.min(selection.cursor),
+            selection_end: selection.anchor.max(selection.cursor),
+            parent_window_id,
+            parent_window_generation,
+        })
+    }
+
+    pub(crate) fn insert_owned_dictation_text(
+        &mut self,
+        expected_thread_id: &str,
+        expected_semantic_token: u64,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(usize, usize), String> {
+        crate::runtime_policy::WindowHostPolicy::OwnedHidden
+            .validate()
+            .map_err(|error| error.to_string())?;
+        if text.is_empty() || text.len() > 64 * 1024 {
+            return Err("invalid_dictation_transcript".into());
+        }
+        if self.semantic_token(cx) != expected_semantic_token {
+            return Err("dictation_destination_stale".into());
+        }
+        let thread = self.thread().ok_or("dictation_destination_unavailable")?;
+        if thread.read(cx).ui_thread_id() != expected_thread_id
+            || !thread.read(cx).is_provider_free_fixture()
+        {
+            return Err("dictation_destination_stale".into());
+        }
+        self.cache_composer_parent_window(window, cx);
+        let (start, end) = thread.update(cx, |thread, cx| {
+            let selection = thread.input.selection();
+            let start = selection.anchor.min(selection.cursor);
+            thread.input.insert_str(text);
+            let end = thread.input.cursor();
+            thread.notify_semantic_change(cx);
+            (start, end)
+        });
+        self.refresh_agent_chat_spine_from_composer(cx);
+        if !self.agent_chat_spine_owns_list() {
+            self.refresh_composer_picker_session(cx);
+        }
+        self.notify_semantic_change(cx);
+        Ok((start, end))
+    }
+
     /// Apply a saved AI preset (from the Search AI Presets built-in) to this
     /// Agent Chat conversation.
     ///
@@ -7144,7 +7037,7 @@ text_style.text_inset_left,
             item_ix,
             offset_in_item: px(offset_px),
         });
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(())
     }
 
@@ -7346,7 +7239,7 @@ text_style.text_inset_left,
             }
         }
 
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(())
     }
 
@@ -7401,7 +7294,7 @@ text_style.text_inset_left,
             );
             thread.input.set_text(staged_text.clone());
             thread.input.set_cursor(staged_cursor);
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
 
         for (inline_token, part) in staged_aliases {
@@ -7414,7 +7307,7 @@ text_style.text_inset_left,
             source,
             token_count = self.inline_owned_context_tokens.len(),
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(())
     }
 
@@ -7484,7 +7377,7 @@ text_style.text_inset_left,
                 thread.input.set_text(new_text);
                 thread.input.set_cursor(cursor);
             }
-            cx.notify();
+            thread.notify_semantic_change(cx);
             Ok::<_, String>(staged)
         })?;
 
@@ -7505,7 +7398,7 @@ text_style.text_inset_left,
             context_item_id_bytes = safe_context_item_id.raw_bytes,
             context_item_id_sha256 = %safe_context_item_id.sha256,
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(staged)
     }
 
@@ -7560,7 +7453,7 @@ text_style.text_inset_left,
                     }
                 })
                 .collect::<Vec<_>>();
-            cx.notify();
+            thread.notify_semantic_change(cx);
             outcomes
         });
         tracing::info!(
@@ -7570,7 +7463,7 @@ text_style.text_inset_left,
             part_count = count,
             accepted_count = outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(outcomes)
     }
 
@@ -7650,7 +7543,7 @@ text_style.text_inset_left,
             );
             thread.input.set_text(input);
             thread.input.set_cursor(cursor);
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
 
         tracing::info!(
@@ -7663,7 +7556,7 @@ text_style.text_inset_left,
             context_status = "captured",
             capture_truncated,
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(())
     }
 
@@ -7723,7 +7616,7 @@ text_style.text_inset_left,
             thread.replace_pending_context_parts(Vec::new(), source, cx);
             thread.input.set_text(input);
             thread.input.set_cursor(cursor);
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
 
         tracing::info!(
@@ -7734,7 +7627,7 @@ text_style.text_inset_left,
             context_status = "captureFailed",
             reason_code,
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(())
     }
 
@@ -7753,7 +7646,7 @@ text_style.text_inset_left,
         });
         self.sync_inline_mentions(cx);
         self.sync_agent_chat_popup_windows_from_cached_parent(cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Stage a plugin skill exactly like accepting it from the Agent Chat slash picker.
@@ -7819,7 +7712,7 @@ text_style.text_inset_left,
             thread.input.set_text(command_text.clone());
             thread.input.set_cursor(cursor_after);
             thread.mark_context_bootstrap_ready(cx);
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
 
         tracing::info!(
@@ -7951,7 +7844,7 @@ text_style.text_inset_left,
                 );
                 return Err(error.to_string());
             }
-            cx.notify();
+            thread.notify_semantic_change(cx);
             Ok::<(), String>(())
         })?;
 
@@ -7962,7 +7855,7 @@ text_style.text_inset_left,
             token_count = self.inline_owned_context_tokens.len(),
             intent_len,
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
         Ok(())
     }
 
@@ -7975,7 +7868,7 @@ text_style.text_inset_left,
                 event = "agent_chat_picker_trigger_ignored_setup_mode",
                 trigger,
             );
-            cx.notify();
+            self.notify_semantic_change(cx);
             return;
         }
 
@@ -8042,7 +7935,7 @@ text_style.text_inset_left,
             self.composer_picker_session = None;
             self.dismissed_mention_trigger = None;
         }
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(crate) fn agent_chat_spine_owns_list(&self) -> bool {
@@ -8090,7 +7983,7 @@ text_style.text_inset_left,
         if len == 0 {
             self.composer_spine.selected_index = 0;
             self.composer_spine.visible_start = 0;
-            cx.notify();
+            self.notify_semantic_change(cx);
             return;
         }
         let current = self.composer_spine.selected_index.min(len - 1);
@@ -8110,7 +8003,7 @@ text_style.text_inset_left,
             8,
         );
         self.composer_spine.visible_start = visible.start;
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn selected_agent_chat_spine_row(&self) -> Option<SpineListRow> {
@@ -8280,7 +8173,7 @@ text_style.text_inset_left,
                     // Bump the view so the script-app observer re-snapshots
                     // the footer with the new thread.cwd(); otherwise the
                     // stored snapshot keeps the prior cwd_display.
-                    cx.notify();
+                    self.notify_semantic_change(cx);
                     return ok;
                 }
                 if resolution_source.as_ref() == "file" {
@@ -8345,7 +8238,7 @@ text_style.text_inset_left,
                                 ContextRole::Supplemental,
                                 cx,
                             );
-                            cx.notify();
+                            thread.notify_semantic_change(cx);
                         });
                         self.sync_inline_mentions(cx);
                         let safe_flow =
@@ -8384,7 +8277,7 @@ text_style.text_inset_left,
                                 ContextRole::Supplemental,
                                 cx,
                             );
-                            cx.notify();
+                            thread.notify_semantic_change(cx);
                         });
                         self.sync_inline_mentions(cx);
                     }
@@ -8418,7 +8311,11 @@ text_style.text_inset_left,
                 }
                 ok
             }
-            SpineListAction::OpenModeExit { .. } | SpineListAction::Noop => false,
+            SpineListAction::OpenModeExit { .. }
+            | SpineListAction::Noop
+            | SpineListAction::AcceptMenuSyntaxTrigger { .. }
+            | SpineListAction::AcceptMenuSyntaxObject { .. }
+            | SpineListAction::AttachContextResult { .. } => false,
         }
     }
 
@@ -8463,7 +8360,7 @@ text_style.text_inset_left,
         self.live_thread().update(cx, |thread, cx| {
             thread.input.set_text(next_text);
             thread.input.set_cursor(next_cursor);
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
         self.refresh_agent_chat_spine_from_composer(cx);
         true
@@ -8473,7 +8370,7 @@ text_style.text_inset_left,
         self.composer_spine.clear();
         self.composer_picker_session = None;
         self.dismissed_mention_trigger = None;
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// If the cursor sits immediately after a resolved sigil segment (with
@@ -8526,7 +8423,7 @@ text_style.text_inset_left,
             thread_entity.update(cx, |thread, cx| {
                 thread.input.set_text(next_text);
                 thread.input.set_cursor(next_cursor);
-                cx.notify();
+                thread.notify_semantic_change(cx);
             });
         }
         self.refresh_agent_chat_spine_from_composer(cx);
@@ -8587,7 +8484,7 @@ text_style.text_inset_left,
             return false;
         }
         self.composer_spine.clear();
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -9282,7 +9179,7 @@ text_style.text_inset_left,
                     self.scope_focused = false;
                     self.live_thread().update(cx, |thread, cx| {
                         thread.input.clear();
-                        cx.notify();
+                        thread.notify_semantic_change(cx);
                     });
                     self.resize_focused_text_mini_for_scope_change(&*cx);
                 }
@@ -9325,7 +9222,7 @@ text_style.text_inset_left,
     ) -> bool {
         let Some(variation) = self.focused_text_variations.get_mut(index) else {
             self.focused_text_editing_variation = None;
-            cx.notify();
+            self.notify_semantic_change(cx);
             return false;
         };
         edit(&mut variation.text);
@@ -9333,7 +9230,7 @@ text_style.text_inset_left,
         variation.error = None;
         self.focused_text_selected_variation = Some(index);
         self.cursor_visible = true;
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -9351,7 +9248,7 @@ text_style.text_inset_left,
         if index >= self.focused_text_variations.len() {
             self.focused_text_selected_variation = None;
             self.focused_text_editing_variation = None;
-            cx.notify();
+            self.notify_semantic_change(cx);
             return false;
         }
         self.focused_text_editing_variation = Some(index);
@@ -9364,14 +9261,14 @@ text_style.text_inset_left,
             angle = self.focused_text_variations[index].angle.id(),
             text_len = self.focused_text_variations[index].text.chars().count(),
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
     pub(crate) fn exit_focused_text_variation_editor(&mut self, cx: &mut Context<Self>) -> bool {
         if self.focused_text_editing_variation.take().is_some() {
             self.cursor_visible = true;
-            cx.notify();
+            self.notify_semantic_change(cx);
             true
         } else {
             false
@@ -9392,7 +9289,7 @@ text_style.text_inset_left,
             || index >= self.focused_text_variations.len()
         {
             self.focused_text_editing_variation = None;
-            cx.notify();
+            self.notify_semantic_change(cx);
             return false;
         }
 
@@ -9415,7 +9312,7 @@ text_style.text_inset_left,
                 self.cursor_visible = true;
                 self.trigger_close_window_requested(window, cx);
             }
-            cx.notify();
+            self.notify_semantic_change(cx);
             return true;
         }
 
@@ -9504,7 +9401,7 @@ text_style.text_inset_left,
             if self.scope_focused {
                 self.scope_focused = false;
                 self.cursor_visible = true;
-                cx.notify();
+                self.notify_semantic_change(cx);
                 return true;
             }
             return false;
@@ -9516,7 +9413,7 @@ text_style.text_inset_left,
         if !was_visible {
             self.resize_focused_text_mini_for_scope_change(&*cx);
         }
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -9559,7 +9456,7 @@ text_style.text_inset_left,
                     let normalized = Self::normalize_focused_text_scope_input(&text);
                     if !normalized.is_empty() {
                         self.scope_input.push_str(&normalized);
-                        cx.notify();
+                        self.notify_semantic_change(cx);
                     }
                 }
             }
@@ -9567,7 +9464,7 @@ text_style.text_inset_left,
         }
         if crate::ui_foundation::is_key_backspace(key) {
             self.scope_input.pop();
-            cx.notify();
+            self.notify_semantic_change(cx);
             return true;
         }
         if crate::ui_foundation::is_key_delete(key) {
@@ -9591,7 +9488,7 @@ text_style.text_inset_left,
             if !ch.is_empty() {
                 self.scope_input
                     .push_str(&Self::normalize_focused_text_scope_input(ch));
-                cx.notify();
+                self.notify_semantic_change(cx);
                 return true;
             }
         }
@@ -10076,7 +9973,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                         window.focus(&chat.focus_handle, cx);
                         chat.scope_focused = false;
                         chat.cursor_visible = true;
-                        cx.notify();
+                        chat.notify_semantic_change(cx);
                     });
                 }
             })
@@ -10164,7 +10061,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                                 chat.scope_visible = true;
                                 chat.scope_focused = true;
                                 chat.cursor_visible = true;
-                                cx.notify();
+                                chat.notify_semantic_change(cx);
                             });
                         }
                     })
@@ -10533,7 +10430,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                                         if !text.is_empty() {
                                             this.live_thread().update(cx, |thread, cx| {
                                                 thread.input.insert_str(&text);
-                                                cx.notify();
+                                                thread.notify_semantic_change(cx);
                                             });
                                             this.refresh_agent_chat_spine_from_composer(cx);
                                             if !this.agent_chat_spine_owns_list() {
@@ -10544,7 +10441,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                                     }
                                 }
                                 this.attach_menu_open = false;
-                                cx.notify();
+                                this.notify_semantic_change(cx);
                             }))
                             .child(
                                 div()
@@ -10572,7 +10469,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                                 // Insert a hint about the screenshot path
                                 this.live_thread().update(cx, |thread, cx| {
                                     thread.input.insert_str("What's on my screen? ");
-                                    cx.notify();
+                                    thread.notify_semantic_change(cx);
                                 });
                                 this.refresh_agent_chat_spine_from_composer(cx);
                                 if !this.agent_chat_spine_owns_list() {
@@ -10580,7 +10477,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                                 }
                                 this.attach_menu_open = false;
                                 this.cursor_visible = true;
-                                cx.notify();
+                                this.notify_semantic_change(cx);
                             }))
                             .child(
                                 div()
@@ -10762,7 +10659,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
         if self.agent_chat_spine_owns_list() {
             self.composer_picker_session = None;
             self.dismissed_mention_trigger = None;
-            cx.notify();
+            self.notify_semantic_change(cx);
             return;
         }
 
@@ -10774,7 +10671,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                     target: "script_kit::tab_ai",
                     event = "agent_chat_composer_picker_cleared_setup_mode",
                 );
-                cx.notify();
+                self.notify_semantic_change(cx);
             }
             return;
         }
@@ -10971,7 +10868,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
         self.live_thread().update(cx, |thread, cx| {
             thread.input.set_text(next_text);
             thread.input.set_cursor(next_cursor);
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
         self.refresh_agent_chat_spine_from_composer(cx);
         if !self.agent_chat_spine_owns_list() {
@@ -11004,7 +10901,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
         self.live_thread().update(cx, |thread, cx| {
             thread.input.set_text(next_text);
             thread.input.set_cursor(next_cursor);
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
         tracing::info!(
             target: "script_kit::tab_ai",
@@ -11202,7 +11099,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                             if submit {
                                 let _ = thread.submit_input(cx);
                             } else {
-                                cx.notify();
+                                thread.notify_semantic_change(cx);
                             }
                         });
                     }
@@ -11251,7 +11148,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                             if submit {
                                 let _ = thread.submit_input(cx);
                             } else {
-                                cx.notify();
+                                thread.notify_semantic_change(cx);
                             }
                         });
                     }
@@ -11299,13 +11196,13 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                             if submit {
                                 let _ = thread.submit_input(cx);
                             } else {
-                                cx.notify();
+                                thread.notify_semantic_change(cx);
                             }
                         });
                     }
                 }
                 self.refresh_composer_picker_state_after_parent_change(cx);
-                cx.notify();
+                self.notify_semantic_change(cx);
                 return;
             }
         }
@@ -11325,11 +11222,11 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                 self.live_thread().update(cx, |thread, cx| {
                     thread.input.set_text(next_text);
                     thread.input.set_cursor(next_cursor);
-                    cx.notify();
+                    thread.notify_semantic_change(cx);
                 });
                 self.select_profile_from_popup(&profile_id, cx);
                 self.refresh_composer_picker_state_after_parent_change(cx);
-                cx.notify();
+                self.notify_semantic_change(cx);
                 return;
             }
         }
@@ -11352,7 +11249,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                 self.live_thread().update(cx, |thread, cx| {
                     thread.input.set_text(next_text);
                     thread.input.set_cursor(next_cursor);
-                    cx.notify();
+                    thread.notify_semantic_change(cx);
                 });
                 tracing::info!(
                     target: "script_kit::tab_ai",
@@ -11565,7 +11462,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                 ContextRole::Supplemental,
                 cx,
             );
-            cx.notify();
+            thread.notify_semantic_change(cx);
         });
 
         // Register typed alias for non-builtin parts so the parser can
@@ -11625,7 +11522,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                 source_bytes = safe_source.raw_bytes,
                 source_sha256 = %safe_source.sha256,
             );
-            cx.notify();
+            self.notify_semantic_change(cx);
         }
         self.refresh_composer_picker_state_after_parent_change(cx);
     }
@@ -11816,6 +11713,13 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
     const FOCUSED_TEXT_VARIATION_AREA_PADDING_Y: f32 = 8.0;
     const FOCUSED_TEXT_VARIATION_AREA_MAX_HEIGHT: f32 = 500.0;
 
+    pub(crate) fn setup_semantic_elements(&self, cx: &App) -> Vec<crate::protocol::ElementInfo> {
+        self.setup_card
+            .as_ref()
+            .map(|card| card.read(cx).collect_semantic_elements())
+            .unwrap_or_default()
+    }
+
     fn ensure_setup_card(
         &mut self,
         state: &super::setup_state::AgentChatInlineSetupState,
@@ -11833,7 +11737,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
             }
             AgentChatSetupCardEvent::CancelPicker => {
                 this.composer_picker_session = None;
-                cx.notify();
+                this.notify_semantic_change(cx);
             }
             AgentChatSetupCardEvent::ActivateAction(action) => {
                 this.handle_setup_action(*action, cx);
@@ -12026,7 +11930,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
             session_id = %session_id,
         );
         self.pending_history_resume = Some(AgentChatHistoryResumeRequest { session_id });
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Take the pending history resume request, if any. Used by the Agent Chat
@@ -12054,7 +11958,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                 session_id = %session_id,
                 message_count = conv.messages.len(),
             );
-            cx.notify();
+            self.notify_semantic_change(cx);
             true
         } else {
             tracing::warn!(
@@ -12176,7 +12080,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
 
         self.sync_inline_mentions(cx);
         self.sync_agent_chat_popup_windows_from_cached_parent(cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     pub(crate) fn restore_retry_draft_state(
@@ -12221,7 +12125,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
             input_len,
             token_count = self.inline_owned_context_tokens.len(),
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Queue an explicit relaunch payload from the current setup state.
@@ -12263,7 +12167,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
         match &mut self.session {
             AgentChatSession::Setup(setup) => {
                 **setup = next;
-                cx.notify();
+                self.notify_semantic_change(cx);
             }
             AgentChatSession::Live(thread) => {
                 thread.update(cx, |thread, cx| {
@@ -12325,7 +12229,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
             needs_embedded_context = setup.launch_requirements.needs_embedded_context,
             needs_image = setup.launch_requirements.needs_image,
         );
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     /// Handle a setup action triggered by the user.
@@ -12334,6 +12238,18 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
         action: super::setup_state::AgentChatSetupAction,
         cx: &mut Context<Self>,
     ) {
+        if crate::runtime_policy::is_owned_evaluation()
+            && matches!(
+                action,
+                super::setup_state::AgentChatSetupAction::Install
+                    | super::setup_state::AgentChatSetupAction::Authenticate
+                    | super::setup_state::AgentChatSetupAction::OpenCatalog
+            )
+        {
+            self.command_status = Some("External setup is unavailable in an owned fixture");
+            self.notify_semantic_change(cx);
+            return;
+        }
         match action {
             super::setup_state::AgentChatSetupAction::SelectAgent => {
                 self.open_setup_agent_picker(cx);
@@ -12409,7 +12325,7 @@ crate::components::main_view_chrome::MainViewInputShellIds::new(
                 if let Some(card) = &self.setup_card {
                     card.update(cx, |view, cx| view.set_agent_picker(None, cx));
                 }
-                cx.notify();
+                self.notify_semantic_change(cx);
                 tracing::info!(
                     target: "script_kit::tab_ai",
                     event = "agent_chat_setup_action_completed",
@@ -12821,14 +12737,14 @@ impl AgentChatView {
         // ── Attach menu dismiss on Escape ───────────────────────
         if self.attach_menu_open && crate::ui_foundation::is_key_escape(key) {
             self.attach_menu_open = false;
-            cx.notify();
+            self.notify_semantic_change(cx);
             cx.stop_propagation();
             return;
         }
         // Close attach menu on any non-modifier key
         if self.attach_menu_open {
             self.attach_menu_open = false;
-            cx.notify();
+            self.notify_semantic_change(cx);
         }
 
         // ── Cmd+F → toggle search ────────────────────────────
@@ -12838,7 +12754,7 @@ impl AgentChatView {
             } else {
                 self.search_state = Some((String::new(), 0));
             }
-            cx.notify();
+            self.notify_semantic_change(cx);
             cx.stop_propagation();
             return;
         }
@@ -12852,7 +12768,7 @@ impl AgentChatView {
         if let Some((ref mut query, ref mut match_idx)) = self.search_state {
             if crate::ui_foundation::is_key_escape(key) {
                 self.search_state = None;
-                cx.notify();
+                self.notify_semantic_change(cx);
                 cx.stop_propagation();
                 return;
             }
@@ -12884,14 +12800,14 @@ impl AgentChatView {
                         }
                     }
                 }
-                cx.notify();
+                self.notify_semantic_change(cx);
                 cx.stop_propagation();
                 return;
             }
             if crate::ui_foundation::is_key_backspace(key) {
                 query.pop();
                 *match_idx = 0;
-                cx.notify();
+                self.notify_semantic_change(cx);
                 cx.stop_propagation();
                 return;
             }
@@ -12899,7 +12815,7 @@ impl AgentChatView {
                 if !ch.is_empty() && !modifiers.platform && !modifiers.control {
                     query.push_str(ch);
                     *match_idx = 0;
-                    cx.notify();
+                    self.notify_semantic_change(cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -13098,7 +13014,7 @@ impl AgentChatView {
                 if let Some(transcript) = &self.transcript {
                     transcript.read(cx).scroll_to_reveal_item(target);
                 }
-                cx.notify();
+                self.notify_semantic_change(cx);
             }
             cx.stop_propagation();
             return;
@@ -13121,7 +13037,7 @@ impl AgentChatView {
                         .read(cx)
                         .scroll_to_reveal_item(search_start + offset);
                 }
-                cx.notify();
+                self.notify_semantic_change(cx);
             }
             cx.stop_propagation();
             return;
@@ -13265,7 +13181,7 @@ impl AgentChatView {
         // ── Cmd+N → new thread (current keeps streaming in background) ──
         if modifiers.platform && key.eq_ignore_ascii_case("n") {
             self.start_new_thread(cx);
-            cx.notify();
+            self.notify_semantic_change(cx);
             cx.stop_propagation();
             return;
         }
@@ -13429,7 +13345,7 @@ impl AgentChatView {
         if crate::ui_foundation::is_key_enter(key) && modifiers.shift {
             self.live_thread().update(cx, |thread, cx| {
                 thread.input.insert_char('\n');
-                cx.notify();
+                thread.notify_semantic_change(cx);
             });
             self.refresh_agent_chat_spine_from_composer(cx);
             if !self.agent_chat_spine_owns_list() {
@@ -13476,7 +13392,7 @@ impl AgentChatView {
                         self.scope_focused = false;
                         self.live_thread().update(cx, |thread, cx| {
                             thread.input.clear();
-                            cx.notify();
+                            thread.notify_semantic_change(cx);
                         });
                         self.resize_focused_text_mini_for_scope_change(&*cx);
                     }
@@ -13743,7 +13659,7 @@ impl AgentChatView {
                 self.live_thread().update(cx, |thread, cx| {
                     thread.input.set_text(next_text);
                     thread.input.set_cursor(next_cursor);
-                    cx.notify();
+                    thread.notify_semantic_change(cx);
                 });
                 self.refresh_agent_chat_spine_from_composer(cx);
                 if !self.agent_chat_spine_owns_list() {
@@ -13751,7 +13667,7 @@ impl AgentChatView {
                 }
                 self.sync_pasted_clipboard_tokens(cx);
                 self.sync_inline_mentions(cx);
-                cx.notify();
+                self.notify_semantic_change(cx);
                 self.check_for_transient_exit(window, cx);
                 cx.stop_propagation();
                 return;
@@ -13768,7 +13684,7 @@ impl AgentChatView {
                 self.live_thread().update(cx, |thread, cx| {
                     thread.input.set_text(next_text);
                     thread.input.set_cursor(next_cursor);
-                    cx.notify();
+                    thread.notify_semantic_change(cx);
                 });
                 self.refresh_agent_chat_spine_from_composer(cx);
                 if !self.agent_chat_spine_owns_list() {
@@ -13776,7 +13692,7 @@ impl AgentChatView {
                 }
                 self.sync_pasted_clipboard_tokens(cx);
                 self.sync_inline_mentions(cx);
-                cx.notify();
+                self.notify_semantic_change(cx);
                 self.check_for_transient_exit(window, cx);
                 cx.stop_propagation();
                 return;
@@ -13801,14 +13717,14 @@ impl AgentChatView {
                 self.live_thread().update(cx, |thread, cx| {
                     thread.input.set_text(next_text);
                     thread.input.set_cursor(next_cursor);
-                    cx.notify();
+                    thread.notify_semantic_change(cx);
                 });
                 self.refresh_agent_chat_spine_from_composer(cx);
                 if !self.agent_chat_spine_owns_list() {
                     self.refresh_composer_picker_session(cx);
                 }
                 self.sync_inline_mentions(cx);
-                cx.notify();
+                self.notify_semantic_change(cx);
                 self.check_for_transient_exit(window, cx);
                 cx.stop_propagation();
                 return;
@@ -13839,7 +13755,7 @@ impl AgentChatView {
             }
             self.live_thread().update(cx, |thread, cx| {
                 thread.input = input_snapshot;
-                cx.notify();
+                thread.notify_semantic_change(cx);
             });
             self.sync_pasted_clipboard_tokens(cx);
             self.refresh_agent_chat_spine_from_composer(cx);
@@ -13863,6 +13779,7 @@ impl Focusable for AgentChatView {
 
 impl Render for AgentChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.rendered_theme_revision = Some(crate::theme::get_theme_snapshot().revision);
         self.ensure_host_activation_subscription(window, cx);
         self.sync_host_window_state(window, cx);
 
@@ -13875,8 +13792,7 @@ impl Render for AgentChatView {
         let is_setup_mode = self.is_setup_mode();
         // Setup mode has no live thread, so only peek for a runtime
         // `SetupRequired` when we are NOT already in session-level setup.
-        let runtime_setup_active =
-            !is_setup_mode && self.live_thread().read(cx).setup_state().is_some();
+        let runtime_setup_active = !is_setup_mode && self.shows_setup_card(cx);
         let focused_text_active =
             ui_variant == AgentChatUiVariant::FocusedTextMini && !is_setup_mode;
         let plan = crate::ai::agent_chat::ui::layout::ResolvedAgentChatRenderPlan::resolve(
@@ -14613,6 +14529,7 @@ include!("view_history_navigation.rs");
 include!("view_permission_actions.rs");
 include!("view_spine_rich_results.rs");
 include!("view_recovery_and_transient.rs");
+include!("view_semantic_identity.rs");
 
 #[cfg(test)]
 include!("view_inline_tests.rs");

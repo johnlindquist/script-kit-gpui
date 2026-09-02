@@ -19,6 +19,8 @@ pub(crate) fn spawn_hosted_thread(
     requirements: AgentChatLaunchRequirements,
     cx: &mut App,
 ) -> Result<Entity<AgentChatThread>, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+        .map_err(|error| error.to_string())?;
     let profile_ctx = crate::ai::agent_chat::profiles::AgentChatProfileContext::from_setup();
     let ai_preferences = crate::config::load_user_preferences().ai;
     let pi_launch =

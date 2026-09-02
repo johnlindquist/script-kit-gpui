@@ -178,6 +178,7 @@ pub struct AgentChatTranscript {
     /// the permanent synthetic tail row so visibility changes do not reset the
     /// whole measured list.
     show_activity_row: bool,
+    interaction_revision: std::cell::Cell<u64>,
 }
 
 impl AgentChatTranscript {
@@ -206,6 +207,7 @@ impl AgentChatTranscript {
             ui_variant: AgentChatUiVariant::Standard,
             anchor,
             show_activity_row: false,
+            interaction_revision: std::cell::Cell::new(0),
         };
         transcript.reconcile_message_views(cx);
         transcript
@@ -525,77 +527,6 @@ impl AgentChatTranscript {
         }
         self.thread_status = thread_status;
         cx.notify();
-    }
-
-    pub fn toggle_collapsed(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.collapsed_ids.contains(&id) {
-            self.collapsed_ids.remove(&id);
-        } else {
-            self.collapsed_ids.insert(id);
-        }
-        cx.notify();
-    }
-
-    fn expand_heavy_markdown(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.expanded_heavy_markdown_ids.insert(id) {
-            self.reconcile_message_views(cx);
-            cx.notify();
-        }
-    }
-
-    /// Whether a collapsible message renders expanded by default, before any
-    /// user toggle. Edit diffs and failed tools surface their body immediately;
-    /// everything else starts collapsed.
-    fn default_expanded(msg: &AgentChatThreadMessage) -> bool {
-        msg.tool_meta
-            .as_ref()
-            .is_some_and(|meta| meta.diff.is_some() || meta.is_error)
-    }
-
-    /// `collapsed_ids` records user toggles, so the effective state is the
-    /// default expansion XOR a recorded toggle.
-    fn is_collapsed_for(msg: &AgentChatThreadMessage, toggled: &HashSet<u64>) -> bool {
-        let is_collapsible = matches!(
-            msg.role,
-            AgentChatThreadMessageRole::Thought | AgentChatThreadMessageRole::Tool
-        );
-        if !is_collapsible {
-            return false;
-        }
-        let expanded = Self::default_expanded(msg) ^ toggled.contains(&msg.id);
-        !expanded
-    }
-
-    pub fn clear_collapsed_ids(&mut self, cx: &mut Context<Self>) {
-        self.collapsed_ids.clear();
-        cx.notify();
-    }
-
-    pub fn expand_ids(&mut self, ids: Vec<u64>, cx: &mut Context<Self>) {
-        self.collapsed_ids.extend(ids);
-        cx.notify();
-    }
-
-    pub fn scroll_to_reveal_item(&self, index: usize) {
-        // Revealing a specific item is a manual navigation: stop following the
-        // tail so a later stream chunk does not snap the reader away.
-        self.list_state.set_follow_tail(false);
-        self.list_state.scroll_to_reveal_item(index);
-    }
-
-    pub fn logical_scroll_top(&self) -> ListOffset {
-        self.list_state.logical_scroll_top()
-    }
-
-    pub fn scroll_to(&self, offset: ListOffset) {
-        self.list_state.set_follow_tail(false);
-        self.list_state.scroll_to(offset);
-    }
-
-    /// Explicitly resume tail-following. `set_follow_tail(true)` snaps the list
-    /// to the end, so the next paint shows the newest message.
-    pub fn scroll_to_end(&self) {
-        self.list_state.set_follow_tail(true);
     }
 
     pub(crate) fn scroll_metrics(&self) -> crate::protocol::AgentChatTranscriptScrollMetrics {
@@ -1246,8 +1177,8 @@ impl AgentChatTranscript {
                 },
             )
             .rounded(px(assistant_style.radius))
-            .when(assistant_style.bg_alpha > 0.0, |d| {
-                d.bg(rgba(style_contract::pack_rgb_alpha(
+            .when(assistant_style.bg_alpha.get() > 0, |d| {
+                d.bg(rgba(crate::theme::pack_rgb_alpha(
                     theme.colors.text.primary,
                     assistant_style.bg_alpha,
                 )))
@@ -1990,6 +1921,8 @@ impl Render for AgentChatTranscript {
             )
     }
 }
+
+include!("transcript_interactions.rs");
 
 #[cfg(test)]
 include!("transcript_tests.rs");

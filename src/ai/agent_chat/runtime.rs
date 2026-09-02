@@ -32,15 +32,17 @@ impl IsolatedTurnHandle {
 }
 
 pub(crate) trait AgentChatConnection: Send + Sync + 'static {
-    #[expect(
-        clippy::result_large_err,
-        reason = "object-safe backend adapters share the existing unboxed typed AI failure boundary"
-    )]
+    /// Fixture sources are selected before construction; they never change the
+    /// immutable Full/QuickAi product policy.
+    fn is_provider_free_fixture(&self) -> bool {
+        false
+    }
+    fn fixture_control(
+        &self,
+    ) -> Option<crate::ai::agent_chat::ui::mock_fixture::AgentChatFixtureControl> {
+        None
+    }
     fn start_turn(&self, request: AgentChatTurnRequest) -> AiAdapterResult<AgentChatEventRx>;
-    #[expect(
-        clippy::result_large_err,
-        reason = "object-safe backend adapters share the existing unboxed typed AI failure boundary"
-    )]
     fn start_isolated_turn(
         &self,
         request: AgentChatTurnRequest,
@@ -48,15 +50,7 @@ pub(crate) trait AgentChatConnection: Send + Sync + 'static {
         let rx = self.start_turn(request)?;
         Ok(IsolatedTurnHandle { rx, cancel: None })
     }
-    #[expect(
-        clippy::result_large_err,
-        reason = "object-safe backend adapters share the existing unboxed typed AI failure boundary"
-    )]
     fn cancel_turn(&self, ui_thread_id: String) -> AiAdapterResult<()>;
-    #[expect(
-        clippy::result_large_err,
-        reason = "object-safe backend adapters share the existing unboxed typed AI failure boundary"
-    )]
     fn prepare_session(
         &self,
         ui_thread_id: String,
@@ -65,19 +59,11 @@ pub(crate) trait AgentChatConnection: Send + Sync + 'static {
     /// List the user messages the session can rewind to. Responds with a
     /// `ForkPointsAvailable` event. Backends without checkpointing keep the
     /// default refusal so the UI never advertises a rewind it cannot honor.
-    #[expect(
-        clippy::result_large_err,
-        reason = "object-safe backend adapters share the existing unboxed typed AI failure boundary"
-    )]
     fn fork_points(&self) -> AiAdapterResult<AgentChatEventRx> {
         Err(anyhow::anyhow!("this agent connection does not support rewind").into())
     }
     /// Rewind the live session to just before the given user message entry.
     /// Responds with a `ForkCompleted` event carrying the message text.
-    #[expect(
-        clippy::result_large_err,
-        reason = "object-safe backend adapters share the existing unboxed typed AI failure boundary"
-    )]
     fn fork_to_entry(&self, entry_id: String) -> AiAdapterResult<AgentChatEventRx> {
         let _ = entry_id;
         Err(anyhow::anyhow!("this agent connection does not support rewind").into())

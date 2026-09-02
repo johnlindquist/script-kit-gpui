@@ -108,7 +108,7 @@ impl AgentChatThread {
             ordinal,
         );
         self.spawn_fork_event_task(rx, "fork", cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
         true
     }
 
@@ -149,7 +149,7 @@ impl AgentChatThread {
                                 // branch remains authoritative. Preserve transcript,
                                 // draft, selection, copy target, and immutable Retry
                                 // payload exactly; only release the in-flight guard.
-                                cx.notify();
+                                this.notify_semantic_change(cx);
                             }
                         }
                     });
@@ -292,6 +292,7 @@ impl AgentChatThread {
 
             // Persist selection to config.ts (non-fatal).
             let id = entry.id.clone();
+            if !self.is_provider_free_fixture() {
             std::thread::Builder::new()
                 .name("agent_chat-save-model".into())
                 .spawn(move || {
@@ -309,6 +310,7 @@ impl AgentChatThread {
                     }
                 })
                 .ok();
+            }
 
             let recovering_selection_command = match &self.reliability_state.phase {
                 AiPhase::Recovering {
@@ -355,13 +357,13 @@ impl AgentChatThread {
                     );
                 }
             }
-            cx.notify();
+            self.notify_semantic_change(cx);
         }
     }
 
     pub(crate) fn toggle_favorite_model(&mut self, model_id: &str, cx: &mut Context<Self>) {
         match super::favorite_models::toggle_favorite_model_id(model_id) {
-            Ok(_) => cx.notify(),
+            Ok(_) => self.notify_semantic_change(cx),
             Err(error) => {
                 tracing::warn!(
                     target: "script_kit::agent_chat",

@@ -1,6 +1,32 @@
 use super::*;
 
 impl PathPrompt {
+    pub(crate) fn dictation_input_revision(&self, _cx: &gpui::App) -> u64 {
+        self.input_revision
+    }
+
+    fn advance_input_revision(&mut self) {
+        assert!(
+            self.input_revision < u64::MAX,
+            "path input revision exhausted"
+        );
+        self.input_revision += 1;
+    }
+
+    pub(crate) fn set_selected_index(&mut self, index: usize) {
+        if self.selected_index != index {
+            self.advance_input_revision();
+            self.selected_index = index;
+        }
+    }
+
+    pub(crate) fn set_header_context(
+        &mut self,
+        context: crate::prompts::base::PromptHeaderContext,
+    ) {
+        self.header_context = Some(context);
+    }
+
     pub fn new(
         id: String,
         start_path: Option<String>,
@@ -36,6 +62,7 @@ impl PathPrompt {
             current_path,
             path_prefix,
             filter_text: String::new(),
+            input_revision: 0,
             selected_index: 0,
             entries,
             load_status: load_result.status,
@@ -51,13 +78,53 @@ impl PathPrompt {
             actions_search_text: Arc::new(Mutex::new(String::new())),
             cursor_visible: true,
             render_rows,
+            header_context: None,
         };
         prompt.select_path_if_present(preselect_path.as_deref());
         prompt.rebuild_render_rows();
         prompt
     }
 
+    /// Use the real filesystem browser, confined by the process-owned root.
+    pub fn from_owned_directory(
+        id: String,
+        directory: std::path::PathBuf,
+        hint: Option<String>,
+        focus_handle: FocusHandle,
+        on_submit: SubmitCallback,
+        theme: Arc<theme::Theme>,
+    ) -> anyhow::Result<Self> {
+        let policy = crate::runtime_policy::owned_evaluation()
+            .ok_or_else(|| anyhow::anyhow!("owned_path_policy_missing"))?;
+        policy.require_owned_path(&directory)?;
+        anyhow::ensure!(directory.is_dir(), "owned_path_not_directory");
+        Ok(Self::new(
+            id,
+            Some(directory.to_string_lossy().into_owned()),
+            hint,
+            focus_handle,
+            on_submit,
+            theme,
+        ))
+    }
+
+    fn check_path(path: &Path) -> Result<(), crate::runtime_policy::EffectRefusal> {
+        if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+            policy.require_owned_path(path)?;
+        }
+        Ok(())
+    }
+
     fn resolve_initial_path(start_path: Option<&str>) -> (String, String, Option<String>) {
+        if crate::runtime_policy::is_owned_evaluation()
+            && start_path.is_none_or(|path| Self::check_path(Path::new(path)).is_err())
+        {
+            return (
+                start_path.unwrap_or_default().to_string(),
+                "refused".to_string(),
+                None,
+            );
+        }
         let Some(raw) = start_path else {
             if let Some(home) = dirs::home_dir() {
                 return (
@@ -141,7 +208,7 @@ impl PathPrompt {
             .iter()
             .position(|entry| entry.path == target_path)
         {
-            self.selected_index = index;
+            self.set_selected_index(index);
         }
     }
 
@@ -190,6 +257,17 @@ impl PathPrompt {
     /// Load directory entries from a path with a stable status for receipts.
     pub(super) fn load_entries(dir_path: &str) -> PathLoadResult {
         let path = Path::new(dir_path);
+        if let Err(error) = Self::check_path(path) {
+            return PathLoadResult {
+                entries: Vec::new(),
+                status: PathLoadStatus::new(
+                    PathLoadStatusKind::PermissionDenied,
+                    error.to_string(),
+                    0,
+                    0,
+                ),
+            };
+        }
         let metadata = match std::fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -258,6 +336,10 @@ impl PathPrompt {
             }
 
             let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
+            if Self::check_path(&entry_path).is_err() {
+                failed_entry_count += 1;
+                continue;
+            }
             let is_dir = entry_path.is_dir();
             let path_entry = PathEntry {
                 name,
@@ -274,8 +356,8 @@ impl PathPrompt {
         }
 
         // Sort alphabetically (case insensitive)
-        dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        dirs.sort_by_cached_key(|entry| entry.name.to_lowercase());
+        files.sort_by_cached_key(|entry| entry.name.to_lowercase());
 
         // Add dirs first, then files
         let mut entries = Vec::with_capacity(dirs.len() + files.len());
@@ -347,7 +429,7 @@ impl PathPrompt {
 
         // Reset selection to 0 if out of bounds
         if self.selected_index >= self.filtered_entries.len() {
-            self.selected_index = 0;
+            self.set_selected_index(0);
         }
 
         self.rebuild_render_rows();
@@ -360,8 +442,9 @@ impl PathPrompt {
         }
 
         self.filter_text = text;
+        self.advance_input_revision();
         self.update_filtered();
-        self.selected_index = 0;
+        self.set_selected_index(0);
         self.list_scroll_handle
             .scroll_to_item(0, gpui::ScrollStrategy::Top);
         cx.notify();
@@ -369,6 +452,19 @@ impl PathPrompt {
 
     /// Navigate into a directory
     pub fn navigate_to(&mut self, path: &str, cx: &mut Context<Self>) {
+        if let Err(error) = Self::check_path(Path::new(path)) {
+            self.load_status = PathLoadStatus::new(
+                PathLoadStatusKind::PermissionDenied,
+                error.to_string(),
+                0,
+                0,
+            );
+            cx.notify();
+            return;
+        }
+        if self.current_path != path || !self.filter_text.is_empty() {
+            self.advance_input_revision();
+        }
         self.current_path = path.to_string();
         self.path_prefix = Self::format_path_prefix(path);
         let load_result = Self::load_entries(path);
@@ -376,7 +472,7 @@ impl PathPrompt {
         self.load_status = load_result.status;
         self.filter_text.clear();
         self.filtered_entries = self.entries.clone();
-        self.selected_index = 0;
+        self.set_selected_index(0);
         self.rebuild_render_rows();
         cx.notify();
     }
@@ -539,7 +635,22 @@ impl PathPrompt {
     /// Submit the selected path - always submits, never navigates
     /// For files and directories: submit the path (script will handle it)
     /// Navigation into directories is handled by → and Tab keys
-    pub(super) fn submit_selected(&mut self, _cx: &mut Context<Self>) {
+    pub(super) fn submit_selected(&mut self, cx: &mut Context<Self>) {
+        let path = self
+            .filtered_entries
+            .get(self.selected_index)
+            .map(|entry| entry.path.as_str())
+            .unwrap_or(self.filter_text.as_str());
+        if let Err(error) = Self::check_path(Path::new(path)) {
+            self.load_status = PathLoadStatus::new(
+                PathLoadStatusKind::PermissionDenied,
+                error.to_string(),
+                0,
+                0,
+            );
+            cx.notify();
+            return;
+        }
         if let Some(entry) = self.filtered_entries.get(self.selected_index) {
             // Always submit the path, whether it's a file or directory
             // The calling script or default handler will decide what to do with it
@@ -588,7 +699,7 @@ impl PathPrompt {
     /// Move selection up
     pub fn move_up(&mut self, cx: &mut Context<Self>) {
         if self.selected_index > 0 {
-            self.selected_index -= 1;
+            self.set_selected_index(self.selected_index - 1);
             self.list_scroll_handle
                 .scroll_to_item(self.selected_index, gpui::ScrollStrategy::Top);
             cx.notify();
@@ -598,7 +709,7 @@ impl PathPrompt {
     /// Move selection down
     pub fn move_down(&mut self, cx: &mut Context<Self>) {
         if self.selected_index < self.filtered_entries.len().saturating_sub(1) {
-            self.selected_index += 1;
+            self.set_selected_index(self.selected_index + 1);
             self.list_scroll_handle
                 .scroll_to_item(self.selected_index, gpui::ScrollStrategy::Top);
             cx.notify();
@@ -608,6 +719,7 @@ impl PathPrompt {
     /// Handle character input
     pub(super) fn handle_char(&mut self, ch: char, cx: &mut Context<Self>) {
         self.filter_text.push(ch);
+        self.advance_input_revision();
         self.update_filtered();
         cx.notify();
     }
@@ -616,6 +728,7 @@ impl PathPrompt {
     pub(super) fn handle_backspace(&mut self, cx: &mut Context<Self>) {
         if !self.filter_text.is_empty() {
             self.filter_text.pop();
+            self.advance_input_revision();
             self.update_filtered();
             cx.notify();
         } else {
@@ -759,4 +872,43 @@ mod tests {
         assert_eq!(result.status.kind, PathLoadStatusKind::PermissionDenied);
         assert_eq!(result.status.message, "Permission denied.");
     }
+}
+
+#[cfg(test)]
+#[gpui::test]
+fn path_revision_tracks_filter_and_selection_aba(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("cat-a"), "a").unwrap();
+    std::fs::write(directory.path().join("cat-b"), "b").unwrap();
+    let prompt = cx.new(|cx| {
+        PathPrompt::new(
+            "epoch".into(),
+            Some(directory.path().to_string_lossy().into_owned()),
+            None,
+            cx.focus_handle(),
+            Arc::new(|_, _| {}),
+            Arc::new(theme::Theme::default()),
+        )
+    });
+    prompt.update(cx, |prompt, cx| {
+        let initial = prompt.dictation_input_revision(cx);
+        prompt.set_input(String::new(), cx);
+        prompt.set_selected_index(0);
+        assert_eq!(prompt.dictation_input_revision(cx), initial);
+        prompt.set_input("cat".into(), cx);
+        let original = prompt.dictation_input_revision(cx);
+        prompt.set_input("dog".into(), cx);
+        let changed = prompt.dictation_input_revision(cx);
+        assert!(changed > original);
+        prompt.set_input("cat".into(), cx);
+        assert!(prompt.dictation_input_revision(cx) > changed);
+        let before_selection = prompt.dictation_input_revision(cx);
+        prompt.set_selected_index(1);
+        prompt.set_selected_index(0);
+        assert!(prompt.dictation_input_revision(cx) > before_selection);
+        let before_read = prompt.dictation_input_revision(cx);
+        prompt.visible_status_kind();
+        assert_eq!(prompt.dictation_input_revision(cx), before_read);
+    });
 }

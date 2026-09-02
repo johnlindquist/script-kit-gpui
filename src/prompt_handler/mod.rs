@@ -2,6 +2,12 @@
 // This file is included via include!() macro in main.rs
 
 // --- merged from part_000.rs ---
+use crate::design_evaluation::prompt_fixtures::*;
+use crate::prompt_completion::{PromptCompletionBinding, PromptOutcome};
+include!("registered_surface.rs");
+include!("batch_transport.rs");
+include!("gpui_dispatch.rs");
+
 fn unhandled_message_warning(message_type: &str) -> String {
     format!(
         "'{}' is not supported yet. Update the script to a supported message type or update Script Kit GPUI.",
@@ -11,56 +17,6 @@ fn unhandled_message_warning(message_type: &str) -> String {
 
 fn prompt_coming_soon_warning(prompt_name: &str) -> String {
     format!("{prompt_name} prompt coming soon.")
-}
-
-fn set_main_window_input_text_for_batch(
-    this: &gpui::WeakEntity<ScriptListApp>,
-    main_window_handle: Option<gpui::AnyWindowHandle>,
-    text: &str,
-    cx: &mut gpui::AsyncApp,
-) -> anyhow::Result<()> {
-    let text = text.to_string();
-    if let Some(handle) = main_window_handle.or_else(crate::get_main_window_handle) {
-        handle.update(cx, |_root, window, cx| {
-            this.update(cx, |app, cx| {
-                app.set_input_text_in_window(&text, window, cx);
-            })
-        })??;
-        return Ok(());
-    }
-
-    let needs_window = this.update(cx, |app, _cx| {
-        matches!(app.current_view, AppView::DayPage { .. })
-    })?;
-    if needs_window {
-        anyhow::bail!("main window handle unavailable for Day Page setInput");
-    }
-
-    this.update(cx, |app, cx| {
-        app.set_input_text(&text, cx);
-    })?;
-    Ok(())
-}
-
-fn select_main_window_semantic_id_for_batch(
-    this: &gpui::WeakEntity<ScriptListApp>,
-    main_window_handle: Option<gpui::AnyWindowHandle>,
-    semantic_id: &str,
-    submit: bool,
-    cx: &mut gpui::AsyncApp,
-) -> anyhow::Result<String> {
-    let semantic_id = semantic_id.to_string();
-    if let Some(handle) = main_window_handle.or_else(crate::get_main_window_handle) {
-        return handle.update(cx, |_root, window, cx| {
-            this.update(cx, |app, cx| {
-                app.select_choice_by_semantic_id_in_window(&semantic_id, submit, window, cx)
-            })
-        })??;
-    }
-
-    this.update(cx, |app, cx| {
-        app.select_choice_by_semantic_id(&semantic_id, submit, cx)
-    })?
 }
 
 fn should_restore_main_window_after_script_exit(
@@ -115,95 +71,21 @@ fn resolve_main_only_target(
     Ok(resolved)
 }
 
-enum GetStateTargetResolution {
-    MainCompatible,
-    Notes {
-        resolved: crate::protocol::AutomationWindowInfo,
-        entity: gpui::Entity<crate::notes::NotesApp>,
-    },
-    ActionsDialog {
-        resolved: crate::protocol::AutomationWindowInfo,
-        entity: gpui::Entity<crate::actions::ActionsDialog>,
-    },
-    UnsupportedNonMain {
-        resolved: crate::protocol::AutomationWindowInfo,
-    },
-    ResolutionFailed {
-        error: String,
-    },
-}
-
 fn resolve_get_state_target(
-    request_id: &str,
     target: Option<&crate::protocol::AutomationWindowTarget>,
-    cx: &gpui::App,
-) -> GetStateTargetResolution {
-    // getState defaults to the main-window state contract. Notes is the first
-    // secondary surface with a redacted passive state envelope because agents
-    // need dirty state, cursor, and autosize receipts for user-reported UX bugs.
-    match target {
-        None
-        | Some(crate::protocol::AutomationWindowTarget::Main)
-        | Some(crate::protocol::AutomationWindowTarget::Focused) => {
-            GetStateTargetResolution::MainCompatible
+) -> Result<crate::protocol::AutomationWindowInfo, String> {
+    let target = target.unwrap_or(&crate::protocol::AutomationWindowTarget::Main);
+    let resolved = crate::windows::resolve_automation_window(Some(target))
+        .map_err(|error| error.to_string())?;
+    if resolved.kind == protocol::AutomationWindowKind::Main {
+        let handle = resolved.generation.and_then(|generation| {
+            crate::windows::get_runtime_window_handle_for_generation(&resolved.id, generation)
+        });
+        if handle.is_none() || handle != crate::get_main_window_handle() {
+            return Err("main_target_owner_mismatch".to_string());
         }
-        Some(t) => match crate::windows::resolve_automation_window(Some(t)) {
-            Ok(resolved) if resolved.kind == crate::protocol::AutomationWindowKind::Main => {
-                GetStateTargetResolution::MainCompatible
-            }
-            Ok(resolved) if resolved.kind == crate::protocol::AutomationWindowKind::Notes => {
-                match crate::notes::get_notes_app_entity_and_handle() {
-                    Some((entity, _handle)) => {
-                        let _ = entity.read(cx);
-                        GetStateTargetResolution::Notes { resolved, entity }
-                    }
-                    None => GetStateTargetResolution::ResolutionFailed {
-                        error: format!(
-                            "getState resolved notes target {} but no live Notes entity is available",
-                            resolved.id
-                        ),
-                    },
-                }
-            }
-            Ok(resolved)
-                if resolved.kind == crate::protocol::AutomationWindowKind::ActionsDialog =>
-            {
-                match crate::actions::get_actions_dialog_entity(cx) {
-                    Some(entity) => {
-                        let _ = entity.read(cx);
-                        GetStateTargetResolution::ActionsDialog { resolved, entity }
-                    }
-                    None => GetStateTargetResolution::ResolutionFailed {
-                        error: format!(
-                            "getState resolved ActionsDialog target {} but no live dialog entity is available",
-                            resolved.id
-                        ),
-                    },
-                }
-            }
-            Ok(resolved) => {
-                tracing::warn!(
-                    target: "script_kit::automation",
-                    request_id = %request_id,
-                    resolved_kind = ?resolved.kind,
-                    resolved_id = %resolved.id,
-                    "getState: secondary window state not yet routed, returning unsupported diagnostic"
-                );
-                GetStateTargetResolution::UnsupportedNonMain { resolved }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target: "script_kit::automation",
-                    request_id = %request_id,
-                    error = %err,
-                    "getState: target resolution failed"
-                );
-                GetStateTargetResolution::ResolutionFailed {
-                    error: err.to_string(),
-                }
-            }
-        },
     }
+    Ok(resolved)
 }
 
 /// Which window an Agent Chat read should target.
@@ -296,35 +178,14 @@ fn revalidate_prompt_popup_target(
     Ok(())
 }
 
-/// Resolved automation target for batch/waitFor operations.
-///
-/// Extends `AgentChatReadTarget` to also accept Notes and ActionsDialog windows.
+/// A resolved batch/wait target. Secondary operations retain the exact registry identity.
 #[derive(Clone)]
 enum AutomationReadTarget {
-    /// Main window (default).
     Main {
         info: Option<crate::protocol::AutomationWindowInfo>,
     },
-    /// Detached Agent Chat chat window.
-    AgentChatDetached {
+    Registered {
         info: crate::protocol::AutomationWindowInfo,
-        entity: gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>,
-    },
-    /// Notes window.
-    Notes {
-        info: crate::protocol::AutomationWindowInfo,
-        entity: gpui::Entity<crate::notes::NotesApp>,
-        handle: gpui::WindowHandle<crate::Root>,
-    },
-    /// Actions dialog popup.
-    ActionsDialog {
-        info: crate::protocol::AutomationWindowInfo,
-        entity: gpui::Entity<crate::actions::ActionsDialog>,
-    },
-    /// Prompt popup (composer picker, history popup, or confirm dialog).
-    PromptPopup {
-        info: crate::protocol::AutomationWindowInfo,
-        subtype: PromptPopupSubtype,
     },
 }
 
@@ -376,7 +237,7 @@ impl BatchTargetCapabilities {
                     "setInput",
                     "openActions",
                     "togglePreview",
-                    "openNotesAgentChat",
+                    "selectBySemanticId",
                     "waitFor",
                 ],
                 concise_unsupported_message: true,
@@ -390,10 +251,30 @@ impl BatchTargetCapabilities {
             AutomationBatchTargetKind::PromptPopup => Self {
                 display_name: "PromptPopup",
                 unsupported_target_name: "PromptPopup",
-                supported_commands: &["selectByValue", "selectBySemanticId", "waitFor"],
+                supported_commands: &[
+                    "setInput",
+                    "selectByValue",
+                    "selectBySemanticId",
+                    "setThemeControl",
+                    "waitFor",
+                ],
                 concise_unsupported_message: false,
             },
         }
+    }
+}
+
+fn registered_batch_target_kind(
+    target: &protocol::AutomationWindowInfo,
+) -> AutomationBatchTargetKind {
+    match target.kind {
+        protocol::AutomationWindowKind::Main => AutomationBatchTargetKind::Main,
+        protocol::AutomationWindowKind::AgentChatDetached => {
+            AutomationBatchTargetKind::AgentChatDetached
+        }
+        protocol::AutomationWindowKind::Notes => AutomationBatchTargetKind::Notes,
+        protocol::AutomationWindowKind::ActionsDialog => AutomationBatchTargetKind::ActionsDialog,
+        _ => AutomationBatchTargetKind::PromptPopup,
     }
 }
 
@@ -402,12 +283,7 @@ fn batch_target_kind_for_resolved_target(
 ) -> AutomationBatchTargetKind {
     match target {
         AutomationReadTarget::Main { .. } => AutomationBatchTargetKind::Main,
-        AutomationReadTarget::AgentChatDetached { .. } => {
-            AutomationBatchTargetKind::AgentChatDetached
-        }
-        AutomationReadTarget::Notes { .. } => AutomationBatchTargetKind::Notes,
-        AutomationReadTarget::ActionsDialog { .. } => AutomationBatchTargetKind::ActionsDialog,
-        AutomationReadTarget::PromptPopup { .. } => AutomationBatchTargetKind::PromptPopup,
+        AutomationReadTarget::Registered { info } => registered_batch_target_kind(info),
     }
 }
 
@@ -478,144 +354,34 @@ fn is_agent_chat_wait_condition(condition: &protocol::WaitCondition) -> bool {
     )
 }
 
-/// Return the live Agent Chat chat entity for automation, preferring the detached window
-/// when it is open and falling back to the embedded main-window view.
-fn active_agent_chat_entity(
-    embedded: Option<&gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>>,
-) -> Option<gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>> {
-    crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity()
-        .or_else(|| embedded.cloned())
-}
-
-/// Resolve an automation target that accepts Main, AgentChatDetached, Notes, and ActionsDialog.
-///
-/// Used by `batch` and `waitFor` to route commands to the correct window.
 fn resolve_automation_read_target(
     request_id: &str,
     op: &'static str,
     target: Option<&crate::protocol::AutomationWindowTarget>,
-    embedded_agent_chat: Option<&gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>>,
     cx: &gpui::App,
 ) -> Result<AutomationReadTarget, crate::protocol::TransactionError> {
     let Some(target) = target else {
         return Ok(AutomationReadTarget::Main { info: None });
     };
-
-    let resolved = crate::windows::resolve_automation_window(Some(target)).map_err(|err| {
-        tracing::warn!(
-            target: "script_kit::automation",
-            request_id = %request_id,
-            op = op,
-            error = %err,
-            "automation.target.resolve_failed"
-        );
-        crate::protocol::TransactionError::action_failed(format!(
-            "{op} target resolution failed: {err}"
-        ))
+    let resolved = crate::windows::resolve_automation_window(Some(target)).map_err(|error| {
+        tracing::warn!(request_id, op, error = %error, "automation.target.resolve_failed");
+        protocol::TransactionError::action_failed(format!("{op} target resolution failed: {error}"))
     })?;
-
-    match resolved.kind {
-        crate::protocol::AutomationWindowKind::Main => Ok(AutomationReadTarget::Main {
+    if resolved.kind == protocol::AutomationWindowKind::Main {
+        let handle = resolved.generation.and_then(|generation| {
+            crate::windows::get_runtime_window_handle_for_generation(&resolved.id, generation)
+        });
+        if handle.is_none() || handle != crate::get_main_window_handle() {
+            return Err(protocol::TransactionError::action_failed(
+                "main_target_owner_mismatch",
+            ));
+        }
+        return Ok(AutomationReadTarget::Main {
             info: Some(resolved),
-        }),
-        crate::protocol::AutomationWindowKind::AgentChatDetached => {
-            match active_agent_chat_entity(embedded_agent_chat) {
-                Some(entity) => {
-                    tracing::info!(
-                        target: "script_kit::automation",
-                        request_id = %request_id,
-                        op = op,
-                        window_id = %resolved.id,
-                        kind = ?resolved.kind,
-                        "automation.target.agent_chat_detached_resolved"
-                    );
-                    Ok(AutomationReadTarget::AgentChatDetached {
-                        info: resolved,
-                        entity,
-                    })
-                }
-                None => Err(crate::protocol::TransactionError::action_failed(format!(
-                    "{op} resolved detached Agent Chat target {} but no live view entity is available",
-                    resolved.id
-                ))),
-            }
-        }
-        crate::protocol::AutomationWindowKind::Notes => {
-            match crate::notes::get_notes_app_entity_and_handle() {
-                Some((entity, handle)) => {
-                    tracing::info!(
-                        target: "script_kit::automation",
-                        request_id = %request_id,
-                        op = op,
-                        window_id = %resolved.id,
-                        kind = ?resolved.kind,
-                        "automation.target.notes_resolved"
-                    );
-                    Ok(AutomationReadTarget::Notes {
-                        info: resolved,
-                        entity,
-                        handle,
-                    })
-                }
-                None => Err(crate::protocol::TransactionError::action_failed(format!(
-                    "{op} resolved Notes target {} but no live Notes entity is available",
-                    resolved.id
-                ))),
-            }
-        }
-        crate::protocol::AutomationWindowKind::ActionsDialog => {
-            match crate::actions::get_actions_dialog_entity(cx) {
-                Some(entity) => {
-                    tracing::info!(
-                        target: "script_kit::automation",
-                        request_id = %request_id,
-                        op = op,
-                        window_id = %resolved.id,
-                        kind = ?resolved.kind,
-                        "automation.target.actions_dialog_resolved"
-                    );
-                    Ok(AutomationReadTarget::ActionsDialog {
-                        info: resolved,
-                        entity,
-                    })
-                }
-                None => Err(crate::protocol::TransactionError::action_failed(format!(
-                    "{op} resolved ActionsDialog target {} but no live dialog entity is available",
-                    resolved.id
-                ))),
-            }
-        }
-        crate::protocol::AutomationWindowKind::PromptPopup => {
-            let subtype = resolve_prompt_popup_subtype(&resolved)?;
-            tracing::info!(
-                target: "script_kit::automation",
-                request_id = %request_id,
-                op = op,
-                window_id = %resolved.id,
-                generation = ?resolved.generation,
-                subtype = ?subtype,
-                "automation.target.prompt_popup_resolved"
-            );
-            Ok(AutomationReadTarget::PromptPopup {
-                info: resolved,
-                subtype,
-            })
-        }
-        other_kind => {
-            tracing::warn!(
-                target: "script_kit::automation",
-                request_id = %request_id,
-                op = op,
-                window_id = %resolved.id,
-                kind = ?other_kind,
-                "automation.target.unsupported_kind"
-            );
-            Err(crate::protocol::TransactionError::action_failed(format!(
-                "{op} supports Main, Ai, AgentChatDetached, Notes, ActionsDialog, and PromptPopup targets; resolved {} ({:?})",
-                resolved.id, other_kind
-            )))
-        }
+        });
     }
+    registered_surface_ui_snapshot(&resolved, cx).map_err(registered_surface_transaction_error)?;
+    Ok(AutomationReadTarget::Registered { info: resolved })
 }
 
 /// Resolve an automation target for Agent Chat read operations (getAgentChatState, getAgentChatTestProbe).
@@ -627,8 +393,6 @@ fn resolve_agent_chat_read_target(
     request_id: &str,
     op: &'static str,
     target: Option<&crate::protocol::AutomationWindowTarget>,
-    embedded_agent_chat: Option<&gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>>,
-    _cx: &gpui::App,
 ) -> Result<AgentChatReadTarget, crate::protocol::TransactionError> {
     // No explicit target → default to main window (preserves existing behavior).
     let Some(target) = target else {
@@ -662,7 +426,13 @@ fn resolve_agent_chat_read_target(
             })
         }
         crate::protocol::AutomationWindowKind::AgentChatDetached => {
-            match active_agent_chat_entity(embedded_agent_chat) {
+            registered_surface_target(&resolved).map_err(registered_surface_transaction_error)?;
+            match resolved.generation.and_then(|generation| {
+                crate::ai::agent_chat::ui::chat_window::get_agent_chat_view_for_instance(
+                    &resolved.id,
+                    generation,
+                )
+            }) {
                 Some(entity) => {
                     tracing::info!(
                         target: "script_kit::automation",
@@ -774,139 +544,6 @@ fn build_agent_chat_resolved_target(
     })
 }
 
-/// Build a `UiStateSnapshot` from a live Notes entity.
-///
-/// Used by `waitFor` and `batch` to evaluate generic conditions
-/// (elementExists, elementFocused, inputEmpty, stateMatch) against
-/// the Notes window instead of the main window.
-fn build_notes_ui_snapshot(
-    entity: &gpui::Entity<crate::notes::NotesApp>,
-    cx: &gpui::App,
-) -> crate::protocol::UiStateSnapshot {
-    let editor_text = entity.read(cx).editor_state.read(cx).value().to_string();
-    let surface = crate::windows::automation_surface_collector::collect_surface_snapshot(
-        &crate::protocol::AutomationWindowInfo {
-            id: "notes".to_string(),
-            kind: crate::protocol::AutomationWindowKind::Notes,
-            title: Some("Notes".to_string()),
-            bounds: None,
-            visible: true,
-            focused: true,
-            semantic_surface: Some("notes".to_string()),
-            parent_window_id: None,
-            parent_kind: None,
-            pid: Some(std::process::id()),
-            generation: None,
-        },
-        200,
-        cx,
-    );
-    let (semantic_ids, focused_id) = match surface {
-        Some(ref snap) => (
-            snap.elements
-                .iter()
-                .map(|e| e.semantic_id.clone())
-                .collect(),
-            snap.focused_semantic_id.clone(),
-        ),
-        None => (Vec::new(), None),
-    };
-    crate::protocol::UiStateSnapshot {
-        window_visible: true,
-        window_focused: true,
-        prompt_type: Some("notes".to_string()),
-        input_value: Some(editor_text),
-        selected_value: None,
-        choice_count: 0,
-        visible_semantic_ids: semantic_ids,
-        focused_semantic_id: focused_id,
-        ..Default::default()
-    }
-}
-
-/// Build a UI state snapshot for a detached Agent Chat target — mirrors
-/// [`DetachedAgentChatTransactionProvider::snapshot`](crate::windows::automation_transaction_provider).
-fn build_agent_chat_detached_ui_snapshot(
-    entity: &gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>,
-    cx: &gpui::App,
-) -> crate::protocol::UiStateSnapshot {
-    let view = entity.read(cx);
-    let state = view.collect_agent_chat_state_snapshot(cx);
-    let surface =
-        crate::windows::automation_surface_collector::collect_agent_chat_detached_elements(
-            entity, 200, cx,
-        );
-    crate::protocol::UiStateSnapshot {
-        window_visible: true,
-        window_focused: true,
-        prompt_type: Some("agentChatChat".to_string()),
-        input_value: Some(state.input_text.clone()),
-        selected_value: state
-            .picker
-            .as_ref()
-            .and_then(|picker| picker.selected_label.clone()),
-        choice_count: state.picker.as_ref().map_or(0, |picker| picker.item_count),
-        visible_semantic_ids: surface
-            .elements
-            .iter()
-            .map(|el| el.semantic_id.clone())
-            .collect(),
-        focused_semantic_id: surface.focused_semantic_id,
-        agent_chat_status: Some(state.status.clone()),
-        agent_chat_context_ready: state.context_ready,
-        agent_chat_picker_open: state.picker.as_ref().is_some_and(|picker| picker.open),
-        agent_chat_cursor_index: Some(state.cursor_index),
-    }
-}
-
-/// Check whether a generic wait condition is satisfied against Notes state.
-///
-/// Only generic conditions (elementExists, elementFocused, inputEmpty,
-/// windowVisible, windowFocused, stateMatch) are meaningful for Notes.
-/// Agent Chat-specific conditions always return `false`.
-fn notes_wait_condition_satisfied(
-    entity: &gpui::Entity<crate::notes::NotesApp>,
-    condition: &crate::protocol::WaitCondition,
-    cx: &gpui::App,
-) -> bool {
-    let snapshot = build_notes_ui_snapshot(entity, cx);
-    match condition {
-        crate::protocol::WaitCondition::Named(crate::protocol::WaitNamedCondition::InputEmpty) => {
-            snapshot.input_value.as_deref().unwrap_or("").is_empty()
-        }
-        crate::protocol::WaitCondition::Named(
-            crate::protocol::WaitNamedCondition::WindowVisible,
-        ) => snapshot.window_visible,
-        crate::protocol::WaitCondition::Named(
-            crate::protocol::WaitNamedCondition::WindowFocused,
-        ) => snapshot.window_focused,
-        crate::protocol::WaitCondition::Named(
-            crate::protocol::WaitNamedCondition::ChoicesRendered,
-        ) => {
-            // Notes has no choices
-            false
-        }
-        crate::protocol::WaitCondition::Detailed(
-            crate::protocol::WaitDetailedCondition::ElementExists { semantic_id }
-            | crate::protocol::WaitDetailedCondition::ElementVisible { semantic_id },
-        ) => snapshot
-            .visible_semantic_ids
-            .iter()
-            .any(|id| id == semantic_id),
-        crate::protocol::WaitCondition::Detailed(
-            crate::protocol::WaitDetailedCondition::ElementFocused { semantic_id },
-        ) => snapshot.focused_semantic_id.as_deref() == Some(semantic_id.as_str()),
-        crate::protocol::WaitCondition::Detailed(
-            crate::protocol::WaitDetailedCondition::StateMatch { state },
-        ) => {
-            use crate::protocol::transaction_executor::matches_state_spec;
-            matches_state_spec(&snapshot, state)
-        }
-        // Agent Chat-specific conditions are not applicable to Notes.
-        _ => false,
-    }
-}
-
 fn resolve_ai_start_chat_provider(
     registry: &crate::ai::ProviderRegistry,
     model_id: &str,
@@ -938,111 +575,6 @@ enum DevtoolsSelectionState {
     MainMenuScriptList,
     ChoiceBackedPrompt,
     UnsupportedPrompt,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct InspectGenerationRecord {
-    target_fingerprint: String,
-    surface_fingerprint: String,
-    data_fingerprint: String,
-    target_generation: u64,
-    surface_generation: u64,
-    data_generation: u64,
-}
-
-static INSPECT_GENERATIONS: std::sync::LazyLock<
-    parking_lot::Mutex<std::collections::HashMap<String, InspectGenerationRecord>>,
-> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
-
-fn next_inspect_generations(
-    window_id: &str,
-    target_fingerprint: String,
-    surface_fingerprint: String,
-    data_fingerprint: String,
-) -> (u64, u64, u64) {
-    let mut generations = INSPECT_GENERATIONS.lock();
-    let record =
-        generations
-            .entry(window_id.to_string())
-            .or_insert_with(|| InspectGenerationRecord {
-                target_fingerprint: target_fingerprint.clone(),
-                surface_fingerprint: surface_fingerprint.clone(),
-                data_fingerprint: data_fingerprint.clone(),
-                target_generation: 1,
-                surface_generation: 1,
-                data_generation: 1,
-            });
-
-    if record.target_fingerprint != target_fingerprint {
-        record.target_fingerprint = target_fingerprint;
-        record.target_generation = record.target_generation.saturating_add(1);
-    }
-    if record.surface_fingerprint != surface_fingerprint {
-        record.surface_fingerprint = surface_fingerprint;
-        record.surface_generation = record.surface_generation.saturating_add(1);
-    }
-    if record.data_fingerprint != data_fingerprint {
-        record.data_fingerprint = data_fingerprint;
-        record.data_generation = record.data_generation.saturating_add(1);
-    }
-
-    (
-        record.target_generation,
-        record.surface_generation,
-        record.data_generation,
-    )
-}
-
-struct AutomationGenerationFacts<'a> {
-    window: &'a protocol::AutomationWindowInfo,
-    surface_kind: Option<&'a str>,
-    app_view_variant: Option<&'a str>,
-    native_footer_surface: Option<&'a str>,
-    total_count: usize,
-    focused_semantic_id: Option<&'a str>,
-    selected_semantic_id: Option<&'a str>,
-    semantic_quality: &'a protocol::SemanticQuality,
-}
-
-/// Advance the one real target/surface/data generation owner from semantic
-/// facts alone. Neither caller needs screenshot, pixel, focus, or input work.
-fn observe_automation_generations(facts: &AutomationGenerationFacts<'_>) -> (u64, u64, u64) {
-    let window = facts.window;
-    let target_fingerprint = format!(
-        "{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
-        window.kind,
-        window.focused,
-        window.visible,
-        window.bounds,
-        window.parent_window_id,
-        window.parent_kind,
-        window.semantic_surface,
-        window.pid,
-        window.generation,
-    );
-    let surface_fingerprint = format!(
-        "{:?}|{:?}|{:?}|{:?}",
-        facts.surface_kind,
-        facts.app_view_variant,
-        facts.native_footer_surface,
-        window.semantic_surface
-    );
-    let data_fingerprint = format!(
-        "{:?}|{:?}|{}|{:?}|{:?}|{:?}",
-        facts.surface_kind,
-        facts.app_view_variant,
-        facts.total_count,
-        facts.focused_semantic_id,
-        facts.selected_semantic_id,
-        facts.semantic_quality
-    );
-
-    next_inspect_generations(
-        &window.id,
-        target_fingerprint,
-        surface_fingerprint,
-        data_fingerprint,
-    )
 }
 
 // --- merged from part_001.rs ---
@@ -1096,10 +628,25 @@ impl ScriptListApp {
                 };
             }
         };
+        let main_target_owned = resolved.kind == protocol::AutomationWindowKind::Main
+            && resolved
+                .generation
+                .and_then(|generation| {
+                    crate::windows::get_runtime_window_handle_for_generation(
+                        &resolved.id,
+                        generation,
+                    )
+                })
+                .is_some_and(|handle| Some(handle) == crate::get_main_window_handle());
 
         // Step 2: Capture RGBA image for dimensions and pixel probes.
         let hi_dpi_mode = hi_dpi.unwrap_or(false);
-        let rgba_result = crate::platform::capture_targeted_rgba_image(target, hi_dpi_mode);
+        let rgba_result = match crate::runtime_policy::check(
+            crate::runtime_policy::ExternalEffect::ScreenCapture,
+        ) {
+            Ok(()) => crate::platform::capture_targeted_rgba_image(target, hi_dpi_mode),
+            Err(error) => Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+        };
 
         let (shot_w, shot_h, probe_results, mut warnings) = match rgba_result {
             Ok(ref rgba_image) => {
@@ -1138,9 +685,7 @@ impl ScriptListApp {
         };
 
         // Step 3: Collect semantic elements via surface-aware collector.
-        let (surface_snapshot, semantic_quality) = if resolved.kind
-            == protocol::AutomationWindowKind::Main
-        {
+        let (surface_snapshot, semantic_quality) = if main_target_owned {
             let outcome = self.collect_visible_elements(200, cx);
             (
                 crate::windows::automation_surface_collector::SurfaceElementSnapshot {
@@ -1193,7 +738,11 @@ impl ScriptListApp {
 
         // Step 4: Resolve the native OS window ID (CGWindowID) for
         // strict screenshot capture threading.
-        let os_window_id = crate::platform::resolve_targeted_os_window_id(target);
+        let os_window_id = if crate::runtime_policy::is_owned_evaluation() {
+            None
+        } else {
+            crate::platform::resolve_targeted_os_window_id(target)
+        };
 
         // Step 5: Compute screenshot-relative geometry for the target surface.
         let target_bounds_in_screenshot = protocol::target_bounds_in_screenshot(&resolved);
@@ -1212,28 +761,36 @@ impl ScriptListApp {
             "automation.inspect.geometry_computed"
         );
 
-        let surface_kind = (resolved.kind == protocol::AutomationWindowKind::Main)
-            .then(|| format!("{:?}", self.current_view.surface_kind()));
-        let app_view_variant = (resolved.kind == protocol::AutomationWindowKind::Main)
-            .then(|| self.current_view.app_view_variant().to_string());
-        let native_footer_surface = (resolved.kind == protocol::AutomationWindowKind::Main)
+        let surface_kind =
+            main_target_owned.then(|| format!("{:?}", self.current_view.surface_kind()));
+        let app_view_variant =
+            main_target_owned.then(|| self.current_view.app_view_variant().to_string());
+        let native_footer_surface = main_target_owned
             .then(|| {
                 self.current_view
                     .native_footer_surface()
                     .map(str::to_string)
             })
             .flatten();
-        let (target_generation, surface_generation, data_generation) =
-            observe_automation_generations(&AutomationGenerationFacts {
-                window: &resolved,
-                surface_kind: surface_kind.as_deref(),
-                app_view_variant: app_view_variant.as_deref(),
-                native_footer_surface: native_footer_surface.as_deref(),
-                total_count,
-                focused_semantic_id: focused_semantic_id.as_deref(),
-                selected_semantic_id: selected_semantic_id.as_deref(),
-                semantic_quality: &semantic_quality,
-            });
+        let target_generation = resolved.generation.and_then(|generation| {
+            crate::windows::automation_registry::automation_target_revision(
+                &resolved.id,
+                generation,
+            )
+        });
+        let revision_facts = if main_target_owned {
+            let facts = self.owned_revision_facts();
+            Some((
+                facts.surface_generation,
+                facts.data_generation,
+                facts.presentation_revision,
+                crate::theme::service::theme_revision(),
+            ))
+        } else {
+            crate::windows::automation_surface_collector::surface_revision_facts(
+                &resolved, None, cx,
+            )
+        };
 
         let snapshot = protocol::AutomationInspectSnapshot {
             schema_version: protocol::AUTOMATION_INSPECT_SCHEMA_VERSION,
@@ -1242,9 +799,9 @@ impl ScriptListApp {
             surface_kind,
             app_view_variant,
             native_footer_surface,
-            target_generation: Some(target_generation),
-            surface_generation: Some(surface_generation),
-            data_generation: Some(data_generation),
+            target_generation,
+            surface_generation: revision_facts.map(|facts| facts.0),
+            data_generation: revision_facts.map(|facts| facts.1),
             title: resolved.title.clone(),
             resolved_bounds: resolved.bounds.clone(),
             target_bounds_in_screenshot,
@@ -1775,10 +1332,61 @@ impl ScriptListApp {
         }
     }
 
+    /// Reveal and size only the interactive host after successful construction.
+    fn prepare_constructed_sdk_prompt(
+        &mut self,
+        kind: &str,
+        deferred: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if crate::runtime_policy::is_owned_evaluation() {
+            return;
+        }
+        self.prepare_window_for_prompt("UI", kind, "");
+        if deferred {
+            let expected = self
+                .prompt_completion
+                .as_ref()
+                .map(|binding| binding.instance().clone());
+            cx.spawn(async move |this, cx| {
+                let target = this
+                    .update(cx, |app, cx| {
+                        if app
+                            .prompt_completion
+                            .as_ref()
+                            .map(|binding| binding.instance())
+                            == expected.as_ref()
+                        {
+                            app.calculate_window_size_params_with_app(Some(cx))
+                        } else {
+                            None
+                        }
+                    })
+                    .ok()
+                    .flatten();
+                if let Some((view_type, item_count)) = target {
+                    resize_to_view_sync(view_type, item_count);
+                }
+            })
+            .detach();
+        } else if let Some((view_type, item_count)) =
+            self.calculate_window_size_params_with_app(Some(cx))
+        {
+            resize_to_view_sync(view_type, item_count);
+        }
+    }
+
     pub(crate) fn make_submit_callback(
         &self,
         dropped_label: &'static str,
     ) -> Arc<dyn Fn(String, Option<String>) + Send + Sync> {
+        if let Some(binding) = self
+            .prompt_completion
+            .as_ref()
+            .filter(|binding| !binding.observation().retired)
+        {
+            return binding.submit_callback();
+        }
         let response_sender = self.response_sender.clone();
         Arc::new(move |id, value| {
             if let Some(ref sender) = response_sender {
@@ -1810,6 +1418,9 @@ impl ScriptListApp {
         prompt_kind: &str,
         bench_marker: &str,
     ) {
+        if crate::runtime_policy::is_owned_evaluation() {
+            return;
+        }
         // Clear NEEDS_RESET when receiving a UI prompt from an active script.
         // This prevents the window from resetting when shown.
         if NEEDS_RESET.swap(false, Ordering::SeqCst) {
@@ -1911,115 +1522,51 @@ impl ScriptListApp {
                 choices,
                 actions,
             } => {
-                self.prepare_window_for_prompt("UI", "arg", "");
-
-                tracing::info!(
-                    category = "UI",
-                    id = %id,
-                    choice_count = choices.len(),
-                    action_count = actions.as_ref().map(|a| a.len()).unwrap_or(0),
-                    "Showing arg prompt"
-                );
-                let choice_count = choices.len();
-
-                // If actions were provided, store them in the SDK actions system
-                // so they can be triggered via shortcuts and Cmd+K
-                if let Some(ref action_list) = actions {
-                    self.set_sdk_actions_and_shortcuts(action_list.clone(), "UI", false);
-                } else {
-                    // Clear any previous SDK actions
-                    self.sdk_actions = None;
-                    self.action_shortcuts.clear();
-                }
-
-                let pending_placeholder = placeholder.clone();
-                self.current_view = AppView::ArgPrompt {
-                    id,
+                let seed = PromptSeed::Arg(ChoicePromptSeed {
+                    common: PromptSeedCommon::sdk(id, actions, self.response_sender.clone()),
                     placeholder,
                     choices,
-                    actions,
-                };
-                self.arg_input.clear();
-                self.filter_text.clear();
-                self.arg_selected_index = 0;
-                self.focused_input = FocusedInput::ArgPrompt;
-                self.pending_filter_sync = true;
-                self.pending_placeholder = Some(pending_placeholder);
-                self.pending_focus = Some(FocusTarget::MainFilter);
-                // Resize window based on number of choices
-                resize_to_view_sync(ViewType::MiniPrompt, choice_count.min(5));
-                cx.notify();
+                    input: String::new(),
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("arg", false, cx);
             }
             PromptMessage::ShowMini {
                 id,
                 placeholder,
                 choices,
             } => {
-                self.prepare_window_for_prompt("UI", "mini", "");
-
-                tracing::info!(
-                    category = "UI",
-                    id = %id,
-                    choice_count = choices.len(),
-                    "Showing mini prompt"
-                );
-                let choice_count = choices.len();
-
-                // Clear any previous SDK actions (mini has no actions)
-                self.sdk_actions = None;
-                self.action_shortcuts.clear();
-
-                let pending_placeholder = placeholder.clone();
-                self.current_view = AppView::MiniPrompt {
-                    id,
+                let seed = PromptSeed::Mini(ChoicePromptSeed {
+                    common: PromptSeedCommon::sdk(id, None, self.response_sender.clone()),
                     placeholder,
                     choices,
-                };
-                self.arg_input.clear();
-                self.filter_text.clear();
-                self.arg_selected_index = 0;
-                self.focused_input = FocusedInput::ArgPrompt;
-                self.pending_filter_sync = true;
-                self.pending_placeholder = Some(pending_placeholder);
-                self.pending_focus = Some(FocusTarget::MainFilter);
-                let view_type = if choice_count == 0 {
-                    ViewType::ArgPromptNoChoices
-                } else {
-                    ViewType::ArgPromptWithChoices
-                };
-                resize_to_view_sync(view_type, choice_count);
-                cx.notify();
+                    input: String::new(),
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("mini", false, cx);
             }
             PromptMessage::ShowMicro {
                 id,
                 placeholder,
                 choices,
             } => {
-                self.prepare_window_for_prompt("UI", "micro", "");
-
-                tracing::info!(
-                    category = "UI",
-                    id = %id,
-                    choice_count = choices.len(),
-                    "Showing micro prompt"
-                );
-
-                // Clear any previous SDK actions (micro has no actions)
-                self.sdk_actions = None;
-                self.action_shortcuts.clear();
-
-                self.current_view = AppView::MicroPrompt {
-                    id,
+                let seed = PromptSeed::Micro(ChoicePromptSeed {
+                    common: PromptSeedCommon::sdk(id, None, self.response_sender.clone()),
                     placeholder,
                     choices,
-                };
-                self.arg_input.clear();
-                self.arg_selected_index = 0;
-                self.focused_input = FocusedInput::ArgPrompt;
-                self.pending_focus = Some(FocusTarget::AppRoot);
-                // Micro always uses compact (no-choices) height
-                resize_to_view_sync(ViewType::ArgPromptNoChoices, 0);
-                cx.notify();
+                    input: String::new(),
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("micro", false, cx);
             }
             PromptMessage::ShowDiv {
                 id,
@@ -2033,17 +1580,6 @@ impl ScriptListApp {
                 container_padding,
                 opacity,
             } => {
-                self.prepare_window_for_prompt("UI", "div", "");
-
-                tracing::info!(category = "UI", id = %id, "Showing div prompt");
-                // Store SDK actions for the actions panel (Cmd+K)
-                self.sdk_actions = actions;
-
-                let submit_callback = self.make_submit_callback("div");
-
-                // Create focus handle for div prompt
-                let div_focus_handle = cx.focus_handle();
-
                 // Build container options from protocol message
                 let container_options = ContainerOptions {
                     background: container_bg,
@@ -2060,158 +1596,79 @@ impl ScriptListApp {
                     container_classes,
                 };
 
-                // Create DivPrompt entity with proper HTML rendering
-                let div_prompt = DivPrompt::with_options(
-                    id.clone(),
+                let seed = PromptSeed::Div(DivPromptSeed {
+                    common: PromptSeedCommon::sdk(id, actions, self.response_sender.clone()),
                     html,
-                    None, // tailwind param deprecated - use container_classes in options
-                    div_focus_handle,
-                    submit_callback,
-                    std::sync::Arc::clone(&self.theme),
-                    crate::designs::DesignVariant::Default,
-                    container_options,
-                );
-
-                let entity = cx.new(|_| div_prompt);
-                self.current_view = AppView::DivPrompt { id, entity };
-                self.focused_input = FocusedInput::None; // DivPrompt has no text input
-                self.pending_focus = Some(FocusTarget::AppRoot); // DivPrompt uses parent focus
-                resize_to_view_sync(ViewType::DivPrompt, 0);
-                cx.notify();
+                    options: container_options,
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("div", false, cx);
             }
             PromptMessage::ShowForm { id, html, actions } => {
-                self.prepare_window_for_prompt("UI", "form", "");
-
-                tracing::info!(category = "UI", id = %id, "Showing form prompt");
-
-                // Store SDK actions for the actions panel (Cmd+K)
-                self.sdk_actions = actions;
-
-                // Create form field colors from theme
-                let colors = FormFieldColors::from_theme(&self.theme);
-
-                // Create FormPromptState entity with parsed fields
-                let form_state = FormPromptState::new(id.clone(), html, colors, cx);
-                let field_count = form_state.fields.len();
-                let entity = cx.new(|_| form_state);
-
-                self.current_view = AppView::FormPrompt { id, entity };
-                self.focused_input = FocusedInput::None; // FormPrompt has its own focus handling
-                self.pending_focus = Some(FocusTarget::FormPrompt);
-
-                // Resize based on field count (more fields = taller window)
-                let view_type = if field_count > 0 {
-                    ViewType::ArgPromptWithChoices
-                } else {
-                    ViewType::DivPrompt
-                };
-                resize_to_view_sync(view_type, field_count);
-                cx.notify();
+                let seed = PromptSeed::Form(FormPromptSeed {
+                    common: PromptSeedCommon::sdk(id, actions, self.response_sender.clone()),
+                    html,
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("form", false, cx);
             }
             PromptMessage::ShowFields {
                 id,
                 fields,
                 actions,
             } => {
-                self.prepare_window_for_prompt("UI", "fields", "");
-
-                tracing::info!(
-                    category = "UI",
-                    id = %id,
-                    field_count = fields.len(),
-                    "Showing fields prompt"
-                );
-
-                // Store SDK actions for the actions panel (Cmd+K).
-                self.sdk_actions = actions;
-
-                let colors = FormFieldColors::from_theme(&self.theme);
-                let form_state = FormPromptState::from_fields(id.clone(), fields, colors, cx);
-                let field_count = form_state.fields.len();
-                let entity = cx.new(|_| form_state);
-
-                self.current_view = AppView::FormPrompt { id, entity };
-                self.focused_input = FocusedInput::None;
-                self.pending_focus = Some(FocusTarget::FormPrompt);
-
-                let view_type = if field_count > 0 {
-                    ViewType::ArgPromptWithChoices
-                } else {
-                    ViewType::DivPrompt
-                };
-                resize_to_view_sync(view_type, field_count);
-                cx.notify();
+                let seed = PromptSeed::Fields(FieldsPromptSeed {
+                    common: PromptSeedCommon::sdk(id, actions, self.response_sender.clone()),
+                    fields,
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("fields", false, cx);
             }
             PromptMessage::ShowTerm {
                 id,
                 command,
                 actions,
             } => {
-                self.prepare_window_for_prompt("UI", "term", "");
-
-                tracing::info!(
-                    category = "UI",
-                    id = %id,
-                    has_command = command.is_some(),
-                    command_bytes = command.as_ref().map_or(0, String::len),
-                    "Showing term prompt"
-                );
-
-                // Store SDK actions for the actions panel (Cmd+K)
-                self.sdk_actions = actions;
-
-                let submit_callback = self.make_submit_callback("terminal");
-
-                // Get the target height for terminal view (subtract footer height)
-                let term_height =
-                    window_resize::layout::MAX_HEIGHT - px(window_resize::layout::FOOTER_HEIGHT);
-
-                // Create terminal with explicit height - GPUI entities don't inherit parent flex sizing
-                match term_prompt::TermPrompt::with_height(
-                    id.clone(),
-                    command,
-                    self.focus_handle.clone(),
-                    submit_callback,
-                    std::sync::Arc::clone(&self.theme),
-                    std::sync::Arc::new(self.config.clone()),
-                    Some(term_height),
-                ) {
-                    Ok(term_prompt) => {
-                        let entity = cx.new(|_| term_prompt);
-                        let expected_id = id.clone();
-                        self.current_view = AppView::TermPrompt { id, entity };
-                        self.focused_input = FocusedInput::None; // Terminal handles its own cursor
-                        self.pending_focus = Some(FocusTarget::TermPrompt);
-                        // DEFERRED RESIZE: Avoid RefCell borrow error by deferring window resize
-                        // to after the current GPUI update cycle completes. Re-check the active
-                        // prompt id before resizing so a stale task cannot resize a newer view.
-                        cx.spawn(async move |this, cx| {
-                            let target = this
-                                .update(cx, |app, _cx| {
-                                    app.calculate_window_size_params_if_current_view(
-                                        "show_term_deferred_resize",
-                                        |view| {
-                                            matches!(
-                                                view,
-                                                AppView::TermPrompt { id, .. }
-                                                    if id == &expected_id
-                                            )
-                                        },
-                                    )
-                                })
-                                .ok()
-                                .flatten();
-                            if let Some((view_type, item_count)) = target {
-                                resize_to_view_sync(view_type, item_count);
-                            }
-                        })
-                        .detach();
-                        cx.notify();
-                    }
-                    Err(e) => {
-                        tracing::error!(category = "ERROR", error = %e, "Failed to create terminal");
-                    }
+                if let Err(error) =
+                    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+                {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
                 }
+                let terminal = match command {
+                    Some(command) => crate::terminal::TerminalHandle::with_command_and_theme(
+                        &command,
+                        80,
+                        24,
+                        &self.theme,
+                    ),
+                    None => crate::terminal::TerminalHandle::new_with_theme(80, 24, &self.theme),
+                };
+                let terminal = match terminal {
+                    Ok(terminal) => terminal,
+                    Err(error) => {
+                        self.show_error_toast(error.to_string(), cx);
+                        return;
+                    }
+                };
+                let seed = PromptSeed::Term(TerminalPromptSeed {
+                    common: PromptSeedCommon::sdk(id, actions, self.response_sender.clone()),
+                    terminal,
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("term", true, cx);
             }
             PromptMessage::ShowEditor {
                 id,
@@ -2220,117 +1677,17 @@ impl ScriptListApp {
                 template,
                 actions,
             } => {
-                self.prepare_window_for_prompt("UI", "editor", "");
-
-                tracing::info!(
-                    category = "UI",
-                    id = %id,
-                    language = ?language,
-                    has_template = template.is_some(),
-                    "Showing editor prompt"
-                );
-
-                // Store SDK actions for the actions panel (Cmd+K)
-                self.sdk_actions = actions;
-
-                let submit_callback = self.make_submit_callback("editor");
-
-                // CRITICAL: Create a SEPARATE focus handle for the editor.
-                // Using the parent's focus handle causes keyboard event routing issues
-                // because the parent checks is_focused() in its render and both parent
-                // and child would be tracking the same handle.
-                let editor_focus_handle = cx.focus_handle();
-
-                // Get the target height for editor view (subtract footer height for unified footer)
-                let editor_height = px(700.0 - window_resize::layout::FOOTER_HEIGHT);
-
-                // Create editor v2 (gpui-component based with Find/Replace)
-                // Default to markdown for all editor content
-                let resolved_language = language.unwrap_or_else(|| "markdown".to_string());
-
-                // Use with_template if template provided, or if content contains tabstop patterns
-                // This auto-detects VSCode-style templates like ${1:name} or $1
-                let content_str = content.unwrap_or_default();
-                let has_tabstops =
-                    crate::snippet::analysis::contains_explicit_tabstops(&content_str);
-
-                let editor_prompt = if let Some(template_str) = template {
-                    EditorPrompt::with_template(
-                        id.clone(),
-                        template_str,
-                        resolved_language.clone(),
-                        editor_focus_handle.clone(),
-                        submit_callback,
-                        std::sync::Arc::clone(&self.theme),
-                        std::sync::Arc::new(self.config.clone()),
-                        Some(editor_height),
-                    )
-                } else if has_tabstops {
-                    // Auto-detect template in content
-                    // Log length only — editor prompt bodies are user content and
-                    // must not be persisted to the on-disk log.
-                    tracing::info!(
-                        category = "UI",
-                        content_len = content_str.len(),
-                        "Auto-detected template in content"
-                    );
-                    EditorPrompt::with_template(
-                        id.clone(),
-                        content_str,
-                        resolved_language.clone(),
-                        editor_focus_handle.clone(),
-                        submit_callback,
-                        std::sync::Arc::clone(&self.theme),
-                        std::sync::Arc::new(self.config.clone()),
-                        Some(editor_height),
-                    )
-                } else {
-                    EditorPrompt::with_height(
-                        id.clone(),
-                        content_str,
-                        resolved_language.clone(),
-                        editor_focus_handle.clone(),
-                        submit_callback,
-                        std::sync::Arc::clone(&self.theme),
-                        std::sync::Arc::new(self.config.clone()),
-                        Some(editor_height),
-                    )
-                };
-
-                let entity = cx.new(|_| editor_prompt);
-                let expected_id = id.clone();
-                self.current_view = AppView::EditorPrompt {
-                    id,
-                    entity,
-                    focus_handle: editor_focus_handle,
-                };
-                self.focused_input = FocusedInput::None; // Editor handles its own focus
-                self.pending_focus = Some(FocusTarget::EditorPrompt);
-
-                // DEFERRED RESIZE: Avoid RefCell borrow error by deferring window resize
-                // to after the current GPUI update cycle completes. Re-check the active
-                // prompt id before resizing so a stale task cannot resize a newer view.
-                cx.spawn(async move |this, cx| {
-                    let target = this
-                        .update(cx, |app, _cx| {
-                            app.calculate_window_size_params_if_current_view(
-                                "show_editor_deferred_resize",
-                                |view| {
-                                    matches!(
-                                        view,
-                                        AppView::EditorPrompt { id, .. } if id == &expected_id
-                                    )
-                                },
-                            )
-                        })
-                        .ok()
-                        .flatten();
-                    if let Some((view_type, item_count)) = target {
-                        resize_to_view_sync(view_type, item_count);
-                    }
-                })
-                .detach();
-                cx.notify();
+                let seed = PromptSeed::Editor(EditorPromptSeed {
+                    common: PromptSeedCommon::sdk(id, actions, self.response_sender.clone()),
+                    content: content.unwrap_or_default(),
+                    language: language.unwrap_or_else(|| "markdown".to_string()),
+                    template,
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("editor", true, cx);
             }
 
             PromptMessage::ScriptExit => {
@@ -2338,6 +1695,13 @@ impl ScriptListApp {
                     category = "VISIBILITY",
                     "=== ScriptExit message received ==="
                 );
+                if let Some(binding) = &self.prompt_completion {
+                    binding.retire();
+                }
+                if crate::runtime_policy::is_owned_evaluation() {
+                    self.reset_to_script_list(cx);
+                    return;
+                }
 
                 // Complete pending Tab AI execution on clean exit.
                 // If ScriptError already consumed the record, this is a no-op.
@@ -2706,180 +2070,63 @@ impl ScriptListApp {
                     "Collecting state for request"
                 );
 
-                match resolve_get_state_target(&request_id, target.as_ref(), cx) {
-                    GetStateTargetResolution::MainCompatible => {}
-                    GetStateTargetResolution::Notes { resolved, entity } => {
-                        if let Some(ref sender) = self.response_sender {
-                            let notes_state = entity.read(cx).automation_state(cx);
-                            let _ = sender.try_send(Message::state_result(
-                                request_id.clone(),
-                                "notes".to_string(),
-                                Some(format!("target:{:?}:{}", resolved.kind, resolved.id)),
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                String::new(),
-                                0,
-                                0,
-                                -1,
-                                None,
-                                resolved.focused,
-                                resolved.visible,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                Some(notes_state),
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                            ));
+                let main_target =
+                    match resolve_get_state_target(target.as_ref()).and_then(|resolved| {
+                        if resolved.kind == protocol::AutomationWindowKind::Main {
+                            return Ok(Some(resolved));
                         }
-                        return;
-                    }
-                    GetStateTargetResolution::ActionsDialog { resolved, entity } => {
-                        if let Some(ref sender) = self.response_sender {
-                            let actions_state =
-                                entity.read(cx).automation_state("actionsDialog", cx);
-                            let _ = sender.try_send(Message::state_result(
-                                request_id.clone(),
-                                "actionsDialog".to_string(),
-                                Some(format!("target:{:?}:{}", resolved.kind, resolved.id)),
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                String::new(),
-                                0,
-                                0,
-                                -1,
-                                None,
-                                resolved.focused,
-                                resolved.visible,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                Some(actions_state),
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                            ));
+                        let response = registered_surface_state_result(&request_id, &resolved, cx)
+                            .map_err(|error| error.to_string())?;
+                        if let Some(sender) = &self.response_sender {
+                            let _ = sender.try_send(response);
                         }
-                        return;
-                    }
-                    GetStateTargetResolution::UnsupportedNonMain { resolved } => {
-                        if let Some(ref sender) = self.response_sender {
-                            let _ = sender.try_send(Message::state_result(
-                                request_id.clone(),
-                                "unsupported".to_string(),
-                                Some(format!("target_unsupported:{:?}", resolved.kind)),
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                String::new(),
-                                0,
-                                0,
-                                -1,
-                                None,
-                                false,
-                                resolved.visible,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                            ));
+                        Ok(None)
+                    }) {
+                        Ok(Some(resolved)) => resolved,
+                        Ok(None) => return,
+                        Err(error) => {
+                            if let Some(ref sender) = self.response_sender {
+                                let _ = sender.try_send(Message::state_result(
+                                    request_id.clone(),
+                                    "target_resolution_failed".to_string(),
+                                    Some(format!("target_error:{}", error)),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    String::new(),
+                                    0,
+                                    0,
+                                    -1,
+                                    None,
+                                    false,
+                                    false,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                ));
+                            }
+                            return;
                         }
-                        return;
-                    }
-                    GetStateTargetResolution::ResolutionFailed { error } => {
-                        if let Some(ref sender) = self.response_sender {
-                            let _ = sender.try_send(Message::state_result(
-                                request_id.clone(),
-                                "target_resolution_failed".to_string(),
-                                Some(format!("target_error:{}", error)),
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                String::new(),
-                                0,
-                                0,
-                                -1,
-                                None,
-                                false,
-                                false,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                                None,
-                            ));
-                        }
-                        return;
-                    }
-                }
+                    };
 
                 // Collect current UI state
                 let (
@@ -2893,86 +2140,33 @@ impl ScriptListApp {
                     selected_value,
                 ) = match &self.current_view {
                     AppView::ScriptList => {
-                        if let Some(snapshot) = self
-                            .menu_syntax_object_selector_state
-                            .snapshot
-                            .as_ref()
-                            .filter(|_| self.menu_syntax_object_selector_state.owns_main_list())
-                        {
-                            let selected_row_index = self
-                                .menu_syntax_object_selector_state
-                                .selected_row_id
-                                .as_deref()
-                                .and_then(|id| snapshot.rows.iter().position(|row| row.id == id));
-                            let selected_value = selected_row_index.and_then(|index| {
-                                snapshot
-                                    .rows
-                                    .get(index)
-                                    .map(|row| row.token.clone().unwrap_or_else(|| row.id.clone()))
+                        let (visible_rows, selected_row_index) =
+                            self.script_list_visible_row_labels_from_cache();
+                        let selected_value =
+                            selected_row_index.and_then(|index| visible_rows.get(index).cloned());
+                        let selected_grouped_index = self
+                            .resolved_main_menu_selected_subject()
+                            .map(|subject| match subject {
+                                ResolvedMainMenuSelection::SearchResult { row, .. }
+                                | ResolvedMainMenuSelection::Calculator { row, .. } => {
+                                    row.grouped_index
+                                }
                             });
-                            (
-                                "none".to_string(),
-                                None,
-                                None,
-                                self.filter_text.clone(),
-                                snapshot.rows.len(),
-                                snapshot.rows.len(),
-                                selected_row_index.map_or(-1, |index| index as i32),
-                                selected_value,
-                            )
-                        } else if let Some(snapshot) = self
-                            .menu_syntax_trigger_picker_state
-                            .snapshot
-                            .as_ref()
-                            .filter(|_| self.menu_syntax_trigger_picker_state.owns_main_list())
-                        {
-                            let selected_row_index = self
-                                .menu_syntax_trigger_picker_state
-                                .selected_row_id
-                                .as_deref()
-                                .and_then(|id| snapshot.rows.iter().position(|row| row.id == id));
-                            let selected_value = selected_row_index.and_then(|index| {
-                                snapshot
-                                    .rows
-                                    .get(index)
-                                    .map(|row| row.token.clone().unwrap_or_else(|| row.id.clone()))
-                            });
-                            (
-                                "none".to_string(),
-                                None,
-                                None,
-                                self.filter_text.clone(),
-                                snapshot.rows.len(),
-                                snapshot.rows.len(),
-                                selected_row_index.map_or(-1, |index| index as i32),
-                                selected_value,
-                            )
-                        } else {
-                            self.get_grouped_results_cached();
-                            let (visible_rows, selected_row_index) =
-                                self.script_list_visible_row_labels_from_cache();
-                            let filtered_len = visible_rows.len();
-                            let selected_value = selected_row_index
-                                .and_then(|index| visible_rows.get(index).cloned());
-                            (
-                                "none".to_string(),
-                                None,
-                                None,
-                                self.filter_text.clone(),
-                                // choiceCount MUST sum every collection
-                                // passed to fuzzy_search_unified_all_with_skills_and_flows
-                                // (see tests/scriptlist_choicecount_includes_skills_contract.rs).
-                                self.scripts.len()
-                                    + self.scriptlets.len()
-                                    + self.builtin_entries.len()
-                                    + self.apps.len()
-                                    + self.skills.len()
-                                    + self.flow_desk_corpus().len(),
-                                filtered_len,
-                                self.selected_index as i32,
-                                selected_value,
-                            )
-                        }
+                        (
+                            "none".to_string(),
+                            None,
+                            None,
+                            self.filter_text.clone(),
+                            self.scripts.len()
+                                + self.scriptlets.len()
+                                + self.builtin_entries.len()
+                                + self.apps.len()
+                                + self.skills.len()
+                                + self.flow_desk_corpus().len(),
+                            visible_rows.len(),
+                            selected_grouped_index.map_or(-1, |index| index as i32),
+                            selected_value,
+                        )
                     }
                     AppView::About { .. } => (
                         "about".to_string(),
@@ -3832,11 +3026,45 @@ impl ScriptListApp {
                         Some(options.title.to_string()),
                     ),
                 };
+                let observation = self.prompt_observation(cx);
+                let (input_value, choice_count, visible_choice_count, selected_index) = observation
+                    .as_ref()
+                    .map(|state| {
+                        (
+                            state.input.clone(),
+                            state.choice_count,
+                            state.choice_count,
+                            state.selected_index.map(|index| index as i32).unwrap_or(-1),
+                        )
+                    })
+                    .unwrap_or((
+                        input_value,
+                        choice_count,
+                        visible_choice_count,
+                        selected_index,
+                    ));
+                let selected_value = match &self.current_view {
+                    AppView::SelectPrompt { entity, .. } => {
+                        let prompt = entity.read(cx);
+                        prompt
+                            .filtered_choices
+                            .get(prompt.focused_index)
+                            .and_then(|index| prompt.choices.get(*index))
+                            .map(|choice| choice.value.clone())
+                    }
+                    AppView::PathPrompt { entity, .. } => {
+                        let prompt = entity.read(cx);
+                        prompt
+                            .filtered_entries
+                            .get(prompt.selected_index)
+                            .map(|entry| entry.path.clone())
+                    }
+                    _ => selected_value,
+                };
 
-                // Focus state: we use focused_input as a proxy since we don't have Window access here.
-                // When window is visible and we're tracking an input, we're focused.
-                let window_visible = script_kit_gpui::is_main_window_visible();
-                let is_focused = window_visible && self.focused_input != FocusedInput::None;
+                // Report the resolved owner, never a process-wide visibility proxy.
+                let window_visible = main_target.visible;
+                let is_focused = main_target.focused;
                 let filter_input_decorations = {
                     let input_state = self.gpui_input_state.read(cx);
                     let input_text = input_state.value().to_string();
@@ -4056,7 +3284,7 @@ impl ScriptListApp {
                         "handoffSubtitle": root_file_handoff_subtitle,
                         "loading": self.root_search.root_file_provider_loading,
                         "providerLoading": self.root_search.root_file_provider_loading,
-                        "visibleLoading": self.root_search.root_file_search_loading,
+                        "visibleLoading": self.visible_root_file_search_loading(),
                         "generation": self.root_search.root_file_search_generation,
                         "visibleResultCount": self.root_search.root_file_results.len(),
                         "visibleRootFileCount": self.root_search.root_file_results.len(),
@@ -4085,7 +3313,7 @@ impl ScriptListApp {
                 };
                 let active_list_scroll = main_list_scroll
                     .clone()
-                    .or_else(|| self.active_builtin_list_scroll_receipt());
+                    .or_else(|| self.active_builtin_list_scroll_receipt(cx));
                 let actions_dialog =
                     if self.show_actions_popup || crate::actions::is_actions_window_open() {
                         self.actions_dialog
@@ -4170,9 +3398,9 @@ impl ScriptListApp {
                     request_id.clone(),
                     prompt_type,
                     prompt_id,
-                    Some(self.current_surface_contract_snapshot(cx)),
+                    Some(self.current_surface_contract_snapshot(&main_target, cx)),
                     self.active_popup_contract_snapshot(),
-                    Some(self.active_footer_snapshot(cx)),
+                    Some(self.active_footer_snapshot(&main_target)),
                     self.submit_diagnostics_snapshot(),
                     placeholder,
                     input_value,
@@ -4258,8 +3486,6 @@ impl ScriptListApp {
                     &request_id,
                     "getAgentChatState",
                     target.as_ref(),
-                    self.embedded_agent_chat_automation_entity().as_ref(),
-                    cx,
                 ) {
                     Ok(t) => t,
                     Err(error) => {
@@ -4407,8 +3633,6 @@ impl ScriptListApp {
                     &request_id,
                     "performAgentChatSetupAction",
                     target.as_ref(),
-                    self.embedded_agent_chat_automation_entity().as_ref(),
-                    cx,
                 ) {
                     Ok(t) => t,
                     Err(error) => {
@@ -4629,8 +3853,6 @@ impl ScriptListApp {
                     &request_id,
                     "resetAgentChatTestProbe",
                     target.as_ref(),
-                    self.embedded_agent_chat_automation_entity().as_ref(),
-                    cx,
                 ) {
                     Ok(t) => t,
                     Err(error) => {
@@ -4721,8 +3943,6 @@ impl ScriptListApp {
                     &request_id,
                     "getAgentChatTestProbe",
                     target.as_ref(),
-                    self.embedded_agent_chat_automation_entity().as_ref(),
-                    cx,
                 ) {
                     Ok(t) => t,
                     Err(error) => {
@@ -4961,114 +4181,47 @@ impl ScriptListApp {
 
                 if target.is_some() {
                     match crate::windows::resolve_automation_window(target.as_ref()) {
-                        Ok(resolved)
-                            if resolved.kind == crate::protocol::AutomationWindowKind::Notes =>
-                        {
-                            if let Some((entity, handle)) =
-                                crate::notes::get_notes_app_entity_and_handle()
+                        Ok(resolved) if resolved.kind != protocol::AutomationWindowKind::Main => {
+                            let layout = if resolved.semantic_surface.as_deref()
+                                == Some("footerOverlay")
                             {
-                                let mut layout_info =
-                                    entity.read(cx).automation_layout_info(&resolved);
-                                if let Err(error) = handle.update(cx, |_root, window, _cx| {
-                                    Self::append_paint_measurements(&mut layout_info, window);
-                                }) {
-                                    tracing::warn!(
-                                        target: "script_kit::automation",
-                                        request_id = %request_id,
-                                        error = %error,
-                                        "getLayoutInfo: Notes paint measurement window update failed"
-                                    );
-                                }
-                                let response =
-                                    Message::layout_info_result(request_id.clone(), layout_info);
-                                if let Some(ref sender) = self.response_sender {
-                                    let _ = sender.try_send(response);
-                                }
-                            } else if let Some(ref sender) = self.response_sender {
-                                let empty_info = crate::protocol::LayoutInfo::default();
-                                let _ = sender.try_send(Message::layout_info_result(
-                                    request_id.clone(),
-                                    empty_info,
-                                ));
-                            }
-                            return;
-                        }
-                        Ok(resolved)
-                            if resolved.kind
-                                == crate::protocol::AutomationWindowKind::AgentChatDetached =>
-                        {
-                            if let Some(entity) =
-                                crate::ai::agent_chat::ui::chat_window::get_detached_agent_chat_view_entity()
-                            {
-                                let layout_info =
-                                    entity.read(cx).automation_layout_info(&resolved, cx);
-                                let response =
-                                    Message::layout_info_result(request_id.clone(), layout_info);
-                                if let Some(ref sender) = self.response_sender {
-                                    let _ = sender.try_send(response);
-                                }
+                                resolved
+                                    .generation
+                                    .ok_or_else(|| anyhow::anyhow!("footer_generation_missing"))
+                                    .and_then(|generation| {
+                                        crate::footer_popup::footer_fixture_layout(
+                                            &resolved.id,
+                                            generation,
+                                            cx,
+                                        )
+                                    })
+                            } else if resolved.id == "shortcut-recorder-popup" {
+                                resolved
+                                    .generation
+                                    .ok_or_else(|| anyhow::anyhow!("shortcut_generation_missing"))
+                                    .and_then(|generation| {
+                                        crate::shortcut_recorder::shortcut_fixture_layout(
+                                            &resolved.id,
+                                            generation,
+                                            cx,
+                                        )
+                                    })
                             } else {
-                                let layout_info = crate::ai::agent_chat::ui::AgentChatView::placeholder_automation_layout_info(&resolved);
-                                let response =
-                                    Message::layout_info_result(request_id.clone(), layout_info);
-                                if let Some(ref sender) = self.response_sender {
-                                    let _ = sender.try_send(response);
-                                }
-                            }
-                            return;
-                        }
-                        Ok(resolved)
-                            if resolved.kind
-                                == crate::protocol::AutomationWindowKind::ActionsDialog =>
-                        {
-                            if let Some(entity) = crate::actions::get_actions_dialog_entity(cx) {
-                                let layout_info =
-                                    entity.read(cx).automation_layout_info(&resolved, cx);
-                                let response =
-                                    Message::layout_info_result(request_id.clone(), layout_info);
-                                if let Some(ref sender) = self.response_sender {
-                                    let _ = sender.try_send(response);
-                                }
-                            } else if let Some(ref sender) = self.response_sender {
-                                let empty_info = crate::protocol::LayoutInfo::default();
+                                crate::windows::automation_surface_collector::collect_registered_surface_layout(&resolved, cx)
+                            };
+                            let layout = layout.unwrap_or_else(|error| {
+                                tracing::warn!(request_id = %request_id, error = %error, "getLayoutInfo: target layout unavailable");
+                                protocol::LayoutInfo::default()
+                            });
+                            if let Some(ref sender) = self.response_sender {
                                 let _ = sender.try_send(Message::layout_info_result(
                                     request_id.clone(),
-                                    empty_info,
+                                    layout,
                                 ));
                             }
                             return;
                         }
-                        Ok(resolved)
-                            if resolved.kind
-                                == crate::protocol::AutomationWindowKind::Dictation =>
-                        {
-                            let layout_info = crate::dictation::automation_layout_info(&resolved);
-                            let response =
-                                Message::layout_info_result(request_id.clone(), layout_info);
-                            if let Some(ref sender) = self.response_sender {
-                                let _ = sender.try_send(response);
-                            }
-                            return;
-                        }
-                        Ok(resolved)
-                            if resolved.kind == crate::protocol::AutomationWindowKind::Main =>
-                        { /* main window — proceed */ }
-                        Ok(resolved) => {
-                            tracing::warn!(
-                                target: "script_kit::automation",
-                                request_id = %request_id,
-                                resolved_kind = ?resolved.kind,
-                                resolved_id = %resolved.id,
-                                "getLayoutInfo: target rejected"
-                            );
-                            let empty_info = crate::protocol::LayoutInfo::default();
-                            let response =
-                                Message::layout_info_result(request_id.clone(), empty_info);
-                            if let Some(ref sender) = self.response_sender {
-                                let _ = sender.try_send(response);
-                            }
-                            return;
-                        }
+                        Ok(_) => { /* main window — proceed */ }
                         Err(error) => {
                             tracing::warn!(
                                 target: "script_kit::automation",
@@ -5187,94 +4340,58 @@ impl ScriptListApp {
                 target,
             } => {
                 let timeout_ms = timeout.unwrap_or(5_000);
-                let poll_ms = poll_interval.unwrap_or(25);
+                let poll_ms = poll_interval.unwrap_or(25).clamp(1, 1_000);
                 let rid = request_id.clone();
-                let command_fingerprint =
-                    match protocol::transaction_executor::stable_wait_fingerprint(
-                        &condition, timeout_ms, poll_ms,
-                    ) {
-                        Ok(fingerprint) => fingerprint,
+                let wait_command = protocol::BatchCommand::WaitFor {
+                    condition: condition.clone(),
+                    timeout: Some(timeout_ms),
+                    poll_interval: Some(poll_ms),
+                };
+                let wait_options = protocol::BatchOptions {
+                    stop_on_error: true,
+                    rollback_on_error: false,
+                    timeout: timeout_ms.max(1),
+                };
+                let (command_fingerprint, dispatch_guard) = match prepare_transaction_transport(
+                    &rid,
+                    std::slice::from_ref(&wait_command),
+                    &wait_options,
+                    target.as_ref(),
+                    cx,
+                ) {
+                    Ok(Some(prepared)) => prepared,
+                    Ok(None) => return,
+                    Err(error) => {
+                        if let Some(sender) = &self.response_sender {
+                            let _ = sender.try_send(Message::wait_for_result(
+                                rid,
+                                false,
+                                0,
+                                Some(error),
+                            ));
+                        }
+                        return;
+                    }
+                };
+
+                let resolved_target =
+                    match resolve_automation_read_target(&rid, "waitFor", target.as_ref(), cx) {
+                        Ok(resolved) => resolved,
                         Err(error) => {
                             if let Some(ref sender) = self.response_sender {
                                 let _ = sender.try_send(Message::wait_for_result(
                                     request_id.clone(),
                                     false,
                                     0,
-                                    Some(crate::protocol::TransactionError::action_failed(
-                                        format!("failed to fingerprint waitFor: {error}"),
-                                    )),
+                                    Some(error),
                                 ));
                             }
                             return;
                         }
                     };
-
-                let is_agent_chat_condition = is_agent_chat_wait_condition(&condition);
-
-                // Resolve target: Agent Chat conditions accept AgentChatDetached; generic
-                // conditions accept Main, AgentChatDetached, and Notes.
-                let resolved_target: AutomationReadTarget = if target.is_some() {
-                    if is_agent_chat_condition {
-                        match resolve_agent_chat_read_target(
-                            &rid,
-                            "waitFor",
-                            target.as_ref(),
-                            self.embedded_agent_chat_automation_entity().as_ref(),
-                            cx,
-                        ) {
-                            Ok(AgentChatReadTarget::Detached { entity, info }) => {
-                                AutomationReadTarget::AgentChatDetached { entity, info }
-                            }
-                            Ok(AgentChatReadTarget::Main { info }) => {
-                                AutomationReadTarget::Main { info }
-                            }
-                            Err(error) => {
-                                if let Some(ref sender) = self.response_sender {
-                                    let _ = sender.try_send(Message::wait_for_result(
-                                        request_id.clone(),
-                                        false,
-                                        0,
-                                        Some(error),
-                                    ));
-                                }
-                                return;
-                            }
-                        }
-                    } else {
-                        match resolve_automation_read_target(
-                            &rid,
-                            "waitFor",
-                            target.as_ref(),
-                            self.embedded_agent_chat_automation_entity().as_ref(),
-                            cx,
-                        ) {
-                            Ok(resolved) => resolved,
-                            Err(error) => {
-                                if let Some(ref sender) = self.response_sender {
-                                    let _ = sender.try_send(Message::wait_for_result(
-                                        request_id.clone(),
-                                        false,
-                                        0,
-                                        Some(error),
-                                    ));
-                                }
-                                return;
-                            }
-                        }
-                    }
-                } else {
-                    AutomationReadTarget::Main { info: None }
-                };
-
-                // Extract the detached Agent Chat entity for backward-compatible condition checking.
-                let detached_entity: Option<
-                    gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>,
-                > = if let AutomationReadTarget::AgentChatDetached { ref entity, .. } =
-                    resolved_target
-                {
-                    Some(entity.clone())
-                } else {
-                    None
+                let secondary_target = match &resolved_target {
+                    AutomationReadTarget::Registered { info } => Some(info.clone()),
+                    AutomationReadTarget::Main { .. } => None,
                 };
 
                 tracing::info!(
@@ -5286,21 +4403,46 @@ impl ScriptListApp {
                     "automation.wait_for.started"
                 );
 
-                // Check if condition is already satisfied
-                let already_satisfied = match &resolved_target {
-                    AutomationReadTarget::Notes { entity, .. } => {
-                        notes_wait_condition_satisfied(entity, &condition, cx)
+                let already_satisfied = match secondary_target.as_ref() {
+                    Some(info) => registered_surface_wait_satisfied(info, &condition, cx),
+                    None => Ok(self.wait_condition_satisfied(&condition, cx)),
+                };
+                let already_satisfied = match already_satisfied {
+                    Ok(satisfied) => satisfied,
+                    Err(error) => {
+                        if let Some(ref sender) = self.response_sender {
+                            let _ = sender.try_send(Message::wait_for_result(
+                                request_id.clone(),
+                                false,
+                                0,
+                                Some(registered_surface_transaction_error(error)),
+                            ));
+                        }
+                        return;
                     }
-                    _ => self.wait_condition_satisfied_for_target(
-                        &condition,
-                        detached_entity.as_ref(),
-                        cx,
-                    ),
                 };
                 if already_satisfied {
                     let include_trace =
                         protocol::transaction_trace::should_include_trace(trace_mode, true);
                     let trace = if include_trace {
+                        let snapshot = match secondary_target.as_ref() {
+                            Some(info) => registered_surface_ui_snapshot(info, cx),
+                            None => Ok(self.build_main_ui_snapshot(cx)),
+                        };
+                        let snapshot = match snapshot {
+                            Ok(snapshot) => snapshot,
+                            Err(error) => {
+                                if let Some(ref sender) = self.response_sender {
+                                    let _ = sender.try_send(Message::wait_for_result(
+                                        request_id.clone(),
+                                        false,
+                                        0,
+                                        Some(registered_surface_transaction_error(error)),
+                                    ));
+                                }
+                                return;
+                            }
+                        };
                         let started_at_ms = protocol::transaction_trace::now_epoch_ms();
                         Some(protocol::TransactionTrace {
                             schema_version: protocol::TRANSACTION_TRACE_SCHEMA_VERSION,
@@ -5316,13 +4458,13 @@ impl ScriptListApp {
                                 command_payload: None,
                                 started_at_ms,
                                 elapsed_ms: 0,
-                                before: protocol::UiStateSnapshot::default(),
-                                after: protocol::UiStateSnapshot::default(),
+                                before: snapshot.clone(),
+                                after: snapshot.clone(),
                                 polls: vec![protocol::WaitPollObservation {
                                     attempt: 1,
                                     elapsed_ms: 0,
                                     condition_satisfied: true,
-                                    snapshot: protocol::UiStateSnapshot::default(),
+                                    snapshot,
                                     matched_semantic_ids: Vec::new(),
                                 }],
                                 error: None,
@@ -5354,14 +4496,18 @@ impl ScriptListApp {
                     // Poll asynchronously
                     let sender = self.response_sender.clone();
                     let condition = condition.clone();
-                    let detached_entity = detached_entity.clone();
-                    let notes_entity: Option<gpui::Entity<crate::notes::NotesApp>> =
-                        if let AutomationReadTarget::Notes { ref entity, .. } = resolved_target {
-                            Some(entity.clone())
-                        } else {
-                            None
-                        };
                     cx.spawn(async move |this, cx| {
+                        if let Err(error) = dispatch_guard.validate() {
+                            if let Some(sender) = &sender {
+                                let _ = sender.try_send(Message::wait_for_result(
+                                    rid,
+                                    false,
+                                    0,
+                                    Some(protocol::TransactionError::action_failed(error)),
+                                ));
+                            }
+                            return;
+                        }
                         let started_at_ms = protocol::transaction_trace::now_epoch_ms();
                         let start = std::time::Instant::now();
                         let timeout_dur = std::time::Duration::from_millis(timeout_ms);
@@ -5369,27 +4515,33 @@ impl ScriptListApp {
 
                         // Capture `before` once at entry so callers can diff against
                         // the state the poll loop saw when it began.
-                        let before_snapshot = {
-                            let notes_ent = notes_entity.clone();
-                            let detached_ent = detached_entity.clone();
-                            this.update(cx, move |this, cx| {
-                                if let Some(ne) = notes_ent {
-                                    build_notes_ui_snapshot(&ne, cx)
-                                } else if let Some(de) = detached_ent {
-                                    build_agent_chat_detached_ui_snapshot(&de, cx)
-                                } else {
-                                    this.build_main_ui_snapshot(cx)
+                        let before_snapshot = match secondary_target.as_ref() {
+                            Some(info) => cx.update(|cx| registered_surface_ui_snapshot(info, cx)),
+                            None => this.update(cx, |this, cx| this.build_main_ui_snapshot(cx)),
+                        };
+                        let before_snapshot = match before_snapshot {
+                            Ok(snapshot) => snapshot,
+                            Err(error) => {
+                                if let Some(ref sender) = sender {
+                                    let _ = sender.try_send(Message::wait_for_result(
+                                        rid.clone(),
+                                        false,
+                                        0,
+                                        Some(registered_surface_transaction_error(error)),
+                                    ));
                                 }
-                            })
-                            .unwrap_or_default()
+                                return;
+                            }
                         };
 
                         let mut polls: Vec<protocol::WaitPollObservation> = Vec::new();
                         let mut last_snapshot = before_snapshot.clone();
 
                         loop {
-                            cx.background_executor().timer(poll_dur).await;
-                            if start.elapsed() >= timeout_dur {
+                            cx.background_executor()
+                                .timer(poll_dur.min(timeout_dur.saturating_sub(start.elapsed())))
+                                .await;
+                            if start.elapsed() >= timeout_dur || polls.len() >= MAX_WAIT_POLLS {
                                 let elapsed_ms = start.elapsed().as_millis() as u64;
                                 let error = crate::protocol::TransactionError {
                                     code:
@@ -5448,34 +4600,33 @@ impl ScriptListApp {
                                 }
                                 break;
                             }
+                            if let Err(error) = dispatch_guard.validate() {
+                                if let Some(sender) = &sender {
+                                    let _ = sender.try_send(Message::wait_for_result(
+                                        rid.clone(),
+                                        false,
+                                        start.elapsed().as_millis() as u64,
+                                        Some(protocol::TransactionError::action_failed(error)),
+                                    ));
+                                }
+                                break;
+                            }
                             // Capture condition_satisfied + a fresh snapshot in the
                             // same `this.update(...)` closure so both reflect the
                             // same tick of state.
-                            let poll_result = if let Some(ref notes_ent) = notes_entity {
-                                let ne = notes_ent.clone();
-                                this.update(cx, |_this, cx| {
-                                    let ok = notes_wait_condition_satisfied(&ne, &condition, cx);
-                                    let snap = build_notes_ui_snapshot(&ne, cx);
-                                    (ok, snap)
-                                })
-                            } else if let Some(ref det_ent) = detached_entity {
-                                let de = det_ent.clone();
-                                this.update(cx, |this, cx| {
-                                    let ok = this.wait_condition_satisfied_for_target(
-                                        &condition,
-                                        Some(&de),
-                                        cx,
-                                    );
-                                    let snap = build_agent_chat_detached_ui_snapshot(&de, cx);
-                                    (ok, snap)
-                                })
-                            } else {
-                                this.update(cx, |this, cx| {
-                                    let ok = this
-                                        .wait_condition_satisfied_for_target(&condition, None, cx);
-                                    let snap = this.build_main_ui_snapshot(cx);
-                                    (ok, snap)
-                                })
+                            let poll_result = match secondary_target.as_ref() {
+                                Some(info) => cx.update(|cx| {
+                                    let satisfied =
+                                        registered_surface_wait_satisfied(info, &condition, cx)?;
+                                    let snapshot = registered_surface_ui_snapshot(info, cx)?;
+                                    Ok((satisfied, snapshot))
+                                }),
+                                None => this.update(cx, |this, cx| {
+                                    (
+                                        this.wait_condition_satisfied(&condition, cx),
+                                        this.build_main_ui_snapshot(cx),
+                                    )
+                                }),
                             };
                             match poll_result {
                                 Ok((condition_satisfied, snapshot)) => {
@@ -5541,13 +4692,9 @@ impl ScriptListApp {
                                     }
                                     continue;
                                 }
-                                Err(_) => {
+                                Err(error) => {
                                     let elapsed_ms = start.elapsed().as_millis() as u64;
-                                    let error = crate::protocol::TransactionError {
-                                        code: crate::protocol::TransactionErrorCode::ActionFailed,
-                                        message: "Entity dropped during WaitFor".to_string(),
-                                        suggestion: None,
-                                    };
+                                    let error = registered_surface_transaction_error(error);
                                     let include_trace =
                                         protocol::transaction_trace::should_include_trace(
                                             trace_mode, false,
@@ -5610,6 +4757,7 @@ impl ScriptListApp {
                 options,
                 trace: trace_mode,
                 target,
+                expected,
             } => {
                 let opts = options.unwrap_or(protocol::BatchOptions {
                     stop_on_error: true,
@@ -5618,76 +4766,29 @@ impl ScriptListApp {
                 });
                 let rid = request_id.clone();
                 let sender = self.response_sender.clone();
-                let command_fingerprint =
-                    match protocol::transaction_executor::stable_transaction_fingerprint(
-                        &commands,
-                        Some(&opts),
-                    ) {
-                        Ok(fingerprint) => fingerprint,
-                        Err(error) => {
-                            if let Some(ref sender) = self.response_sender {
-                                let _ = sender.try_send(Message::batch_result(
-                                    request_id.clone(),
-                                    false,
-                                    vec![crate::protocol::BatchResultEntry {
-                                        index: 0,
-                                        success: false,
-                                        command: "batch".to_string(),
-                                        elapsed: Some(0),
-                                        value: None,
-                                        error: Some(
-                                            crate::protocol::TransactionError::action_failed(
-                                                format!(
-                                                    "failed to fingerprint transaction: {error}"
-                                                ),
-                                            ),
-                                        ),
-                                    }],
-                                    Some(0),
-                                    0,
-                                ));
-                            }
-                            return;
-                        }
-                    };
-
-                match protocol::transaction_trace::read_latest_transaction_trace(None, Some(&rid)) {
-                    Ok(Some(existing)) if existing.command_fingerprint == command_fingerprint => {
-                        let output = protocol::transaction_executor::BatchOutput::from_trace(
-                            existing.clone(),
-                        );
-                        let include_trace = protocol::transaction_trace::should_include_trace(
-                            trace_mode,
-                            output.success,
-                        );
-                        if let Some(ref sender) = self.response_sender {
-                            let _ = sender.try_send(Message::batch_result_with_trace(
-                                output.request_id,
-                                output.success,
-                                output.results,
-                                output.failed_at,
-                                output.total_elapsed,
-                                include_trace.then_some(existing),
-                            ));
-                        }
-                        return;
-                    }
-                    Ok(Some(existing)) if !existing.command_fingerprint.is_empty() => {
-                        if let Some(ref sender) = self.response_sender {
+                let batch_start = std::time::Instant::now();
+                let batch_timeout = std::time::Duration::from_millis(opts.timeout);
+                let (command_fingerprint, dispatch_guard) = match prepare_transaction_transport(
+                    &rid,
+                    &commands,
+                    &opts,
+                    target.as_ref(),
+                    cx,
+                ) {
+                    Ok(Some(prepared)) => prepared,
+                    Ok(None) => return, // The original in-flight/terminal request owns its sole reply.
+                    Err(error) => {
+                        if let Some(sender) = &self.response_sender {
                             let _ = sender.try_send(Message::batch_result(
-                                request_id.clone(),
+                                rid,
                                 false,
-                                vec![crate::protocol::BatchResultEntry {
+                                vec![protocol::BatchResultEntry {
                                     index: 0,
                                     success: false,
-                                    command: "batch".to_string(),
+                                    command: "batch".into(),
                                     elapsed: Some(0),
                                     value: None,
-                                    error: Some(
-                                        crate::protocol::TransactionError::action_failed(format!(
-                                            "requestId {rid} was already used for a different transaction payload"
-                                        )),
-                                    ),
+                                    error: Some(error),
                                 }],
                                 Some(0),
                                 0,
@@ -5695,33 +4796,11 @@ impl ScriptListApp {
                         }
                         return;
                     }
-                    Ok(Some(_legacy)) => {
-                        tracing::warn!(
-                            target: "script_kit::transaction",
-                            request_id = %rid,
-                            "Ignoring legacy transaction trace without fingerprint"
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "script_kit::transaction",
-                            request_id = %rid,
-                            error = %error,
-                            "Failed to inspect prior transaction trace"
-                        );
-                    }
-                }
+                };
 
                 // Resolve target: accept Main, AgentChatDetached, and Notes.
                 let batch_target: AutomationReadTarget = if target.is_some() {
-                    match resolve_automation_read_target(
-                        &rid,
-                        "batch",
-                        target.as_ref(),
-                        self.embedded_agent_chat_automation_entity().as_ref(),
-                        cx,
-                    ) {
+                    match resolve_automation_read_target(&rid, "batch", target.as_ref(), cx) {
                         Ok(resolved) => resolved,
                         Err(error) => {
                             if let Some(ref sender) = self.response_sender {
@@ -5744,48 +4823,11 @@ impl ScriptListApp {
                         }
                     }
                 } else {
-                    AutomationReadTarget::Main { info: None }
+                    AutomationReadTarget::Main {
+                        info: Some(dispatch_guard.info.clone()),
+                    }
                 };
                 let batch_target_kind = batch_target_kind_for_resolved_target(&batch_target);
-
-                let detached_batch_entity: Option<
-                    gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>,
-                > = if let AutomationReadTarget::AgentChatDetached { ref entity, .. } = batch_target
-                {
-                    Some(entity.clone())
-                } else {
-                    None
-                };
-
-                let notes_batch_target: Option<(
-                    gpui::Entity<crate::notes::NotesApp>,
-                    gpui::WindowHandle<crate::Root>,
-                )> = if let AutomationReadTarget::Notes {
-                    ref entity,
-                    ref handle,
-                    ..
-                } = batch_target
-                {
-                    Some((entity.clone(), *handle))
-                } else {
-                    None
-                };
-
-                let actions_dialog_batch_entity: Option<
-                    gpui::Entity<crate::actions::ActionsDialog>,
-                > = if let AutomationReadTarget::ActionsDialog { ref entity, .. } = batch_target {
-                    Some(entity.clone())
-                } else {
-                    None
-                };
-
-                let prompt_popup_batch_target =
-                    if let AutomationReadTarget::PromptPopup { ref info, subtype } = batch_target {
-                        Some((info.clone(), subtype))
-                    } else {
-                        None
-                    };
-                let is_prompt_popup_batch = prompt_popup_batch_target.is_some();
 
                 tracing::info!(
                     category = "AUTOMATION",
@@ -5799,313 +4841,71 @@ impl ScriptListApp {
                 let main_batch_window_handle = crate::get_main_window_handle();
 
                 cx.spawn(async move |this, cx| {
-                    // ── Detached Agent Chat batch path ──────────────────────────
-                    // When targeting a detached Agent Chat entity, route commands
-                    // to it instead of the main window. The command set is
-                    // limited to setInput, waitFor, selectByValue, and
-                    // selectBySemanticId.
-                    if let Some(agent_chat_entity) = detached_batch_entity {
+                    // Secondary commands use the same exact production owners as the evaluator.
+                    if let AutomationReadTarget::Registered { info } = &batch_target {
                         let batch_started_at_ms = protocol::transaction_trace::now_epoch_ms();
-                        let batch_start = std::time::Instant::now();
-                        let batch_timeout = std::time::Duration::from_millis(opts.timeout);
-                        let mut results: Vec<protocol::BatchResultEntry> = Vec::new();
-                        let mut failed = false;
-
+                        let mut results = Vec::new();
                         for (index, cmd) in commands.iter().enumerate() {
-                            if batch_start.elapsed() >= batch_timeout {
+                            if let Err(error) = dispatch_guard.validate() {
                                 results.push(protocol::BatchResultEntry {
-                                    index,
-                                    success: false,
-                                    command: batch_command_name(cmd),
-                                    elapsed: Some(0),
-                                    value: None,
-                                    error: Some(protocol::TransactionError::wait_timeout("Batch timeout exceeded")),
+                                    index, success: false, command: batch_command_name(cmd),
+                                    elapsed: Some(0), value: None,
+                                    error: Some(protocol::TransactionError::action_failed(error)),
                                 });
-                                failed = true;
                                 break;
                             }
-
-                            let cmd_start = std::time::Instant::now();
-                            match cmd {
-                                protocol::BatchCommand::SetInput { text } => {
-                                    let text = text.clone();
-                                    let text_len = text.len();
-                                    let agent_chat_entity = agent_chat_entity.clone();
-                                    let result = this.update(cx, |_this, cx| {
-                                        agent_chat_entity.update(cx, |view, cx| {
-                                            if view.thread().is_none() {
-                                                return "detached Agent Chat is in setup mode".to_string();
-                                            }
-                                            // Route through `AgentChatView::set_input` so mention
-                                            // picker sessions refresh (thread-only updates
-                                            // leave `composer_picker_session` stale for selectByValue).
-                                            view.set_input(text, cx);
-                                            tracing::info!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_detached_agent_chat_set_input",
-                                                text_len,
-                                                "detached Agent Chat set_input"
-                                            );
-                                            String::new() // empty = success
-                                        })
-                                    });
-                                    match result {
-                                        Ok(err) if err.is_empty() => {
-                                            tracing::info!(category = "BATCH", request_id = %rid, index, command = "setInput", "batch.detached_agent_chat.step.ok");
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "setInput".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None, error: None,
-                                            });
-                                        }
-                                        Ok(err) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "setInput".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(err)),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "setInput".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::SelectByValue { value, submit } => {
-                                    let submit = *submit;
-                                    let value = value.clone();
-                                    let agent_chat_entity = agent_chat_entity.clone();
-                                    // Returns Option<String>: Some(matched) or None if not found.
-                                    let selected = this.update(cx, |_this, cx| {
-                                        agent_chat_entity.update(cx, |view, _cx| -> Option<String> {
-                                            let session = view.composer_picker_session.as_ref()?;
-                                            let idx = session.items.iter().position(|item| {
-                                                item.label.as_ref() == value || item.id.as_ref() == value
-                                            })?;
-                                            view.select_mention_index(idx);
-                                            Some(value.clone())
-                                        })
-                                    });
-                                    match selected {
-                                        Ok(Some(v)) => {
-                                            if submit {
-                                                let agent_chat_entity2 = agent_chat_entity.clone();
-                                                let _ = this.update(cx, |_this, cx| {
-                                                    agent_chat_entity2.update(cx, |view, cx| {
-                                                        view.accept_composer_picker_selection(cx);
-                                                    });
-                                                });
-                                            }
-                                            tracing::info!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_detached_agent_chat_select_by_value",
-                                                value_bytes = v.len(), submit,
-                                                "detached Agent Chat select_by_value"
-                                            );
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "selectByValue".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: Some(v), error: None,
-                                            });
-                                        }
-                                        Ok(None) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectByValue".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::selection_not_found(
-                                                    format!("selectByValue could not find '{value}' in detached Agent Chat picker")
-                                                )),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectByValue".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::SelectBySemanticId { semantic_id, submit } => {
-                                    let submit = *submit;
-                                    let semantic_id = semantic_id.clone();
-                                    let agent_chat_entity = agent_chat_entity.clone();
-                                    let selected = this.update(cx, |_this, cx| {
-                                        agent_chat_entity.update(cx, |view, _cx| -> Option<String> {
-                                            let session = view.composer_picker_session.as_ref()?;
-                                            let idx = session.items.iter().position(|item| {
-                                                item.label.as_ref() == semantic_id || item.id.as_ref() == semantic_id
-                                            })?;
-                                            view.select_mention_index(idx);
-                                            Some(semantic_id.clone())
-                                        })
-                                    });
-                                    match selected {
-                                        Ok(Some(v)) => {
-                                            if submit {
-                                                let agent_chat_entity2 = agent_chat_entity.clone();
-                                                let _ = this.update(cx, |_this, cx| {
-                                                    agent_chat_entity2.update(cx, |view, cx| {
-                                                        view.accept_composer_picker_selection(cx);
-                                                    });
-                                                });
-                                            }
-                                            tracing::info!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_detached_agent_chat_select_by_value",
-                                                value_bytes = v.len(), submit,
-                                                "detached Agent Chat select_by_semantic_id"
-                                            );
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "selectBySemanticId".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: Some(v), error: None,
-                                            });
-                                        }
-                                        Ok(None) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectBySemanticId".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::selection_not_found(
-                                                    format!("selectBySemanticId could not find '{semantic_id}' in detached Agent Chat picker")
-                                                )),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectBySemanticId".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::WaitFor { condition, timeout, poll_interval } => {
-                                    let wait_timeout = std::time::Duration::from_millis(timeout.unwrap_or(5_000));
-                                    let wait_poll = std::time::Duration::from_millis(poll_interval.unwrap_or(25));
-                                    let wait_start = std::time::Instant::now();
-                                    let agent_chat_entity_ref = &agent_chat_entity;
-
-                                    let already = this.update(cx, |this, cx| {
-                                        this.wait_condition_satisfied_for_target(condition, Some(agent_chat_entity_ref), cx)
-                                    });
-                                    match already {
-                                        Ok(true) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "waitFor".to_string(),
-                                                elapsed: Some(0), value: None, error: None,
-                                            });
-                                        }
-                                        Ok(false) => {
-                                            let mut wait_result: Result<Option<String>, protocol::TransactionError> =
-                                                Err(protocol::TransactionError::wait_timeout(
-                                                    format!("WaitFor timeout after {}ms", wait_timeout.as_millis())
-                                                ));
-                                            loop {
-                                                cx.background_executor().timer(wait_poll).await;
-                                                if wait_start.elapsed() >= wait_timeout { break; }
-                                                match this.update(cx, |this, cx| {
-                                                    this.wait_condition_satisfied_for_target(condition, Some(agent_chat_entity_ref), cx)
-                                                }) {
-                                                    Ok(true) => { wait_result = Ok(None); break; }
-                                                    Ok(false) => continue,
-                                                    _ => {
-                                                        wait_result = Err(protocol::TransactionError::action_failed(
-                                                            "Entity dropped during WaitFor"
-                                                        ));
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            match wait_result {
-                                                Ok(_) => {
-                                                    tracing::info!(
-                                                        target: "script_kit::transaction",
-                                                        event = "transaction_wait_complete",
-                                                        request_id = %rid,
-                                                        index,
-                                                        target = "agentChatDetached",
-                                                        "batch.detached_agent_chat.wait.ok"
-                                                    );
-                                                    results.push(protocol::BatchResultEntry {
-                                                        index, success: true, command: "waitFor".to_string(),
-                                                        elapsed: Some(wait_start.elapsed().as_millis() as u64),
-                                                        value: None, error: None,
-                                                    });
-                                                }
-                                                Err(e) => {
-                                                    tracing::info!(category = "BATCH", request_id = %rid, index, command = "waitFor", error = %e.message, "batch.detached_agent_chat.step.error");
-                                                    results.push(protocol::BatchResultEntry {
-                                                        index, success: false, command: "waitFor".to_string(),
-                                                        elapsed: Some(wait_start.elapsed().as_millis() as u64),
-                                                        value: None, error: Some(e),
-                                                    });
-                                                    failed = true;
-                                                    if opts.stop_on_error { break; }
-                                                }
-                                            }
-                                        }
-                                        Err(_) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "waitFor".to_string(),
-                                                elapsed: Some(wait_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed("Entity dropped")),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    // Unsupported commands for detached Agent Chat
-                                    let cmd_name = batch_command_name(cmd);
-                                    results.push(protocol::BatchResultEntry {
-                                        index,
-                                        success: false,
-                                        command: cmd_name,
-                                        elapsed: Some(0),
-                                        value: None,
-                                        error: Some(unsupported_batch_command_error(
-                                            AutomationBatchTargetKind::AgentChatDetached,
-                                            cmd,
-                                        )),
-                                    });
-                                    failed = true;
-                                    if opts.stop_on_error { break; }
-                                }
+                            if batch_start.elapsed() >= batch_timeout {
+                                results.push(protocol::BatchResultEntry {
+                                    index, success: false, command: batch_command_name(cmd),
+                                    elapsed: Some(0), value: None,
+                                    error: Some(protocol::TransactionError::wait_timeout("Batch timeout exceeded")),
+                                });
+                                break;
                             }
+                            let cmd_start = std::time::Instant::now();
+                            let result = if let protocol::BatchCommand::WaitFor { condition, timeout, poll_interval } = cmd {
+                                let (wait_timeout, wait_poll) = bounded_batch_wait(
+                                    *timeout, *poll_interval, batch_timeout.saturating_sub(batch_start.elapsed()),
+                                );
+                                let mut polls = 0;
+                                loop {
+                                    let remaining = wait_timeout.saturating_sub(cmd_start.elapsed())
+                                        .min(batch_timeout.saturating_sub(batch_start.elapsed()));
+                                    if remaining.is_zero() || polls >= MAX_WAIT_POLLS {
+                                        break Err(protocol::TransactionError::wait_timeout("Batch wait deadline or poll budget exceeded"));
+                                    }
+                                    if let Err(error) = dispatch_guard.validate() {
+                                        break Err(protocol::TransactionError::action_failed(error));
+                                    }
+                                    polls += 1;
+                                    match cx.update(|cx| registered_surface_wait_satisfied(info, condition, cx)) {
+                                        Ok(true) => break Ok(None),
+                                        Err(error) => break Err(registered_surface_transaction_error(error)),
+                                        Ok(false) => {}
+                                    }
+                                    cx.background_executor().timer(wait_poll.min(remaining)).await;
+                                }
+                            } else {
+                                cx.update(|cx| {
+                                    validate_batch_app_effect(expected.as_ref(), &dispatch_guard, &this, cx)?;
+                                    apply_registered_surface_command(info, cmd, cx)
+                                })
+                                    .map_err(registered_surface_transaction_error)
+                            };
+                            let (value, error) = match result {
+                                Ok(value) => (value, None),
+                                Err(error) => (None, Some(error)),
+                            };
+                            let success = error.is_none();
+                            results.push(protocol::BatchResultEntry {
+                                index, success, command: batch_command_name(cmd),
+                                elapsed: Some(cmd_start.elapsed().as_millis() as u64), value, error,
+                            });
+                            if !success && opts.stop_on_error { break; }
                         }
-
                         let total_elapsed = batch_start.elapsed().as_millis() as u64;
-                        let success = !failed;
-                        let failed_at = if failed {
-                            results.iter().position(|r| !r.success)
-                        } else {
-                            None
-                        };
-
+                        let failed_at = results.iter().position(|result| !result.success);
+                        let success = failed_at.is_none();
                         let trace = match protocol::transaction_trace::maybe_persist_batch_trace_from_results(
                             trace_mode,
                             rid.clone(),
@@ -6154,1005 +4954,9 @@ impl ScriptListApp {
                             success,
                             total_elapsed_ms = total_elapsed,
                             failed_at = ?failed_at,
-                            target = "agentChatDetached",
+                            target = %info.id,
                             trace_included = trace.is_some(),
-                            "automation.batch.detached_agent_chat.completed"
-                        );
-
-                        if let Some(ref s) = sender {
-                            let _ = s.try_send(Message::batch_result_with_trace(
-                                rid.clone(), success, results, failed_at, total_elapsed, trace,
-                            ));
-                        }
-                        return;
-                    }
-
-                    // ── Notes batch path ─────────────────────────────────
-                    // When targeting the Notes window, route setInput and
-                    // waitFor commands to the Notes entity.
-                    if let Some((notes_entity, notes_handle)) = notes_batch_target {
-                        let batch_started_at_ms = protocol::transaction_trace::now_epoch_ms();
-                        let batch_start = std::time::Instant::now();
-                        let batch_timeout = std::time::Duration::from_millis(opts.timeout);
-                        let mut results: Vec<protocol::BatchResultEntry> = Vec::new();
-                        let mut failed = false;
-
-                        for (index, cmd) in commands.iter().enumerate() {
-                            if batch_start.elapsed() >= batch_timeout {
-                                results.push(protocol::BatchResultEntry {
-                                    index,
-                                    success: false,
-                                    command: batch_command_name(cmd),
-                                    elapsed: Some(0),
-                                    value: None,
-                                    error: Some(protocol::TransactionError::wait_timeout("Batch timeout exceeded")),
-                                });
-                                failed = true;
-                                break;
-                            }
-
-                            let cmd_start = std::time::Instant::now();
-                            match cmd {
-                                protocol::BatchCommand::SetInput { text } => {
-                                    let text = text.clone();
-                                    let ne = notes_entity.clone();
-                                    let nh = notes_handle;
-                                    let result = nh.update(cx, |_root, window, cx| {
-                                        ne.update(cx, |app, cx| {
-                                            app.set_editor_text_for_automation(
-                                                text.clone(),
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        tracing::info!(
-                                            target: "script_kit::transaction",
-                                            event = "transaction_notes_set_input",
-                                            text_len = text.len(),
-                                            "Notes set_input"
-                                        );
-                                    });
-                                    match result {
-                                        Ok(()) => {
-                                            tracing::info!(category = "BATCH", request_id = %rid, index, command = "setInput", "batch.notes.step.ok");
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "setInput".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None, error: None,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "setInput".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::OpenActions => {
-                                    let ne = notes_entity.clone();
-                                    let nh = notes_handle;
-                                    let result = nh.update(cx, |_root, window, cx| {
-                                        window.defer(cx, move |window, cx| {
-                                            ne.update(cx, |app, cx| {
-                                                app.open_actions_panel(window, cx);
-                                            });
-                                        });
-                                        tracing::info!(
-                                            target: "script_kit::transaction",
-                                            event = "transaction_notes_open_actions",
-                                            request_id = %rid,
-                                            "Notes open_actions scheduled"
-                                        );
-                                    });
-                                    match result {
-                                        Ok(()) => {
-                                            tracing::info!(category = "BATCH", request_id = %rid, index, command = "openActions", "batch.notes.step.ok");
-                                            results.push(protocol::BatchResultEntry {
-                                                index,
-                                                success: true,
-                                                command: "openActions".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: None,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index,
-                                                success: false,
-                                                command: "openActions".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::TogglePreview => {
-                                    let ne = notes_entity.clone();
-                                    let nh = notes_handle;
-                                    let result = nh.update(cx, |_root, window, cx| {
-                                        window.defer(cx, move |window, cx| {
-                                            ne.update(cx, |app, cx| {
-                                                app.toggle_preview(window, cx);
-                                            });
-                                        });
-                                        tracing::info!(
-                                            target: "script_kit::transaction",
-                                            event = "transaction_notes_toggle_preview",
-                                            request_id = %rid,
-                                            "Notes toggle_preview scheduled"
-                                        );
-                                    });
-                                    match result {
-                                        Ok(()) => {
-                                            tracing::info!(category = "BATCH", request_id = %rid, index, command = "togglePreview", "batch.notes.step.ok");
-                                            results.push(protocol::BatchResultEntry {
-                                                index,
-                                                success: true,
-                                                command: "togglePreview".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: None,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index,
-                                                success: false,
-                                                command: "togglePreview".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::WaitFor { condition, timeout, poll_interval } => {
-                                    let wait_timeout = std::time::Duration::from_millis(timeout.unwrap_or(5_000));
-                                    let wait_poll = std::time::Duration::from_millis(poll_interval.unwrap_or(25));
-                                    let wait_start = std::time::Instant::now();
-                                    let ne = notes_entity.clone();
-
-                                    let already = this.update(cx, |_this, cx| {
-                                        notes_wait_condition_satisfied(&ne, condition, cx)
-                                    });
-                                    match already {
-                                        Ok(true) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "waitFor".to_string(),
-                                                elapsed: Some(0), value: None, error: None,
-                                            });
-                                        }
-                                        Ok(false) => {
-                                            let mut wait_result: Result<Option<String>, protocol::TransactionError> =
-                                                Err(protocol::TransactionError::wait_timeout(
-                                                    format!("WaitFor timeout after {}ms", wait_timeout.as_millis())
-                                                ));
-                                            loop {
-                                                cx.background_executor().timer(wait_poll).await;
-                                                if wait_start.elapsed() >= wait_timeout { break; }
-                                                let ne2 = ne.clone();
-                                                match this.update(cx, |_this, cx| {
-                                                    notes_wait_condition_satisfied(&ne2, condition, cx)
-                                                }) {
-                                                    Ok(true) => { wait_result = Ok(None); break; }
-                                                    Ok(false) => continue,
-                                                    _ => {
-                                                        wait_result = Err(protocol::TransactionError::action_failed(
-                                                            "Entity dropped during WaitFor"
-                                                        ));
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            match wait_result {
-                                                Ok(_) => {
-                                                    tracing::info!(
-                                                        target: "script_kit::transaction",
-                                                        event = "transaction_notes_wait_complete",
-                                                        request_id = %rid,
-                                                        index,
-                                                        target = "notes",
-                                                        "batch.notes.wait.ok"
-                                                    );
-                                                    results.push(protocol::BatchResultEntry {
-                                                        index, success: true, command: "waitFor".to_string(),
-                                                        elapsed: Some(wait_start.elapsed().as_millis() as u64),
-                                                        value: None, error: None,
-                                                    });
-                                                }
-                                                Err(e) => {
-                                                    tracing::info!(category = "BATCH", request_id = %rid, index, command = "waitFor", error = %e.message, "batch.notes.step.error");
-                                                    results.push(protocol::BatchResultEntry {
-                                                        index, success: false, command: "waitFor".to_string(),
-                                                        elapsed: Some(wait_start.elapsed().as_millis() as u64),
-                                                        value: None, error: Some(e),
-                                                    });
-                                                    failed = true;
-                                                    if opts.stop_on_error { break; }
-                                                }
-                                            }
-                                        }
-                                        Err(_) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "waitFor".to_string(),
-                                                elapsed: Some(wait_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed("Entity dropped")),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    // Unsupported commands for Notes
-                                    let cmd_name = batch_command_name(cmd);
-                                    results.push(protocol::BatchResultEntry {
-                                        index,
-                                        success: false,
-                                        command: cmd_name,
-                                        elapsed: Some(0),
-                                        value: None,
-                                        error: Some(unsupported_batch_command_error(
-                                            AutomationBatchTargetKind::Notes,
-                                            cmd,
-                                        )),
-                                    });
-                                    failed = true;
-                                    if opts.stop_on_error { break; }
-                                }
-                            }
-                        }
-
-                        let total_elapsed = batch_start.elapsed().as_millis() as u64;
-                        let success = !failed;
-                        let failed_at = if failed {
-                            results.iter().position(|r| !r.success)
-                        } else {
-                            None
-                        };
-
-                        let trace = match protocol::transaction_trace::maybe_persist_batch_trace_from_results(
-                            trace_mode,
-                            rid.clone(),
-                            command_fingerprint.clone(),
-                            batch_started_at_ms,
-                            total_elapsed,
-                            success,
-                            failed_at,
-                            &commands,
-                            &results,
-                            None,
-                        ) {
-                            Ok(trace) => trace,
-                            Err(error) => {
-                                tracing::warn!(
-                                    target: "script_kit::transaction",
-                                    request_id = %rid,
-                                    error = %error,
-                                    "batch trace persistence failed"
-                                );
-                                if let Some(ref s) = sender {
-                                    let _ = s.try_send(Message::batch_result(
-                                        rid.clone(),
-                                        false,
-                                        vec![protocol::BatchResultEntry {
-                                            index: 0,
-                                            success: false,
-                                            command: "trace".to_string(),
-                                            elapsed: Some(total_elapsed),
-                                            value: None,
-                                            error: Some(protocol::TransactionError::action_failed(format!(
-                                                "failed to persist transaction trace: {error}"
-                                            ))),
-                                        }],
-                                        Some(0),
-                                        total_elapsed,
-                                    ));
-                                }
-                                return;
-                            }
-                        };
-
-                        tracing::info!(
-                            category = "AUTOMATION",
-                            request_id = %rid,
-                            success,
-                            total_elapsed_ms = total_elapsed,
-                            failed_at = ?failed_at,
-                            target = "notes",
-                            trace_included = trace.is_some(),
-                            "automation.batch.notes.completed"
-                        );
-
-                        if let Some(ref s) = sender {
-                            let _ = s.try_send(Message::batch_result_with_trace(
-                                rid.clone(), success, results, failed_at, total_elapsed, trace,
-                            ));
-                        }
-                        return;
-                    }
-
-                    // ── ActionsDialog batch path ────────────────────────
-                    // When targeting the ActionsDialog popup, route setInput,
-                    // selectByValue, selectBySemanticId, and waitFor commands
-                    // to the dialog entity. Unsupported commands fail closed.
-                    if let Some(dialog_entity) = actions_dialog_batch_entity {
-                        let batch_started_at_ms = protocol::transaction_trace::now_epoch_ms();
-                        let batch_start = std::time::Instant::now();
-                        let batch_timeout = std::time::Duration::from_millis(opts.timeout);
-                        let mut results: Vec<protocol::BatchResultEntry> = Vec::new();
-                        let mut failed = false;
-
-                        for (index, cmd) in commands.iter().enumerate() {
-                            if batch_start.elapsed() >= batch_timeout {
-                                results.push(protocol::BatchResultEntry {
-                                    index,
-                                    success: false,
-                                    command: batch_command_name(cmd),
-                                    elapsed: Some(0),
-                                    value: None,
-                                    error: Some(protocol::TransactionError::wait_timeout("Batch timeout exceeded")),
-                                });
-                                failed = true;
-                                break;
-                            }
-
-                            let cmd_start = std::time::Instant::now();
-                            match cmd {
-                                protocol::BatchCommand::SetInput { text } => {
-                                    let text = text.clone();
-                                    let de = dialog_entity.clone();
-                                    let result = this.update(cx, |_this, cx| {
-                                        let updated = crate::actions::set_actions_dialog_search_text(
-                                            &de,
-                                            text.clone(),
-                                            cx,
-                                        );
-                                        let err = if updated {
-                                            tracing::info!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_actions_dialog_set_input",
-                                                text_len = text.len(),
-                                                "ActionsDialog set_input"
-                                            );
-                                            String::new()
-                                        } else {
-                                            "ActionsDialog input owner is unavailable".to_string()
-                                        };
-                                        err
-                                    });
-                                    match result {
-                                        Ok(err) if err.is_empty() => {
-                                            tracing::info!(category = "BATCH", request_id = %rid, index, command = "setInput", "batch.actions_dialog.step.ok");
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "setInput".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None, error: None,
-                                            });
-                                        }
-                                        Ok(err) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "setInput".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(err)),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "setInput".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::SelectByValue { value, submit: _ } => {
-                                    let value = value.clone();
-                                    let de = dialog_entity.clone();
-                                    let selected = this.update(cx, |_this, cx| {
-                                        de.update(cx, |dialog, cx| -> Option<String> {
-                                            dialog.select_action_by_id(&value, cx)
-                                        })
-                                    });
-                                    match selected {
-                                        Ok(Some(v)) => {
-                                            tracing::info!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_actions_dialog_select_by_value",
-                                                value_bytes = v.len(),
-                                                "ActionsDialog select_by_value"
-                                            );
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "selectByValue".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: Some(v), error: None,
-                                            });
-                                        }
-                                        Ok(None) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectByValue".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::selection_not_found(&value)),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectByValue".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::SelectBySemanticId { semantic_id, submit: _ } => {
-                                    let semantic_id = semantic_id.clone();
-                                    let de = dialog_entity.clone();
-                                    let selected = this.update(cx, |_this, cx| {
-                                        de.update(cx, |dialog, cx| -> Option<String> {
-                                            dialog.select_action_by_semantic_id(&semantic_id, cx)
-                                        })
-                                    });
-                                    match selected {
-                                        Ok(Some(v)) => {
-                                            tracing::info!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_actions_dialog_select_by_semantic_id",
-                                                semantic_id = %v,
-                                                "ActionsDialog select_by_semantic_id"
-                                            );
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "selectBySemanticId".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: Some(v), error: None,
-                                            });
-                                        }
-                                        Ok(None) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectBySemanticId".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::element_not_found(&semantic_id)),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectBySemanticId".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::WaitFor { condition, timeout, poll_interval } => {
-                                    let wait_timeout = std::time::Duration::from_millis(timeout.unwrap_or(5_000));
-                                    let wait_poll = std::time::Duration::from_millis(poll_interval.unwrap_or(25));
-                                    let wait_start = std::time::Instant::now();
-
-                                    let already = this.update(cx, |this, cx| {
-                                        this.wait_condition_satisfied(condition, cx)
-                                    });
-
-                                    let mut wait_result: Result<Option<String>, protocol::TransactionError> = match already {
-                                        Ok(true) => Ok(None),
-                                        Ok(false) => Err(protocol::TransactionError::wait_timeout("not yet")),
-                                        Err(ref e) => Err(protocol::TransactionError::action_failed(format!("{e}"))),
-                                    };
-
-                                    if wait_result.is_err() && matches!(already, Ok(false)) {
-                                        loop {
-                                            cx.background_executor().timer(wait_poll).await;
-                                            if wait_start.elapsed() >= wait_timeout {
-                                                wait_result = Err(protocol::TransactionError::wait_timeout(
-                                                    format!("Timeout after {}ms", wait_timeout.as_millis()),
-                                                ));
-                                                break;
-                                            }
-                                            match this.update(cx, |this, cx| this.wait_condition_satisfied(condition, cx)) {
-                                                Ok(true) => {
-                                                    wait_result = Ok(None);
-                                                    break;
-                                                }
-                                                Ok(false) => continue,
-                                                Err(e) => {
-                                                    wait_result = Err(protocol::TransactionError::action_failed(format!("{e}")));
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    match wait_result {
-                                        Ok(_) => {
-                                            tracing::info!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_actions_dialog_wait_complete",
-                                                request_id = %rid,
-                                                index,
-                                                target = "actionsDialog",
-                                                "batch.actions_dialog.wait.ok"
-                                            );
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "waitFor".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None, error: None,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "waitFor".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(e),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                other => {
-                                    let cmd_name = batch_command_name(other);
-                                    tracing::warn!(
-                                        target: "script_kit::transaction",
-                                        event = "transaction_actions_dialog_unsupported",
-                                        command = %cmd_name,
-                                        "ActionsDialog batch: unsupported command"
-                                    );
-                                    results.push(protocol::BatchResultEntry {
-                                        index,
-                                        success: false,
-                                        command: cmd_name,
-                                        elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                        value: None,
-                                        error: Some(unsupported_batch_command_error(
-                                            AutomationBatchTargetKind::ActionsDialog,
-                                            other,
-                                        )),
-                                    });
-                                    failed = true;
-                                    if opts.stop_on_error { break; }
-                                }
-                            }
-                        }
-
-                        let success = !failed;
-                        let failed_at = if failed { results.iter().position(|r| !r.success) } else { None };
-                        let total_elapsed = batch_start.elapsed().as_millis() as u64;
-                        let trace = match protocol::transaction_trace::maybe_persist_batch_trace_from_results(
-                            trace_mode,
-                            rid.clone(),
-                            command_fingerprint.clone(),
-                            batch_started_at_ms,
-                            total_elapsed,
-                            success,
-                            failed_at,
-                            &commands,
-                            &results,
-                            None,
-                        ) {
-                            Ok(trace) => trace,
-                            Err(error) => {
-                                tracing::warn!(
-                                    target: "script_kit::transaction",
-                                    request_id = %rid,
-                                    error = %error,
-                                    "batch trace persistence failed"
-                                );
-                                if let Some(ref s) = sender {
-                                    let _ = s.try_send(Message::batch_result(
-                                        rid.clone(),
-                                        false,
-                                        vec![protocol::BatchResultEntry {
-                                            index: 0,
-                                            success: false,
-                                            command: "trace".to_string(),
-                                            elapsed: Some(total_elapsed),
-                                            value: None,
-                                            error: Some(protocol::TransactionError::action_failed(format!(
-                                                "failed to persist transaction trace: {error}"
-                                            ))),
-                                        }],
-                                        Some(0),
-                                        total_elapsed,
-                                    ));
-                                }
-                                return;
-                            }
-                        };
-
-                        tracing::info!(
-                            category = "AUTOMATION",
-                            request_id = %rid,
-                            success,
-                            total_elapsed_ms = total_elapsed,
-                            failed_at = ?failed_at,
-                            target = "actionsDialog",
-                            trace_included = trace.is_some(),
-                            "automation.batch.actions_dialog.completed"
-                        );
-
-                        if let Some(ref s) = sender {
-                            let _ = s.try_send(Message::batch_result_with_trace(
-                                rid.clone(), success, results, failed_at, total_elapsed, trace,
-                            ));
-                        }
-                        return;
-                    }
-
-                    // ── PromptPopup batch path ─────────────────────────
-                    // Resolve the active PromptPopup subtype at execution time.
-                    // Supported: selectByValue, selectBySemanticId, waitFor.
-                    // setInput fails closed (popups don't have independent input).
-                    if is_prompt_popup_batch {
-                        let Some((prompt_popup_info, prompt_popup_subtype)) =
-                            prompt_popup_batch_target
-                        else {
-                            reject_missing_prompt_popup_batch_target(&rid, sender.as_ref());
-                            return;
-                        };
-                        let batch_started_at_ms = protocol::transaction_trace::now_epoch_ms();
-                        let batch_start = std::time::Instant::now();
-                        let batch_timeout = std::time::Duration::from_millis(opts.timeout);
-                        let mut results: Vec<protocol::BatchResultEntry> = Vec::new();
-                        let mut failed = false;
-
-                        for (index, cmd) in commands.iter().enumerate() {
-                            if batch_start.elapsed() >= batch_timeout {
-                                results.push(protocol::BatchResultEntry {
-                                    index,
-                                    success: false,
-                                    command: batch_command_name(cmd),
-                                    elapsed: Some(0),
-                                    value: None,
-                                    error: Some(protocol::TransactionError::wait_timeout("Batch timeout exceeded")),
-                                });
-                                failed = true;
-                                break;
-                            }
-
-                            if let Err(error) = revalidate_prompt_popup_target(
-                                &prompt_popup_info,
-                                prompt_popup_subtype,
-                            ) {
-                                results.push(protocol::BatchResultEntry {
-                                    index,
-                                    success: false,
-                                    command: batch_command_name(cmd),
-                                    elapsed: Some(0),
-                                    value: None,
-                                    error: Some(error),
-                                });
-                                failed = true;
-                                break;
-                            }
-
-                            let cmd_start = std::time::Instant::now();
-                            match cmd {
-                                protocol::BatchCommand::SelectByValue { value, submit: _ } => {
-                                    let value = value.clone();
-                                    let popup_generation = prompt_popup_info.generation;
-                                    let selected = this.update(cx, |_this, cx| match prompt_popup_subtype {
-                                        PromptPopupSubtype::Confirm => {
-                                            crate::confirm::batch_select_confirm_button_by_value(&value, cx)
-                                        }
-                                        PromptPopupSubtype::DictationMicrophone => popup_generation
-                                            .and_then(|generation| {
-                                                crate::dictation::batch_select_dictation_microphone_popup_row_by_value(
-                                                    generation,
-                                                    &value,
-                                                    cx,
-                                                )
-                                            }),
-                                        PromptPopupSubtype::AgentChatHistory => None,
-                                    });
-                                    match selected {
-                                        Ok(Some(v)) => {
-                                            tracing::info!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_prompt_popup_select_by_value",
-                                                value_bytes = v.len(),
-                                                "PromptPopup select_by_value"
-                                            );
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "selectByValue".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: Some(v), error: None,
-                                            });
-                                        }
-                                        Ok(None) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectByValue".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::selection_not_found(&value)),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectByValue".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                            protocol::BatchCommand::SelectBySemanticId { semantic_id, submit: _ } => {
-                                let semantic_id = semantic_id.clone();
-                                let popup_generation = prompt_popup_info.generation;
-                                let selected = this.update(cx, |_this, cx| match prompt_popup_subtype {
-                                    PromptPopupSubtype::Confirm => {
-                                        crate::confirm::batch_select_confirm_button_by_semantic_id(
-                                            &semantic_id,
-                                            cx,
-                                        )
-                                    }
-                                    PromptPopupSubtype::DictationMicrophone => popup_generation
-                                        .and_then(|generation| {
-                                            crate::dictation::batch_select_dictation_microphone_popup_row_by_semantic_id(
-                                                generation,
-                                                &semantic_id,
-                                                cx,
-                                            )
-                                        }),
-                                    PromptPopupSubtype::AgentChatHistory => None,
-                                });
-                                    match selected {
-                                        Ok(Some(v)) => {
-                                            tracing::info!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_prompt_popup_select_by_semantic_id",
-                                                semantic_id = %v,
-                                                "PromptPopup select_by_semantic_id"
-                                            );
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "selectBySemanticId".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: Some(v), error: None,
-                                            });
-                                        }
-                                        Ok(None) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectBySemanticId".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::element_not_found(&semantic_id)),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "selectBySemanticId".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::SetThemeControl { control, value } => {
-                                    let control = control.clone();
-                                    let value = value.clone();
-                                    let selected = this.update(cx, |_this, cx| {
-                                        if !matches!(_this.current_view, AppView::ThemeChooserView { .. }) {
-                                            return Err(anyhow::anyhow!(
-                                                "setThemeControl requires ThemeChooserView"
-                                            ));
-                                        }
-                                        _this.set_theme_chooser_control_from_devtools(&control, &value, cx)
-                                    });
-                                    match selected {
-                                        Ok(Ok(v)) => {
-                                            tracing::info!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_prompt_popup_set_theme_control",
-                                                control = %control,
-                                                value_bytes = value.len(),
-                                                "PromptPopup set_theme_control"
-                                            );
-                                            results.push(protocol::BatchResultEntry {
-                                                index,
-                                                success: true,
-                                                command: "setThemeControl".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: Some(v),
-                                                error: None,
-                                            });
-                                        }
-                                        Ok(Err(e)) | Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index,
-                                                success: false,
-                                                command: "setThemeControl".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(protocol::TransactionError::action_failed(format!("{e}"))),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                protocol::BatchCommand::WaitFor { condition, timeout, poll_interval } => {
-                                    let wait_timeout = std::time::Duration::from_millis(timeout.unwrap_or(5_000));
-                                    let wait_poll = std::time::Duration::from_millis(poll_interval.unwrap_or(25));
-                                    let wait_start = std::time::Instant::now();
-
-                                    let already = this.update(cx, |this, cx| {
-                                        this.wait_condition_satisfied(condition, cx)
-                                    });
-
-                                    let mut wait_result: Result<Option<String>, protocol::TransactionError> = match already {
-                                        Ok(true) => Ok(None),
-                                        Ok(false) => Err(protocol::TransactionError::wait_timeout("not yet")),
-                                        Err(ref e) => Err(protocol::TransactionError::action_failed(format!("{e}"))),
-                                    };
-
-                                    if wait_result.is_err() && matches!(already, Ok(false)) {
-                                        loop {
-                                            cx.background_executor().timer(wait_poll).await;
-                                            if wait_start.elapsed() >= wait_timeout {
-                                                wait_result = Err(protocol::TransactionError::wait_timeout(
-                                                    format!("Timeout after {}ms", wait_timeout.as_millis()),
-                                                ));
-                                                break;
-                                            }
-                                            match this.update(cx, |this, cx| this.wait_condition_satisfied(condition, cx)) {
-                                                Ok(true) => {
-                                                    wait_result = Ok(None);
-                                                    break;
-                                                }
-                                                Ok(false) => continue,
-                                                Err(e) => {
-                                                    wait_result = Err(protocol::TransactionError::action_failed(format!("{e}")));
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    match wait_result {
-                                        Ok(_) => {
-                                            tracing::info!(
-                                                target: "script_kit::transaction",
-                                                event = "transaction_prompt_popup_wait_complete",
-                                                request_id = %rid,
-                                                index,
-                                                target = "promptPopup",
-                                                "batch.prompt_popup.wait.ok"
-                                            );
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: true, command: "waitFor".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None, error: None,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            results.push(protocol::BatchResultEntry {
-                                                index, success: false, command: "waitFor".to_string(),
-                                                elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                                value: None,
-                                                error: Some(e),
-                                            });
-                                            failed = true;
-                                            if opts.stop_on_error { break; }
-                                        }
-                                    }
-                                }
-                                other => {
-                                    let cmd_name = batch_command_name(other);
-                                    tracing::warn!(
-                                        target: "script_kit::transaction",
-                                        event = "transaction_prompt_popup_unsupported",
-                                        command = %cmd_name,
-                                        "PromptPopup batch: unsupported command"
-                                    );
-                                    results.push(protocol::BatchResultEntry {
-                                        index,
-                                        success: false,
-                                        command: cmd_name,
-                                        elapsed: Some(cmd_start.elapsed().as_millis() as u64),
-                                        value: None,
-                                        error: Some(unsupported_batch_command_error(
-                                            AutomationBatchTargetKind::PromptPopup,
-                                            other,
-                                        )),
-                                    });
-                                    failed = true;
-                                    if opts.stop_on_error { break; }
-                                }
-                            }
-                        }
-
-                        let success = !failed;
-                        let failed_at = if failed { results.iter().position(|r| !r.success) } else { None };
-                        let total_elapsed = batch_start.elapsed().as_millis() as u64;
-                        let trace = match protocol::transaction_trace::maybe_persist_batch_trace_from_results(
-                            trace_mode,
-                            rid.clone(),
-                            command_fingerprint.clone(),
-                            batch_started_at_ms,
-                            total_elapsed,
-                            success,
-                            failed_at,
-                            &commands,
-                            &results,
-                            None,
-                        ) {
-                            Ok(trace) => trace,
-                            Err(error) => {
-                                tracing::warn!(
-                                    target: "script_kit::transaction",
-                                    request_id = %rid,
-                                    error = %error,
-                                    "batch trace persistence failed"
-                                );
-                                if let Some(ref s) = sender {
-                                    let _ = s.try_send(Message::batch_result(
-                                        rid.clone(),
-                                        false,
-                                        vec![protocol::BatchResultEntry {
-                                            index: 0,
-                                            success: false,
-                                            command: "trace".to_string(),
-                                            elapsed: Some(total_elapsed),
-                                            value: None,
-                                            error: Some(protocol::TransactionError::action_failed(format!(
-                                                "failed to persist transaction trace: {error}"
-                                            ))),
-                                        }],
-                                        Some(0),
-                                        total_elapsed,
-                                    ));
-                                }
-                                return;
-                            }
-                        };
-
-                        tracing::info!(
-                            category = "AUTOMATION",
-                            request_id = %rid,
-                            success,
-                            total_elapsed_ms = total_elapsed,
-                            failed_at = ?failed_at,
-                            target = "promptPopup",
-                            trace_included = trace.is_some(),
-                            "automation.batch.prompt_popup.completed"
+                            "automation.batch.secondary.completed"
                         );
 
                         if let Some(ref s) = sender {
@@ -7165,12 +4969,18 @@ impl ScriptListApp {
 
                     // ── Main-window batch path (existing) ────────────────
                     let batch_started_at_ms = protocol::transaction_trace::now_epoch_ms();
-                    let batch_start = std::time::Instant::now();
-                    let batch_timeout = std::time::Duration::from_millis(opts.timeout);
                     let mut results: Vec<protocol::BatchResultEntry> = Vec::new();
                     let mut failed = false;
 
                     for (index, cmd) in commands.iter().enumerate() {
+                        if let Err(error) = dispatch_guard.validate() {
+                            results.push(protocol::BatchResultEntry {
+                                index, success: false, command: batch_command_name(cmd), elapsed: Some(0),
+                                value: None, error: Some(protocol::TransactionError::action_failed(error)),
+                            });
+                            failed = true;
+                            break;
+                        }
                         // Check batch timeout
                         if batch_start.elapsed() >= batch_timeout {
                             let entry = protocol::BatchResultEntry {
@@ -7192,6 +5002,8 @@ impl ScriptListApp {
                                 match set_main_window_input_text_for_batch(
                                     &this,
                                     main_batch_window_handle,
+                                    expected.as_ref(),
+                                    &dispatch_guard,
                                     text,
                                     cx,
                                 ) {
@@ -7224,6 +5036,7 @@ impl ScriptListApp {
                                 let submit = *submit;
                                 let value = value.clone();
                                 match this.update(cx, |this, cx| {
+                                    validate_batch_main_effect(this, expected.as_ref(), &dispatch_guard, cx)?;
                                     this.select_choice_by_value(&value, submit, cx)
                                 }) {
                                     Ok(Ok(v)) => {
@@ -7270,6 +5083,12 @@ impl ScriptListApp {
                                 match select_main_window_semantic_id_for_batch(
                                     &this,
                                     main_batch_window_handle,
+                                    match &batch_target {
+                                        AutomationReadTarget::Main { info } => info.as_ref(),
+                                        AutomationReadTarget::Registered { .. } => None,
+                                    },
+                                    expected.as_ref(),
+                                    &dispatch_guard,
                                     &semantic_id,
                                     submit,
                                     cx,
@@ -7293,7 +5112,7 @@ impl ScriptListApp {
                                             command: "selectBySemanticId".to_string(),
                                             elapsed: Some(cmd_start.elapsed().as_millis() as u64),
                                             value: None,
-                                            error: Some(protocol::TransactionError::selection_not_found(format!("{e}"))),
+                                            error: Some(e.downcast::<protocol::TransactionError>().unwrap_or_else(|error| protocol::TransactionError::selection_not_found(error.to_string()))),
                                         });
                                         failed = true;
                                         if opts.stop_on_error { break; }
@@ -7304,6 +5123,7 @@ impl ScriptListApp {
                                 let control = control.clone();
                                 let value = value.clone();
                                 match this.update(cx, |this, cx| {
+                                    validate_batch_main_effect(this, expected.as_ref(), &dispatch_guard, cx)?;
                                     if !matches!(
                                         this.current_view,
                                         AppView::ThemeChooserView { .. }
@@ -7427,11 +5247,14 @@ impl ScriptListApp {
                                 match set_main_window_input_text_for_batch(
                                     &this,
                                     main_batch_window_handle,
+                                    expected.as_ref(),
+                                    &dispatch_guard,
                                     &filter,
                                     cx,
                                 )
                                 .and_then(|_| {
                                     this.update(cx, |this, cx| {
+                                        validate_batch_main_effect(this, expected.as_ref(), &dispatch_guard, cx)?;
                                         if select_first {
                                             this.select_first_choice(submit, cx)
                                         } else {
@@ -7470,13 +5293,16 @@ impl ScriptListApp {
                                 match set_main_window_input_text_for_batch(
                                     &this,
                                     main_batch_window_handle,
+                                    expected.as_ref(),
+                                    &dispatch_guard,
                                     &text,
                                     cx,
                                 )
                                 .and_then(|_| {
                                     this.update(cx, |this, cx| {
-                                        this.submit_current_value(cx);
-                                    })
+                                        validate_batch_main_effect(this, expected.as_ref(), &dispatch_guard, cx)?;
+                                        this.submit_current_value(cx)
+                                    })?
                                 }) {
                                     Ok(()) => {
                                         tracing::info!(category = "BATCH", request_id = %rid, index = index, command = "typeAndSubmit", "batch.step.ok");
@@ -7508,6 +5334,7 @@ impl ScriptListApp {
                                     crate::get_main_window_handle()
                                 {
                                     window_handle.update(cx, |_, window, cx| {
+                                        validate_batch_window_effect(expected.as_ref(), &dispatch_guard, &this, window, cx)?;
                                         this.update(cx, |this, cx| {
                                             this.dispatch_actions_toggle_for_current_view(
                                                 window,
@@ -7587,6 +5414,7 @@ impl ScriptListApp {
                             protocol::BatchCommand::ForceSubmit { value } => {
                                 let value = value.clone();
                                 match this.update(cx, |this, cx| {
+                                    validate_batch_main_effect(this, expected.as_ref(), &dispatch_guard, cx)?;
                                     let prompt_id = match &this.current_view {
                                         AppView::ArgPrompt { id, .. } => Some(id.clone()),
                                         AppView::DivPrompt { id, .. } => Some(id.clone()),
@@ -7610,6 +5438,9 @@ impl ScriptListApp {
                                             false,
                                         );
                                         this.submit_prompt_response(id, Some(value_str.clone()), cx);
+                                        if let Some(error) = this.prompt_completion.as_ref().and_then(|binding| binding.observation().error) {
+                                            return Err(anyhow::anyhow!(error));
+                                        }
                                         Ok(value_str)
                                     } else {
                                         Err(anyhow::anyhow!("No active prompt to submit to"))
@@ -7642,86 +5473,37 @@ impl ScriptListApp {
                                 }
                             }
                             protocol::BatchCommand::WaitFor { condition, timeout, poll_interval } => {
-                                let wait_timeout = std::time::Duration::from_millis(timeout.unwrap_or(5_000));
-                                let wait_poll = std::time::Duration::from_millis(poll_interval.unwrap_or(25));
+                                let (wait_timeout, wait_poll) = bounded_batch_wait(
+                                    *timeout, *poll_interval, batch_timeout.saturating_sub(batch_start.elapsed()),
+                                );
                                 let wait_start = std::time::Instant::now();
-
-                                // Check if already satisfied
-                                let already = this.update(cx, |this, cx| {
-                                    this.wait_condition_satisfied(condition, cx)
+                                let mut polls = 0;
+                                let wait_result = loop {
+                                    let remaining = wait_timeout.saturating_sub(wait_start.elapsed())
+                                        .min(batch_timeout.saturating_sub(batch_start.elapsed()));
+                                    if remaining.is_zero() || polls >= MAX_WAIT_POLLS {
+                                        break Err(protocol::TransactionError::wait_timeout("Batch wait deadline or poll budget exceeded"));
+                                    }
+                                    if let Err(error) = dispatch_guard.validate() {
+                                        break Err(protocol::TransactionError::action_failed(error));
+                                    }
+                                    polls += 1;
+                                    match this.update(cx, |this, cx| this.wait_condition_satisfied(condition, cx)) {
+                                        Ok(true) => break Ok(()),
+                                        Ok(false) => {}
+                                        Err(error) => break Err(protocol::TransactionError::action_failed(error.to_string())),
+                                    }
+                                    cx.background_executor().timer(wait_poll.min(remaining)).await;
+                                };
+                                let error = wait_result.err();
+                                let success = error.is_none();
+                                results.push(protocol::BatchResultEntry {
+                                    index, success, command: "waitFor".into(),
+                                    elapsed: Some(wait_start.elapsed().as_millis() as u64), value: None, error,
                                 });
-                                match already {
-                                    Ok(true) => {
-                                        results.push(protocol::BatchResultEntry {
-                                            index,
-                                            success: true,
-                                            command: "waitFor".to_string(),
-                                            elapsed: Some(0),
-                                            value: None,
-                                            error: None,
-                                        });
-                                    }
-                                    Ok(false) => {
-                                        // Poll loop
-                                        let mut wait_result: Result<Option<String>, protocol::TransactionError> = Err(protocol::TransactionError::wait_timeout(format!("WaitFor timeout after {}ms", wait_timeout.as_millis())));
-                                        loop {
-                                            cx.background_executor().timer(wait_poll).await;
-                                            if wait_start.elapsed() >= wait_timeout {
-                                                break;
-                                            }
-                                            match this.update(cx, |this, cx| {
-                                                this.wait_condition_satisfied(condition, cx)
-                                            }) {
-                                                Ok(true) => { wait_result = Ok(None); break; }
-                                                Ok(false) => continue,
-                                                _ => { wait_result = Err(protocol::TransactionError::action_failed("Entity dropped during WaitFor")); break; }
-                                            }
-                                        }
-                                        match wait_result {
-                                            Ok(_) => {
-                                                results.push(protocol::BatchResultEntry {
-                                                    index,
-                                                    success: true,
-                                                    command: "waitFor".to_string(),
-                                                    elapsed: Some(wait_start.elapsed().as_millis() as u64),
-                                                    value: None,
-                                                    error: None,
-                                                });
-                                            }
-                                            Err(e) => {
-                                                tracing::info!(
-                                                    category = "BATCH",
-                                                    request_id = %rid,
-                                                    index = index,
-                                                    command = %batch_command_name(cmd),
-                                                    error = %e.message,
-                                                    "batch.step.error"
-                                                );
-                                                results.push(protocol::BatchResultEntry {
-                                                    index,
-                                                    success: false,
-                                                    command: "waitFor".to_string(),
-                                                    elapsed: Some(wait_start.elapsed().as_millis() as u64),
-                                                    value: None,
-                                                    error: Some(e),
-                                                });
-                                                failed = true;
-                                                if opts.stop_on_error { break; }
-                                            }
-                                        }
-                                    }
-                                    Err(_) => {
-                                        results.push(protocol::BatchResultEntry {
-                                            index,
-                                            success: false,
-                                            command: "waitFor".to_string(),
-                                            elapsed: Some(wait_start.elapsed().as_millis() as u64),
-                                            value: None,
-                                            error: Some(protocol::TransactionError::action_failed("Entity dropped")),
-                                        });
-                                        failed = true;
-                                        if opts.stop_on_error { break; }
-                                    }
+                                if !success {
+                                    failed = true;
+                                    if opts.stop_on_error { break; }
                                 }
                             }
                         }
@@ -7838,87 +5620,16 @@ impl ScriptListApp {
                 start_path,
                 hint,
             } => {
-                self.prepare_window_for_prompt("UI", "path", "");
-
-                tracing::info!(
-                    category = "UI",
-                    id = %id,
-                    has_start_path = start_path.is_some(),
-                    has_hint = hint.is_some(),
-                    "Showing path prompt"
-                );
-
-                let path_submit_callback = self.make_submit_callback("path");
-                let submit_callback: std::sync::Arc<dyn Fn(String, Option<String>) + Send + Sync> =
-                    std::sync::Arc::new(move |id, value| {
-                        tracing::info!(
-                            category = "UI",
-                            id = %id,
-                            has_value = value.is_some(),
-                            "PathPrompt submit callback called"
-                        );
-                        path_submit_callback(id, value);
-                    });
-
-                // Clone the path_actions_showing and search_text Arcs for header display
-                let path_actions_showing = self.path_actions_showing.clone();
-                let path_actions_search_text = self.path_actions_search_text.clone();
-
-                let focus_handle = cx.focus_handle();
-                let path_prompt = PathPrompt::new(
-                    id.clone(),
-                    start_path,
+                let seed = PromptSeed::Path(PathPromptSeed {
+                    common: PromptSeedCommon::sdk(id, None, self.response_sender.clone()),
+                    source: PathSource::Production(start_path),
                     hint,
-                    focus_handle.clone(),
-                    submit_callback,
-                    std::sync::Arc::clone(&self.theme),
-                )
-                // Note: Legacy callbacks are no longer needed - we use events now
-                // But we still pass the shared state for header display
-                .with_actions_showing(path_actions_showing)
-                .with_actions_search_text(path_actions_search_text);
-
-                let entity = cx.new(|_| path_prompt);
-
-                // Subscribe to PathPrompt events for actions dialog control
-                // This replaces the mutex-polling pattern with event-driven handling
-                cx.subscribe(
-                    &entity,
-                    |this, _entity, event: &PathPromptEvent, cx| match event {
-                        PathPromptEvent::ShowActions(path_info) => {
-                            tracing::info!(
-                                category = "UI",
-                                is_dir = path_info.is_dir,
-                                "PathPromptEvent::ShowActions received"
-                            );
-                            this.handle_show_path_actions(path_info.clone(), cx);
-                        }
-                        PathPromptEvent::CloseActions => {
-                            tracing::info!(
-                                category = "UI",
-                                "PathPromptEvent::CloseActions received"
-                            );
-                            this.handle_close_path_actions(cx);
-                        }
-                    },
-                )
-                .detach();
-
-                self.current_view = AppView::PathPrompt {
-                    id,
-                    entity,
-                    focus_handle,
-                };
-                self.focused_input = FocusedInput::None;
-                self.pending_focus = Some(FocusTarget::PathPrompt);
-
-                // Reset showing state (no more mutex polling needed)
-                if let Ok(mut guard) = self.path_actions_showing.lock() {
-                    *guard = false;
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
                 }
-
-                resize_to_view_sync(ViewType::ScriptList, 20);
-                cx.notify();
+                self.prepare_constructed_sdk_prompt("path", false, cx);
             }
             PromptMessage::ShowEnv {
                 id,
@@ -7927,7 +5638,12 @@ impl ScriptListApp {
                 title,
                 secret,
             } => {
-                self.prepare_window_for_prompt("UI", "env", "");
+                if let Err(error) =
+                    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Credentials)
+                {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
 
                 tracing::info!(
                     category = "UI",
@@ -7936,8 +5652,6 @@ impl ScriptListApp {
                     secret,
                     "ShowEnv prompt received"
                 );
-
-                let submit_callback = self.make_submit_callback("env");
 
                 // Check if key already exists in secrets (for UX messaging). Missing
                 // keys stay distinct from storage/decrypt/parse failures.
@@ -7963,112 +5677,82 @@ impl ScriptListApp {
                         }
                     };
 
-                // Create EnvPrompt entity
-                let focus_handle = self.focus_handle.clone();
-                let mut env_prompt = prompts::EnvPrompt::new(
-                    id.clone(),
+                let previous_view = self.current_view.clone();
+                let previous_focus = self.pending_focus;
+                let previous_input = self.focused_input;
+                let common = PromptSeedCommon::sdk(id, None, self.response_sender.clone());
+                let completion = common.completion.clone();
+                let seed = PromptSeed::Env(EnvPromptSeed {
+                    common,
                     key,
                     prompt,
                     title,
                     secret,
-                    focus_handle,
-                    submit_callback,
-                    std::sync::Arc::clone(&self.theme),
-                    exists_in_keyring,
-                    modified_at,
-                    stored_secret_value,
-                    secret_store_error,
-                );
-
-                // Check keyring first - if value exists and no contextual prompt/title
-                // was provided, auto-submit without showing UI. When prompt or title
-                // are set, the script wants the user to see the setup context.
-                let has_contextual_text = env_prompt.has_prompt_or_title();
-                if !has_contextual_text && env_prompt.check_keyring_and_auto_submit() {
-                    tracing::info!(
-                        category = "UI",
-                        "EnvPrompt value found in keyring, auto-submitted"
-                    );
-                    // Don't switch view, the callback already submitted
-                    cx.notify();
+                    facts: EnvSecretFacts {
+                        exists: exists_in_keyring,
+                        modified_at,
+                        stored_value: stored_secret_value,
+                        error: secret_store_error,
+                    },
+                    local_storage: None,
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
                     return;
                 }
-
-                let entity = cx.new(|_| env_prompt);
-                self.current_view = AppView::EnvPrompt { id, entity };
-                self.focused_input = FocusedInput::None; // EnvPrompt has its own focus handling
-                self.pending_focus = Some(FocusTarget::EnvPrompt);
-
-                // Resize to standard height for full-window centered layout
-                resize_to_view_sync(ViewType::DivPrompt, 0);
-                cx.notify();
+                let auto_submitted = if let AppView::EnvPrompt { entity, .. } = &self.current_view {
+                    entity.update(cx, |prompt, _cx| {
+                        !prompt.has_prompt_or_title() && prompt.check_keyring_and_auto_submit()
+                    })
+                } else {
+                    false
+                };
+                if auto_submitted {
+                    let completion = completion.observation();
+                    if let Some(error) = completion.error {
+                        self.show_error_toast(error.to_string(), cx);
+                    } else if completion.completed {
+                        self.transition_current_view_and_rekey_main_automation_surface(
+                            previous_view,
+                        );
+                        self.pending_focus = previous_focus;
+                        self.focused_input = previous_input;
+                        if matches!(self.current_view, AppView::ScriptList) {
+                            self.flush_pending_main_menu_query(cx);
+                        }
+                        cx.notify();
+                        return;
+                    }
+                }
+                self.prepare_constructed_sdk_prompt("env", false, cx);
             }
             PromptMessage::ShowDrop {
                 id,
                 placeholder,
                 hint,
             } => {
-                self.prepare_window_for_prompt("UI", "drop", "");
-
-                tracing::info!(id, ?placeholder, ?hint, "ShowDrop received");
-                tracing::info!(
-                    category = "UI",
-                    id = %id,
-                    placeholder = ?placeholder,
-                    "ShowDrop prompt received"
-                );
-
-                let submit_callback = self.make_submit_callback("drop");
-
-                // Create DropPrompt entity
-                let focus_handle = self.focus_handle.clone();
-                let drop_prompt = prompts::DropPrompt::new(
-                    id.clone(),
+                let seed = PromptSeed::Drop(DropPromptSeed {
+                    common: PromptSeedCommon::sdk(id, None, self.response_sender.clone()),
                     placeholder,
                     hint,
-                    focus_handle,
-                    submit_callback,
-                    std::sync::Arc::clone(&self.theme),
-                );
-
-                let entity = cx.new(|_| drop_prompt);
-                self.current_view = AppView::DropPrompt { id, entity };
-                self.focused_input = FocusedInput::None;
-                self.pending_focus = Some(FocusTarget::DropPrompt);
-
-                resize_to_view_sync(ViewType::DivPrompt, 0);
-                cx.notify();
+                    owned_files: None,
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("drop", false, cx);
             }
             PromptMessage::ShowTemplate { id, template } => {
-                self.prepare_window_for_prompt("UI", "template", "");
-
-                tracing::info!(id, template, "ShowTemplate received");
-                tracing::info!(
-                    category = "UI",
-                    id = %id,
-                    template = %template,
-                    "ShowTemplate prompt received"
-                );
-
-                let submit_callback = self.make_submit_callback("template");
-
-                // Create TemplatePrompt entity
-                let focus_handle = self.focus_handle.clone();
-                let template_prompt = prompts::TemplatePrompt::new(
-                    id.clone(),
+                let seed = PromptSeed::Template(TemplatePromptSeed {
+                    common: PromptSeedCommon::sdk(id, None, self.response_sender.clone()),
                     template,
-                    focus_handle,
-                    submit_callback,
-                    std::sync::Arc::clone(&self.theme),
-                );
-
-                let entity = cx.new(|_| template_prompt);
-                self.current_view = AppView::TemplatePrompt { id, entity };
-                self.focused_input = FocusedInput::None;
-                self.pending_focus = Some(FocusTarget::TemplatePrompt);
-
-                resize_to_view_sync(ViewType::DivPrompt, 0);
-                cx.notify();
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("template", false, cx);
             }
 
             PromptMessage::ShowSelect {
@@ -8077,45 +5761,18 @@ impl ScriptListApp {
                 choices,
                 multiple,
             } => {
-                self.prepare_window_for_prompt("UI", "select", "");
-
-                tracing::info!(
-                    id,
-                    ?placeholder,
-                    choice_count = choices.len(),
-                    multiple,
-                    "ShowSelect received"
-                );
-                tracing::info!(
-                    category = "UI",
-                    id = %id,
-                    choice_count = choices.len(),
-                    multiple,
-                    "ShowSelect prompt received"
-                );
-
-                let submit_callback = self.make_submit_callback("select");
-
-                // Create SelectPrompt entity
-                let choice_count = choices.len();
-                let select_prompt = prompts::SelectPrompt::new(
-                    id.clone(),
+                let seed = PromptSeed::Select(SelectPromptSeed {
+                    common: PromptSeedCommon::sdk(id, None, self.response_sender.clone()),
                     placeholder,
                     choices,
                     multiple,
-                    self.focus_handle.clone(),
-                    submit_callback,
-                    std::sync::Arc::clone(&self.theme),
-                );
-                let entity = cx.new(|_| select_prompt);
-                self.current_view = AppView::SelectPrompt { id, entity };
-                self.focused_input = FocusedInput::None; // SelectPrompt has its own focus handling
-                self.pending_focus = Some(FocusTarget::SelectPrompt);
-
-                // Select owns both the main context header and its internal
-                // search/selection header, so it needs a distinct sizing lane.
-                resize_to_view_sync(ViewType::SelectPrompt, choice_count);
-                cx.notify();
+                    disabled: Vec::new(),
+                });
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("select", false, cx);
             }
             PromptMessage::ShowConfirm {
                 id,
@@ -8130,55 +5787,6 @@ impl ScriptListApp {
                     "ShowConfirm prompt"
                 );
 
-                // Build response callback that sends submit message back to the script
-                let response_sender = self.response_sender.clone();
-                let prompt_id = id.clone();
-                let send_response = {
-                    let response_sender = response_sender.clone();
-                    let prompt_id = prompt_id.clone();
-                    move |confirmed: bool| {
-                        tracing::info!(
-                            category = "CONFIRM",
-                            prompt_id = %prompt_id,
-                            confirmed,
-                            "User choice received"
-                        );
-                        if let Some(ref sender) = response_sender {
-                            let value = if confirmed {
-                                Some("true".to_string())
-                            } else {
-                                Some("false".to_string())
-                            };
-                            let response = Message::Submit {
-                                id: prompt_id.clone(),
-                                value,
-                            };
-                            match sender.try_send(response) {
-                                Ok(()) => {
-                                    tracing::info!(category = "CONFIRM", "Submit message sent");
-                                }
-                                Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                                    tracing::warn!(
-                                        category = "WARN",
-                                        "Response channel full - confirm response dropped"
-                                    );
-                                }
-                                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                                    tracing::info!(
-                                        category = "UI",
-                                        "Response channel disconnected - script exited"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                };
-
-                let send_confirm = send_response.clone();
-                let send_cancel = send_response;
-
-                self.prepare_window_for_prompt("UI", "confirm", "");
-
                 let options = crate::confirm::ParentConfirmOptions {
                     title: "Confirm".into(),
                     body: gpui::SharedString::from(message),
@@ -8191,26 +5799,50 @@ impl ScriptListApp {
                     ..Default::default()
                 };
 
-                if let Some(window) = current_window {
+                if let Some(window) =
+                    current_window.filter(|_| !crate::runtime_policy::is_owned_evaluation())
+                {
+                    let binding = PromptCompletionBinding::sdk(id, self.response_sender.clone());
+                    if let Some(previous) = self.prompt_completion.replace(binding.clone()) {
+                        previous.retire();
+                    }
+                    let send_confirm = binding.clone();
+                    let confirm_app = cx.entity().downgrade();
+                    let cancel_app = confirm_app.clone();
+                    self.prepare_window_for_prompt("UI", "confirm", "");
                     crate::confirm::open_parent_confirm_dialog(
                         window,
                         cx,
                         options,
-                        move |_window, _cx| send_confirm(true),
-                        move |_window, _cx| send_cancel(false),
+                        move |_window, cx| {
+                            if let Err(error) =
+                                send_confirm.try_complete(PromptOutcome::Confirmed(true))
+                            {
+                                let _ = confirm_app.update(cx, |app, cx| {
+                                    app.show_error_toast(error.to_string(), cx)
+                                });
+                            }
+                        },
+                        move |_window, cx| {
+                            if let Err(error) =
+                                binding.try_complete(PromptOutcome::Confirmed(false))
+                            {
+                                let _ = cancel_app.update(cx, |app, cx| {
+                                    app.show_error_toast(error.to_string(), cx)
+                                });
+                            }
+                        },
                     );
                 } else {
-                    let (confirm_tx, confirm_rx) = async_channel::bounded::<bool>(1);
-                    self.open_confirm_prompt(options, confirm_tx, cx);
-                    cx.spawn(async move |_this, _cx| {
-                        let confirmed = confirm_rx.recv().await.unwrap_or(false);
-                        if confirmed {
-                            send_confirm(true);
-                        } else {
-                            send_cancel(false);
-                        }
-                    })
-                    .detach();
+                    let seed = PromptSeed::Confirm(ConfirmPromptSeed {
+                        common: PromptSeedCommon::sdk(id, None, self.response_sender.clone()),
+                        options,
+                    });
+                    if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                        self.show_error_toast(error.to_string(), cx);
+                        return;
+                    }
+                    self.prepare_constructed_sdk_prompt("confirm", false, cx);
                 }
 
                 cx.notify();
@@ -8229,7 +5861,22 @@ impl ScriptListApp {
             } => {
                 logging::bench_log("ShowChat_received");
 
-                self.prepare_window_for_prompt("CHAT", "chat", "window_show_requested");
+                if use_builtin_ai {
+                    if let Err(error) = crate::runtime_policy::check(
+                        crate::runtime_policy::ExternalEffect::Provider,
+                    ) {
+                        self.show_error_toast(error.to_string(), cx);
+                        return;
+                    }
+                }
+                if save_history {
+                    if let Err(error) = crate::runtime_policy::check(
+                        crate::runtime_policy::ExternalEffect::ExternalStorage,
+                    ) {
+                        self.show_error_toast(error.to_string(), cx);
+                        return;
+                    }
+                }
 
                 tracing::info!(
                     id,
@@ -8251,8 +5898,17 @@ impl ScriptListApp {
                     "ShowChat prompt received"
                 );
 
-                // Store SDK actions for the actions panel (Cmd+K)
-                self.sdk_actions = actions;
+                self.sdk_actions = None;
+                self.action_shortcuts.clear();
+                if let Some(actions) = actions {
+                    self.set_sdk_actions_and_shortcuts(actions, "CHAT", false);
+                }
+                let binding =
+                    PromptCompletionBinding::sdk(id.clone(), self.response_sender.clone());
+                if let Some(previous) = self.prompt_completion.replace(binding.clone()) {
+                    previous.retire();
+                }
+                let dismiss_binding = binding.clone();
 
                 let dismiss_sender = self.inline_chat_escape_sender.clone();
                 let dismiss_main_window_mode = self.main_window_mode;
@@ -8266,40 +5922,20 @@ impl ScriptListApp {
                             trigger = ?request.trigger,
                             "SDK ChatPrompt dismiss requested"
                         );
-                        let _ = dismiss_sender.try_send(());
-                    });
-
-                // Create submit callback for chat prompt
-                let response_sender = self.response_sender.clone();
-                let chat_submit_callback: prompts::ChatSubmitCallback =
-                    std::sync::Arc::new(move |request| {
-                        if let Some(ref sender) = response_sender {
-                            // Send the exact immutable accepted payload back to the SDK.
-                            let response = Message::ChatSubmit {
-                                id: request.prompt_id().to_string(),
-                                text: request.outbound_text().to_string(),
-                            };
-                            match sender.try_send(response) {
-                                Ok(()) => {}
-                                Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                                    tracing::warn!(
-                                        category = "WARN",
-                                        "Response channel full - chat response dropped"
-                                    );
-                                }
-                                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                                    tracing::info!(
-                                        category = "UI",
-                                        "Response channel disconnected - script exited"
-                                    );
-                                }
-                            }
+                        if let Err(error) = dismiss_binding.try_complete(PromptOutcome::Cancelled) {
+                            tracing::warn!(%error, "SDK Chat cancellation refused");
+                            return;
+                        }
+                        if let Err(error) = dismiss_sender.try_send(()) {
+                            tracing::warn!(%error, "SDK Chat dismissal route unavailable");
                         }
                     });
 
+                let chat_submit_callback = binding.chat_submit_callback();
+
                 // Create ChatPrompt entity with configured models
                 let focus_handle = self.focus_handle.clone();
-                let mut chat_prompt = prompts::ChatPrompt::new(
+                let mut chat_prompt = prompts::ChatPrompt::new_sdk(
                     id.clone(),
                     placeholder,
                     messages,
@@ -8307,6 +5943,7 @@ impl ScriptListApp {
                     footer,
                     focus_handle,
                     Some(chat_submit_callback),
+                    save_history,
                     std::sync::Arc::clone(&self.theme),
                 )
                 .with_dismiss_binding(crate::prompts::ChatPromptDismissBinding {
@@ -8323,9 +5960,6 @@ impl ScriptListApp {
                 if let Some(default_model) = model {
                     chat_prompt = chat_prompt.with_default_model(default_model);
                 }
-
-                // Configure history saving
-                chat_prompt = chat_prompt.with_save_history(save_history);
 
                 // If SDK requested built-in AI mode, enable it with the app's AI providers
                 if use_builtin_ai {
@@ -8407,15 +6041,15 @@ impl ScriptListApp {
                         });
                     }));
                 });
-                self.current_view = AppView::ChatPrompt { id, entity };
+                self.transition_current_view_and_rekey_main_automation_surface(
+                    AppView::ChatPrompt { id, entity },
+                );
                 self.focused_input = FocusedInput::None;
                 self.pending_focus = Some(FocusTarget::ChatPrompt);
+                self.bind_owned_surface_revision_observers(cx);
                 logging::bench_log("ChatPrompt_created");
 
-                resize_to_view_sync(
-                    crate::ui_window::compact_ai_view_type_for_mode(self.main_window_mode),
-                    0,
-                );
+                self.prepare_constructed_sdk_prompt("chat", false, cx);
                 logging::bench_log("resize_queued");
                 cx.notify();
                 logging::bench_end("hotkey_to_chat_visible");
@@ -8575,7 +6209,18 @@ impl ScriptListApp {
                 );
             }
             PromptMessage::SetInput { text } => {
-                self.set_prompt_input(text, cx);
+                if let Some(window) = current_window {
+                    if let Err(error) = self.set_input_text_in_window(&text, window, cx) {
+                        self.show_error_toast(error.to_string(), cx);
+                    }
+                } else if matches!(
+                    self.current_view,
+                    AppView::EditorPrompt { .. } | AppView::ScratchPadView { .. }
+                ) {
+                    self.show_error_toast("prompt_input_window_required".to_string(), cx);
+                } else {
+                    self.set_prompt_input(text, cx);
+                }
             }
             PromptMessage::SetActions { actions } => {
                 tracing::info!(
@@ -8607,42 +6252,15 @@ impl ScriptListApp {
                 self.show_prompt_coming_soon_toast("fields()", cx);
             }
             PromptMessage::ShowHotkey { id, placeholder } => {
-                self.prepare_window_for_prompt("UI", "hotkey", "");
-
-                tracing::info!(
-                    id,
-                    has_placeholder = placeholder.is_some(),
-                    "ShowHotkey received"
-                );
-                logging::log(
-                    "PROMPTS",
-                    &format!(
-                        "ShowHotkey prompt received id={} placeholder={:?}",
-                        id, placeholder
-                    ),
-                );
-
-                let theme = std::sync::Arc::clone(&self.theme);
-                let title = placeholder
-                    .clone()
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| "Press keys".to_string());
-                let entity = cx.new(move |cx| {
-                    let mut recorder =
-                        crate::components::shortcut_recorder::ShortcutRecorder::new(cx, theme)
-                            .with_capture_only(true);
-                    recorder.set_command_name(Some(title));
-                    recorder.set_command_description(Some(
-                        "Transient capture for SDK hotkey(); does not save or register."
-                            .to_string(),
-                    ));
-                    recorder
+                let seed = PromptSeed::Hotkey(HotkeyPromptSeed {
+                    common: PromptSeedCommon::sdk(id, None, self.response_sender.clone()),
+                    description: placeholder.unwrap_or_else(|| "Press a shortcut".into()),
                 });
-                self.current_view = AppView::HotkeyPrompt { id, entity };
-                self.focused_input = FocusedInput::None;
-
-                resize_to_view_sync(ViewType::DivPrompt, 0);
-                cx.notify();
+                if let Err(error) = self.construct_prompt_seed(seed, cx) {
+                    self.show_error_toast(error.to_string(), cx);
+                    return;
+                }
+                self.prepare_constructed_sdk_prompt("hotkey", false, cx);
             }
             PromptMessage::WidgetComingSoon { id } => {
                 tracing::warn!(
@@ -8924,53 +6542,19 @@ impl ScriptListApp {
                 tracing::info!(category = "DEBUG_GRID", "HideGrid from script");
                 self.hide_grid(cx);
             }
-            PromptMessage::SimulateGpuiEvent {
-                request_id,
-                target,
-                event,
-            } => {
-                tracing::info!(
-                    target: "script_kit::automation",
-                    request_id = %request_id,
-                    target = ?target,
-                    event = ?event,
-                    "gpui_event_simulation.entity_received"
-                );
-
-                let result = crate::platform::gpui_event_simulator::dispatch_gpui_event(
-                    &request_id,
-                    target.as_ref(),
-                    &event,
-                    cx,
-                );
-
-                let response = if result.success {
-                    Message::simulate_gpui_event_result_success(
-                        request_id,
-                        result.dispatch_path,
-                        result.resolved_window_id,
-                        result.dispatch_completed,
-                        result.dispatch_scheduled,
-                        result.activation_proof,
-                    )
-                } else {
-                    Message::simulate_gpui_event_result_error(
-                        request_id,
-                        result.error_code.unwrap_or_else(|| "unknown".to_string()),
-                        result.error.unwrap_or_else(|| "Unknown error".to_string()),
-                        result.dispatch_path,
-                        result.resolved_window_id,
-                    )
-                };
-
-                if let Some(ref sender) = self.response_sender {
-                    if let Err(e) = sender.try_send(response) {
-                        tracing::error!(
-                            target: "script_kit::automation",
-                            error = %e,
-                            "Failed to send GPUI event simulation response"
-                        );
-                    }
+            PromptMessage::SimulateGpuiEvent { message } => {
+                // A scheduling ticket is internal. The shared producer emits exactly one
+                // correlated terminal reply after execution or cancellation.
+                if let Some(sender) = self.response_sender.clone() {
+                    let mut message = *message;
+                    let precondition =
+                        gpui_dispatch_precondition(&mut message, cx.entity().downgrade());
+                    crate::platform::gpui_event_simulator::handle_gpui_event_message(
+                        message,
+                        sender,
+                        precondition,
+                        cx,
+                    );
                 }
             }
         }
@@ -9023,218 +6607,13 @@ impl ScriptListApp {
                     let snapshot = self.build_main_ui_snapshot(cx);
                     crate::protocol::transaction_executor::matches_state_spec(&snapshot, expected)
                 }
-                // ── Agent Chat-specific wait conditions ────────────────────
-                protocol::WaitDetailedCondition::AgentChatReady => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state.context_ready && state.status == "idle"
-                }
-                protocol::WaitDetailedCondition::AgentChatPickerOpen => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state.picker.as_ref().is_some_and(|p| p.open)
-                }
-                protocol::WaitDetailedCondition::AgentChatPickerClosed => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state.picker.is_none() || state.picker.as_ref().is_some_and(|p| !p.open)
-                }
-                protocol::WaitDetailedCondition::AgentChatItemAccepted => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state.last_accepted_item.is_some()
-                }
-                protocol::WaitDetailedCondition::AgentChatCursorAt { index } => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state.cursor_index == *index
-                }
-                protocol::WaitDetailedCondition::AgentChatStatus { status } => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state.status == *status
-                }
-                protocol::WaitDetailedCondition::AgentChatInputMatch { text } => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state.input_text == *text
-                }
-                protocol::WaitDetailedCondition::AgentChatInputContains { substring } => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state.input_text.contains(substring.as_str())
-                }
-                // ── Agent Chat proof wait conditions (test probe) ─────────
-                protocol::WaitDetailedCondition::AgentChatAcceptedViaKey { key } => {
-                    let probe = self.collect_agent_chat_test_probe(1, cx);
-                    probe
-                        .accepted_items
-                        .last()
-                        .is_some_and(|item| item.accepted_via_key == *key)
-                }
-                protocol::WaitDetailedCondition::AgentChatAcceptedLabel { label } => {
-                    let probe = self.collect_agent_chat_test_probe(1, cx);
-                    probe
-                        .accepted_items
-                        .last()
-                        .is_some_and(|item| item.item_label == *label)
-                }
-                protocol::WaitDetailedCondition::AgentChatAcceptedCursorAt { index } => {
-                    let probe = self.collect_agent_chat_test_probe(1, cx);
-                    probe
-                        .accepted_items
-                        .last()
-                        .is_some_and(|item| item.cursor_after == *index)
-                }
-                protocol::WaitDetailedCondition::AgentChatInputLayoutMatch {
-                    visible_start,
-                    visible_end,
-                    cursor_in_window,
-                } => {
-                    let probe = self.collect_agent_chat_test_probe(1, cx);
-                    probe.input_layout.as_ref().is_some_and(|layout| {
-                        layout.visible_start == *visible_start
-                            && layout.visible_end == *visible_end
-                            && layout.cursor_in_window == *cursor_in_window
-                    })
-                }
-                // ── Agent Chat setup wait conditions ─────────────────────
-                protocol::WaitDetailedCondition::AgentChatSetupVisible => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state.setup.is_some()
-                }
-                protocol::WaitDetailedCondition::AgentChatSetupReasonCode { reason_code } => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state
-                        .setup
-                        .as_ref()
-                        .is_some_and(|s| s.reason_code == *reason_code)
-                }
-                protocol::WaitDetailedCondition::AgentChatSetupPrimaryAction { action } => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state
-                        .setup
-                        .as_ref()
-                        .is_some_and(|s| s.primary_action == *action)
-                }
-                protocol::WaitDetailedCondition::AgentChatSetupAgentPickerOpen => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state.setup.as_ref().is_some_and(|s| s.agent_picker_open)
-                }
-                protocol::WaitDetailedCondition::AgentChatSetupSelectedAgent { agent_id } => {
-                    let state = self.collect_agent_chat_state(cx);
-                    state.setup.as_ref().is_some_and(|s| {
-                        s.selected_agent_id
-                            .as_ref()
-                            .is_some_and(|id| id == agent_id)
-                    })
-                }
+                detailed => protocol::transaction_executor::matches_agent_chat_wait_condition(
+                    detailed,
+                    &self.collect_agent_chat_state(cx),
+                    || self.collect_agent_chat_test_probe(1, cx),
+                )
+                .unwrap_or(false),
             },
-        }
-    }
-
-    /// Check if a wait condition is currently satisfied, reading Agent Chat data
-    /// from the given detached entity (if provided) instead of the main window.
-    ///
-    /// Non-Agent Chat conditions always read from the main window regardless.
-    fn wait_condition_satisfied_for_target(
-        &self,
-        condition: &protocol::WaitCondition,
-        detached_entity: Option<&gpui::Entity<crate::ai::agent_chat::ui::AgentChatView>>,
-        cx: &Context<Self>,
-    ) -> bool {
-        match condition {
-            // Non-Agent Chat conditions: delegate to main-window logic
-            protocol::WaitCondition::Named(_) => self.wait_condition_satisfied(condition, cx),
-            protocol::WaitCondition::Detailed(detailed) => {
-                let is_agent_chat = is_agent_chat_wait_condition(condition);
-
-                if !is_agent_chat || detached_entity.is_none() {
-                    return self.wait_condition_satisfied(condition, cx);
-                }
-
-                // Agent Chat condition with a detached entity — read from it.
-                let state = self.collect_agent_chat_state_for_target(detached_entity, cx);
-                let probe_fn =
-                    || self.collect_agent_chat_test_probe_for_target(detached_entity, 1, cx);
-
-                match detailed {
-                    protocol::WaitDetailedCondition::AgentChatReady => {
-                        state.context_ready && state.status == "idle"
-                    }
-                    protocol::WaitDetailedCondition::AgentChatPickerOpen => {
-                        state.picker.as_ref().is_some_and(|p| p.open)
-                    }
-                    protocol::WaitDetailedCondition::AgentChatPickerClosed => {
-                        state.picker.is_none() || state.picker.as_ref().is_some_and(|p| !p.open)
-                    }
-                    protocol::WaitDetailedCondition::AgentChatItemAccepted => {
-                        state.last_accepted_item.is_some()
-                    }
-                    protocol::WaitDetailedCondition::AgentChatCursorAt { index } => {
-                        state.cursor_index == *index
-                    }
-                    protocol::WaitDetailedCondition::AgentChatStatus { status } => {
-                        state.status == *status
-                    }
-                    protocol::WaitDetailedCondition::AgentChatInputMatch { text } => {
-                        state.input_text == *text
-                    }
-                    protocol::WaitDetailedCondition::AgentChatInputContains { substring } => {
-                        state.input_text.contains(substring.as_str())
-                    }
-                    protocol::WaitDetailedCondition::AgentChatAcceptedViaKey { key } => {
-                        let probe = probe_fn();
-                        probe
-                            .accepted_items
-                            .last()
-                            .is_some_and(|item| item.accepted_via_key == *key)
-                    }
-                    protocol::WaitDetailedCondition::AgentChatAcceptedLabel { label } => {
-                        let probe = probe_fn();
-                        probe
-                            .accepted_items
-                            .last()
-                            .is_some_and(|item| item.item_label == *label)
-                    }
-                    protocol::WaitDetailedCondition::AgentChatAcceptedCursorAt { index } => {
-                        let probe = probe_fn();
-                        probe
-                            .accepted_items
-                            .last()
-                            .is_some_and(|item| item.cursor_after == *index)
-                    }
-                    protocol::WaitDetailedCondition::AgentChatInputLayoutMatch {
-                        visible_start,
-                        visible_end,
-                        cursor_in_window,
-                    } => {
-                        let probe = probe_fn();
-                        probe.input_layout.as_ref().is_some_and(|layout| {
-                            layout.visible_start == *visible_start
-                                && layout.visible_end == *visible_end
-                                && layout.cursor_in_window == *cursor_in_window
-                        })
-                    }
-                    protocol::WaitDetailedCondition::AgentChatSetupVisible => state.setup.is_some(),
-                    protocol::WaitDetailedCondition::AgentChatSetupReasonCode { reason_code } => {
-                        state
-                            .setup
-                            .as_ref()
-                            .is_some_and(|s| s.reason_code == *reason_code)
-                    }
-                    protocol::WaitDetailedCondition::AgentChatSetupPrimaryAction { action } => {
-                        state
-                            .setup
-                            .as_ref()
-                            .is_some_and(|s| s.primary_action == *action)
-                    }
-                    protocol::WaitDetailedCondition::AgentChatSetupAgentPickerOpen => {
-                        state.setup.as_ref().is_some_and(|s| s.agent_picker_open)
-                    }
-                    protocol::WaitDetailedCondition::AgentChatSetupSelectedAgent { agent_id } => {
-                        state.setup.as_ref().is_some_and(|s| {
-                            s.selected_agent_id
-                                .as_ref()
-                                .is_some_and(|id| id == agent_id)
-                        })
-                    }
-                    // Non-Agent Chat conditions (already handled above, but required for exhaustiveness)
-                    _ => self.wait_condition_satisfied(condition, cx),
-                }
-            }
         }
     }
 
@@ -9332,7 +6711,8 @@ impl ScriptListApp {
 
     fn current_surface_contract_snapshot(
         &self,
-        cx: &Context<Self>,
+        target: &crate::protocol::AutomationWindowInfo,
+        cx: &gpui::App,
     ) -> crate::protocol::LauncherSurfaceContractSnapshot {
         let contract = self.current_view.surface_contract();
         let surface_kind = format!("{:?}", self.current_view.surface_kind());
@@ -9341,34 +6721,29 @@ impl ScriptListApp {
             .current_view
             .native_footer_surface()
             .map(str::to_string);
-        let target_identity = crate::windows::resolve_automation_window(Some(
-            &protocol::AutomationWindowTarget::Main,
-        ))
-        .ok()
-        .map(|window| {
-            let elements = self.collect_visible_elements(200, cx);
-            let focused_semantic_id = elements.focused_semantic_id();
-            let selected_semantic_id = elements.selected_semantic_id();
-            let (target_generation, surface_generation, data_generation) =
-                observe_automation_generations(&AutomationGenerationFacts {
-                    window: &window,
-                    surface_kind: Some(&surface_kind),
-                    app_view_variant: Some(&app_view_variant),
-                    native_footer_surface: native_footer_surface.as_deref(),
-                    total_count: elements.total_count,
-                    focused_semantic_id: focused_semantic_id.as_deref(),
-                    selected_semantic_id: selected_semantic_id.as_deref(),
-                    semantic_quality: &protocol::SemanticQuality::Full,
-                });
+        let target_identity = Some(target.clone()).and_then(|window| {
+            let facts = self.owned_revision_facts();
+            let target_generation = window.generation.and_then(|generation| {
+                crate::windows::automation_registry::automation_target_revision(
+                    &window.id, generation,
+                )
+            })?;
 
-            crate::protocol::AutomationTargetIdentitySnapshot {
+            Some(crate::protocol::AutomationTargetIdentitySnapshot {
                 window_id: window.id,
                 window_generation: window.generation,
                 app_view_variant: app_view_variant.clone(),
                 target_generation,
-                surface_generation,
-                data_generation,
-            }
+                surface_generation: facts.surface_generation,
+                data_generation: facts
+                    .data_generation
+                    .strict_add(self.gpui_input_state.read(cx).revision())
+                    .strict_add(self.arg_input.revision())
+                    .strict_add(self.owned_child_semantic_revision(cx)),
+                presentation_revision: Some(facts.presentation_revision),
+                theme_revision: Some(crate::theme::service::theme_revision()),
+                frame_generation: None,
+            })
         });
         crate::protocol::LauncherSurfaceContractSnapshot {
             schema_version: crate::protocol::LAUNCHER_SURFACE_CONTRACT_SCHEMA_VERSION,
@@ -9471,15 +6846,15 @@ impl ScriptListApp {
 
     pub(crate) fn active_footer_snapshot(
         &self,
-        cx: &gpui::App,
+        target: &crate::protocol::AutomationWindowInfo,
     ) -> crate::protocol::ActiveFooterSnapshot {
         let expected_surface = self.current_view.native_footer_surface();
-        let host = crate::footer_popup::main_window_footer_host_snapshot();
+        let state = target.generation.and_then(|generation| {
+            crate::footer_popup::footer_runtime_state(&target.id, generation)
+        });
+        let host = state.as_ref().map(|state| state.host).unwrap_or_default();
         let popup_open = self.show_actions_popup || self.actions_dialog.is_some();
-        let mut config = self.main_window_footer_config_with_cx(Some(cx));
-        if let Some(ref mut cfg) = config {
-            self.enrich_footer_config_with_agent_chat_info(cfg);
-        }
+        let config = state.map(|state| state.config);
         let slot_model = config.as_ref().map(|cfg| cfg.slot_model());
         let native_buttons: Vec<_> = config
             .as_ref()
@@ -9799,8 +7174,16 @@ impl ScriptListApp {
         text: &str,
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> anyhow::Result<()> {
         match &self.current_view {
+            AppView::EditorPrompt { entity, .. } | AppView::ScratchPadView { entity, .. } => {
+                let entity = entity.clone();
+                entity.update(cx, |editor, cx| {
+                    editor.set_input(text.to_string(), window, cx)
+                });
+                self.mark_main_data_changed();
+                cx.notify();
+            }
             AppView::ScriptList => {
                 self.menu_syntax_form_input_active = false;
                 self.menu_syntax_form_draft_field_id = None;
@@ -9817,23 +7200,27 @@ impl ScriptListApp {
                 });
                 cx.notify();
             }
-            // Flow sessions compose in the shared MAIN input.
-            AppView::FlowSessionView { .. } => {
+            // Both surfaces use the shared main input and its production query setter.
+            AppView::FlowSessionView { .. } | AppView::FileSearchView { .. } => {
                 self.set_filter_text_immediate(text.to_string(), window, cx);
                 cx.notify();
             }
-            _ => self.set_input_text(text, cx),
+            _ => self.set_input_text(text, cx)?,
         }
+        Ok(())
     }
 
     /// Set the input text for the current prompt.
-    fn set_input_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    fn set_input_text(&mut self, text: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
         match &self.current_view {
             AppView::ArgPrompt { .. }
             | AppView::MiniPrompt { .. }
             | AppView::MicroPrompt { .. } => {
                 self.arg_input.set_text(text);
-                self.arg_selected_index = 0;
+                self.filter_text = text.to_string();
+                self.pending_filter_sync = true;
+                self.mark_main_data_changed();
+                self.set_arg_selected_index(0);
                 cx.notify();
             }
             AppView::ScriptList => {
@@ -9853,6 +7240,11 @@ impl ScriptListApp {
                 entity.update(cx, |prompt, cx| prompt.set_input(text.to_string(), cx));
                 cx.notify();
             }
+            AppView::SelectPrompt { entity, .. } => {
+                let entity = entity.clone();
+                entity.update(cx, |prompt, cx| prompt.set_input(text.to_string(), cx));
+                cx.notify();
+            }
             AppView::TemplatePrompt { entity, .. } => {
                 let entity = entity.clone();
                 entity.update(cx, |prompt, cx| prompt.set_input(text.to_string(), cx));
@@ -9867,25 +7259,16 @@ impl ScriptListApp {
                 let entity = entity.clone();
                 let payload = text.to_string();
                 entity.update(cx, |term, cx| {
-                    if let Err(error) = term.send_raw_input(&payload) {
-                        tracing::warn!(
-                            category = "BATCH",
-                            %error,
-                            "setInput failed for QuickTerminalView"
-                        );
-                    }
+                    term.send_raw_input(&payload)?;
                     cx.notify();
-                });
+                    anyhow::Ok(())
+                })?;
             }
-            // FlowSessionView is handled by the window-aware setInput path
-            // (main-filter composer); it never reaches this fallback.
-            _ => {
-                tracing::warn!(
-                    category = "BATCH",
-                    "setInput not supported for current view"
-                );
-            }
+            // FlowSessionView and FileSearchView use the window-aware main-input
+            // path above; they never reach this fallback.
+            _ => anyhow::bail!("set_input_not_supported_for_current_view"),
         }
+        Ok(())
     }
 
     /// Select a choice by its value from the filtered list.
@@ -9956,7 +7339,7 @@ impl ScriptListApp {
 
             if let Some(selected) = selected {
                 if submit {
-                    self.submit_current_value(cx);
+                    self.submit_current_value(cx)?;
                 }
                 return Ok(selected);
             }
@@ -9975,31 +7358,6 @@ impl ScriptListApp {
                 anyhow::bail!("selectBySemanticId only supports visible choice surfaces")
             }
         }
-    }
-
-    fn select_choice_by_semantic_id_in_window(
-        &mut self,
-        semantic_id: &str,
-        submit: bool,
-        window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) -> anyhow::Result<String> {
-        if let AppView::DayPage { entity } = &self.current_view {
-            let entity = entity.clone();
-            if semantic_id == script_kit_gpui::day_page::FRAGMENT_BACK_ID {
-                return entity.update(cx, |view, cx| {
-                    if !view.session.is_viewing_fragment() {
-                        anyhow::bail!("Day Page fragment back is not visible");
-                    }
-                    if submit {
-                        view.return_to_day_page(window, cx);
-                    }
-                    Ok(semantic_id.to_string())
-                });
-            }
-        }
-
-        self.select_choice_by_semantic_id(semantic_id, submit, cx)
     }
 
     /// Select the first choice in the filtered list.
@@ -10037,31 +7395,32 @@ impl ScriptListApp {
         submit: bool,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<String> {
-        self.get_grouped_results_cached();
-        let Some(grouped_index) = self
-            .main_menu_result_caches
-            .grouped_items()
+        anyhow::ensure!(
+            self.root_search.query_is_current(),
+            "main_menu_query_pending"
+        );
+        let mut matches = self
+            .main_menu_committed_rows()
             .iter()
-            .enumerate()
-            .find_map(|(grouped_index, item)| {
-                let crate::list_item::GroupedListItem::Item(result_idx) = item else {
-                    return None;
+            .filter(|row| row.eligibility.selectable)
+            .filter_map(|row| {
+                let matched = match row.subject {
+                    MainMenuRowSubject::SearchResult { flat_index } => {
+                        let result = self.main_menu_committed_results().get(flat_index)?;
+                        result.launcher_command_id().as_deref() == Some(value)
+                            || result.launcher_command_name() == value
+                    }
+                    MainMenuRowSubject::Calculator => self
+                        .main_menu_committed_calculator()
+                        .is_some_and(|calculator| calculator.formatted == value),
                 };
-                let result = self
-                    .main_menu_result_caches
-                    .search_result_for_flat_index(*result_idx)?;
-                let command_id_matches = result
-                    .launcher_command_id()
-                    .as_deref()
-                    .is_some_and(|id| id == value);
-                (result.launcher_command_name() == value || command_id_matches)
-                    .then_some(grouped_index)
-            })
-        else {
-            anyhow::bail!("No visible main-menu choice matched value '{value}'");
-        };
-
-        self.apply_main_menu_selection(grouped_index, submit, cx);
+                matched.then_some(row.grouped_index)
+            });
+        let grouped_index = matches
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("main_menu_choice_not_found"))?;
+        anyhow::ensure!(matches.next().is_none(), "ambiguous_main_menu_value");
+        self.apply_main_menu_selection(grouped_index, submit, cx)?;
         Ok(value.to_string())
     }
 
@@ -10071,58 +7430,21 @@ impl ScriptListApp {
         submit: bool,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<String> {
-        let visible_choice_index = semantic_id
-            .split(':')
-            .nth(1)
-            .and_then(|index| index.parse::<usize>().ok())
-            .ok_or_else(|| anyhow::anyhow!("Invalid main-menu semantic ID '{semantic_id}'"))?;
-
-        if self.menu_syntax_trigger_picker_state.owns_main_list() {
-            let Some(snapshot) = self.menu_syntax_trigger_picker_state.snapshot.as_ref() else {
-                anyhow::bail!(
-                    "No visible menu-syntax trigger picker matched semantic ID '{semantic_id}'"
-                );
-            };
-            let Some(row) = snapshot.rows.get(visible_choice_index) else {
-                anyhow::bail!(
-                    "No visible menu-syntax trigger picker matched semantic ID '{semantic_id}'"
-                );
-            };
-            if !row.enabled {
-                anyhow::bail!("Menu-syntax trigger picker row '{semantic_id}' is disabled");
+        let row = self
+            .resolve_main_menu_semantic_row(semantic_id)
+            .ok_or_else(|| anyhow::anyhow!("main_menu_semantic_target_not_current"))?;
+        let grouped_index = row.grouped_index;
+        let selected = match row.subject {
+            MainMenuRowSubject::SearchResult { flat_index } => {
+                self.main_menu_committed_results()[flat_index].launcher_command_name()
             }
-            let row_id = row.id.clone();
-            let selected = row.token.clone().unwrap_or_else(|| row.title.clone());
-            self.menu_syntax_trigger_picker_state.selected_row_id = Some(row_id.clone());
-            if submit {
-                self.accept_menu_syntax_trigger_picker_row(&row_id, None, cx);
-            }
-            return Ok(selected);
-        }
-
-        self.get_grouped_results_cached();
-        let Some((grouped_index, selected)) = self
-            .main_menu_result_caches
-            .grouped_items()
-            .iter()
-            .enumerate()
-            .filter_map(|(candidate_grouped_index, item)| {
-                let crate::list_item::GroupedListItem::Item(result_idx) = item else {
-                    return None;
-                };
-                self.main_menu_result_caches
-                    .search_result_for_flat_index(*result_idx)
-                    .map(|result| (candidate_grouped_index, result))
-            })
-            .nth(visible_choice_index)
-            .map(|(candidate_grouped_index, result)| {
-                (candidate_grouped_index, result.launcher_command_name())
-            })
-        else {
-            anyhow::bail!("No visible main-menu choice matched semantic ID '{semantic_id}'");
+            MainMenuRowSubject::Calculator => self
+                .main_menu_committed_calculator()
+                .ok_or_else(|| anyhow::anyhow!("main_menu_calculator_missing"))?
+                .formatted
+                .clone(),
         };
-
-        self.apply_main_menu_selection(grouped_index, submit, cx);
+        self.apply_main_menu_selection(grouped_index, submit, cx)?;
         Ok(selected)
     }
 
@@ -10131,25 +7453,16 @@ impl ScriptListApp {
         submit: bool,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<Option<String>> {
-        self.get_grouped_results_cached();
-        let Some(grouped_index) = self
-            .main_menu_result_caches
-            .grouped_items()
+        let Some(semantic_id) = self
+            .main_menu_committed_rows()
             .iter()
-            .enumerate()
-            .find_map(|(grouped_index, item)| {
-                matches!(item, crate::list_item::GroupedListItem::Item(_)).then_some(grouped_index)
-            })
+            .find(|row| row.eligibility.selectable)
+            .map(|row| row.semantic_id.clone())
         else {
-            anyhow::bail!("No visible main-menu choices to select");
+            return Ok(None);
         };
-        let selected = self
-            .main_menu_result_caches
-            .search_result_for_grouped_item(grouped_index)
-            .map(|result| result.launcher_command_name());
-
-        self.apply_main_menu_selection(grouped_index, submit, cx);
-        Ok(selected)
+        self.select_main_menu_choice_by_semantic_id(&semantic_id, submit, cx)
+            .map(Some)
     }
 
     fn apply_main_menu_selection(
@@ -10157,8 +7470,11 @@ impl ScriptListApp {
         grouped_index: usize,
         submit: bool,
         cx: &mut Context<Self>,
-    ) {
-        self.selected_index = grouped_index;
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.select_main_menu_row(grouped_index, MainMenuSelectionOrigin::Agent, cx),
+            "main_menu_choice_not_selectable"
+        );
         self.hovered_index = None;
         self.last_scrolled_index = None;
         self.reveal_main_list_selection_above_footer("devtools main-menu selection");
@@ -10169,8 +7485,9 @@ impl ScriptListApp {
         cx.notify();
 
         if submit {
-            self.submit_current_value(cx);
+            self.submit_current_value(cx)?;
         }
+        Ok(())
     }
 
     fn select_prompt_choice_by_value(
@@ -10191,13 +7508,12 @@ impl ScriptListApp {
             anyhow::bail!("No visible choice matched value '{value}'");
         };
 
-        self.arg_selected_index = index;
+        let selected = filtered[index].value.clone();
+        self.set_arg_selected_index(index);
         cx.notify();
 
-        let selected = filtered[index].value.clone();
-
         if submit {
-            self.submit_current_value(cx);
+            self.submit_current_value(cx)?;
         }
 
         Ok(selected)
@@ -10225,13 +7541,12 @@ impl ScriptListApp {
             anyhow::bail!("No visible choice matched semantic ID '{semantic_id}'");
         };
 
-        self.arg_selected_index = index;
+        let selected = filtered[index].value.clone();
+        self.set_arg_selected_index(index);
         cx.notify();
 
-        let selected = filtered[index].value.clone();
-
         if submit {
-            self.submit_current_value(cx);
+            self.submit_current_value(cx)?;
         }
 
         Ok(selected)
@@ -10254,50 +7569,89 @@ impl ScriptListApp {
             anyhow::bail!("No visible choices to select");
         }
 
-        self.arg_selected_index = 0;
+        let selected = filtered[0].value.clone();
+        self.set_arg_selected_index(0);
         cx.notify();
 
-        let selected = filtered[0].value.clone();
-
         if submit {
-            self.submit_current_value(cx);
+            self.submit_current_value(cx)?;
         }
 
         Ok(Some(selected))
     }
 
     /// Submit the currently selected value.
-    fn submit_current_value(&mut self, cx: &mut Context<Self>) {
-        match &self.current_view {
-            AppView::ArgPrompt { id, choices, .. }
-            | AppView::MiniPrompt { id, choices, .. }
-            | AppView::MicroPrompt { id, choices, .. } => {
-                let id = id.clone();
-                let filtered = self.get_filtered_arg_choices(choices);
-                let value = if self.arg_selected_index < filtered.len() {
-                    filtered[self.arg_selected_index].value.clone()
-                } else {
-                    self.arg_input.text().to_string()
-                };
-                self.record_submit_diagnostic(
-                    "protocol",
-                    "submit_current_value",
-                    Some(id.as_str()),
-                    Some(value.as_str()),
-                    false,
+    fn submit_current_value(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let binding = self.prompt_completion.clone();
+        let before = binding
+            .as_ref()
+            .and_then(|binding| binding.observation().receipt)
+            .map(|receipt| receipt.sequence);
+        match self.current_view.clone() {
+            AppView::ScriptList => {
+                self.submit_main_menu_selected_subject(cx)?;
+                return Ok(());
+            }
+            AppView::ArgPrompt { id, .. }
+            | AppView::MiniPrompt { id, .. }
+            | AppView::MicroPrompt { id, .. } => {
+                self.submit_arg_prompt_from_current_state(&id, cx);
+            }
+            AppView::FormPrompt { id, entity } => {
+                let value = entity
+                    .update(cx, |form, cx| form.validated_submit_value(cx))
+                    .ok_or_else(|| anyhow::anyhow!("invalid_form_submission"))?;
+                self.submit_prompt_response(id, Some(value), cx);
+            }
+            AppView::EditorPrompt { entity, .. } | AppView::ScratchPadView { entity, .. } => {
+                entity.update(cx, |editor, cx| editor.submit(cx))
+            }
+            AppView::EnvPrompt { entity, .. } => entity.update(cx, |prompt, cx| prompt.submit(cx)),
+            AppView::DropPrompt { entity, .. } => entity.update(cx, |prompt, _cx| prompt.submit()),
+            AppView::TemplatePrompt { entity, .. } => {
+                entity.update(cx, |prompt, cx| prompt.submit(cx))
+            }
+            AppView::PathPrompt { entity, .. } => {
+                entity.update(cx, |prompt, cx| prompt.handle_enter(cx))
+            }
+            AppView::SelectPrompt { entity, .. } => {
+                anyhow::ensure!(
+                    entity.update(cx, |prompt, cx| prompt.submit(cx)),
+                    "invalid_select_submission"
                 );
-                if let Some(ref sender) = self.response_sender {
-                    let _ = sender.try_send(Message::Submit {
-                        id,
-                        value: Some(value),
-                    });
-                }
-                cx.notify();
             }
-            _ => {
-                tracing::warn!(category = "BATCH", "submit not supported for current view");
+            AppView::NamingPrompt { entity, .. } => {
+                entity.update(cx, |prompt, cx| prompt.submit(cx))
             }
+            AppView::ChatPrompt { entity, .. } => entity.update(cx, |prompt, cx| prompt.submit(cx)),
+            AppView::DivPrompt { entity, .. } => entity.update(cx, |prompt, _cx| prompt.submit()),
+            AppView::TermPrompt { entity, .. } | AppView::QuickTerminalView { entity } => {
+                entity.update(cx, |prompt, cx| {
+                    if crate::runtime_policy::is_owned_evaluation() {
+                        prompt.terminal.finish_fixture(0)?;
+                    } else {
+                        prompt.send_raw_input("\r")?;
+                    }
+                    cx.notify();
+                    anyhow::Ok(())
+                })?;
+                return Ok(()); // The real terminal exit timer delivers completion.
+            }
+            _ => anyhow::bail!("submit_not_supported_for_current_view"),
         }
+        self.mark_main_data_changed();
+        cx.notify();
+        let completion = binding
+            .ok_or_else(|| anyhow::anyhow!("prompt_completion_missing"))?
+            .observation();
+        if let Some(error) = completion.error {
+            return Err(error.into());
+        }
+        anyhow::ensure!(
+            completion.receipt.as_ref().map(|receipt| receipt.sequence) != before,
+            "prompt_submission_not_delivered"
+        );
+        Ok(())
     }
 }
 

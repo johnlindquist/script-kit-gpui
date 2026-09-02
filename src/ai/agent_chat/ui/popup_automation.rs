@@ -1,9 +1,5 @@
-//! Agent Chat-specific automation identity for shared inline popup windows.
-//!
-//! Window mechanics live in `components::inline_popup_window`; this module owns
-//! only the Agent Chat parent/child automation registration policy.
-
-use gpui::{AnyWindowHandle, Bounds, Pixels};
+//! Agent Chat identities over the shared exact popup host registry.
+use gpui::{AnyWindowHandle, App, Bounds, Pixels};
 
 pub(crate) fn automation_bounds(bounds: Bounds<Pixels>) -> crate::protocol::AutomationWindowBounds {
     crate::protocol::AutomationWindowBounds {
@@ -16,71 +12,59 @@ pub(crate) fn automation_bounds(bounds: Bounds<Pixels>) -> crate::protocol::Auto
 
 pub(crate) fn resolve_agent_chat_popup_parent_automation_id(
     parent_window_handle: AnyWindowHandle,
-    parent_bounds: Bounds<Pixels>,
+    _parent_bounds: Bounds<Pixels>,
 ) -> anyhow::Result<String> {
-    for window in crate::windows::list_automation_windows() {
-        if crate::windows::get_runtime_window_handle(&window.id)
-            .is_some_and(|handle| handle == parent_window_handle)
-        {
-            return Ok(window.id);
-        }
-    }
-
-    if crate::get_main_window_handle().is_some_and(|handle| handle == parent_window_handle) {
-        let parent_id = "main".to_string();
-        crate::windows::upsert_runtime_window_handle(&parent_id, parent_window_handle);
-        let preserved_semantic_surface = crate::windows::list_automation_windows()
-            .into_iter()
-            .find(|window| window.id == parent_id)
-            .and_then(|window| window.semantic_surface)
-            .unwrap_or_else(|| "agentChatChat".to_string());
-        crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
-            id: parent_id.clone(),
-            kind: crate::protocol::AutomationWindowKind::Main,
-            title: Some("Script Kit".to_string()),
-            focused: true,
-            visible: true,
-            semantic_surface: Some(preserved_semantic_surface),
-            bounds: Some(automation_bounds(parent_bounds)),
-            parent_window_id: None,
-            parent_kind: None,
-            pid: Some(std::process::id()),
-            generation: None,
-        });
-        return Ok(parent_id);
-    }
-
-    anyhow::bail!(
-        "Cannot register Agent Chat prompt popup: parent automation identity is required"
-    );
+    crate::windows::list_automation_windows()
+        .into_iter()
+        .find(|window| {
+            window.generation.is_some_and(|generation| {
+                crate::windows::get_runtime_window_handle_for_generation(&window.id, generation)
+                    == Some(parent_window_handle)
+            })
+        })
+        .map(|window| window.id)
+        .ok_or_else(|| anyhow::anyhow!("popup_parent_identity_missing"))
 }
 
 pub(crate) fn register_agent_chat_prompt_popup_automation_window(
     automation_id: &'static str,
     title: &'static str,
-    parent_window_handle: AnyWindowHandle,
-    parent_bounds: Bounds<Pixels>,
+    handle: AnyWindowHandle,
     popup_bounds: Bounds<Pixels>,
-    generation: u64,
-) -> anyhow::Result<String> {
-    let parent_id =
-        resolve_agent_chat_popup_parent_automation_id(parent_window_handle, parent_bounds)?;
-    crate::windows::register_attached_popup_instance(
-        automation_id.to_string(),
-        crate::protocol::AutomationWindowKind::PromptPopup,
-        Some(title.to_string()),
-        Some("promptPopup".to_string()),
-        Some(automation_bounds(popup_bounds)),
-        Some(parent_id.as_str()),
-        Some(generation),
+    focus_return: &crate::components::inline_popup_window::InlinePopupFocusReturn,
+    cx: &mut App,
+) -> anyhow::Result<u64> {
+    let parent = crate::windows::automation_window_by_id(&focus_return.parent_automation_id)
+        .ok_or_else(|| anyhow::anyhow!("popup_parent_missing"))?;
+    anyhow::ensure!(
+        parent.generation == Some(focus_return.parent_generation),
+        "stale_popup_parent"
+    );
+    let info = crate::windows::register_runtime_window_instance(
+        crate::protocol::AutomationWindowInfo {
+            id: automation_id.into(),
+            kind: crate::protocol::AutomationWindowKind::PromptPopup,
+            title: Some(title.into()),
+            focused: false,
+            visible: !focus_return.host_policy.is_hidden(),
+            semantic_surface: Some("promptPopup".into()),
+            bounds: Some(automation_bounds(popup_bounds)),
+            parent_window_id: Some(parent.id),
+            parent_kind: Some(parent.kind),
+            parent_window_generation: Some(focus_return.parent_generation),
+            generation: None,
+            pid: Some(std::process::id()),
+        },
+        handle,
+        cx,
     )?;
-    Ok(parent_id)
+    info.generation
+        .ok_or_else(|| anyhow::anyhow!("popup_generation_missing"))
 }
 
 pub(crate) fn unregister_agent_chat_prompt_popup_automation_window(
     automation_id: &'static str,
     generation: u64,
 ) {
-    crate::windows::remove_runtime_window_handle_if_generation(automation_id, generation);
-    crate::windows::remove_automation_window_if_generation(automation_id, generation);
+    crate::windows::remove_runtime_window_instance(automation_id, generation);
 }

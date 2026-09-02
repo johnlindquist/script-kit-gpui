@@ -478,14 +478,11 @@ fn startup_shift_tab_opens_agent_chat_profile_picker() {
 
 #[test]
 fn native_footer_agent_model_preserves_agent_chat_view() {
-    let arm = UI_WINDOW_SOURCE
-        .split("crate::footer_popup::FooterAction::AgentModel =>")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split("/// If the current view is an Agent Chat chat")
-                .next()
-        })
-        .expect("ui_window.rs should contain the native AgentModel footer action arm");
+    let arm = agent_chat_source_between(
+        UI_WINDOW_SOURCE,
+        "crate::footer_popup::FooterAction::AgentModel => {",
+        "/// One receiver task per owning main root",
+    );
 
     assert!(
         arm.contains("AppView::AgentChatView { entity, .. }"),
@@ -681,8 +678,18 @@ fn agent_chat_history_migration_uses_popup_window_instead_of_inline_layer() {
             && AGENT_CHAT_HISTORY_POPUP_SOURCE
                 .contains("let bounds = popup_bounds(parent_bounds, &snapshot);")
             && AGENT_CHAT_HISTORY_POPUP_SOURCE
-                .contains("inline_popup_window_options(bounds, display_id)"),
+                .contains("focus_return.host_policy"),
         "Agent Chat history picker should render through a popup window entity using shared popup mechanics"
+    );
+    let options = agent_chat_source_between(
+        AGENT_CHAT_HISTORY_POPUP_SOURCE,
+        "let window_options =",
+        "let native_source_view =",
+    );
+    let options: String = options.split_whitespace().collect();
+    assert!(
+        options.contains("inline_popup_window_options(bounds,display_id,focus_return.host_policy,"),
+        "history popup options must preserve parent-relative bounds, display, and host policy"
     );
     assert!(
         !AGENT_CHAT_HISTORY_POPUP_SOURCE.contains("fn popup_ns_window")
@@ -879,10 +886,17 @@ fn agent_chat_history_popup_window_supports_actions_style_search_and_keyboard_na
 
 #[test]
 fn agent_chat_history_enter_resumes_selected_chat() {
+    const HISTORY_NAVIGATION_SOURCE: &str = include_str!("view_history_navigation.rs");
+    let selection = agent_chat_source_between(
+        HISTORY_NAVIGATION_SOURCE,
+        "fn execute_history_popup_selection(",
+        "let mode =",
+    );
     assert!(
-        AGENT_CHAT_VIEW_SOURCE.contains("if modifiers.platform {")
-            && AGENT_CHAT_VIEW_SOURCE.contains("self.select_history_from_popup(&entry, cx);"),
-        "embedded Agent Chat history keyboard handling should route the resume action through select_history_from_popup"
+        AGENT_CHAT_VIEW_SOURCE.contains("self.execute_history_popup_selection(modifiers, cx);")
+            && selection.contains("if modifiers.platform {")
+            && selection.contains("self.select_history_from_popup(&entry, cx);"),
+        "embedded Agent Chat history keyboard handling must delegate to the extracted selection owner and retain its resume action"
     );
     assert!(
         AGENT_CHAT_HISTORY_POPUP_SOURCE.contains("if has_shift {")
@@ -1679,7 +1693,6 @@ fn history_resume_request_struct_carries_session_id() {
 
 #[test]
 fn agent_chat_view_exposes_history_resume_primitives() {
-    const AGENT_CHAT_VIEW_SOURCE: &str = include_str!("view.rs");
     assert!(
         AGENT_CHAT_VIEW_SOURCE.contains("pub(crate) struct AgentChatHistoryResumeRequest"),
         "AgentChatView module must define AgentChatHistoryResumeRequest"
@@ -1732,11 +1745,20 @@ fn global_clear_history_remains_separate_from_per_item_delete() {
         HISTORY_SOURCE.contains("filter(|entry| entry.session_id != session_id)"),
         "delete_conversation must filter by session_id, not clear all"
     );
-    // The chat_window.rs clear path uses remove_file + remove_dir_all
+    // Filesystem deletion and symlink rejection are behavior-tested by
+    // chat_window_tests::confirmed_agent_chat_history_deletion_removes_all_four_exact_owned_targets.
+    // Keep this audit on the confirmation-gated caller, not the extracted I/O implementation.
     const CHAT_WINDOW_SOURCE: &str = include_str!("chat_window.rs");
+    let clear_request = agent_chat_source_between(
+        CHAT_WINDOW_SOURCE,
+        "fn request_detached_agent_chat_history_deletion(",
+        "fn dispatch_detached_action(",
+    );
     assert!(
-        CHAT_WINDOW_SOURCE.contains("remove_dir_all"),
-        "clear_history must remove entire conversations directory"
+        clear_request.contains("open_parent_confirm_dialog_for_entity(")
+            && clear_request.contains("clear_agent_chat_history_at(")
+            && clear_request.contains("Some(ConfirmedAgentChatHistoryDeletion)"),
+        "global history deletion must delegate to the confirmed whole-history owner, not per-item deletion"
     );
 }
 
@@ -2414,8 +2436,8 @@ fn agent_chat_ui_variants_are_menu_addressable_and_protocol_visible() {
     assert!(
         AGENT_CHAT_VIEW_SOURCE.contains("fn render_variant_badge(")
             && AGENT_CHAT_VIEW_SOURCE.contains("fn render_variant_sidecar(")
-            && AGENT_CHAT_VIEW_SOURCE.contains("plan.layout.show_variant_badge")
-            && AGENT_CHAT_VIEW_SOURCE.contains("plan.layout.show_sidecar"),
+            && AGENT_CHAT_VIEW_SOURCE.contains("resolved_layout.show_variant_badge")
+            && AGENT_CHAT_VIEW_SOURCE.contains("resolved_layout.show_sidecar"),
         "Agent Chat renderer must expose visible variant badge and sidecar affordances for experiment review"
     );
 

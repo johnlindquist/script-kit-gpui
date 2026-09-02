@@ -63,7 +63,7 @@ pub use webcam_stub::WebcamPrompt;
 // These exports are ready for use in main.rs when AppView variants are added
 // The #[allow(unused_imports)] is temporary until main.rs integrations are complete
 #[allow(unused_imports)]
-pub use drop::DropPrompt;
+pub use drop::{DropPrompt, DroppedFile};
 #[allow(unused_imports)]
 pub use env::EnvPrompt;
 #[allow(unused_imports)]

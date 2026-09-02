@@ -266,6 +266,8 @@ impl HarnessConfig {
 
 /// Path to the harness config file.
 pub fn tab_ai_harness_config_path() -> Result<std::path::PathBuf, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ExternalStorage)
+        .map_err(|error| error.to_string())?;
     let home = std::env::var("HOME")
         .map_err(|_| "tab_ai_harness_config_path: HOME is not set".to_string())?;
     Ok(std::path::Path::new(&home)

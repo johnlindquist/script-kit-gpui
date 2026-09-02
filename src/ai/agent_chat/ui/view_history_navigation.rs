@@ -8,7 +8,7 @@ impl AgentChatView {
             hits,
         });
         self.sync_history_popup_window_from_cached_parent(cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn navigate_history_popup_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
@@ -28,7 +28,7 @@ impl AgentChatView {
         };
         self.history_closed_at = None;
         self.sync_history_popup_window_from_cached_parent(cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn jump_history_popup_selection(&mut self, end: bool, cx: &mut Context<Self>) {
@@ -46,7 +46,7 @@ impl AgentChatView {
         };
         self.history_closed_at = None;
         self.sync_history_popup_window_from_cached_parent(cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn page_history_popup_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
@@ -65,7 +65,7 @@ impl AgentChatView {
         };
         self.history_closed_at = None;
         self.sync_history_popup_window_from_cached_parent(cx);
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 
     fn execute_history_popup_selection(
@@ -105,6 +105,6 @@ impl AgentChatView {
                 error = %error,
             );
         }
-        cx.notify();
+        self.notify_semantic_change(cx);
     }
 }

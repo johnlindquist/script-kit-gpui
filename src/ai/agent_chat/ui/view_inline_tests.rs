@@ -13,6 +13,7 @@ mod footer_owner_tests {
             owner: AgentChatFooterOwner::Native,
             is_main_window: false,
             native_config: Some(MainWindowFooterConfig::new(surface_tag, Vec::new())),
+            theme_revision: 0,
         }
     }
 
@@ -21,6 +22,7 @@ mod footer_owner_tests {
             owner: AgentChatFooterOwner::External,
             is_main_window: false,
             native_config: None,
+            theme_revision: 0,
         }
     }
 
@@ -434,5 +436,90 @@ mod composer_sizing_tests {
             combined_agent_model_header_label("Codex", "GPT-5.6"),
             "Codex · GPT-5.6"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod semantic_epoch_tests {
+    use super::*;
+    use crate::ai::agent_chat::ui::capabilities::AgentChatSessionPolicy;
+    use crate::computer_use::owned_render_capture::validate_current_frame_identity;
+    use crate::protocol::AutomationTargetIdentitySnapshot;
+    use gpui::AppContext as _;
+
+    fn frame_authority(revision: u64) -> AutomationTargetIdentitySnapshot {
+        AutomationTargetIdentitySnapshot {
+            window_id: "detached-chat-test".into(),
+            window_generation: Some(1),
+            app_view_variant: "AgentChatView".into(),
+            target_generation: 1,
+            surface_generation: revision,
+            data_generation: revision,
+            presentation_revision: Some(1),
+            theme_revision: Some(1),
+            frame_generation: Some(7),
+        }
+    }
+
+    #[gpui::test]
+    fn detached_mutations_reject_prior_exact_frame_before_paint(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let (thread, _) = crate::ai::agent_chat::ui::mock_fixture::create_mock_fixture_thread(
+                "detached-epoch", AgentChatSessionPolicy::Full, cx,
+            );
+            let view = cx.new(|cx| AgentChatView::new(thread.clone(), cx));
+            thread.update(cx, |thread, cx| thread.set_input("alpha", cx));
+            let retained = frame_authority(view.read(cx).semantic_revision(cx));
+            validate_current_frame_identity(&retained, &retained).unwrap();
+            thread.update(cx, |thread, cx| thread.set_input("bravo", cx));
+            let changed = frame_authority(view.read(cx).semantic_revision(cx));
+            assert!(changed.data_generation > retained.data_generation);
+            assert_eq!(changed.frame_generation, retained.frame_generation);
+            assert_eq!(validate_current_frame_identity(&changed, &retained).unwrap_err().to_string(), "capture_frame_identity_stale");
+            thread.update(cx, |thread, cx| thread.set_input("alpha", cx));
+            let aba = frame_authority(view.read(cx).semantic_revision(cx));
+            assert!(aba.data_generation > changed.data_generation);
+            assert!(validate_current_frame_identity(&aba, &retained).is_err());
+            assert_eq!(thread.read(cx).input.text(), "alpha");
+            view.update(cx, |view, _| view.set_context_capture_pending(true));
+            let child_state = frame_authority(view.read(cx).semantic_revision(cx));
+            assert!(child_state.data_generation > aba.data_generation);
+            assert!(validate_current_frame_identity(&child_state, &aba).is_err());
+            assert_eq!(view.read(cx).semantic_revision(cx), child_state.data_generation);
+            // This is the production exact comparator, not native publication:
+            // no frame or observer has been advanced within this app update.
+            validate_current_frame_identity(&child_state, &child_state).unwrap();
+        });
+    }
+
+    #[gpui::test]
+    fn transcript_child_toggle_aba_changes_view_authority_without_paint(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let (thread, _) = crate::ai::agent_chat::ui::mock_fixture::create_mock_fixture_thread(
+                "detached-child-epoch", AgentChatSessionPolicy::Full, cx,
+            );
+            let view = cx.new(|cx| AgentChatView::new(thread, cx));
+            let transcript = cx.new(|cx| AgentChatTranscript::new(vec![
+                AgentChatThreadMessage {
+                    id: 1,
+                    role: AgentChatThreadMessageRole::Thought,
+                    body: "Reasoning".into(),
+                    tool_call_id: None,
+                    tool_meta: None,
+                    attachments: Vec::new(),
+                },
+            ], cx));
+            view.update(cx, |view, _| view.transcript = Some(transcript.clone()));
+            let retained = frame_authority(view.read(cx).semantic_revision(cx));
+            transcript.update(cx, |transcript, cx| transcript.toggle_collapsed(1, cx));
+            let expanded = view.read(cx).semantic_revision(cx);
+            assert!(expanded > retained.data_generation);
+            transcript.update(cx, |transcript, cx| transcript.toggle_collapsed(1, cx));
+            let aba = frame_authority(view.read(cx).semantic_revision(cx));
+            assert!(aba.data_generation > expanded);
+            assert!(validate_current_frame_identity(&aba, &retained).is_err());
+        });
     }
 }

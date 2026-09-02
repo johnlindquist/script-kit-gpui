@@ -230,7 +230,8 @@ impl AgentChatSessionPolicy {
 ///
 /// Ordinary text paste and web search are always available and are therefore
 /// not represented here — they are not context-leaking capabilities.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct AgentChatCapabilities {
     /// `@`/`>` context portals (files, projects, working directory, etc.).
     pub(crate) context_portals: bool,
