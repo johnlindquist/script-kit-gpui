@@ -465,6 +465,7 @@ jobs:
           mkdir -p .test-output/release
           bun scripts/devtools/devtools.ts build-ops act app-build \
             --profile release --features owned-ui-evaluation \
+            --timeout-ms 5400000 \
             --artifact-out .test-output/release/compile.reference.json
           COMPILE_BINARY="$(bun scripts/agentic/build-artifact.ts verify-reference "$PWD" .test-output/release/compile.reference.json)"
           cp "$COMPILE_BINARY" "target/release/bundle/osx/Script Kit.app/Contents/MacOS/script-kit-gpui"
