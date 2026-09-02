@@ -1,5 +1,143 @@
 use super::*;
 
+/// Parent-forwarded edits must never fall through into the parent's draft just
+/// because the detached popup's search input owns its local focus handle.
+#[gpui::test]
+fn parent_forwarded_edits_stay_in_actions_search(cx: &mut gpui::TestAppContext) {
+    use std::{cell::RefCell, rc::Rc, sync::Arc};
+
+    cx.update(gpui_component::init);
+    let popup_slot = Rc::new(RefCell::new(None));
+    let popup_slot_for_window = Rc::clone(&popup_slot);
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), move |window, cx| {
+            let dialog = cx.new(|cx| {
+                ActionsDialog::with_config(
+                    cx.focus_handle(),
+                    Arc::new(|_| {}),
+                    vec![make_action_for_header_count("alpha", None)],
+                    Arc::new(crate::theme::Theme::default()),
+                    Default::default(),
+                )
+            });
+            dialog.update(cx, |dialog, cx| {
+                dialog.ensure_search_input(window, cx);
+                assert!(dialog.focus_search_input(window, cx));
+            });
+            let parent = AutomationWindowInfo {
+                id: "test-parent".into(),
+                kind: AutomationWindowKind::Main,
+                title: None,
+                focused: true,
+                visible: false,
+                semantic_surface: None,
+                bounds: None,
+                parent_window_id: None,
+                parent_window_generation: None,
+                parent_kind: None,
+                generation: Some(1),
+                pid: None,
+            };
+            let fixed_shell_size = window.viewport_size();
+            let opening_shell_basis = dialog.read(cx).opening_shell_sizing_snapshot();
+            let popup = cx.new(|cx| {
+                ActionsWindow::new(
+                    dialog,
+                    &parent,
+                    fixed_shell_size,
+                    opening_shell_basis,
+                    WindowHostPolicy::OwnedHidden,
+                    1,
+                    cx,
+                )
+            });
+            *popup_slot_for_window.borrow_mut() = Some(popup);
+            cx.new(|_| gpui::Empty)
+        })
+        .expect("simulated Actions test window opens")
+    });
+    let popup = popup_slot.borrow().clone().expect("Actions entity exists");
+
+    window
+        .update(cx, |_empty, window, cx| {
+            popup.update(cx, |popup, cx| {
+                assert!(popup.dialog.read(cx).search_input_is_focused(window, cx));
+                assert!(!popup.handle_key_event(
+                    ActionsWindowKeyOrigin::PopupWindow,
+                    "a",
+                    Some("a"),
+                    &Default::default(),
+                    window,
+                    cx,
+                ));
+                assert_eq!(popup.dialog.read(cx).search_text, "");
+                assert!(
+                    popup.handle_key_event(
+                        ActionsWindowKeyOrigin::ParentWindow,
+                        "a",
+                        Some("a"),
+                        &Default::default(),
+                        window,
+                        cx,
+                    ),
+                    "forwarded typing must not reach the parent draft"
+                );
+                assert_eq!(popup.dialog.read(cx).search_text, "a");
+                let command = gpui::Modifiers {
+                    platform: true,
+                    ..Default::default()
+                };
+                assert!(!popup.handle_key_event(
+                    ActionsWindowKeyOrigin::PopupWindow,
+                    "a",
+                    None,
+                    &command,
+                    window,
+                    cx,
+                ));
+                assert!(popup.handle_key_event(
+                    ActionsWindowKeyOrigin::ParentWindow,
+                    "a",
+                    None,
+                    &command,
+                    window,
+                    cx,
+                ));
+                assert!(popup.handle_key_event(
+                    ActionsWindowKeyOrigin::ParentWindow,
+                    "b",
+                    Some("b"),
+                    &Default::default(),
+                    window,
+                    cx,
+                ));
+                assert_eq!(popup.dialog.read(cx).search_text, "b");
+                assert!(!popup.handle_key_event(
+                    ActionsWindowKeyOrigin::PopupWindow,
+                    "backspace",
+                    None,
+                    &Default::default(),
+                    window,
+                    cx,
+                ));
+                assert_eq!(popup.dialog.read(cx).search_text, "b");
+                assert!(
+                    popup.handle_key_event(
+                        ActionsWindowKeyOrigin::ParentWindow,
+                        "backspace",
+                        None,
+                        &Default::default(),
+                        window,
+                        cx,
+                    ),
+                    "forwarded deletion must not reach the parent draft"
+                );
+                assert_eq!(popup.dialog.read(cx).search_text, "");
+            });
+        })
+        .expect("simulated Actions test window remains available");
+}
+
 #[test]
 fn test_should_auto_close_actions_window_returns_true_when_neither_window_is_focused() {
     assert!(should_auto_close_actions_window(false, false));

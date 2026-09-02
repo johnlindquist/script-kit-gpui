@@ -122,6 +122,11 @@ fn actions_window_reserves_shortcut(canonical: &str) -> bool {
     matches!(canonical, "escape" | "cmd+k")
 }
 
+enum ActionsWindowKeyOrigin {
+    PopupWindow,
+    ParentWindow,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActionsWindowKeyIntent {
     MoveUp,
@@ -679,6 +684,7 @@ impl ActionsWindow {
     /// Returns `true` when the popup consumed the key.
     fn handle_key_event(
         &mut self,
+        origin: ActionsWindowKeyOrigin,
         key: &str,
         key_char: Option<&str>,
         modifiers: &gpui::Modifiers,
@@ -691,8 +697,9 @@ impl ActionsWindow {
             return true;
         }
         let intent = actions_window_key_intent(key, key_char, modifiers);
-        let input_focused = self.dialog.read(cx).search_input_is_focused(window, cx);
-        if input_focused
+        let native_input_owns_event = matches!(origin, ActionsWindowKeyOrigin::PopupWindow)
+            && self.dialog.read(cx).search_input_is_focused(window, cx);
+        if native_input_owns_event
             && matches!(
                 intent,
                 Some(
@@ -704,9 +711,9 @@ impl ActionsWindow {
                 )
             )
         {
-            // The rendered gpui-component Input receives the native action/text
-            // event directly. Returning false prevents the popup host from
-            // applying the same edit a second time.
+            // Only a popup-local event can continue into the rendered Input.
+            // Parent-forwarded events must be applied here; returning false
+            // would let them edit the parent's draft instead.
             return false;
         }
 
@@ -925,7 +932,7 @@ impl ActionsWindow {
                         .update(cx, |d, cx| d.activate_action_id(action_id, cx));
                     self.handle_dialog_activation(activation, window, cx, "shortcut_execute");
                     true
-                } else if input_focused
+                } else if native_input_owns_event
                     && modifiers.platform
                     && !modifiers.control
                     && !modifiers.alt
@@ -1160,8 +1167,14 @@ impl Render for ActionsWindow {
                 ),
             );
 
-            if this.handle_key_event(key, event.keystroke.key_char.as_deref(), modifiers, window, cx)
-            {
+            if this.handle_key_event(
+                ActionsWindowKeyOrigin::PopupWindow,
+                key,
+                event.keystroke.key_char.as_deref(),
+                modifiers,
+                window,
+                cx,
+            ) {
                 cx.stop_propagation();
             }
         });
@@ -1904,7 +1917,14 @@ pub fn route_key_to_detached_actions_window(
     };
     handle
         .update(cx, |this, window, cx| {
-            let handled = this.handle_key_event(key, key_char, modifiers, window, cx);
+            let handled = this.handle_key_event(
+                ActionsWindowKeyOrigin::ParentWindow,
+                key,
+                key_char,
+                modifiers,
+                window,
+                cx,
+            );
             if handled {
                 crate::logging::log(
                     "KEY_ROUTE",
