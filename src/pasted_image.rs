@@ -207,9 +207,10 @@ fn next_token_index(existing_tokens: &[PastedImageToken], input_text: &str) -> u
         .unwrap_or(0)
         .checked_add(1)
         .unwrap_or_else(|| {
-            (1..=used.len() + 1)
+            // If every index through len is occupied, len + 1 must be free.
+            (1..=used.len())
                 .find(|index| !used.contains(index))
-                .expect("a finite token set has a free index")
+                .unwrap_or_else(|| used.len() + 1)
         })
 }
 

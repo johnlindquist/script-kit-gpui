@@ -801,12 +801,18 @@ function makeFixture(): ReleaseFixture {
   };
 }
 
-function bunJunitFixture(fixture: ReleaseFixture, repetitions = 1) {
+function bunJunitFixture(fixture: ReleaseFixture, repetitions = 1, includeProperties = false) {
   // Synthetic parser fixtures follow Bun 1.3.14's native reporter shape. They
   // are never retained as executed release proof or campaign evidence.
   const legacy = readFileSync(join(fixture.root, "proof-result.log"), "utf8");
   const files = legacy.split("\n").filter((line) => line.endsWith(".test.ts:")).map((line) => line.slice(0, -1));
   const testsPerFile = repetitions * 2;
+  const properties = [
+    "    <properties>",
+    '      <property name="ci" value="https://ci.invalid/run?attempt=1&amp;view=all" />',
+    `      <property name="commit" value="${SOURCE_SHA}" />`,
+    "    </properties>",
+  ].join("\n");
   const suites = files.map((file, index) => {
     const cases = Array.from({ length: repetitions }, (_, repetition) => [
       `      <testcase name="passes &amp; checks &quot;identity&quot; (${repetition})" classname="proof contract" time="0.000545" file="${file}" line="28" assertions="2" />`,
@@ -814,6 +820,7 @@ function bunJunitFixture(fixture: ReleaseFixture, repetitions = 1) {
     ].join("\n")).join("\n");
     return [
       `  <testsuite name="${file}" file="${file}" tests="${testsPerFile}" assertions="${testsPerFile}" failures="0" skipped="0" time="0" hostname="fixture.invalid">`,
+      ...(includeProperties ? [properties] : []),
       ...(index === 0 ? [
         `    <testsuite name="proof contract" file="${file}" line="27" tests="${testsPerFile}" assertions="${testsPerFile}" failures="0" skipped="0" time="0" hostname="fixture.invalid">`,
         cases,
@@ -830,7 +837,7 @@ function bunJunitFixture(fixture: ReleaseFixture, repetitions = 1) {
     ...suites,
     "</testsuites>",
   ].join("\n");
-  return { files, suites, summary, xml, count, legacy };
+  return { files, suites, summary, xml, count, legacy, properties };
 }
 
 function options(fixture: ReleaseFixture): ManifestOptions {
@@ -1160,6 +1167,43 @@ describe("fail-closed release evidence", () => {
         gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
       });
       expect(receipt.result).toEqual({ passed: count, failed: 0, skipped: 0, files: files.length, assertions: count });
+    }
+  });
+
+  test.each([false, true])("optional Bun JUnit properties preserve strict proof checks (%s)", (includeProperties) => {
+    const fixture = makeFixture();
+    const { xml, summary, count, files, properties } = bunJunitFixture(fixture, 1, includeProperties);
+    const resultPath = join(fixture.root, "junit-properties-proof.log");
+    const build = (report: string) => {
+      writeFileSync(resultPath, summary + report);
+      return buildGateReceipt({
+        gateId: "proof-contracts", evidenceClass: "UNIT_BEHAVIOR", sourceSha: SOURCE_SHA, resultPath,
+      });
+    };
+    expect(build(xml).result).toEqual({ passed: count, failed: 0, skipped: 0, files: files.length, assertions: count });
+    for (const report of [
+      xml.replace(`tests="${count}"`, `tests="${count + 1}"`),
+      xml.replace(`assertions="${count}"`, `assertions="${count + 1}"`),
+      xml.replace('tests="2"', 'tests="3"'),
+      xml.replace('assertions="2" />', 'assertions="3" />'),
+      xml.replace('assertions="2" />', 'assertions="2"><failure message="failed" /></testcase>'),
+      xml.replace('assertions="2" />', 'assertions="2"><skipped /></testcase>'),
+    ]) {
+      expect(() => build(report)).toThrow();
+    }
+    if (includeProperties) {
+      for (const child of [
+        '<failure message="hidden failure" />',
+        '<testcase name="hidden execution" />',
+        '<property name="ci" value="ok" extra="unexpected" />',
+        '<property name="ci" />',
+        '<property name="ci" value="&unknown;" />',
+        '<properties></properties>',
+        'unexpected text',
+      ]) {
+        expect(() => build(xml.replace(properties, properties.replace("</properties>", `${child}</properties>`)))).toThrow();
+      }
+      expect(() => build(xml.replace(properties, `${properties}\n${properties}`))).toThrow();
     }
   });
 

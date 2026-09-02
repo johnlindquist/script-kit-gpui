@@ -3959,7 +3959,7 @@ text_style.text_inset_left,
         cx.spawn(async move |this, cx| {
             let result = preparation.await;
             let succeeded = result.is_ok();
-            let _ = thread.update(cx, |thread, cx| {
+            thread.update(cx, |thread, cx| {
                 if thread.finish_pasted_image_preparation(&path, succeeded) {
                     if !succeeded {
                         thread.push_notice(

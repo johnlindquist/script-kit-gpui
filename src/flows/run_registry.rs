@@ -833,7 +833,7 @@ mod tests {
         let b = insert(&registry);
         let c = insert(&registry);
         for id in [a, b, c] {
-            registry.set_pid(id, 100 + id as u32);
+            // No child was spawned. Invented PIDs can alias live CI process groups.
             registry.apply_event(
                 id,
                 &parse_event_line(
@@ -841,6 +841,7 @@ mod tests {
                 )
                 .unwrap(),
             );
+            assert_eq!(registry.get(id).unwrap().phase, RunPhase::Running);
         }
         registry.mark_cancelled(b);
         assert_eq!(registry.get(a).unwrap().phase, RunPhase::Running);

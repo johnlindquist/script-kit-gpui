@@ -1164,18 +1164,30 @@ function bunJunitProofFiles(xml: string, tests: number, assertions: number, file
   const attribute = '(?:[^"<&]|&(?:amp|lt|gt|quot|apos|#\\d+|#x[\\da-fA-F]+);)*';
   const suiteTag = new RegExp(`^<testsuite name="(${attribute})" file="([^"<&]+)"(?: line="\\d+")? tests="(\\d+)" assertions="(\\d+)" failures="0" skipped="0" time="\\d+(?:\\.\\d+)?" hostname="${attribute}">`);
   const caseTag = new RegExp(`^<testcase name="${attribute}"(?: classname="${attribute}")? time="\\d+(?:\\.\\d+)?" file="([^"<&]+)" line="\\d+" assertions="(\\d+)"\\s*/>`);
+  // Bun emits suite properties in CI; they are metadata, never test evidence.
+  const propertiesTag = new RegExp(`^<properties>\\s*(?:<property name="${attribute}" value="${attribute}"\\s*/>\\s*)*</properties>`);
   const stack: Array<{
     file: string;
     tests: number;
     assertions: number;
     observedTests: number;
     observedAssertions: number;
+    propertiesSeen: boolean;
   }> = [];
   const files = new Set<string>();
   let observedTests = 0;
   let observedAssertions = 0;
   let remaining = root[3].trim();
   while (remaining) {
+    if (remaining.startsWith("<properties>")) {
+      const properties = remaining.match(propertiesTag);
+      const parent = stack.at(-1);
+      requireCondition(properties && parent && !parent.propertiesSeen,
+        "proof gate Bun JUnit has malformed, duplicate, or misplaced properties");
+      parent.propertiesSeen = true;
+      remaining = remaining.slice(properties[0].length).trimStart();
+      continue;
+    }
     if (remaining.startsWith("</testsuite>")) {
       const suite = stack.pop();
       requireCondition(suite && suite.tests === suite.observedTests &&
@@ -1202,7 +1214,7 @@ function bunJunitProofFiles(xml: string, tests: number, assertions: number, file
         "proof gate Bun JUnit has a duplicate or mismatched file suite");
       stack.push({
         file: suite[2], tests: Number(suite[3]), assertions: Number(suite[4]),
-        observedTests: 0, observedAssertions: 0,
+        observedTests: 0, observedAssertions: 0, propertiesSeen: false,
       });
       remaining = remaining.slice(suite[0].length).trimStart();
       continue;
