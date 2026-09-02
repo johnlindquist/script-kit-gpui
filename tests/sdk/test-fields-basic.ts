@@ -169,13 +169,8 @@ for (let i = 0; i < testCases.length; i++) {
 debug("\n=== Test Summary ===");
 debug(`Ran ${testCases.length} test cases for fields() SDK function`);
 debug("All tests verify that the SDK correctly sends Fields messages.");
-debug("Note: GPUI backend does not yet implement Fields message handler.");
-debug("");
-debug("When Fields handler is implemented in GPUI, these tests should:");
-debug("  1. Render actual form fields");
-debug("  2. Support all field types: text, password, email, number");
-debug("  3. Display placeholders and pre-filled values");
-debug("  4. Return user input as string array on submit");
+debug("SDK auto-submit verifies ordered response values and field defaults without GPUI interaction.");
+debug("The GPUI Fields handler uses the shared form prompt; native styling and password masking require separate runtime proof.");
 debug("");
 debug("test-fields-basic.ts completed!");
 
