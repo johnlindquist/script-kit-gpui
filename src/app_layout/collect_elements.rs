@@ -1370,7 +1370,7 @@ impl ScriptListApp {
                             "built-in".to_string(),
                             index.to_string(),
                         ),
-                        ThemeChooserCatalogKind::User { slug } => (
+                        ThemeChooserCatalogKind::User { slug, .. } => (
                             format!("theme-row-user:{slug}"),
                             "user".to_string(),
                             slug.clone(),

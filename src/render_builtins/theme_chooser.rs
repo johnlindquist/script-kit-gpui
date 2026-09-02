@@ -164,7 +164,10 @@ fn render_theme_chooser_browser_main(
 #[derive(Clone, Debug)]
 pub(crate) enum ThemeChooserCatalogKind {
     BuiltIn(usize),
-    User { slug: String },
+    User {
+        slug: String,
+        source_fingerprint: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1146,7 +1149,10 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) {
         logging::log("KEY", "PressEnter routed to ThemeChooser");
-        if self.theme_chooser_preview_revision.is_some_and(|revision| revision != crate::theme::service::theme_revision()) {
+        if self
+            .theme_chooser_preview_revision
+            .is_some_and(|revision| revision != crate::theme::service::theme_revision())
+        {
             self.theme_chooser_management_mut().status = ThemeChooserManagementStatus::Error {
                 message: "Theme changed elsewhere; preview was not saved".into(),
             };
@@ -1167,7 +1173,9 @@ impl ScriptListApp {
             return;
         }
         self.record_return_to_script_list_submit(
-            "theme_chooser", "submit_theme_chooser_from_input_enter", Some("theme_chooser_done"),
+            "theme_chooser",
+            "submit_theme_chooser_from_input_enter",
+            Some("theme_chooser_done"),
         );
         self.theme_chooser_preview_revision = None;
         self.update_theme(cx);
@@ -1359,7 +1367,13 @@ impl ScriptListApp {
                 }
                 "w" => {
                     if let Some(original) = self.theme_before_chooser.take() {
-                        if !self.restore_theme_chooser_theme(original, "theme_chooser_close_undo", cx) { return; }
+                        if !self.restore_theme_chooser_theme(
+                            original,
+                            "theme_chooser_close_undo",
+                            cx,
+                        ) {
+                            return;
+                        }
                     }
                     self.clear_theme_chooser_controls();
                     self.close_and_reset_window(cx);
@@ -1374,7 +1388,13 @@ impl ScriptListApp {
                 // a pure cancel restores the opening snapshot in memory only.
                 if !self.clear_builtin_view_filter(cx) {
                     if let Some(original) = self.theme_before_chooser.take() {
-                        if !self.restore_theme_chooser_theme(original, "theme_chooser_escape_undo", cx) { return; }
+                        if !self.restore_theme_chooser_theme(
+                            original,
+                            "theme_chooser_escape_undo",
+                            cx,
+                        ) {
+                            return;
+                        }
                     }
                     self.clear_theme_chooser_controls();
                     self.go_back_or_close(window, cx);
@@ -1453,7 +1473,8 @@ impl ScriptListApp {
                 let preview_colors = Self::theme_preview_colors_for_theme(&theme);
                 Some(ThemeChooserCatalogEntry {
                     kind: ThemeChooserCatalogKind::User {
-                        slug: user_theme.slug.clone(),
+                        slug: user_theme.slug,
+                        source_fingerprint: user_theme.source_fingerprint,
                     },
                     name: user_theme.name,
                     description: "User theme saved in ~/.scriptkit/themes".to_string(),
@@ -1520,7 +1541,7 @@ impl ScriptListApp {
                             .get(*index)
                             .map(|preset| preset.id.contains(&filter))
                             .unwrap_or(false),
-                        ThemeChooserCatalogKind::User { slug } => {
+                        ThemeChooserCatalogKind::User { slug, .. } => {
                             slug.contains(&filter) || "user personal custom".contains(&filter)
                         }
                     }
@@ -1585,16 +1606,25 @@ impl ScriptListApp {
         cx: &mut Context<Self>,
     ) {
         let snapshot = crate::theme::get_theme_snapshot();
-        let expected = self.theme_chooser_preview_revision.unwrap_or(snapshot.revision);
+        let expected = self
+            .theme_chooser_preview_revision
+            .unwrap_or(snapshot.revision);
         let result = crate::theme::live_edit::prepare_theme(next_theme)
             .map_err(crate::theme::service::ThemePublishError::from)
-            .and_then(|prepared| crate::theme::service::publish_runtime_theme(
-                cx, expected, prepared,
-                crate::theme::service::ThemePublicationSource::ChooserPreview { sync_native: sync_native_vibrancy },
-            ));
+            .and_then(|prepared| {
+                crate::theme::service::publish_runtime_theme(
+                    cx,
+                    expected,
+                    prepared,
+                    crate::theme::service::ThemePublicationSource::ChooserPreview {
+                        sync_native: sync_native_vibrancy,
+                    },
+                )
+            });
         match result {
             Ok(receipt) => {
-                self.theme_before_chooser.get_or_insert(snapshot.theme.clone());
+                self.theme_before_chooser
+                    .get_or_insert(snapshot.theme.clone());
                 self.theme_chooser_preview_revision = Some(receipt.revision);
                 self.theme = crate::theme::get_theme_snapshot().theme.clone();
                 self.theme_revision_seen = receipt.revision;
@@ -1624,7 +1654,9 @@ impl ScriptListApp {
         reason: &'static str,
         cx: &mut Context<Self>,
     ) {
-        let expected = self.theme_chooser_preview_revision.unwrap_or_else(crate::theme::service::theme_revision);
+        let expected = self
+            .theme_chooser_preview_revision
+            .unwrap_or_else(crate::theme::service::theme_revision);
         if expected != crate::theme::service::theme_revision() {
             self.theme_chooser_management_mut().status = ThemeChooserManagementStatus::Error {
                 message: "Theme changed elsewhere; preview was not saved".into(),
@@ -1687,12 +1719,19 @@ impl ScriptListApp {
         reason: &'static str,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(expected) = self.theme_chooser_preview_revision else { return true; };
+        let Some(expected) = self.theme_chooser_preview_revision else {
+            return true;
+        };
         let result = crate::theme::live_edit::prepare_theme((*original).clone())
             .map_err(crate::theme::service::ThemePublishError::from)
-            .and_then(|prepared| crate::theme::service::publish_runtime_theme(
-                cx, expected, prepared, crate::theme::service::ThemePublicationSource::Revert,
-            ));
+            .and_then(|prepared| {
+                crate::theme::service::publish_runtime_theme(
+                    cx,
+                    expected,
+                    prepared,
+                    crate::theme::service::ThemePublicationSource::Revert,
+                )
+            });
         match result {
             Ok(_) => {
                 self.theme = crate::theme::get_theme_snapshot().theme.clone();
@@ -1755,6 +1794,7 @@ impl ScriptListApp {
                     slug: saved.slug.clone(),
                     name: saved.name.clone(),
                     fingerprint,
+                    source_fingerprint: saved.source_fingerprint,
                 });
                 state.draft_name = None;
                 state.last_saved = Some(ThemeChooserSaveReceipt {
@@ -1825,6 +1865,7 @@ impl ScriptListApp {
             slug: saved.slug.clone(),
             name: saved.name.clone(),
             fingerprint: current_fingerprint,
+            source_fingerprint: saved.source_fingerprint,
         });
         state.draft_name = None;
         state.last_saved = Some(ThemeChooserSaveReceipt {
@@ -1839,7 +1880,12 @@ impl ScriptListApp {
     }
 
     fn update_selected_user_theme(&mut self, reason: &'static str, cx: &mut Context<Self>) {
-        let Some(ThemeChooserBase::User { slug, name, .. }) = self
+        let Some(ThemeChooserBase::User {
+            slug,
+            name,
+            source_fingerprint,
+            ..
+        }) = self
             .theme_chooser_management
             .as_ref()
             .and_then(|state| state.selected_base.clone())
@@ -1855,6 +1901,16 @@ impl ScriptListApp {
             cx.notify();
             return;
         }
+        // Compare source bytes: decoding normalizes text colors and drops unknown fields.
+        let saved_fingerprint = theme::user_themes::user_theme_source_fingerprint(&slug);
+        if saved_fingerprint.as_deref() != Some(source_fingerprint.as_str()) {
+            self.theme_chooser_management_mut().status = ThemeChooserManagementStatus::Error {
+                message: "Saved theme changed or is unavailable. Your edits are preserved; use Save Copy."
+                    .to_string(),
+            };
+            cx.notify();
+            return;
+        }
         match theme::user_themes::save_theme_to_user_theme_slug(&slug, &name, self.theme.as_ref()) {
             Ok(saved) => {
                 let fingerprint = Self::theme_chooser_theme_fingerprint(self.theme.as_ref());
@@ -1863,6 +1919,7 @@ impl ScriptListApp {
                     slug: saved.slug.clone(),
                     name: saved.name.clone(),
                     fingerprint,
+                    source_fingerprint: saved.source_fingerprint,
                 });
                 state.last_saved = Some(ThemeChooserSaveReceipt {
                     slug: saved.slug,
@@ -1896,7 +1953,7 @@ impl ScriptListApp {
         else {
             return;
         };
-        if let ThemeChooserCatalogKind::User { slug } = &entry.kind {
+        if let ThemeChooserCatalogKind::User { slug, .. } = &entry.kind {
             let candidate = ThemeChooserDeleteCandidate {
                 slug: slug.clone(),
                 name: entry.name.clone(),
@@ -2401,10 +2458,12 @@ impl ScriptListApp {
     }
 
     /// One label/value line inside the Preview-mode theme facts card.
-    fn render_theme_chooser_fact_row(label: &'static str,
-    value: String,
-    chrome: &theme::AppChromeColors,
-    swatch: Option<u32>,) -> gpui::Div {
+    fn render_theme_chooser_fact_row(
+        label: &'static str,
+        value: String,
+        chrome: &theme::AppChromeColors,
+        swatch: Option<u32>,
+    ) -> gpui::Div {
         div()
             .w_full()
             .flex()
@@ -2473,7 +2532,6 @@ impl ScriptListApp {
         }
     }
 
-
     fn theme_chooser_base_from_entry(entry: &ThemeChooserCatalogEntry) -> ThemeChooserBase {
         let fingerprint = Self::theme_chooser_theme_fingerprint(entry.theme.as_ref());
         match &entry.kind {
@@ -2482,10 +2540,14 @@ impl ScriptListApp {
                 name: entry.name.clone(),
                 fingerprint,
             },
-            ThemeChooserCatalogKind::User { slug } => ThemeChooserBase::User {
+            ThemeChooserCatalogKind::User {
+                slug,
+                source_fingerprint,
+            } => ThemeChooserBase::User {
                 slug: slug.clone(),
                 name: entry.name.clone(),
                 fingerprint,
+                source_fingerprint: source_fingerprint.clone(),
             },
         }
     }
@@ -2841,7 +2903,10 @@ impl ScriptListApp {
             "theme_chooser_undo_close" => {
                 // Memory-only restore: a cancelled session never writes the theme override to disk.
                 if let Some(original) = self.theme_before_chooser.take() {
-                    if !self.restore_theme_chooser_theme(original, "theme_chooser_action_undo", cx) { return; }
+                    if !self.restore_theme_chooser_theme(original, "theme_chooser_action_undo", cx)
+                    {
+                        return;
+                    }
                 }
                 self.clear_theme_chooser_controls();
                 self.go_back_or_close(window, cx);
@@ -3279,7 +3344,11 @@ impl ScriptListApp {
                 if is_key_escape(key) && !this.show_actions_popup {
                     if !this.clear_builtin_view_filter(cx) {
                         if let Some(original) = this.theme_before_chooser.take() {
-                            if !this.restore_theme_chooser_theme(original, "theme_chooser_escape_undo", cx) {
+                            if !this.restore_theme_chooser_theme(
+                                original,
+                                "theme_chooser_escape_undo",
+                                cx,
+                            ) {
                                 cx.stop_propagation();
                                 return;
                             }
@@ -3293,7 +3362,11 @@ impl ScriptListApp {
                 // Cmd+W: undo all changes (memory-only restore) and close window
                 if has_cmd && key.eq_ignore_ascii_case("w") {
                     if let Some(original) = this.theme_before_chooser.take() {
-                        if !this.restore_theme_chooser_theme(original, "theme_chooser_close_undo", cx) {
+                        if !this.restore_theme_chooser_theme(
+                            original,
+                            "theme_chooser_close_undo",
+                            cx,
+                        ) {
                             cx.stop_propagation();
                             return;
                         }

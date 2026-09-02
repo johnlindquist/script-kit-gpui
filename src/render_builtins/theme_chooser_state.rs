@@ -54,6 +54,7 @@ pub(crate) enum ThemeChooserBase {
         slug: String,
         name: String,
         fingerprint: u64,
+        source_fingerprint: String,
     },
 }
 

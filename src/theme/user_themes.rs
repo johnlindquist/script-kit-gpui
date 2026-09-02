@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::theme::Theme;
 
@@ -48,6 +49,8 @@ pub struct UserTheme {
     pub name: String,
     /// Absolute path to the theme file.
     pub path: PathBuf,
+    /// SHA-256 of the exact source bytes, before theme normalization.
+    pub source_fingerprint: String,
 }
 
 /// Preview of the slug/display-name a save-copy operation will use.
@@ -97,7 +100,12 @@ pub fn list_user_themes() -> Vec<UserTheme> {
                 .and_then(|v| v.as_str())
                 .unwrap_or(slug.as_str())
                 .to_string();
-            Some(UserTheme { slug, name, path })
+            Some(UserTheme {
+                slug,
+                name,
+                path,
+                source_fingerprint: source_fingerprint(contents.as_bytes()),
+            })
         })
         .collect();
 
@@ -119,6 +127,20 @@ pub fn load_user_theme(slug: &str) -> Option<Theme> {
     require_theme_path(&path).ok()?;
     let contents = fs::read_to_string(path).ok()?;
     super::types::decode_theme_json(&contents, super::types::detect_system_appearance()).ok()
+}
+
+/// Reads the current source revision without normalizing away external edits.
+pub fn user_theme_source_fingerprint(slug: &str) -> Option<String> {
+    ensure_safe_user_theme_slug(slug).ok()?;
+    let path = user_themes_dir().join(format!("{slug}.json"));
+    require_theme_path(&path).ok()?;
+    fs::read(path)
+        .ok()
+        .map(|contents| source_fingerprint(&contents))
+}
+
+fn source_fingerprint(contents: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(contents))
 }
 
 /// Normalizes a display name into a filesystem-safe slug.
@@ -219,6 +241,7 @@ pub fn save_user_theme(name: &str, payload: &Value) -> Result<UserTheme> {
         slug,
         name: name.to_string(),
         path,
+        source_fingerprint: source_fingerprint(serialized.as_bytes()),
     })
 }
 
@@ -242,6 +265,7 @@ pub fn save_user_theme_unique(name: &str, payload: &Value) -> Result<UserTheme> 
         slug: resolution.slug,
         name: display_name,
         path,
+        source_fingerprint: source_fingerprint(serialized.as_bytes()),
     })
 }
 
@@ -270,6 +294,7 @@ pub fn save_theme_to_user_theme_slug(slug: &str, name: &str, theme: &Theme) -> R
         slug: slug.to_string(),
         name: name.to_string(),
         path,
+        source_fingerprint: source_fingerprint(serialized.as_bytes()),
     })
 }
 
@@ -333,6 +358,7 @@ pub fn restore_user_theme_backup(backup: &DeletedUserThemeBackup) -> Result<User
         slug: backup.slug.clone(),
         name: backup.name.clone(),
         path,
+        source_fingerprint: source_fingerprint(backup.contents.as_bytes()),
     })
 }
 
@@ -466,11 +492,20 @@ mod tests {
             let saved = save_theme_to_user_theme_slug("night-work", "Night Work", &theme)
                 .expect("save theme");
             assert_eq!(saved.slug, "night-work");
+            assert_eq!(
+                user_theme_source_fingerprint(&saved.slug).as_deref(),
+                Some(saved.source_fingerprint.as_str())
+            );
 
             theme.colors.accent.selected = 0x654321;
             let updated = save_theme_to_user_theme_slug("night-work", "Night Work", &theme)
                 .expect("update theme");
             assert_eq!(updated.name, "Night Work");
+            assert_ne!(updated.source_fingerprint, saved.source_fingerprint);
+            assert_eq!(
+                user_theme_source_fingerprint(&updated.slug).as_deref(),
+                Some(updated.source_fingerprint.as_str())
+            );
             let loaded = load_user_theme("night-work").expect("load updated");
             assert_eq!(loaded.colors.accent.selected, 0x654321);
 
@@ -482,8 +517,58 @@ mod tests {
             assert!(!user_themes_dir().join("night-work.json").exists());
             let restored = restore_user_theme_backup(&backup).expect("restore");
             assert_eq!(restored.slug, "night-work");
+            assert_eq!(restored.source_fingerprint, updated.source_fingerprint);
             assert!(user_themes_dir().join("night-work.json").exists());
             assert!(restore_user_theme_backup(&backup).is_err());
+        });
+    }
+
+    #[test]
+    fn source_revision_preserves_changes_hidden_by_theme_normalization() {
+        with_temp_themes_dir(|| {
+            let theme = Theme::dark_default();
+            let saved = save_theme_as_user_theme("Source Revision", &theme).expect("save copy");
+            assert_eq!(
+                user_theme_source_fingerprint(&saved.slug).as_deref(),
+                Some(saved.source_fingerprint.as_str())
+            );
+
+            let mut payload = serde_json::to_value(&theme).expect("theme payload");
+            payload["name"] = json!("Source Revision");
+            payload["colors"]["text"]["primary"] = json!("#11CC77");
+            let changed_source = serde_json::to_string_pretty(&payload).expect("external source");
+            fs::write(&saved.path, &changed_source).expect("external edit");
+            let changed = user_theme_source_fingerprint(&saved.slug).expect("changed revision");
+            assert_ne!(changed, saved.source_fingerprint);
+            assert_eq!(
+                load_user_theme(&saved.slug)
+                    .expect("normalized theme")
+                    .colors
+                    .text
+                    .primary,
+                theme.colors.text.primary
+            );
+            assert_eq!(
+                find_user_theme(&saved.slug)
+                    .expect("catalog entry")
+                    .source_fingerprint,
+                changed
+            );
+
+            fs::write(&saved.path, format!("{changed_source}\n")).expect("format-only edit");
+            assert_ne!(
+                user_theme_source_fingerprint(&saved.slug).as_deref(),
+                Some(changed.as_str())
+            );
+            fs::write(&saved.path, [0xff]).expect("non-UTF-8 edit");
+            assert!(load_user_theme(&saved.slug).is_none());
+            assert_ne!(
+                user_theme_source_fingerprint(&saved.slug).as_deref(),
+                Some(saved.source_fingerprint.as_str())
+            );
+            fs::remove_file(&saved.path).expect("remove theme");
+            assert!(user_theme_source_fingerprint(&saved.slug).is_none());
+            assert!(user_theme_source_fingerprint("../outside").is_none());
         });
     }
 }

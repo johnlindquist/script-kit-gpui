@@ -199,6 +199,7 @@ mod theme_chooser_filter_tests {
             ThemeChooserCatalogEntry {
                 kind: ThemeChooserCatalogKind::User {
                     slug: "my-night-shift".to_string(),
+                    source_fingerprint: "fixture-source".to_string(),
                 },
                 name: "Night Shift".to_string(),
                 description: "User theme saved in ~/.scriptkit/themes".to_string(),
@@ -230,6 +231,7 @@ mod theme_chooser_filter_tests {
             ThemeChooserCatalogEntry {
                 kind: ThemeChooserCatalogKind::User {
                     slug: "saved-copy".to_string(),
+                    source_fingerprint: "fixture-source".to_string(),
                 },
                 name: "Saved Copy".to_string(),
                 description: "User theme saved in ~/.scriptkit/themes".to_string(),
