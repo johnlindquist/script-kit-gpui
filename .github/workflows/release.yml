@@ -166,6 +166,9 @@ jobs:
     name: Validate headless proof and consistency contracts
     runs-on: macos-14
     needs: validate-version
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v4
       - name: Install root-pinned Rust toolchain
@@ -173,6 +176,16 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.2.21
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "macos-debug"
+          workspaces: ". -> target-agent/pools/agent-debug"
+          cache-on-failure: true
+      - name: Build the application under test
+        run: |
+          bash scripts/agentic/agent-cargo.sh test --locked --lib theme::alpha::alpha_byte_tests::
+          bash scripts/agentic/agent-cargo.sh test --locked --doc --package script-kit-gpui theme::alpha::
       - name: Execute safe proof-contract behavior
         env:
           SCRIPT_KIT_VERIFY_RECEIPT: ${{ runner.temp }}/release-proof-evidence/proof-contracts.json

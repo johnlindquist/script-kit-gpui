@@ -94,7 +94,14 @@ mod tests {
     fn fake_codex(dir: &Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let path = dir.join("fake-codex");
-        std::fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
+        // A trapped TERM runs after the foreground child is reaped, avoiding
+        // orphan zombies whose process group depends on launchd's scheduling.
+        // The trailing builtin prevents /bin/sh from tail-execing that child.
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nset -eu\ntrap 'exit 0' TERM\n{body}\n:\n"),
+        )
+        .unwrap();
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
@@ -870,8 +877,8 @@ printf '%s\n' '{"type":"item.started","item":{"id":"s","type":"web_search","quer
 printf '%s\n' '{"type":"item.completed","item":{"id":"s","type":"web_search","query":"Rust","action":{"type":"search","query":"Rust"}}}'
 printf '%s\n' '{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"{\"answer\":\"Rust\",\"sources\":[\"https://blog.rust-lang.org/source\"]}"}}'
 printf '%s\n' '{"type":"turn.completed","usage":{}}'
-# Stay alive until controller teardown, without a helper waiting on orphan reaping.
-exec sleep 60
+# Keep the shell available to reap its foreground child during group teardown.
+sleep 60
 "#,
         );
         let connection = CodexQuickAiExecConnection::new(CodexQuickAiExecSpec {

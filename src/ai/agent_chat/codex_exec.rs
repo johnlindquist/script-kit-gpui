@@ -634,12 +634,17 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                         terminate_and_reap_process_group(&mut child, pgid, teardown_policy)
                             .unwrap_or_else(|error| ProcessTeardownReport::failed(error.to_string()))
                     });
-                    let stderr_text = stderr_thread.join().unwrap_or_default();
                     trace.write(
                         "teardown",
                         serde_json::to_value(&teardown).unwrap_or(Value::Null),
                     );
                     let cleanup_verified = teardown.child_reaped && !teardown.process_group_alive;
+                    // A refused signal can leave stderr open in a live child.
+                    let stderr_text = if cleanup_verified || stderr_thread.is_finished() {
+                        stderr_thread.join().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     if !cleanup_verified {
                         stop_reason = QuickAiTurnStop::Failed(CodexTurnFailure::protocol(
                             "quick_ai_codex_process_teardown_incomplete",
@@ -1733,11 +1738,17 @@ pub(crate) fn terminate_and_reap_process_group(
         let result = unsafe { libc::killpg(pgid, libc::SIGTERM) };
         if result == 0 {
             report.term_sent = true;
-        } else if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
-            return Err(anyhow!(
-                "quick_ai_sigterm_failed:{}",
-                std::io::Error::last_os_error()
-            ));
+        } else {
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::ESRCH) => {}
+                Some(libc::EPERM) => {
+                    // Darwin also refuses signals to zombie-only groups. Keep the
+                    // diagnostic; only reaping plus a later ESRCH proves cleanup.
+                    report.error = Some(format!("quick_ai_sigterm_failed:{error}"));
+                }
+                _ => return Err(anyhow!("quick_ai_sigterm_failed:{error}")),
+            }
         }
     }
     let deadline = Instant::now() + policy.term_grace;
@@ -1754,32 +1765,44 @@ pub(crate) fn terminate_and_reap_process_group(
         let result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
         if result == 0 {
             report.kill_sent = true;
-        } else if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
-            return Err(anyhow!(
-                "quick_ai_sigkill_failed:{}",
-                std::io::Error::last_os_error()
-            ));
+        } else {
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::ESRCH) => {}
+                Some(libc::EPERM) => {
+                    report
+                        .error
+                        .get_or_insert_with(|| format!("quick_ai_sigkill_failed:{error}"));
+                }
+                _ => return Err(anyhow!("quick_ai_sigkill_failed:{error}")),
+            }
         }
     }
-    if status.is_none() {
+    // Never block waiting for a live child whose termination was refused.
+    if status.is_none() && report.error.is_none() {
         status = Some(child.wait()?);
-    }
-    let Some(status) = status else {
-        bail!("quick_ai_codex_wait_status_missing")
-    };
-    report.child_reaped = true;
-    report.exit_code = status.code();
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt as _;
-        report.exit_signal = status.signal();
     }
     let verify_deadline = Instant::now() + policy.post_kill_verify;
     while Instant::now() < verify_deadline {
-        if !process_group_alive(pgid) {
+        if status.is_none() {
+            status = child.try_wait()?;
+        }
+        if status.is_some() && !process_group_alive(pgid) {
             break;
         }
         std::thread::sleep(policy.poll_interval);
+    }
+    if status.is_none() {
+        status = child.try_wait()?;
+    }
+    if let Some(status) = status {
+        report.child_reaped = true;
+        report.exit_code = status.code();
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            report.exit_signal = status.signal();
+        }
     }
     report.process_group_alive = process_group_alive(pgid);
     Ok(report)

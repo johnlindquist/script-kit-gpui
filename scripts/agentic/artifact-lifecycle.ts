@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   constants,
   closeSync,
+  fchmodSync,
   fstatSync,
   fsyncSync,
   openSync,
@@ -2173,7 +2174,23 @@ export function pruneManagedRecords(repositoryRoot: string, expectedRevision: st
             assertRetentionDirectory(candidate.path, candidate);
             assertQuarantinedRecords(candidate, candidate.path);
             assertRetentionIdle(candidate, candidate.path);
-            renameSync(candidate.path, step.quarantine);
+            const directory = openSync(candidate.path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+            try {
+              const stat = fstatSync(directory);
+              if (!stat.isDirectory() || stat.dev !== candidate.directoryDevice || stat.ino !== candidate.directoryInode) {
+                throw new Error("retention_directory_changed");
+              }
+              const mode = stat.mode & 0o7777;
+              try {
+                // Darwin needs owner-write on the moved directory, not its files.
+                fchmodSync(directory, mode | 0o200);
+                renameSync(candidate.path, step.quarantine);
+              } finally {
+                fchmodSync(directory, mode);
+              }
+            } finally {
+              closeSync(directory);
+            }
             hooks.afterQuarantine?.(step.quarantine);
           }
           assertStartedUnreferenced(repositoryRoot, journal, candidate, step.quarantine);
