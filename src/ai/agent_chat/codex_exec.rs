@@ -484,6 +484,7 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                     let _registration = registration;
                     let mut accumulator = CodexExecTurnAccumulator::new(run_id.clone());
                     let deadline = turn_started + work_deadline;
+                    let mut parent_exit_teardown = None;
                     let mut stop_reason = loop {
                         if cancel_requested.load(Ordering::Acquire) || event_tx.is_closed() {
                             break QuickAiTurnStop::Cancelled;
@@ -590,16 +591,23 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                                 )));
                             }
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                if let Ok(Some(status)) = child.try_wait() {
-                                    if accumulator.terminal_seen {
-                                        break QuickAiTurnStop::ProviderTerminal;
-                                    }
-                                    break QuickAiTurnStop::Failed(CodexTurnFailure::protocol(
-                                        format!(
-                                            "quick_ai_codex_eof_without_terminal:{}",
-                                            status.code().unwrap_or(-1)
-                                        ),
-                                    ));
+                                // A descendant can retain stdout after its parent exits.
+                                // Close those writers through the owned-group teardown,
+                                // but let the reader deliver buffered JSON before EOF.
+                                if parent_exit_teardown.is_none()
+                                    && matches!(child.try_wait(), Ok(Some(_)))
+                                {
+                                    trace.write("teardown_started", json!({}));
+                                    parent_exit_teardown = Some(
+                                        terminate_and_reap_process_group(
+                                            &mut child,
+                                            pgid,
+                                            USER_CANCEL_TEARDOWN,
+                                        )
+                                        .unwrap_or_else(|error| {
+                                            ProcessTeardownReport::failed(error.to_string())
+                                        }),
+                                    );
                                 }
                             }
                             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -613,21 +621,19 @@ impl AgentChatConnection for CodexQuickAiExecConnection {
                         }
                     };
 
-                    let teardown_policy = match &stop_reason {
-                        QuickAiTurnStop::EarlySuccess(_)
-                        | QuickAiTurnStop::PolicyRecovery(_)
-                        | QuickAiTurnStop::DeadlineRecovery(_) => QUICK_AI_FAST_TEARDOWN,
-                        QuickAiTurnStop::ProviderTerminal
-                        | QuickAiTurnStop::Cancelled
-                        | QuickAiTurnStop::Failed(_) => USER_CANCEL_TEARDOWN,
-                    };
-                    trace.write("teardown_started", json!({}));
-                    let teardown = terminate_and_reap_process_group(
-                        &mut child,
-                        pgid,
-                        teardown_policy,
-                    )
-                    .unwrap_or_else(|error| ProcessTeardownReport::failed(error.to_string()));
+                    let teardown = parent_exit_teardown.unwrap_or_else(|| {
+                        let teardown_policy = match &stop_reason {
+                            QuickAiTurnStop::EarlySuccess(_)
+                            | QuickAiTurnStop::PolicyRecovery(_)
+                            | QuickAiTurnStop::DeadlineRecovery(_) => QUICK_AI_FAST_TEARDOWN,
+                            QuickAiTurnStop::ProviderTerminal
+                            | QuickAiTurnStop::Cancelled
+                            | QuickAiTurnStop::Failed(_) => USER_CANCEL_TEARDOWN,
+                        };
+                        trace.write("teardown_started", json!({}));
+                        terminate_and_reap_process_group(&mut child, pgid, teardown_policy)
+                            .unwrap_or_else(|error| ProcessTeardownReport::failed(error.to_string()))
+                    });
                     let stderr_text = stderr_thread.join().unwrap_or_default();
                     trace.write(
                         "teardown",

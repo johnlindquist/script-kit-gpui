@@ -859,6 +859,7 @@ mod tests {
     #[test]
     fn codex_quick_ai_success_reaps_process_group() {
         let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("trace.ndjson");
         let binary = fake_codex(
             dir.path(),
             r#"
@@ -869,21 +870,53 @@ printf '%s\n' '{"type":"item.started","item":{"id":"s","type":"web_search","quer
 printf '%s\n' '{"type":"item.completed","item":{"id":"s","type":"web_search","query":"Rust","action":{"type":"search","query":"Rust"}}}'
 printf '%s\n' '{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"{\"answer\":\"Rust\",\"sources\":[\"https://blog.rust-lang.org/source\"]}"}}'
 printf '%s\n' '{"type":"turn.completed","usage":{}}'
-sleep 1
+# Stay alive until controller teardown, without a helper waiting on orphan reaping.
+exec sleep 60
 "#,
         );
         let connection = CodexQuickAiExecConnection::new(CodexQuickAiExecSpec {
             binary,
+            trace_path: Some(trace_path.clone()),
             ..CodexQuickAiExecSpec::from_builtin_contract(dir.path().join("scratch"))
         });
         let rx = connection.start_turn(turn_request()).unwrap();
-        let mut answer = false;
-        let mut finished = false;
+        let mut events = Vec::new();
         while let Ok(event) = rx.recv_blocking() {
-            answer |= matches!(event, AgentChatEvent::AgentMessageDelta(_));
-            finished |= matches!(event, AgentChatEvent::TurnCompleted { .. });
+            events.push(event);
         }
-        assert!(answer && finished);
+        let trace = std::fs::read_to_string(trace_path).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentChatEvent::TurnFailed { .. })),
+            "unexpected failure: {events:?}\ntrace:\n{trace}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentChatEvent::AgentMessageDelta(answer)
+                    if answer == "Rust\n\nSource: https://blog.rust-lang.org/source"
+            )),
+            "missing expected answer: {events:?}\ntrace:\n{trace}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentChatEvent::TurnCompleted {
+                    outcome: crate::ai::reliability::AiTurnRuntimeOutcome::Completed {
+                        stop_reason,
+                    },
+                } if stop_reason.as_deref() == Some("stop")
+            )),
+            "missing successful completion: {events:?}\ntrace:\n{trace}"
+        );
+        let pgid = trace
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|record| record["event"] == "spawned")
+            .and_then(|record| record["pgid"].as_i64())
+            .expect("spawn trace records the owned process group") as i32;
+        assert!(!process_group_alive(pgid), "owned process group survived");
         assert!(connection.active_turns.lock().unwrap().is_empty());
         assert_eq!(
             std::fs::read_dir(dir.path().join("scratch"))

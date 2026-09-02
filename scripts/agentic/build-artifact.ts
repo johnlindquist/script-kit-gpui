@@ -737,8 +737,9 @@ export function publishImmutableArtifact(root: string, task: ManagedTask, execut
     resourceCheck("post-publication");
     // Eligibility still requires the successfully finalized task after lease release.
     if (readOwnedJson(join(leasePath, "lease.json")).generation !== lease.generation || task.identity.generation !== body.publication.buildTask.generation) refuse("publication_not_finalized", "publication ownership changed");
-    chmodSync(staging, 0o500);
+    // Darwin can reject renaming a write-disabled directory; seal before issuing authority.
     renameDirectoryNoReplace(staging, destination);
+    chmodSync(destination, 0o500);
     updateManagedPublicationIntent(task, artifactId, "published");
     return { manifestPath: `target-agent/artifacts/${artifactId}/manifest.json`, manifestSha256: hashArtifactFile(join(destination, "manifest.json")) };
     } catch (error) {
@@ -1141,10 +1142,11 @@ export async function publishSignedBundle(root: string, task: ManagedTask, input
         if (stat.isDirectory()) { for (const name of readdirSync(path)) seal(join(path, name)); chmodSync(path, 0o500); }
         else if (!stat.isSymbolicLink()) { if (stat.nlink !== 1) refuse("unsafe_artifact_path", "bundle hardlink"); chmodSync(path, stat.mode & 0o111 ? 0o500 : 0o400); const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { fsyncSync(fd); } finally { closeSync(fd); } }
       };
-      seal(staging);
+      for (const name of readdirSync(staging)) seal(join(staging, name));
       if (bundleTreeHash(copiedBundle, true) !== treeHash) refuse("binary_hash_mismatch", "sealed bundle identity differs");
       resourceCheck("post-publication");
       renameDirectoryNoReplace(staging, destination);
+      chmodSync(destination, 0o500);
       updateManagedPublicationIntent(task, artifactId, "published");
       return { manifestPath: `target-agent/artifacts/${artifactId}/manifest.json`, manifestSha256: hashArtifactFile(join(destination, "manifest.json")) };
     });

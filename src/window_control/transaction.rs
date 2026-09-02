@@ -600,9 +600,9 @@ mod tests {
     fn same_pid_serializes_and_different_pids_overlap() {
         let _lock = registry::REGISTRY_TEST_LOCK.lock();
         let _env = fixture(
-            r#"[{"id":1,"app":"A","title":"S1","pid":9,"mutation":{"delayMs":120}},
-                {"id":2,"app":"A","title":"S2","pid":9,"mutation":{"delayMs":120}},
-                {"id":3,"app":"B","title":"P1","pid":10,"mutation":{"delayMs":120}}]"#,
+            r#"[{"id":1,"app":"A","title":"S1","pid":9},
+                {"id":2,"app":"A","title":"S2","pid":9},
+                {"id":3,"app":"B","title":"P1","pid":10}]"#,
         );
         refreshed();
 
@@ -615,34 +615,95 @@ mod tests {
             .expect("plan")
         };
 
-        // Same PID: two commands serialize on one worker.
-        let started = Instant::now();
+        // Same PID: both mutations execute on the same serial worker.
+        let (entered, entries) = std::sync::mpsc::channel();
+        super::super::test_support::with_state(|state| {
+            state.mutation_entered = Some(entered);
+        })
+        .expect("observe mutation entry");
         let plan_a = plan_for(1);
         let plan_b = plan_for(2);
-        let handle_a = std::thread::spawn(move || execute_plan(&plan_a).expect("a"));
-        let handle_b = std::thread::spawn(move || execute_plan(&plan_b).expect("b"));
-        let receipt_a = handle_a.join().expect("join");
-        let receipt_b = handle_b.join().expect("join");
-        let same_pid_elapsed = started.elapsed();
-        assert_eq!(receipt_a.status, MutationStatus::Succeeded);
-        assert_eq!(receipt_b.status, MutationStatus::Succeeded);
-        assert!(
-            same_pid_elapsed >= Duration::from_millis(230),
-            "same-PID work must serialize (elapsed {same_pid_elapsed:?})"
+        let handle_a = std::thread::spawn(move || {
+            execute_plan_with_deadline(&plan_a, Duration::from_secs(30))
+        });
+        let handle_b = std::thread::spawn(move || {
+            execute_plan_with_deadline(&plan_b, Duration::from_secs(30))
+        });
+        let first = entries
+            .recv_timeout(Duration::from_secs(10))
+            .map(|(id, worker, release)| (id, worker, release.send(())));
+        let second = entries
+            .recv_timeout(Duration::from_secs(10))
+            .map(|(id, worker, release)| (id, worker, release.send(())));
+        drop(entries);
+        let receipt_a = handle_a.join();
+        let receipt_b = handle_b.join();
+        super::super::test_support::with_state(|state| state.mutation_entered = None)
+            .expect("clear mutation observation");
+        let (first_id, first_worker, first_release) = first.expect("first mutation entered");
+        let (second_id, second_worker, second_release) = second.expect("second mutation entered");
+        first_release.expect("release first mutation");
+        second_release.expect("release second mutation");
+        let mut entered_ids = [first_id, second_id];
+        entered_ids.sort_unstable();
+        assert_eq!(entered_ids, [1, 2]);
+        assert_eq!(
+            first_worker, second_worker,
+            "same PID must use one serial worker"
+        );
+        assert_eq!(
+            receipt_a.expect("join a").expect("execute a").status,
+            MutationStatus::Succeeded
+        );
+        assert_eq!(
+            receipt_b.expect("join b").expect("execute b").status,
+            MutationStatus::Succeeded
         );
 
-        // Different PIDs: run concurrently, well under 2x the delay.
-        let started = Instant::now();
+        // Different PIDs must both enter mutation work before either is released.
+        // Timeouts only bound a broken lock; elapsed time is not a success criterion.
+        let (entered, entries) = std::sync::mpsc::channel();
+        super::super::test_support::with_state(|state| {
+            state.mutation_entered = Some(entered);
+        })
+        .expect("observe mutation entry");
         let plan_c = plan_for(1);
         let plan_d = plan_for(3);
-        let handle_c = std::thread::spawn(move || execute_plan(&plan_c).expect("c"));
-        let handle_d = std::thread::spawn(move || execute_plan(&plan_d).expect("d"));
-        handle_c.join().expect("join");
-        handle_d.join().expect("join");
-        let cross_pid_elapsed = started.elapsed();
-        assert!(
-            cross_pid_elapsed < Duration::from_millis(230),
-            "cross-PID work must overlap (elapsed {cross_pid_elapsed:?})"
+        let handle_c = std::thread::spawn(move || {
+            execute_plan_with_deadline(&plan_c, Duration::from_secs(30))
+        });
+        let handle_d = std::thread::spawn(move || {
+            execute_plan_with_deadline(&plan_d, Duration::from_secs(30))
+        });
+        let first = entries.recv_timeout(Duration::from_secs(10));
+        let second = entries.recv_timeout(Duration::from_secs(10));
+
+        // Release every observed worker and disconnect any late entry before
+        // joining both callers, even when an entry timed out or a caller failed.
+        let first = first.map(|(id, _, release)| (id, release.send(())));
+        let second = second.map(|(id, _, release)| (id, release.send(())));
+        drop(entries);
+        let receipt_c = handle_c.join();
+        let receipt_d = handle_d.join();
+        super::super::test_support::with_state(|state| {
+            state.mutation_entered = None;
+        })
+        .expect("clear mutation observation");
+
+        let (first_id, first_release) = first.expect("first PID entered mutation work");
+        let (second_id, second_release) = second.expect("second PID entered mutation work");
+        first_release.expect("first PID remained in flight until both entered");
+        second_release.expect("second PID remained in flight until both entered");
+        let mut entered_ids = [first_id, second_id];
+        entered_ids.sort_unstable();
+        assert_eq!(entered_ids, [1, 3], "different PIDs must overlap");
+        assert_eq!(
+            receipt_c.expect("join c").expect("execute c").status,
+            MutationStatus::Succeeded
+        );
+        assert_eq!(
+            receipt_d.expect("join d").expect("execute d").status,
+            MutationStatus::Succeeded
         );
     }
 

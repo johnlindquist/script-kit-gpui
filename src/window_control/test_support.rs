@@ -245,6 +245,9 @@ pub(crate) struct ProviderState {
     /// Total mutations applied against this fixture instance. Plan-compilation
     /// tests assert this stays zero across planning.
     mutation_count: u64,
+    #[cfg(test)]
+    pub(crate) mutation_entered:
+        Option<std::sync::mpsc::Sender<(u32, std::thread::ThreadId, std::sync::mpsc::Sender<()>)>>,
 }
 
 static PROVIDER: std::sync::LazyLock<parking_lot::Mutex<Option<ProviderState>>> =
@@ -284,6 +287,8 @@ fn parse_document(raw: &str) -> Result<ProviderState> {
         displays,
         frontmost_window_id,
         mutation_count: 0,
+        #[cfg(test)]
+        mutation_entered: None,
     })
 }
 
@@ -445,6 +450,18 @@ pub(crate) fn apply_mutation(
             .map(|window| window.definition.mutation.delay_ms)
     })?
     .with_context(|| format!("provider window {id} not found"))?;
+
+    #[cfg(test)]
+    if let Some(entered) = with_state(|state| state.mutation_entered.clone())? {
+        // Observe work on the PID worker, without holding the provider lock.
+        let (release, released) = std::sync::mpsc::channel();
+        entered
+            .send((id, std::thread::current().id(), release))
+            .context("mutation observer disconnected")?;
+        released
+            .recv_timeout(Duration::from_secs(10))
+            .context("mutation observer did not release the worker")?;
+    }
 
     if !run_delay(delay_ms, cancelled) {
         return Ok(ProviderMutationOutcome::Cancelled);
