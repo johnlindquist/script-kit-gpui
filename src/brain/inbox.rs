@@ -170,7 +170,7 @@ fn dedupe_hash(kind: InboxKind, title: &str) -> String {
         .as_str()
         .as_bytes()
         .iter()
-        .chain([b'|'].iter())
+        .chain(b"|".iter())
         .chain(normalized.as_bytes())
     {
         hash ^= u64::from(*byte);

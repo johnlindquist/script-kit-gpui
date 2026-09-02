@@ -2,13 +2,23 @@ use super::*;
 
 use crate::components::notes_editor::{NotesEditor, NotesEditorLayout, NotesEditorMarkdownConfig};
 
+/// Prepared production records and effect sources; construction performs no storage startup.
+pub(crate) struct NotesInitialData {
+    pub notes: Vec<Note>,
+    pub deleted_notes: Vec<Note>,
+    pub host_policy: crate::runtime_policy::WindowHostPolicy,
+    pub ghost_clipboard: Option<Vec<crate::notes::ghost::NotesGhostClipboardText>>,
+    pub now: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 impl NotesApp {
     /// Create a new NotesApp
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let instance_id =
-            NOTES_INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        CURRENT_NOTES_INSTANCE.store(instance_id, std::sync::atomic::Ordering::SeqCst);
+        let initial = Self::load_initial_data();
+        Self::from_initial_data(initial, window, cx)
+    }
 
+    fn load_initial_data() -> NotesInitialData {
         // Initialize storage
         if let Err(e) = storage::init_notes_db() {
             let safe_error = crate::logging::log_private_user_value(&e.to_string());
@@ -57,6 +67,31 @@ impl NotesApp {
                 info!("Created welcome note for first launch");
             }
         }
+        NotesInitialData {
+            notes,
+            deleted_notes,
+            host_policy: crate::runtime_policy::WindowHostPolicy::Interactive,
+            ghost_clipboard: None,
+            now: None,
+        }
+    }
+
+    pub(crate) fn from_initial_data(
+        initial: NotesInitialData,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let published_theme = crate::theme::get_theme_snapshot();
+        let NotesInitialData {
+            notes,
+            deleted_notes,
+            host_policy,
+            ghost_clipboard,
+            now,
+        } = initial;
+        let instance_id =
+            NOTES_INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        CURRENT_NOTES_INSTANCE.store(instance_id, std::sync::atomic::Ordering::SeqCst);
 
         let selected_note_id = notes.first().map(|n| n.id);
 
@@ -147,8 +182,15 @@ impl NotesApp {
             selected_note_id.map(crate::notes::search_model::NoteSearchDocumentId::Note),
         );
 
-        Self {
+        let mut app = Self {
             notes,
+            host_policy,
+            fixture_ghost_clipboard: ghost_clipboard,
+            automation_generation: None,
+            clock_now: now,
+            document_revision: 1,
+            search_revision: 0,
+            autosave_flush_scheduled: false,
             deleted_notes,
             view_mode: NotesViewMode::AllNotes,
             selected_note_id,
@@ -184,13 +226,13 @@ impl NotesApp {
                     auto_sizing_enabled: true,
                 }),
                 CommandBarConfig::notes_style(),
-                std::sync::Arc::new(theme::get_cached_theme()),
+                published_theme.theme.clone(),
             ),
             // Initialize note switcher CommandBar (Cmd+P) with note list
             note_switcher: CommandBar::new(
                 note_switcher_actions,
                 CommandBarConfig::notes_recent_style(),
-                std::sync::Arc::new(theme::get_cached_theme()),
+                published_theme.theme.clone(),
             ),
             active_day_binding: None,
             pending_day_editor_reconcile: None,
@@ -200,7 +242,7 @@ impl NotesApp {
             last_save_time: None,
             last_persisted_bounds: None,
             last_bounds_save: Instant::now(),
-            theme_rev_seen: crate::theme::service::theme_revision(),
+            theme_rev_seen: published_theme.revision,
             history_back: Vec::new(),
             history_forward: Vec::new(),
             navigating_history: false,
@@ -223,7 +265,38 @@ impl NotesApp {
             ai_handoff_generation: 0,
             mention_portal_edit: None,
             kit_resource_preview: None,
-        }
+        };
+        app.command_bar.set_host_policy(host_policy);
+        app.note_switcher.set_host_policy(host_policy);
+        app
+    }
+
+    pub(crate) fn actions_dialog(&self) -> Option<Entity<crate::actions::ActionsDialog>> {
+        self.command_bar.dialog().cloned()
+    }
+
+    pub(crate) fn note_switcher_dialog(&self) -> Option<Entity<crate::actions::ActionsDialog>> {
+        self.note_switcher.dialog().cloned()
+    }
+
+    pub(crate) fn semantic_revision(&self, cx: &App) -> u64 {
+        self.notes_editor
+            .read(cx)
+            .semantic_revision(cx)
+            .saturating_add(self.search_revision)
+            .saturating_add(self.notes_action_execution_generation)
+    }
+
+    pub(crate) fn document_revision(&self) -> u64 {
+        self.document_revision
+    }
+
+    pub(crate) fn applied_theme_revision(&self) -> u64 {
+        self.theme_rev_seen
+    }
+
+    pub(crate) fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.clock_now.unwrap_or_else(chrono::Utc::now)
     }
 
     /// Debounce interval for saves (in milliseconds)
@@ -236,11 +309,15 @@ impl NotesApp {
     ///
     /// This is called during render to detect theme hot-reloads.
     /// NOTE: Box shadows were removed for vibrancy compatibility.
-    pub(super) fn maybe_update_theme_cache(&mut self) {
-        let current_rev = crate::theme::service::theme_revision();
-        if self.theme_rev_seen != current_rev {
-            self.theme_rev_seen = current_rev;
-            // Box shadows disabled for vibrancy - no cached values to update
+    pub(super) fn maybe_update_theme_cache(&mut self, cx: &mut Context<Self>) {
+        let snapshot = crate::theme::get_theme_snapshot();
+        if self.theme_rev_seen != snapshot.revision {
+            self.theme_rev_seen = snapshot.revision;
+            self.notes_editor
+                .update(cx, |editor, cx| editor.sync_markdown_link_highlights(cx));
+            let theme = snapshot.theme.clone();
+            self.command_bar.set_theme(theme.clone(), cx);
+            self.note_switcher.set_theme(theme, cx);
         }
     }
 
@@ -255,7 +332,8 @@ impl NotesApp {
     /// crash. The close paths save the stable frame explicitly before the
     /// exit begins.
     fn bounds_are_persistable(&self) -> bool {
-        self.native_resize_phase == resize::NotesNativeResizePhase::Enabled
+        !self.host_policy.is_hidden()
+            && self.native_resize_phase == resize::NotesNativeResizePhase::Enabled
             && NOTES_EXIT_TICKET
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
@@ -370,6 +448,9 @@ impl NotesApp {
                         self.pending_day_editor_reconcile = Some(content);
                     }
                     debug!(date = %day.date, merged, "Day note saved from Notes window");
+                    if self.host_policy.is_hidden() {
+                        crate::runtime_policy::record_completed_fixture_effect();
+                    }
                     self.has_unsaved_changes = false;
                     self.last_save_time = Some(Instant::now());
                     self.last_save_confirmed = Some(Instant::now());
@@ -420,6 +501,9 @@ impl NotesApp {
         }
 
         debug!(note_id = %id, "Note saved (debounced)");
+        if self.host_policy.is_hidden() {
+            crate::runtime_policy::record_completed_fixture_effect();
+        }
         self.has_unsaved_changes = false;
         self.last_save_time = Some(Instant::now());
         self.last_save_confirmed = Some(Instant::now());
@@ -436,6 +520,35 @@ impl NotesApp {
             None => true,
             Some(last_save) => last_save.elapsed() >= Duration::from_millis(Self::SAVE_DEBOUNCE_MS),
         }
+    }
+
+    fn schedule_autosave_flush(&mut self, cx: &mut Context<Self>) {
+        if self.autosave_flush_scheduled {
+            return;
+        }
+        self.autosave_flush_scheduled = true;
+        let document_revision = self.document_revision;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(Self::SAVE_DEBOUNCE_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.autosave_flush_scheduled = false;
+                if this.host_policy.is_hidden()
+                    && CURRENT_NOTES_INSTANCE.load(std::sync::atomic::Ordering::SeqCst)
+                        != this.instance_id
+                {
+                    return;
+                }
+                if this.document_revision == document_revision {
+                    this.save_current_note();
+                    cx.notify();
+                } else if this.has_unsaved_changes {
+                    this.schedule_autosave_flush(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Handle editor content changes with auto-resize
@@ -476,8 +589,13 @@ impl NotesApp {
         // Auto-create a note if user is typing with no note selected
         // This prevents data loss when users start typing immediately
         if let Some(day) = self.active_day_binding.as_mut() {
-            day.content = content_string.clone();
-            self.has_unsaved_changes = true;
+            if day.content != content_string {
+                day.content = content_string.clone();
+                self.has_unsaved_changes = true;
+            }
+            if self.has_unsaved_changes {
+                self.schedule_autosave_flush(cx);
+            }
             let new_line_count = self.editor_display_line_count(&content_string, cx);
             if new_line_count != self.last_line_count {
                 self.last_line_count = new_line_count;
@@ -513,17 +631,22 @@ impl NotesApp {
         }
 
         if let Some(id) = self.selected_note_id {
-            // Update the note in our cache (in-memory only)
+            // Programmatic document loads emit Change too. Only edits may
+            // dirty the cached document or advance its storage timestamp.
             let content_updated = if let Some(note) = self.notes.iter_mut().find(|n| n.id == id) {
-                note.set_content(content_string.clone());
-                // Mark as dirty - actual save is debounced
-                self.has_unsaved_changes = true;
+                if note.content != content_string {
+                    note.set_content(content_string.clone());
+                    self.has_unsaved_changes = true;
+                }
                 true
             } else {
                 false
             };
 
             if content_updated {
+                if self.has_unsaved_changes {
+                    self.schedule_autosave_flush(cx);
+                }
                 // Auto-resize: adjust window height based on content
                 let new_line_count = self.editor_display_line_count(&content_string, cx);
                 if new_line_count != self.last_line_count {
@@ -620,6 +743,10 @@ impl NotesApp {
         selection: std::ops::Range<usize>,
         cx: &mut Context<Self>,
     ) {
+        if self.host_policy.is_hidden() || self.fixture_ghost_clipboard.is_some() {
+            self.cancel_notes_ghost_llm();
+            return;
+        }
         let line = crate::notes::ghost::current_line_prefix(editor_text, selection.clone());
         let Some(line) = line else {
             self.cancel_notes_ghost_llm();
@@ -818,7 +945,25 @@ impl NotesApp {
     fn collect_notes_ghost_clipboard_texts(
         &self,
     ) -> Vec<crate::notes::ghost::NotesGhostClipboardText> {
-        crate::clipboard_history::get_clipboard_history_meta(20, 0)
+        if let Some(records) = &self.fixture_ghost_clipboard {
+            return records.clone();
+        }
+        if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::SystemClipboard)
+            .is_err()
+        {
+            return Vec::new();
+        }
+        let entries = match crate::clipboard_history::get_clipboard_history_meta(20, 0) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    error_bytes = error.to_string().len(),
+                    "notes_ghost_clipboard_read_failed"
+                );
+                return Vec::new();
+            }
+        };
+        entries
             .into_iter()
             .filter(|entry| {
                 matches!(
@@ -830,6 +975,55 @@ impl NotesApp {
             .filter_map(|entry| crate::clipboard_history::get_entry_content(&entry.id))
             .map(|text| crate::notes::ghost::NotesGhostClipboardText { text })
             .collect()
+    }
+
+    pub(crate) fn editor_text(&self, cx: &gpui::App) -> String {
+        self.editor_state.read(cx).value().to_string()
+    }
+
+    pub(crate) fn editor_runtime_info(
+        &self,
+        cx: &gpui::App,
+    ) -> crate::protocol::ElementEditorRuntimeInfo {
+        self.notes_editor
+            .read(cx)
+            .markdown_runtime_info_with_scroll(cx)
+    }
+
+    pub(crate) fn titlebar_action_descriptors(&self) -> Vec<crate::notes::NotesActionDescriptor> {
+        let context = self.notes_action_context();
+        [
+            crate::notes::NotesAction::SendToAi,
+            crate::notes::NotesAction::RestoreNote,
+            crate::notes::NotesAction::PermanentlyDeleteNote,
+        ]
+        .into_iter()
+        .filter_map(|action| action.descriptor(context))
+        .collect()
+    }
+
+    pub(crate) fn document_identity_spec(
+        &self,
+    ) -> crate::components::main_view_chrome::SemanticChipSpec {
+        let (semantic_id, label) = if let Some(binding) = self.active_day_binding.as_ref() {
+            (
+                format!("notes-document-day:{}", binding.date),
+                format!("Today · {}", binding.date),
+            )
+        } else if let Some(note_id) = self.selected_note_id {
+            (
+                format!("notes-document:{}", note_id.as_str()),
+                "Current Note".to_string(),
+            )
+        } else {
+            ("notes-document:draft".to_string(), "Draft Note".to_string())
+        };
+        crate::components::main_view_chrome::SemanticChipSpec::enabled_identity(
+            semantic_id,
+            label,
+            crate::components::main_view_chrome::SemanticChipAction::OpenDetails,
+            "⌘P",
+        )
     }
 
     pub(crate) fn set_editor_text_for_automation(
@@ -979,24 +1173,7 @@ impl NotesApp {
             // as app-owned while this fresh transition is active.
             self.last_window_height = clamped_height;
             window.resize(new_size);
-            crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
-                id: "notes".to_string(),
-                kind: crate::protocol::AutomationWindowKind::Notes,
-                title: Some("Notes".to_string()),
-                focused: true,
-                visible: true,
-                semantic_surface: Some("notes".to_string()),
-                bounds: Some(crate::protocol::AutomationWindowBounds {
-                    x: f32::from(current_bounds.origin.x) as f64,
-                    y: f32::from(current_bounds.origin.y) as f64,
-                    width: f32::from(new_size.width) as f64,
-                    height: f32::from(new_size.height) as f64,
-                }),
-                parent_window_id: None,
-                parent_kind: None,
-                pid: Some(std::process::id()),
-                generation: None,
-            });
+            self.sync_automation_bounds(window);
             applied = true;
         }
 
@@ -1048,6 +1225,12 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)
+            .is_err()
+        {
+            self.show_action_feedback("Window positioning is unavailable", false);
+            return;
+        }
         let bounds = super::window_ops::default_notes_window_bounds();
         let x: f64 = bounds.origin.x.into();
         let y: f64 = bounds.origin.y.into();

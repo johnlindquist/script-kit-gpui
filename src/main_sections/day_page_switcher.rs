@@ -12,7 +12,7 @@
 
 impl DayPageView {
     fn local_today(&self) -> chrono::NaiveDate {
-        Utc::now()
+        self.now()
             .with_timezone(&self.session.substrate().timezone())
             .date_naive()
     }
@@ -74,6 +74,7 @@ impl DayPageView {
         let Some(dialog) = self.note_switcher.dialog().cloned() else {
             return;
         };
+        let dialog_id = dialog.entity_id();
         let day_page = cx.entity().downgrade();
         let day_window = window.window_handle();
         let on_close_day_page = day_page.clone();
@@ -86,6 +87,9 @@ impl DayPageView {
                             return;
                         };
                         day_page.update(cx, |view, cx| {
+                            if view.note_switcher.dialog().map(|dialog| dialog.entity_id()) != Some(dialog_id) {
+                                return;
+                            }
                             view.note_switcher.mark_closed_externally();
                             view.focus_editor(window, cx);
                         });
@@ -102,6 +106,9 @@ impl DayPageView {
                                     return;
                                 };
                                 day_page.update(cx, |view, cx| {
+                                    if view.note_switcher.dialog().map(|dialog| dialog.entity_id()) != Some(dialog_id) {
+                                        return;
+                                    }
                                     view.execute_note_switcher_action(&action_id, window, cx);
                                 });
                             });
@@ -161,7 +168,7 @@ impl DayPageView {
                 note.title.clone(),
                 note.content.clone(),
                 path,
-                Utc::now(),
+                self.now(),
             ) {
                 tracing::error!(
                     target: "script_kit::day_page",
@@ -189,7 +196,7 @@ impl DayPageView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Err(error) = self.session.bind_date(date, Utc::now()) {
+        if let Err(error) = self.session.bind_date(date, self.now()) {
             tracing::error!(
                 target: "script_kit::day_page",
                 event = "day_page_bind_day_failed",

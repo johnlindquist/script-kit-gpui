@@ -23,6 +23,9 @@ impl NotesApp {
     }
 
     pub(super) fn hide_mouse_cursor(&mut self, cx: &mut Context<Self>) {
+        if self.host_policy.is_hidden() {
+            return;
+        }
         if Self::set_mouse_cursor_hidden_state(&mut self.mouse_cursor_hidden, true) {
             crate::platform::hide_cursor_until_mouse_moves();
             cx.notify();

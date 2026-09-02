@@ -14,13 +14,33 @@ impl NotesApp {
         currently_checked: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let toggled = self.notes_editor.update(cx, |editor, cx| {
             editor.toggle_task_marker_at(marker_range, currently_checked, window, cx)
         });
         if toggled {
             self.has_unsaved_changes = true;
         }
+        toggled
+    }
+
+    pub(crate) fn toggle_task_marker_for_owned_evaluation(
+        &mut self,
+        marker_range: std::ops::Range<usize>,
+        checked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.host_policy.is_hidden() && crate::runtime_policy::owned_evaluation().is_some(),
+            "owned_notes_required"
+        );
+        anyhow::ensure!(self.preview_enabled, "notes_preview_required");
+        anyhow::ensure!(
+            self.toggle_task_marker_at(marker_range, checked, window, cx),
+            "stale_task_marker"
+        );
+        Ok(())
     }
 
     pub(super) fn insert_horizontal_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -58,7 +78,7 @@ impl NotesApp {
     }
 
     pub(super) fn try_smart_paste(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let clipboard = Self::read_clipboard();
+        let clipboard = Self::read_clipboard(cx);
         let handled = self.notes_editor.update(cx, |editor, cx| {
             editor.try_smart_paste(&clipboard, window, cx)
         });

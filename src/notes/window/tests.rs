@@ -1,5 +1,4 @@
 use super::{Note, NoteId, NotesApp};
-use crate::ai::message_parts::AiContextPart;
 
 #[test]
 fn formatting_replacement_wraps_selected_text() {
@@ -278,9 +277,10 @@ fn test_platform_arrow_shortcuts_only_run_note_navigation_when_editor_not_focuse
     );
 }
 
+const NOTES_ACTIONS_SOURCE: &str = include_str!("notes_actions.rs");
+
 #[test]
 fn test_show_selected_note_missing_feedback_notifies_after_feedback_state_update() {
-    const NOTES_ACTIONS_SOURCE: &str = include_str!("notes_actions.rs");
     assert!(
         NOTES_ACTIONS_SOURCE.contains(
             "self.show_action_feedback(Self::SELECTED_NOTE_NOT_FOUND_FEEDBACK, true);\n        cx.notify();"
@@ -291,7 +291,6 @@ fn test_show_selected_note_missing_feedback_notifies_after_feedback_state_update
 
 #[test]
 fn test_duplicate_selected_note_sets_feedback_before_select_note() {
-    const NOTES_ACTIONS_SOURCE: &str = include_str!("notes_actions.rs");
     let feedback_idx = NOTES_ACTIONS_SOURCE
         .find("self.show_action_feedback(\"Duplicated\", false);")
         .expect("Expected duplicate feedback call in notes_actions.rs");
@@ -308,10 +307,34 @@ fn test_duplicate_selected_note_sets_feedback_before_select_note() {
 #[test]
 fn test_copy_as_markdown_notifies_after_feedback_state_update() {
     const CLIPBOARD_OPS_SOURCE: &str = include_str!("clipboard_ops.rs");
+    let copy = CLIPBOARD_OPS_SOURCE
+        .split("fn copy_as_markdown(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }").next())
+        .expect("copy_as_markdown must exist");
     assert!(
-        CLIPBOARD_OPS_SOURCE
-            .contains("self.show_action_feedback(\"Copied\", false);\n        cx.notify();"),
-        "Copy-as-markdown should notify after updating action feedback state"
+        copy.contains("self.copy_text_to_clipboard(&content, \"Copied\", cx);"),
+        "Copy-as-markdown must delegate feedback and notification to the shared copy owner"
+    );
+    let helper = NOTES_ACTIONS_SOURCE
+        .split("fn copy_text_to_clipboard(")
+        .nth(1)
+        .and_then(|body| body.split("pub(super) fn note_deeplink(").next())
+        .expect("shared copy helper must exist");
+    assert!(
+        helper.contains(
+            "self.show_action_feedback(receipt.feedback(success_message.to_owned()), false)"
+        ) && helper
+            .contains("self.show_action_feedback(format!(\"Failed to copy: {error}\"), true)"),
+        "shared copy helper must update feedback for both successful and failed copies"
+    );
+    let feedback = helper
+        .rfind("self.show_action_feedback(")
+        .expect("copy feedback");
+    let notify = helper.find("cx.notify();").expect("copy notification");
+    assert!(
+        feedback < notify,
+        "Copy-as-markdown must notify after the shared helper updates feedback"
     );
 }
 
@@ -519,22 +542,79 @@ fn test_save_note_with_content_activates_existing_notes_window() {
     );
 }
 
-#[test]
-fn test_notes_window_registers_automation_parent_for_actions_popup() {
-    const WINDOW_OPS_SOURCE: &str = include_str!("window_ops.rs");
-
-    assert!(
-        WINDOW_OPS_SOURCE.contains("upsert_runtime_window_handle(\"notes\""),
-        "Notes window should register its runtime handle so shared actions popups can target it"
-    );
-    assert!(
-        WINDOW_OPS_SOURCE.contains("AutomationWindowKind::Notes"),
-        "Notes window should register itself as a Notes automation window"
-    );
-    assert!(
-        WINDOW_OPS_SOURCE.contains("remove_automation_window(\"notes\")"),
-        "Notes window close paths should clear its automation registration"
-    );
+#[gpui::test]
+fn test_notes_window_registers_automation_parent_for_actions_popup(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, WindowOptions};
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let mount = |cx: &mut gpui::App| {
+            let handle = cx
+                .open_window(
+                    WindowOptions {
+                        show: false,
+                        focus: false,
+                        ..Default::default()
+                    },
+                    |window, cx| cx.new(|cx| super::NotesApp::new(window, cx)),
+                )
+                .expect("Notes test root");
+            let info = crate::windows::register_runtime_window_instance(
+                crate::protocol::AutomationWindowInfo {
+                    id: "notes-registration-fixture".into(),
+                    kind: crate::protocol::AutomationWindowKind::Notes,
+                    title: Some("Notes".into()),
+                    focused: false,
+                    visible: false,
+                    semantic_surface: Some("notes".into()),
+                    bounds: None,
+                    parent_window_id: None,
+                    parent_window_generation: None,
+                    parent_kind: None,
+                    pid: Some(std::process::id()),
+                    generation: None,
+                },
+                handle.into(),
+                cx,
+            )
+            .expect("paired registration");
+            (handle, info.generation.expect("registered generation"))
+        };
+        let (first, old_generation) = mount(cx);
+        assert_eq!(
+            crate::windows::get_runtime_window_handle_for_generation(
+                "notes-registration-fixture",
+                old_generation
+            ),
+            Some(first.into())
+        );
+        assert!(crate::windows::remove_runtime_window_instance(
+            "notes-registration-fixture",
+            old_generation
+        ));
+        first
+            .update(cx, |_, window, _| window.remove_window())
+            .expect("close first root");
+        let (second, new_generation) = mount(cx);
+        assert_ne!(old_generation, new_generation);
+        assert!(!crate::windows::remove_runtime_window_instance(
+            "notes-registration-fixture",
+            old_generation
+        ));
+        assert_eq!(
+            crate::windows::get_runtime_window_handle_for_generation(
+                "notes-registration-fixture",
+                new_generation
+            ),
+            Some(second.into())
+        );
+        assert!(crate::windows::remove_runtime_window_instance(
+            "notes-registration-fixture",
+            new_generation
+        ));
+        second
+            .update(cx, |_, window, _| window.remove_window())
+            .expect("close replacement root");
+    });
 }
 
 #[test]

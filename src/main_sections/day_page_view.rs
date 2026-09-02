@@ -91,6 +91,26 @@ impl DayPageView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::from_initial_data(
+            app,
+            DayPageInitialData {
+                session: DayPageDocumentSession::new(substrate),
+                now: None,
+                shelf_previews: None,
+                host_policy: crate::runtime_policy::WindowHostPolicy::Interactive,
+            },
+            window,
+            cx,
+        )
+    }
+
+    pub(crate) fn from_initial_data(
+        app: Entity<ScriptListApp>,
+        initial: DayPageInitialData,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let published_theme = crate::theme::get_theme_snapshot();
         let metrics = crate::notes::window::style::adopted_metrics();
         let (editor_state, notes_editor) = NotesEditor::new_markdown_pair(
             window,
@@ -126,11 +146,16 @@ impl DayPageView {
         // the mouse live.
         let editor_hover_observation = cx.observe(&editor_state, |_, _, cx| cx.notify());
 
-        Self {
+        let mut view = Self {
             app: app.downgrade(),
             instance_id: cx.entity().entity_id().as_u64(),
             host_return_generation: 0,
-            session: DayPageDocumentSession::new(substrate),
+            session: initial.session,
+            clock_now: initial.now,
+            fixture_shelf_previews: initial.shelf_previews,
+            theme_revision_seen: published_theme.revision,
+            document_revision: 0,
+            loaded_document: None,
             notes_editor,
             editor_state,
             editor_subscription,
@@ -145,7 +170,7 @@ impl DayPageView {
             note_switcher: crate::actions::CommandBar::new(
                 Vec::new(),
                 crate::actions::CommandBarConfig::notes_recent_style(),
-                std::sync::Arc::new(crate::theme::get_cached_theme()),
+                published_theme.theme.clone(),
             ),
             last_editor_content_len: 0,
             kit_resource_preview: None,
@@ -154,6 +179,158 @@ impl DayPageView {
             last_agent_chat_handoff_receipt: None,
             last_context_round_trip_receipt: None,
             read_mode: false,
+        };
+        view.note_switcher.set_host_policy(initial.host_policy);
+        if view.session.path().is_some() {
+            view.apply_loaded_content_to_editor(window, cx);
+        }
+        view
+    }
+
+    pub(crate) fn now(&self) -> chrono::DateTime<Utc> {
+        self.clock_now.unwrap_or_else(Utc::now)
+    }
+
+    pub(crate) fn semantic_revision(&self, cx: &App) -> u64 {
+        self.notes_editor.read(cx).semantic_revision(cx)
+    }
+
+    pub(crate) fn document_revision(&self) -> u64 {
+        self.document_revision
+    }
+
+    pub(crate) fn applied_theme_revision(&self) -> u64 {
+        self.theme_revision_seen
+    }
+
+    pub(crate) fn capture_owned_dictation_destination(
+        &self,
+        cx: &App,
+    ) -> Result<crate::dictation::DayPageDictationDestinationSnapshot, String> {
+        let policy = crate::runtime_policy::owned_evaluation()
+            .ok_or_else(|| "stale_destination: owned Day policy missing".to_string())?;
+        let document_path = self
+            .session
+            .path()
+            .cloned()
+            .ok_or_else(|| "stale_destination: Day document is unbound".to_string())?;
+        policy
+            .require_owned_path(&document_path)
+            .map_err(|error| format!("stale_destination: {error}"))?;
+        let editor = self.notes_editor.read(cx);
+        let content = editor.content(cx);
+        let insertion_anchor = editor.selection(cx);
+        if insertion_anchor.start > insertion_anchor.end
+            || insertion_anchor.end > content.len()
+            || !content.is_char_boundary(insertion_anchor.start)
+            || !content.is_char_boundary(insertion_anchor.end)
+        {
+            return Err("stale_destination: Day selection is not a valid UTF-8 range".to_string());
+        }
+        Ok(crate::dictation::DayPageDictationDestinationSnapshot {
+            instance_id: self.instance_id,
+            document_revision: self.document_revision,
+            editor_revision: editor.semantic_revision(cx),
+            document_path,
+            content_fingerprint: day_page_context_round_trip_fingerprint(
+                &self.canonical_content_with_shelf(&content),
+            ),
+            insertion_anchor,
+        })
+    }
+
+    pub(crate) fn owned_dictation_observation(&self, cx: &App) -> serde_json::Value {
+        let editor = self.notes_editor.read(cx);
+        let canonical = self.canonical_content_with_shelf(&editor.content(cx));
+        serde_json::json!({
+            "family": "dayPage", "instanceId": self.instance_id,
+            "documentRevision": self.document_revision, "editorRevision": editor.semantic_revision(cx),
+            "inputText": editor.content(cx), "selection": editor.selection(cx),
+            "documentPath": self.session.path(), "saved": !self.session.is_dirty(),
+            "canonicalContentFingerprint": day_page_context_round_trip_fingerprint(self.session.disk_content()),
+            "canonicalReadbackMatchesEditor": !self.session.is_dirty()
+                && self.session.verify_saved_content(&canonical).is_ok(),
+            "clipboardShelfCount": self.clipboard_shelf.len(),
+            "clipboardShelfFingerprint": day_page_context_round_trip_fingerprint(
+                &self.canonical_content_with_shelf("")
+            ),
+        })
+    }
+
+    pub(crate) fn inject_dictation_text_into_owned_snapshot(
+        &mut self,
+        expected: &crate::dictation::DayPageDictationDestinationSnapshot,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        if &self.capture_owned_dictation_destination(cx)? != expected {
+            return Err(
+                "stale_destination: Day instance, document, editor or selection changed"
+                    .to_string(),
+            );
+        }
+        if text.is_empty() {
+            return Err("stale_destination: empty dictation text".to_string());
+        }
+        let content = self.notes_editor.read(cx).content(cx);
+        let anchor = &expected.insertion_anchor;
+        let next = format!(
+            "{}{}{}",
+            &content[..anchor.start],
+            text,
+            &content[anchor.end..]
+        );
+        let cursor = anchor.start + text.len();
+        self.notes_editor.update(cx, |editor, cx| {
+            editor.set_value_preserving_scroll(next, cursor, window, cx)
+        });
+        self.on_editor_change(window, cx);
+        let after = self.notes_editor.read(cx).content(cx);
+        let observed = crate::components::notes_editor::observed_replacement_range(
+            &content,
+            &after,
+            anchor.clone(),
+            text,
+            self.notes_editor.read(cx).selection(cx),
+        )
+        .ok_or_else(|| {
+            "mutation_failed: Day observed insertion differs from requested replacement".to_string()
+        })?;
+        if !self.save_and_sync_footer(window, cx) {
+            return Err(
+                "mutation_failed: Day editor changed but canonical save failed".to_string(),
+            );
+        }
+        self.session
+            .verify_saved_content(&self.canonical_content_with_shelf(&after))
+            .map_err(|error| format!("mutation_failed: Day canonical readback failed: {error}"))?;
+        Ok(serde_json::json!({
+            "available": true,
+            "unit": "utf8Bytes",
+            "start": observed.start,
+            "end": observed.end,
+            "replacedStart": anchor.start,
+            "replacedEnd": anchor.end,
+            "insertedLength": observed.end - observed.start,
+            "operation": if anchor.start == anchor.end { "insertAtFrozenCursor" } else { "replaceFrozenSelection" },
+            "source": "day_page.inject_dictation_text_into_owned_snapshot",
+            "documentRevision": self.document_revision,
+            "editorRevision": self.semantic_revision(cx),
+            "canonicalContentFingerprint": day_page_context_round_trip_fingerprint(self.session.disk_content()),
+            "saved": true,
+            "observed": true,
+            "redacted": true,
+        }))
+    }
+
+    fn refresh_published_theme(&mut self, cx: &mut Context<Self>) {
+        let snapshot = crate::theme::get_theme_snapshot();
+        if self.theme_revision_seen != snapshot.revision {
+            self.theme_revision_seen = snapshot.revision;
+            self.notes_editor
+                .update(cx, |editor, cx| editor.sync_markdown_link_highlights(cx));
+            self.note_switcher.set_theme(snapshot.theme.clone(), cx);
         }
     }
 
@@ -169,7 +346,7 @@ impl DayPageView {
     }
 
     pub fn bind_today(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let now = Utc::now();
+        let now = self.now();
         if let Err(error) = self.session.bind_today(now) {
             tracing::error!(error = %error, "Failed to bind today's day page");
             return;
@@ -190,7 +367,13 @@ impl DayPageView {
         self.clipboard_shelf = items
             .into_iter()
             .map(|item| {
-                let preview = clipboard_shelf_preview_text(&item.entry_id);
+                let preview = match &self.fixture_shelf_previews {
+                    Some(records) => records
+                        .get(&item.entry_id)
+                        .cloned()
+                        .unwrap_or_else(|| "Clipboard entry".into()),
+                    None => clipboard_shelf_preview_text(&item.entry_id),
+                };
                 DayPageClipboardShelfEntry { item, preview }
             })
             .collect();
@@ -225,6 +408,11 @@ impl DayPageView {
     }
 
     fn apply_loaded_content_to_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let identity = (self.session.binding().clone(), self.session.path().cloned());
+        if self.loaded_document.as_ref() != Some(&identity) {
+            self.document_revision = self.document_revision.saturating_add(1);
+            self.loaded_document = Some(identity);
+        }
         let full = self.session.disk_content().to_string();
         let content = self.adopt_clipboard_shelf_from(&full);
         self.reset_day_page_spine_handoff_state(true, true);
@@ -268,7 +456,7 @@ impl DayPageView {
         let Some(fragment_path) = self.fragment_open_targets.get(index).cloned() else {
             return;
         };
-        let now = Utc::now();
+        let now = self.now();
         if let Err(error) = self.session.bind_fragment(fragment_path, now) {
             tracing::error!(error = %error, "Failed to open fragment from day page");
             return;
@@ -279,7 +467,7 @@ impl DayPageView {
     }
 
     pub fn return_to_day_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let now = Utc::now();
+        let now = self.now();
         if let Err(error) = self.session.return_to_day(now) {
             tracing::error!(error = %error, "Failed to return to day page from fragment");
             return;
@@ -371,7 +559,7 @@ impl DayPageView {
     /// following `Day` binding by `day_has_rolled`, so an open note, fragment,
     /// or explicitly-opened past day is never dragged onto the new day.
     fn maybe_rebind_after_midnight(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.session.day_has_rolled(Utc::now()) {
+        if !self.session.day_has_rolled(self.now()) {
             return;
         }
         // `save` reads the editor buffer, applies it to the session, and writes
@@ -412,12 +600,16 @@ impl DayPageView {
         }
         self.autosave_flush_scheduled = true;
         let flush_delay = std::time::Duration::from_millis(Self::SAVE_DEBOUNCE_MS + 50);
+        let document_revision = self.document_revision;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(flush_delay).await;
             this.update(cx, |this, cx| {
                 this.autosave_flush_scheduled = false;
-                // Render side effects run the actual save; notify forces a
-                // render even when no further input arrives.
+                if this.document_revision == document_revision {
+                    this.save(cx);
+                } else if this.session.is_dirty() {
+                    this.schedule_autosave_flush(cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -454,9 +646,11 @@ impl DayPageView {
         let content = self.notes_editor.read(cx).content(cx);
         let content = self.canonical_content_with_shelf(&content);
         self.session.apply_editor_content(&content);
-        match self.session.save_content(&content, Utc::now()) {
+        match self.session.save_content(&content, self.now()) {
             Ok(()) => {
-                wake_indexer();
+                if !crate::runtime_policy::is_owned_evaluation() {
+                    wake_indexer();
+                }
                 true
             }
             Err(error) => {
@@ -542,6 +736,10 @@ impl DayPageView {
             "redacted": true,
             "instanceId": self.instance_id,
             "hostReturnGeneration": self.host_return_generation,
+            "dataRevision": self.semantic_revision(cx),
+            "surfaceRevision": self.document_revision(),
+            "themeRevision": self.theme_revision_seen,
+            "noteSwitcher": self.note_switcher.automation_state("dayPage.switcher", cx),
             "inputLength": input.chars().count(),
             "inputFingerprint": day_page_context_round_trip_fingerprint(&input),
             "dirty": self.session.is_dirty(),
@@ -747,295 +945,7 @@ impl Focusable for DayPageView {
     }
 }
 
-impl Render for DayPageView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.poll_external_disk_changes(window, cx);
-        self.maybe_rebind_after_midnight(window, cx);
-        self.maybe_autosave(window, cx);
-
-        let Some(app) = self.app.upgrade() else {
-            tracing::warn!("day_page.render_abandoned_after_host_dropped");
-            return div().into_any_element();
-        };
-
-        let app_state = app.read(cx);
-        let menu_def = app_state.current_main_menu_theme.def();
-        let shell = menu_def.shell;
-        let search = menu_def.search;
-        let tokens = get_tokens(app_state.current_design);
-        let design_visual = tokens.visual();
-        let is_default_design = app_state.current_design.is_default();
-        let text_primary = app_state.theme.colors.text.primary;
-        let font_family = app_state.theme_font_family();
-
-        let columns = crate::components::main_view_chrome::main_view_content_columns(menu_def);
-        let editor_layout = self.notes_editor.read(cx).layout();
-        let viewport_height = window.viewport_size().height.as_f32();
-        // Day Page is the explicit view-owned context-only policy: its editor
-        // belongs to MainViewMain, so no phantom input lane or input gap is
-        // reserved above it.
-        let header_height =
-            crate::components::main_view_chrome::main_view_header_metrics(menu_def, None)
-                .header_height;
-        let footer_height = crate::components::footer_chrome::current_main_menu_footer_height();
-        let shelf_count = if self.kit_resource_preview.is_none() {
-            self.clipboard_shelf.len()
-        } else {
-            0
-        };
-        let layout_budget = day_page_layout_budget(
-            viewport_height,
-            header_height,
-            footer_height,
-            shelf_count,
-            self.clipboard_shelf_expanded,
-            editor_layout.padding_y,
-        );
-        let editor_input = self.notes_editor.read(cx).render_input(cx);
-        // Hover discoverability: names the click action while the mouse is
-        // over a deeplink (the vendored input paints underline + pointer
-        // cursor). Absolute overlay — never reflows the editor. The receipt
-        // records what this render actually built (only meaningful in edit
-        // mode; preview/read branches below don't mount the editor).
-        let hover_hint_model = if self.kit_resource_preview.is_some() || self.read_mode {
-            None
-        } else {
-            crate::notes::deeplink_activation::hover_hint_model(
-                self.notes_editor.read(cx).hovered_deeplink(cx),
-                crate::notes::deeplink_activation::ActivationSurface::DayPage,
-            )
-        };
-        self.last_deeplink_hover_hint = hover_hint_model
-            .as_ref()
-            .map(|(verb, href)| serde_json::json!({ "verb": verb, "href": href }));
-        let deeplink_hover_hint = hover_hint_model.map(|(verb, href)| {
-            crate::components::resource_preview::render_deeplink_hover_hint(
-                "day-page-deeplink-hover-hint",
-                verb,
-                &href,
-                cx,
-            )
-        });
-        let editor_input = div()
-            .relative()
-            .flex_1()
-            .min_h(px(0.))
-            .h_full()
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
-                    this.activate_deeplink_from_mouse_up(event.clone(), window, cx);
-                }),
-            )
-            .child(editor_input);
-        let viewing_fragment = self.session.is_viewing_fragment();
-        let theme = app_state.theme.clone();
-
-        let local_today = Utc::now()
-            .with_timezone(&self.session.substrate().timezone())
-            .date_naive();
-        let viewing_past_day = !viewing_fragment
-            && self
-                .session
-                .bound_date()
-                .is_some_and(|date| date != local_today);
-
-        let back_bar = if viewing_fragment {
-            let label = match self.session.binding() {
-                DayPageBinding::Fragment {
-                    return_day_date, ..
-                } => {
-                    format!("Today · {return_day_date}")
-                }
-                DayPageBinding::Day => "Today".to_string(),
-                DayPageBinding::Note { title, .. } => title.clone(),
-            };
-            Some(crate::components::render_back_affordance(
-                script_kit_gpui::day_page::FRAGMENT_BACK_ID.into(),
-                label.into(),
-                &theme,
-                cx.listener(|this, _, window, cx| {
-                    this.return_to_day_page(window, cx);
-                }),
-            ))
-        } else if viewing_past_day {
-            let label = self
-                .session
-                .bound_date()
-                .map(|date| format!("Back to Today · viewing {date}"))
-                .unwrap_or_else(|| "Back to Today".to_string());
-            Some(crate::components::render_back_affordance(
-                "day-page-past-day-back".into(),
-                label.into(),
-                &theme,
-                cx.listener(|this, _, window, cx| {
-                    this.bind_today(window, cx);
-                    this.focus_editor(window, cx);
-                }),
-            ))
-        } else if self.session.is_viewing_note() {
-            let label = self
-                .session
-                .viewing_note_title()
-                .map(|title| format!("Back to Today · viewing {title}"))
-                .unwrap_or_else(|| "Back to Today".to_string());
-            Some(crate::components::render_back_affordance(
-                "day-page-note-back".into(),
-                label.into(),
-                &theme,
-                cx.listener(|this, _, window, cx| {
-                    this.return_to_day_page(window, cx);
-                    this.focus_editor(window, cx);
-                }),
-            ))
-        } else {
-            None
-        };
-
-        let editor_content = if self.kit_resource_preview.is_some() {
-            self.render_kit_resource_preview(cx)
-        } else if self.read_mode {
-            self.render_day_page_read_mode(cx)
-        } else {
-            div()
-                .relative()
-                .flex_1()
-                .min_h(px(0.))
-                .child(editor_input)
-                .when_some(deeplink_hover_hint, |d, chip| d.child(chip))
-                .into_any_element()
-        };
-
-        let clipboard_shelf = self
-            .render_clipboard_shelf(layout_budget.shelf_list_height, cx)
-            .map(|shelf| self.notes_editor.read(cx).render_content_accessory(shelf));
-
-        let editor_body = div()
-            .id(DAY_PAGE_EDITOR_ID)
-            .flex_1()
-            .min_h(px(0.))
-            .h_full()
-            // Symmetric content padding matching the notes/markdown editors,
-            // rather than the launcher's list-text column inset
-            // (`input_text_inset_left`) which pushed the day-page prose far to
-            // the right and looked inconsistent with every other markdown view.
-            .pl(px(columns.content_right_inset_x))
-            .pr(px(columns.content_right_inset_x))
-            .flex()
-            .flex_col()
-            .when_some(back_bar, |parent, bar| parent.child(bar))
-            .child(
-                div()
-                    // GPUI divs are display:block by default; without .flex()
-                    // the editor's flex_1/h_full chain resolves against an
-                    // auto height and collapses to a single line.
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h(px(DAY_PAGE_MIN_EDITOR_HEIGHT_PX))
-                    .child(editor_content),
-            )
-            .when_some(clipboard_shelf, |parent, shelf| parent.child(shelf));
-
-        let context_zone = app.update(cx, |app, _cx| {
-            app.render_inert_main_view_context_zone(menu_def)
-        });
-
-        let main = div()
-            .flex()
-            .flex_col()
-            .h_full()
-            .min_h(px(0.))
-            .w_full()
-            .overflow_hidden()
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .min_h(px(search.height))
-                    .flex_1()
-                    .min_h(px(0.))
-                    .child(editor_body),
-            )
-            .into_any_element();
-
-        let header = crate::components::main_view_chrome::MainViewHeaderChrome::context_only(
-            menu_def,
-            context_zone,
-        );
-
-        let divider = crate::components::main_view_chrome::MainViewDividerChrome {
-            margin_x: shell.divider_margin_x,
-            height: if is_default_design {
-                shell.divider_height
-            } else {
-                design_visual.border_thin
-            },
-            visible: false,
-        };
-
-        let root = crate::components::main_view_chrome::render_main_view_shell()
-            .text_color(rgb(text_primary))
-            .font_family(font_family)
-            .key_context("day_page")
-            .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, event, window, cx| {
-                this.handle_key_down(event, window, cx);
-            }));
-
-        let preview_availability = self.kit_resource_preview_action_availability();
-        let preview_return_label = self.kit_resource_preview_return_label();
-        let footer = if let Some(mut footer_config) =
-            app.read(cx).main_window_footer_config_with_cx(None)
-        {
-            footer_config.buttons = day_page_footer_buttons_for_preview(
-                app.read(cx),
-                preview_availability,
-                preview_return_label,
-            );
-            let footer_app = app.downgrade();
-            Some(
-                crate::components::prompt_layout_shell::render_main_window_footer_slot_for_prompt_surface(
-                    "day_page",
-                    move || {
-                        crate::components::footer_chrome::render_main_window_footer_config_rail(
-                            footer_config,
-                            move |action, window, cx| {
-                                if let Some(app) = footer_app.upgrade() {
-                                    app.update(cx, |app, cx| {
-                                        app.dispatch_main_window_footer_action(
-                                            action,
-                                            window,
-                                            cx,
-                                            "gpui_footer_click",
-                                        );
-                                    });
-                                }
-                            },
-                        )
-                    },
-                ),
-            )
-        } else {
-            tracing::warn!("day_page.footer_config_unavailable");
-            None
-        };
-
-        crate::components::main_view_chrome::render_main_view_chrome(
-            root,
-            &theme,
-            menu_def,
-            crate::components::main_view_chrome::MainViewChrome {
-                header,
-                divider,
-                main,
-                footer,
-                overlays: Vec::new(),
-            },
-        )
-    }
-}
+include!("day_page_render.rs");
 
 impl DayPageView {
     pub(crate) fn execute_day_page_action_from_preview(
@@ -1240,7 +1150,8 @@ impl DayPageView {
         if self.session.is_viewing_fragment() {
             return "Back to Fragment";
         }
-        let today = Utc::now()
+        let today = self
+            .now()
             .with_timezone(&self.session.substrate().timezone())
             .date_naive();
         if self.session.bound_date().is_some_and(|date| date != today) {
@@ -1284,7 +1195,7 @@ impl DayPageView {
                     note.title.clone(),
                     note.content.clone(),
                     path,
-                    Utc::now(),
+                    self.now(),
                 ) {
                     tracing::error!(
                         target: "script_kit::day_page",
@@ -1393,7 +1304,8 @@ impl DayPageView {
             }
             // Escape from a past day returns to today before closing the
             // window, keeping the dismissal ladder predictable.
-            let today = Utc::now()
+            let today = self
+                .now()
                 .with_timezone(&self.session.substrate().timezone())
                 .date_naive();
             if self.session.bound_date().is_some_and(|date| date != today) {
@@ -1541,7 +1453,24 @@ impl DayPageView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match crate::notes::deeplink_activation::read_cheap_kit_resource_preview(&uri) {
+        let fixture_preview = self.fixture_shelf_previews.as_ref().and_then(|records| {
+            records
+                .iter()
+                .find(|(id, _)| crate::clipboard_history::entry_resource_uri(id) == uri)
+                .map(
+                    |(_, text)| crate::notes::deeplink_activation::KitResourcePreview {
+                        uri: uri.clone(),
+                        title: "Clipboard entry".into(),
+                        mime_type: "text/plain".into(),
+                        text: text.clone(),
+                        truncated: false,
+                    },
+                )
+        });
+        let preview = fixture_preview.map(Ok).unwrap_or_else(|| {
+            crate::notes::deeplink_activation::read_cheap_kit_resource_preview(&uri)
+        });
+        match preview {
             Ok(preview) => {
                 tracing::info!(
                     event = "day_page_deeplink_kit_resource_preview_opened",
@@ -1582,6 +1511,12 @@ impl DayPageView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Err(error) =
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+        {
+            tracing::warn!(%error, "Day link opening refused");
+            return;
+        }
         match open::that(&href) {
             Ok(()) => {
                 tracing::info!(event = "day_page_deeplink_url_opened", href = %href);
@@ -1604,6 +1539,18 @@ impl DayPageView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Err(error) =
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+        {
+            self.open_deeplink_info_dialog(
+                "Can't open this link",
+                error.to_string(),
+                raw_href,
+                window,
+                cx,
+            );
+            return;
+        }
         let path_display = path.to_string_lossy().to_string();
         if !path.exists() {
             self.open_missing_file_deeplink_dialog(path, raw_href, window, cx);
@@ -1972,6 +1919,7 @@ impl ScriptListApp {
 
         entity.update(cx, |view, cx| view.focus_editor(window, cx));
         self.current_view = AppView::DayPage { entity };
+        self.note_main_route_changed();
         self.focused_input = FocusedInput::None;
         self.rekey_main_automation_surface_from_current_view();
         self.sync_main_footer_popup(window, cx);

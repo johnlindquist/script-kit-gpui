@@ -742,11 +742,13 @@ impl DayPageView {
         if response.is_empty() {
             anyhow::bail!("empty Agent Chat response");
         }
-        let local = Utc::now().with_timezone(&self.session.substrate().timezone());
+        let local = self.now().with_timezone(&self.session.substrate().timezone());
         let timestamp = local.format("%H:%M").to_string();
         self.session
             .append_external_line_to_bound_file(&format!("{timestamp} Agent Chat\n\n{response}"))?;
-        script_kit_gpui::brain::indexer::wake_indexer();
+        if !crate::runtime_policy::is_owned_evaluation() {
+            script_kit_gpui::brain::indexer::wake_indexer();
+        }
         Ok(())
     }
 

@@ -9,7 +9,7 @@ use crate::notes::deeplink_activation::{
 impl NotesApp {
     const SELECTED_NOTE_NOT_FOUND_FEEDBACK: &'static str = "Selected note could not be found";
 
-    pub(super) fn resolve_selected_note(
+    pub(crate) fn resolve_selected_note(
         selected_note_id: Option<NoteId>,
         notes: &[Note],
     ) -> Option<(NoteId, &Note)> {
@@ -224,6 +224,18 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Err(error) =
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+        {
+            self.open_deeplink_error_dialog(
+                "Can't open this link",
+                error.to_string(),
+                href,
+                window,
+                cx,
+            );
+            return;
+        }
         match open::that(&href) {
             Ok(()) => {
                 tracing::info!(event = "notes_deeplink_url_opened", href = %href);
@@ -247,6 +259,18 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Err(error) =
+            crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::OpenExternal)
+        {
+            self.open_deeplink_error_dialog(
+                "Can't open this link",
+                error.to_string(),
+                raw_href,
+                window,
+                cx,
+            );
+            return;
+        }
         let path_display = path.to_string_lossy().to_string();
         if !path.exists() {
             self.open_missing_file_deeplink_dialog(path, raw_href, window, cx);
@@ -588,32 +612,33 @@ impl NotesApp {
         cx.notify();
     }
 
-    /// Copy the current note content to clipboard
-    pub(super) fn copy_note_to_clipboard(&self, cx: &Context<Self>) {
+    /// Copy the current note content to the application's text-copy destination.
+    pub(super) fn copy_note_to_clipboard(&mut self, cx: &mut Context<Self>) {
         let content = self.editor_state.read(cx).value().to_string();
-        self.copy_text_to_clipboard(&content);
+        self.copy_text_to_clipboard(&content, "Copied", cx);
     }
 
-    pub(super) fn copy_text_to_clipboard(&self, content: &str) {
-        #[cfg(target_os = "macos")]
-        {
-            use std::process::Command;
-            let _ = Command::new("pbcopy")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .and_then(|mut child| {
-                    use std::io::Write;
-                    if let Some(stdin) = child.stdin.as_mut() {
-                        stdin.write_all(content.as_bytes())?;
-                    }
-                    child.wait()
-                });
+    pub(super) fn copy_text_to_clipboard(
+        &mut self,
+        content: &str,
+        success_message: &str,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::platform::copy_text(content) {
+            Ok(receipt) => {
+                info!(
+                    destination = ?receipt.destination(),
+                    byte_length = receipt.byte_length(),
+                    "Note text copied"
+                );
+                self.show_action_feedback(receipt.feedback(success_message.to_owned()), false);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Failed to copy note text");
+                self.show_action_feedback(format!("Failed to copy: {error}"), true);
+            }
         }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = content; // Avoid unused warning
-        }
+        cx.notify();
     }
 
     pub(super) fn note_deeplink(&self, id: NoteId) -> String {
@@ -708,7 +733,7 @@ impl NotesApp {
             return;
         };
         let deeplink = self.note_deeplink(id);
-        self.copy_text_to_clipboard(&deeplink);
+        self.copy_text_to_clipboard(&deeplink, "Copied link", cx);
     }
 
     pub(super) fn create_note_quicklink(&mut self, cx: &mut Context<Self>) {
@@ -722,7 +747,7 @@ impl NotesApp {
         };
         let deeplink = self.note_deeplink(id);
         let quicklink = format!("[{}]({})", title, deeplink);
-        self.copy_text_to_clipboard(&quicklink);
+        self.copy_text_to_clipboard(&quicklink, "Copied link", cx);
     }
 
     pub(super) fn copy_note_backlinks(&mut self, cx: &mut Context<Self>) {
@@ -732,8 +757,7 @@ impl NotesApp {
 
         match storage::get_note_backlinks(id) {
             Ok(backlinks) if backlinks.is_empty() => {
-                self.copy_text_to_clipboard("No backlinks");
-                self.show_action_feedback("No backlinks", false);
+                self.copy_text_to_clipboard("No backlinks", "No backlinks", cx);
             }
             Ok(backlinks) => {
                 let markdown = backlinks
@@ -748,8 +772,7 @@ impl NotesApp {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                self.copy_text_to_clipboard(&markdown);
-                self.show_action_feedback("Copied backlinks", false);
+                self.copy_text_to_clipboard(&markdown, "Copied backlinks", cx);
             }
             Err(error) => {
                 tracing::warn!(error = %error, note_id = %id, "Failed to copy note backlinks");

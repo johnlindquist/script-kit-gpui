@@ -82,7 +82,7 @@ fn relative_age(age_secs: i64) -> String {
 
 /// A brain document projected down to exactly what the launcher row needs.
 /// Full document content intentionally stays behind in the store.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootBrainSearchHit {
     pub title: String,
     pub excerpt: String,
@@ -213,74 +213,92 @@ pub fn root_brain_query_plan(
     }
 }
 
-/// Search the brain for passive root-launcher rows. Returns an empty list when
-/// the section is disabled, the query is too short, or the store errors —
-/// passive sources must never surface failures into the launcher.
+/// Search the brain for passive root-launcher rows. Ineligible queries are
+/// successful empty reads; storage failures remain typed for the source owner.
 pub fn search_root_brain_direct(
     query: &str,
     options: &RootBrainSectionOptions,
-) -> Vec<RootBrainSearchHit> {
+) -> anyhow::Result<Vec<RootBrainSearchHit>> {
     if !root_brain_query_is_eligible(query, *options) || options.max_results == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
+    }
+    if crate::runtime_policy::is_owned_evaluation() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "owned_source_snapshot_required",
+        )
+        .into());
     }
 
-    // The sync per-keystroke pass stays lexical-only (query_vec: None); the
-    // async pass ([`search_root_brain_semantic`]) upgrades it to hybrid.
+    // The synchronous pass stays lexical-only; the asynchronous pass upgrades it.
     let fetch_limit = options.max_results.saturating_mul(2);
-    let mut hits = map_root_brain_hits(
-        super::search::brain_search_proximity(query.trim(), None, None, fetch_limit)
-            .unwrap_or_default(),
-    );
+    let mut hits = map_root_brain_hits(super::search::brain_search_proximity(
+        query.trim(),
+        None,
+        None,
+        fetch_limit,
+    )?);
     hits.truncate(options.max_results);
-    hits
+    Ok(hits)
 }
 
 /// Async hybrid pass for the root launcher: embed the query on the warm
 /// indexer thread (hard ~200ms budget), then run hybrid FTS+cosine search.
-/// Returns `None` when no embedding model is warm — callers keep the lexical
-/// hits. Blocking; call from a background thread only, never the UI thread.
+/// Returns `Ok(None)` when embedding is unavailable within its native budget;
+/// storage failures stay `Err`. Call from a background thread, never the UI thread.
 pub fn search_root_brain_semantic(
     query: &str,
     options: &RootBrainSectionOptions,
-) -> Option<Vec<RootBrainSearchHit>> {
+) -> anyhow::Result<Option<Vec<RootBrainSearchHit>>> {
     if !root_brain_query_is_eligible(query, *options) || options.max_results == 0 {
-        return None;
+        return Ok(None);
+    }
+    if crate::runtime_policy::is_owned_evaluation() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "owned_source_snapshot_required",
+        )
+        .into());
     }
     let query = query.trim();
-    let (model_id, query_vec) = super::indexer::embed_query_within_budget(query)?;
+    let Some((model_id, query_vec)) = super::indexer::embed_query_within_budget(query) else {
+        return Ok(None);
+    };
     let fetch_limit = options.max_results.saturating_mul(2);
-    let mut hits = map_root_brain_hits(
-        super::search::brain_search_proximity(
-            query,
-            Some(&query_vec),
-            Some(&model_id),
-            fetch_limit,
-        )
-        .unwrap_or_default(),
-    );
+    let mut hits = map_root_brain_hits(super::search::brain_search_proximity(
+        query,
+        Some(&query_vec),
+        Some(&model_id),
+        fetch_limit,
+    )?);
     hits.truncate(options.max_results);
-    Some(hits)
+    Ok(Some(hits))
 }
 
 /// Most recent brain docs as launcher rows. Backs the armed-but-empty
 /// `brain:` source filter so it shows "what your brain holds" instead of a
-/// blank panel. Never errors into the launcher (empty on store failure).
-pub fn recent_root_brain_hits(max_results: usize) -> Vec<RootBrainSearchHit> {
+/// blank panel. Storage failures remain typed for the source owner.
+pub fn recent_root_brain_hits(max_results: usize) -> anyhow::Result<Vec<RootBrainSearchHit>> {
     if max_results == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    // Over-fetch then dedupe by content, mirroring `brain_search`: the same
-    // text mirrored from several sources must not fill the recents view.
+    if crate::runtime_policy::is_owned_evaluation() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "owned_source_snapshot_required",
+        )
+        .into());
+    }
+    // Over-fetch then dedupe by content, mirroring `brain_search`.
     let mut seen = std::collections::HashSet::new();
-    map_root_brain_hits(
-        super::store::recent_docs(max_results.saturating_mul(3).max(8))
-            .unwrap_or_default()
+    Ok(map_root_brain_hits(
+        super::store::recent_docs(max_results.saturating_mul(3).max(8))?
             .into_iter()
             .filter(|doc| seen.insert(super::store::content_hash(&doc.title, &doc.content)))
             .take(max_results)
             .map(|doc| super::search::BrainHit { doc, score: 0.0 })
             .collect(),
-    )
+    ))
 }
 
 /// Prefer async semantic hits over the sync lexical pass when they were
@@ -794,8 +812,12 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        assert!(search_root_brain_direct("anything", &options).is_empty());
+        assert!(search_root_brain_direct("anything", &options)
+            .expect("disabled source does not read IO")
+            .is_empty());
         let options = RootBrainSectionOptions::default();
-        assert!(search_root_brain_direct("ab", &options).is_empty());
+        assert!(search_root_brain_direct("ab", &options)
+            .expect("short query does not read IO")
+            .is_empty());
     }
 }

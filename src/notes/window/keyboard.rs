@@ -773,12 +773,10 @@ impl NotesApp {
                     self.toggle_bullet_list(window, cx);
                     cx.stop_propagation();
                 }
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
-                    if !modifiers.shift {
-                        if let Ok(num) = key.parse::<usize>() {
-                            self.select_pinned_note_by_index(num - 1, window, cx);
-                            cx.stop_propagation();
-                        }
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !modifiers.shift => {
+                    if let Ok(num) = key.parse::<usize>() {
+                        self.select_pinned_note_by_index(num - 1, window, cx);
+                        cx.stop_propagation();
                     }
                 }
                 _ => {}

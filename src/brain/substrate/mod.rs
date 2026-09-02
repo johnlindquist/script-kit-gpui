@@ -55,6 +55,9 @@ impl BrainSubstrate {
     }
 
     pub fn default_kit() -> Self {
+        if crate::runtime_policy::is_owned_evaluation() {
+            return Self::new(BrainPaths::default_kit().base());
+        }
         Self::with_timezone(BrainPaths::default_kit().base(), default_brain_timezone())
     }
 
@@ -85,7 +88,11 @@ impl BrainSubstrate {
         let path = self.paths.day_page(date);
         let line = entry.format_line(&timestamp);
         io::atomic_append_line(&path, &line)?;
-        crate::brain::indexer::index_capture_after_write(&path);
+        if crate::runtime_policy::is_owned_evaluation() {
+            crate::runtime_policy::record_completed_fixture_effect();
+        } else {
+            crate::brain::indexer::index_capture_after_write(&path);
+        }
         Ok(())
     }
 
@@ -134,7 +141,11 @@ impl BrainSubstrate {
         if let Some(reference) = &reference {
             if let Some(filename) = reference.relative_link.rsplit('/').next() {
                 let fragment_path = self.paths.fragments_dir().join(filename);
-                crate::brain::indexer::index_capture_after_write(&fragment_path);
+                if crate::runtime_policy::is_owned_evaluation() {
+                    crate::runtime_policy::record_completed_fixture_effect();
+                } else {
+                    crate::brain::indexer::index_capture_after_write(&fragment_path);
+                }
             }
         }
         Ok(reference)
@@ -180,12 +191,15 @@ impl BrainSubstrate {
     }
 
     /// Allocate a unique lowercase hyphenated slug in the given directory.
-    pub fn allocate_slug(&self, base: &str, dir: BrainSlugDir) -> String {
+    pub fn allocate_slug(&self, base: &str, dir: BrainSlugDir) -> Result<String> {
         let parent = match dir {
             BrainSlugDir::Notes => self.paths.notes_dir(),
             BrainSlugDir::Fragments => self.paths.fragments_dir(),
         };
-        dedupe_slug_in_dir(&parent, base)
+        if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+            policy.require_owned_path(&parent)?;
+        }
+        Ok(dedupe_slug_in_dir(&parent, base))
     }
 
     /// Move a brain file into `brain/trash/`.
@@ -537,12 +551,16 @@ mod tests {
         fs::write(notes_dir.join("my-note.md"), "existing").expect("seed note");
 
         assert_eq!(
-            substrate.allocate_slug("My Note", BrainSlugDir::Notes),
+            substrate
+                .allocate_slug("My Note", BrainSlugDir::Notes)
+                .expect("allocate slug"),
             "my-note-2"
         );
         fs::write(notes_dir.join("my-note-2.md"), "existing").expect("seed note 2");
         assert_eq!(
-            substrate.allocate_slug("My Note", BrainSlugDir::Notes),
+            substrate
+                .allocate_slug("My Note", BrainSlugDir::Notes)
+                .expect("allocate slug"),
             "my-note-3"
         );
     }

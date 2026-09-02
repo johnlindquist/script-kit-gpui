@@ -395,6 +395,9 @@ impl NotesApp {
             }
             crate::spine::SpineListAction::OpenFileSearchPortal { .. }
             | crate::spine::SpineListAction::OpenModeExit { .. }
+            | crate::spine::SpineListAction::AcceptMenuSyntaxTrigger { .. }
+            | crate::spine::SpineListAction::AcceptMenuSyntaxObject { .. }
+            | crate::spine::SpineListAction::AttachContextResult { .. }
             | crate::spine::SpineListAction::Noop => false,
         }
     }

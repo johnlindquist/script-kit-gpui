@@ -49,6 +49,12 @@ pub(crate) struct BrainFileSourceSyncReceipt {
 /// Ask the indexer to run a cycle soon (e.g. after a chat turn ingests new
 /// docs). Cheap; coalesces with pending wakes.
 pub fn wake_indexer() {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+    {
+        tracing::warn!(%error, "Brain indexer wake refused");
+        return;
+    }
     if let Some(tx) = WAKE.get() {
         let _ = tx.send(IndexerRequest::Wake);
     }
@@ -59,6 +65,12 @@ pub fn wake_indexer() {
 /// the model isn't warm yet, or the indexer is mid-cycle — callers fall back
 /// to lexical recall. Never blocks longer than [`QUERY_EMBED_BUDGET`].
 pub fn embed_query_within_budget(text: &str) -> Option<(String, Vec<f32>)> {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+    {
+        tracing::warn!(%error, "Brain query embedding refused");
+        return None;
+    }
     let tx = WAKE.get()?;
     let (reply_tx, reply_rx) = mpsc::channel();
     tx.send(IndexerRequest::EmbedQuery {
@@ -71,6 +83,12 @@ pub fn embed_query_within_budget(text: &str) -> Option<(String, Vec<f32>)> {
 
 /// Start the background indexer thread. Idempotent.
 pub fn start_brain_indexer() {
+    if let Err(error) =
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Provider)
+    {
+        tracing::warn!(%error, "Brain indexer startup refused");
+        return;
+    }
     if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -768,6 +786,7 @@ pub fn index_capture_now(path: &Path) {
 }
 
 fn try_index_capture(path: &Path) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ExternalStorage)?;
     let Some(doc) = derive_capture_doc(path)? else {
         return Ok(());
     };

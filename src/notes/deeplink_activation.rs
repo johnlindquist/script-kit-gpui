@@ -155,6 +155,10 @@ pub(crate) fn hover_hint_model(
 }
 
 pub(crate) fn read_cheap_kit_resource_preview(uri: &str) -> Result<KitResourcePreview, String> {
+    if crate::runtime_policy::is_owned_evaluation() && !uri.starts_with("kit://notes") {
+        crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::ExternalStorage)
+            .map_err(|error| error.to_string())?;
+    }
     if !is_cheap_text_kit_resource_uri(uri) {
         return Err(format!(
             "Resource preview supports kit://notes, kit://scripts, kit://clipboard-history, and kit://dictation-history in this slice: {uri}"
@@ -162,7 +166,7 @@ pub(crate) fn read_cheap_kit_resource_preview(uri: &str) -> Result<KitResourcePr
     }
 
     let scripts = if uri == "kit://scripts" {
-        crate::scripts::read_scripts()
+        crate::scripts::read_scripts().map_err(|error| error.to_string())?
     } else {
         Vec::new()
     };

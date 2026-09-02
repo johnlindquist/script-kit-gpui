@@ -36,6 +36,7 @@ impl NotesEditor {
 
         div()
             .id("notes-markdown-preview")
+            .debug_selector(|| "notes-markdown-preview".to_string())
             .flex_1()
             .min_h(px(0.))
             .track_scroll(&self.preview_scroll_handle)
@@ -74,6 +75,10 @@ impl NotesEditor {
             .font_family(cx.theme().mono_font_family.clone())
             .text_size(cx.theme().mono_font_size);
 
-        div().h_full().child(editor).into_any_element()
+        div()
+            .debug_selector(|| "notes-editor-input-viewport".to_string())
+            .h_full()
+            .child(editor)
+            .into_any_element()
     }
 }

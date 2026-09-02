@@ -21,6 +21,9 @@ impl BrainPaths {
     }
 
     pub fn default_kit() -> Self {
+        if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+            return Self::new(policy.root().join("notes/brain"));
+        }
         Self::new(crate::setup::get_kit_path().join("brain"))
     }
 

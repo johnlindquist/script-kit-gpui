@@ -1,20 +1,3 @@
-/// Return shared Markdown editor runtime metadata for the live Notes window.
-pub fn get_notes_editor_runtime_info(
-    cx: &gpui::App,
-) -> Option<crate::protocol::ElementEditorRuntimeInfo> {
-    let entity = {
-        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
-        slot.lock().ok()?.clone()?
-    };
-    Some(
-        entity
-            .read(cx)
-            .notes_editor
-            .read(cx)
-            .markdown_runtime_info_with_scroll(cx),
-    )
-}
-
 /// Handle the current Notes ghost autocomplete prediction through the live
 /// Notes window, for target-scoped DevTools `simulateKey` proof.
 pub fn handle_notes_ghost_key_for_automation(

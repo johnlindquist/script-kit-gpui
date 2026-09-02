@@ -104,11 +104,12 @@ impl NotesApp {
         let before = self.native_resize_phase;
         self.native_resize_phase = next;
         let interaction_enabled = next == NotesNativeResizePhase::Enabled;
-        let applied = crate::platform::apply_window_resize_policy(
-            window,
-            Self::notes_shell_resize_policy(),
-            interaction_enabled,
-        );
+        let applied = !self.host_policy.is_hidden()
+            && crate::platform::apply_window_resize_policy(
+                window,
+                Self::notes_shell_resize_policy(),
+                interaction_enabled,
+            );
         tracing::info!(
             target: "notes",
             event = "notes_native_resize_phase_transition",
@@ -281,6 +282,9 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.host_policy.is_hidden() {
+            return;
+        }
         // Native and custom drag handlers must never run simultaneously: while
         // the interlock is Enabled, AppKit's resizable frame owns every edge
         // and corner; the bottom-band fallback stays available for the locked
@@ -379,15 +383,7 @@ impl NotesApp {
             receipt.after_width = after.width.as_f32();
             receipt.after_height = after.height.as_f32();
         }
-        crate::windows::set_automation_bounds(
-            "notes",
-            Some(crate::protocol::AutomationWindowBounds {
-                x: bounds.origin.x.as_f32() as f64,
-                y: bounds.origin.y.as_f32() as f64,
-                width: bounds.size.width.as_f32() as f64,
-                height: bounds.size.height.as_f32() as f64,
-            }),
-        );
+        self.sync_automation_bounds(window);
     }
 }
 

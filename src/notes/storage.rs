@@ -102,12 +102,23 @@ pub(crate) struct RootNotesSearchRefresh {
 
 pub(crate) struct RootNotesSearchSnapshot {
     flight: RootNotesSearchFlightKey,
+    hits: Result<Vec<RootNoteSearchHit>>,
+}
+
+impl RootNotesSearchSnapshot {
+    pub(crate) fn read_outcome(&self) -> Result<usize, &anyhow::Error> {
+        self.hits.as_ref().map(Vec::len)
+    }
+}
+
+struct RootNotesCachedHits {
+    generation: u64,
     hits: Vec<RootNoteSearchHit>,
 }
 
 #[derive(Default)]
 struct RootNotesSearchCache {
-    hits_by_query: HashMap<RootNotesSearchCacheKey, Vec<RootNoteSearchHit>>,
+    hits_by_query: HashMap<RootNotesSearchCacheKey, RootNotesCachedHits>,
     in_flight: HashSet<RootNotesSearchFlightKey>,
     refresh_lifecycle: RootOwnedProviderRefreshLifecycle,
 }
@@ -161,9 +172,11 @@ fn fingerprint_path(path: &std::path::Path) -> (String, usize) {
 pub(crate) fn automation_storage_identity() -> serde_json::Value {
     let (db_fingerprint, db_len) = fingerprint_path(&get_notes_db_path());
     let (brain_fingerprint, brain_len) = fingerprint_path(&get_notes_brain_base_path());
-    let db_sandbox = std::env::var_os("SCRIPT_KIT_TEST_NOTES_DB_PATH").is_some() || cfg!(test);
+    let owned = crate::runtime_policy::is_owned_evaluation();
+    let db_sandbox =
+        owned || std::env::var_os("SCRIPT_KIT_TEST_NOTES_DB_PATH").is_some() || cfg!(test);
     let brain_sandbox =
-        std::env::var_os("SCRIPT_KIT_TEST_NOTES_BRAIN_PATH").is_some() || cfg!(test);
+        owned || std::env::var_os("SCRIPT_KIT_TEST_NOTES_BRAIN_PATH").is_some() || cfg!(test);
 
     serde_json::json!({
         "schemaVersion": 2,
@@ -190,6 +203,9 @@ pub(crate) fn root_notes_query_is_eligible(query: &str, options: RootNotesSectio
 
 /// Get the path to the notes database
 fn get_notes_db_path() -> PathBuf {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        return policy.root().join("notes/db/notes.sqlite");
+    }
     if let Ok(path) = std::env::var("SCRIPT_KIT_TEST_NOTES_DB_PATH") {
         return PathBuf::from(path);
     }
@@ -210,6 +226,11 @@ fn get_notes_db_path() -> PathBuf {
 }
 
 fn get_notes_brain_base_path() -> PathBuf {
+    if crate::runtime_policy::is_owned_evaluation() {
+        return crate::brain::substrate::BrainPaths::default_kit()
+            .base()
+            .to_path_buf();
+    }
     if let Ok(path) = std::env::var("SCRIPT_KIT_TEST_NOTES_BRAIN_PATH") {
         return PathBuf::from(path);
     }
@@ -240,6 +261,12 @@ pub(crate) fn note_file_path(id: NoteId) -> Result<Option<PathBuf>> {
 }
 
 fn notes_substrate() -> Result<Arc<BrainSubstrate>> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy.require_owned_path(&get_notes_brain_base_path())?;
+        if let Some(substrate) = NOTES_SUBSTRATE.get() {
+            policy.require_owned_path(substrate.paths().base())?;
+        }
+    }
     Ok(NOTES_SUBSTRATE
         .get_or_init(|| Arc::new(BrainSubstrate::new(get_notes_brain_base_path())))
         .clone())
@@ -361,7 +388,7 @@ fn resolve_note_slug(conn: &Connection, note: &Note) -> Result<String> {
     }
 
     let substrate = notes_substrate()?;
-    Ok(substrate.allocate_slug(&note.title, BrainSlugDir::Notes))
+    substrate.allocate_slug(&note.title, BrainSlugDir::Notes)
 }
 
 fn write_conflict_copy(path: &Path, contents: &str) -> Result<()> {
@@ -853,6 +880,10 @@ fn reindex_external_note_file(path: &Path) -> Result<()> {
 }
 
 fn start_notes_dir_watcher() {
+    // Owned fixtures use synchronous canonical saves/searches, not an unbounded watcher.
+    if crate::runtime_policy::is_owned_evaluation() {
+        return;
+    }
     if NOTES_DIR_WATCHER_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -933,246 +964,7 @@ fn notes_dir_watcher_loop(notes_dir: PathBuf) {
     }
 }
 
-/// Ensure the notes tables and virtual search table exist.
-fn ensure_notes_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS notes (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL DEFAULT '',
-            content TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            deleted_at TEXT,
-            is_pinned INTEGER NOT NULL DEFAULT 0,
-            sort_order INTEGER NOT NULL DEFAULT 0,
-            file_slug TEXT,
-            content_hash TEXT
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_notes_updated_at ON notes(updated_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_notes_deleted_at ON notes(deleted_at);
-        CREATE INDEX IF NOT EXISTS idx_notes_is_pinned ON notes(is_pinned);
-
-        CREATE TABLE IF NOT EXISTS note_cart_items (
-            id TEXT PRIMARY KEY,
-            note_id TEXT NOT NULL,
-            label TEXT NOT NULL DEFAULT '',
-            payload_json TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            sort_order INTEGER NOT NULL DEFAULT 0,
-            FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_note_cart_items_note_id_sort
-            ON note_cart_items(note_id, sort_order, updated_at DESC);
-
-        CREATE TABLE IF NOT EXISTS note_tags (
-            note_id TEXT NOT NULL,
-            tag TEXT NOT NULL,
-            normalized_tag TEXT NOT NULL,
-            source TEXT NOT NULL DEFAULT 'markdown',
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY(note_id, normalized_tag),
-            FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_note_tags_normalized
-            ON note_tags(normalized_tag, note_id);
-
-        CREATE TABLE IF NOT EXISTS note_aliases (
-            note_id TEXT NOT NULL,
-            alias TEXT NOT NULL,
-            slug TEXT NOT NULL,
-            source TEXT NOT NULL DEFAULT 'title',
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY(note_id, slug),
-            FOREIGN KEY(note_id) REFERENCES notes(id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_note_aliases_slug
-            ON note_aliases(slug, note_id);
-
-        CREATE TABLE IF NOT EXISTS note_links (
-            source_note_id TEXT NOT NULL,
-            target_note_id TEXT,
-            target_ref TEXT NOT NULL,
-            target_slug TEXT NOT NULL,
-            label TEXT,
-            kind TEXT NOT NULL DEFAULT 'wiki',
-            byte_start INTEGER NOT NULL DEFAULT 0,
-            byte_end INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY(source_note_id, target_slug, byte_start, byte_end, kind),
-            FOREIGN KEY(source_note_id) REFERENCES notes(id) ON DELETE CASCADE,
-            FOREIGN KEY(target_note_id) REFERENCES notes(id) ON DELETE SET NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_note_links_target
-            ON note_links(target_note_id, source_note_id);
-        CREATE INDEX IF NOT EXISTS idx_note_links_target_slug
-            ON note_links(target_slug, source_note_id);
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
-            title,
-            content,
-            content='notes',
-            content_rowid='rowid'
-        );
-        "#,
-    )
-    .context("Failed to create notes tables")?;
-
-    migrate_notes_schema(conn)?;
-    ensure_notes_fts_triggers(conn)?;
-    Ok(())
-}
-
-fn migrate_notes_schema(conn: &Connection) -> Result<()> {
-    let columns = [("file_slug", "TEXT"), ("content_hash", "TEXT")];
-    for (name, column_type) in columns {
-        let exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('notes') WHERE name = ?1",
-                params![name],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        if exists == 0 {
-            conn.execute(
-                &format!("ALTER TABLE notes ADD COLUMN {name} {column_type}"),
-                [],
-            )
-            .with_context(|| format!("Failed to add notes.{name} column"))?;
-        }
-    }
-    Ok(())
-}
-
-/// Recreate the FTS triggers so migrations are applied even on an existing DB connection.
-fn ensure_notes_fts_triggers(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        DROP TRIGGER IF EXISTS notes_ai;
-        DROP TRIGGER IF EXISTS notes_ad;
-        DROP TRIGGER IF EXISTS notes_au;
-
-        CREATE TRIGGER notes_ai AFTER INSERT ON notes BEGIN
-            INSERT INTO notes_fts(rowid, title, content)
-            VALUES (NEW.rowid, NEW.title, NEW.content);
-        END;
-
-        CREATE TRIGGER notes_ad AFTER DELETE ON notes BEGIN
-            INSERT INTO notes_fts(notes_fts, rowid, title, content)
-            VALUES('delete', OLD.rowid, OLD.title, OLD.content);
-        END;
-
-        CREATE TRIGGER notes_au AFTER UPDATE ON notes
-        WHEN OLD.title <> NEW.title OR OLD.content <> NEW.content
-        BEGIN
-            INSERT INTO notes_fts(notes_fts, rowid, title, content)
-            VALUES('delete', OLD.rowid, OLD.title, OLD.content);
-            INSERT INTO notes_fts(rowid, title, content)
-            VALUES (NEW.rowid, NEW.title, NEW.content);
-        END;
-        "#,
-    )
-    .context("Failed to create FTS triggers")?;
-
-    Ok(())
-}
-
-/// Serializes first-time notes DB initialization across threads.
-///
-/// Without this, concurrent callers can each pass the `NOTES_DB.get()` miss,
-/// open separate connections to the same sqlite file, and race the
-/// DROP/CREATE TRIGGER batch in `ensure_notes_schema` ("Failed to create FTS
-/// triggers"). Poison-tolerant: a panicking initializer must not wedge every
-/// later caller.
-static NOTES_DB_INIT_LOCK: Mutex<()> = Mutex::new(());
-
-/// Open a connection at `path`, apply the standard pragmas, verify integrity
-/// with `quick_check`, and ensure the schema. Any failure returns Err with the
-/// connection already dropped, so the caller can safely rename files aside.
-fn open_and_check_notes_db(path: &Path) -> Result<Connection> {
-    let conn = crate::utils::db_permissions::open_private_sqlite(path)
-        .context("Failed to open private notes database")?;
-    conn.execute_batch("PRAGMA journal_mode=WAL;")
-        .context("Failed to enable WAL mode")?;
-    conn.execute_batch("PRAGMA foreign_keys=ON;")
-        .context("Failed to enable notes foreign keys")?;
-    let integrity: String = conn
-        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
-        .context("notes quick_check")?;
-    if integrity != "ok" {
-        anyhow::bail!("notes quick_check reported: {integrity}");
-    }
-    ensure_notes_schema(&conn)?;
-    // notes.sqlite stores full note titles + bodies (+ FTS shadow). Keep it and
-    // its WAL/SHM sidecars owner-only rather than inheriting umask.
-    crate::utils::db_permissions::harden_sqlite_permissions(path)
-        .context("Failed to protect private Notes SQLite sidecars")?;
-    Ok(conn)
-}
-
-fn notes_path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    name.push_str(suffix);
-    path.with_file_name(name)
-}
-
-/// Move a damaged notes db and its WAL/SHM sidecars aside to
-/// `*.corrupt-<secs>` siblings. Returns the destination of the primary db
-/// file for logging.
-fn move_corrupt_notes_db_aside(path: &Path) -> Result<PathBuf> {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let corrupt = format!(".corrupt-{secs}");
-    let mut primary_dest = notes_path_with_suffix(path, &corrupt);
-    for suffix in ["", "-wal", "-shm"] {
-        let from = notes_path_with_suffix(path, suffix);
-        if !from.exists() {
-            continue;
-        }
-        let dest = notes_path_with_suffix(&from, &corrupt);
-        fs::rename(&from, &dest)
-            .with_context(|| format!("move corrupt notes file {} aside", from.display()))?;
-        if suffix.is_empty() {
-            primary_dest = dest;
-        }
-    }
-    Ok(primary_dest)
-}
-
-/// Open the notes DB at `path`, recovering from corruption by moving the
-/// damaged database aside and starting fresh. Markdown under `brain/notes/`
-/// is canonical (ADR 0003), so the caller rebuilds the index from files when
-/// the returned bool is `true` — a corrupt index must never present as an
-/// empty Notes list while the notes still exist on disk.
-fn open_or_recover_notes_db(path: &Path) -> Result<(Connection, bool)> {
-    crate::utils::db_permissions::prepare_private_sqlite(path)
-        .context("Refuse unsafe Notes SQLite ownership before corruption recovery")?;
-    match open_and_check_notes_db(path) {
-        Ok(conn) => Ok((conn, false)),
-        Err(err) => {
-            // open_and_check_notes_db dropped its connection on the error
-            // path, so the files are unlocked and safe to rename.
-            let moved = move_corrupt_notes_db_aside(path)?;
-            warn!(
-                error = %err,
-                moved_to = %moved.display(),
-                "notes.sqlite failed integrity check; moved aside and rebuilding index from markdown"
-            );
-            Ok((open_and_check_notes_db(path)?, true))
-        }
-    }
-}
+include!("storage_schema.rs");
 
 /// Initialize the notes database
 ///
@@ -1303,6 +1095,26 @@ pub fn save_note(note: &Note) -> Result<()> {
     debug!(note_id = %note.id, title = %note.title, slug = %slug, "Note saved to brain file");
     crate::dev_marker::log_marker_note_explanation_if_ready(&note.id, &note.content);
     invalidate_root_notes_search_cache();
+    Ok(())
+}
+
+/// Read back the canonical file and index after a delivery save.
+pub(crate) fn verify_saved_note_content(id: NoteId, expected: &str) -> Result<()> {
+    let note = get_note(id)?.context("saved Notes index entry missing")?;
+    anyhow::ensure!(
+        note.content == expected && note.deleted_at.is_none(),
+        "saved Notes index content differs"
+    );
+    let path = note_file_path(id)?.context("saved Notes canonical path missing")?;
+    let raw = brain_io::read_private_document(&path)?;
+    let (frontmatter, _) = notes_substrate()?.parse_document(&raw)?;
+    anyhow::ensure!(
+        frontmatter.id == id,
+        "saved Notes canonical identity differs"
+    );
+    let expected_raw = brain_frontmatter_from_note(&note, frontmatter.source)
+        .render(&note_body_for_file(expected));
+    anyhow::ensure!(raw == expected_raw, "saved Notes canonical content differs");
     Ok(())
 }
 
@@ -1955,7 +1767,7 @@ pub(crate) fn search_root_notes_meta_cached(
             cache
                 .hits_by_query
                 .get(&root_notes_search_cache_key(query, options))
-                .cloned()
+                .map(|cached| cached.hits.clone())
         })
         .unwrap_or_default()
 }
@@ -1968,8 +1780,43 @@ pub(crate) fn root_notes_search_cache_is_fresh(
         && root_notes_search_cache().lock().is_ok_and(|cache| {
             cache
                 .hits_by_query
-                .contains_key(&root_notes_search_cache_key(query, options))
+                .get(&root_notes_search_cache_key(query, options))
+                .is_some_and(|cached| {
+                    cached.generation == ROOT_NOTES_SEARCH_CACHE_GENERATION.load(Ordering::Relaxed)
+                })
         })
+}
+
+fn fresh_root_notes_search_cache_status(
+    cache: &RootNotesSearchCache,
+    query: &str,
+    options: RootNotesSectionOptions,
+    generation: u64,
+) -> Option<(u64, usize)> {
+    if !root_notes_query_is_eligible(query, options)
+        || cache.refresh_lifecycle.in_flight.is_some()
+        || !cache.in_flight.is_empty()
+    {
+        return None;
+    }
+    let cached = cache
+        .hits_by_query
+        .get(&root_notes_search_cache_key(query, options))?;
+    (cached.generation == generation).then_some((cached.generation, cached.hits.len()))
+}
+
+/// Current exact-query cache epoch and row count; no source work is admitted.
+pub(crate) fn root_notes_search_fresh_cache_status(
+    query: &str,
+    options: RootNotesSectionOptions,
+) -> Option<(u64, usize)> {
+    let cache = root_notes_search_cache().try_lock().ok()?;
+    fresh_root_notes_search_cache_status(
+        &cache,
+        query,
+        options,
+        ROOT_NOTES_SEARCH_CACHE_GENERATION.load(Ordering::Relaxed),
+    )
 }
 
 fn try_begin_root_notes_search_refresh_in_cache(
@@ -1985,7 +1832,10 @@ fn try_begin_root_notes_search_refresh_in_cache(
     let search = root_notes_search_cache_key(query, options);
     let owner = cache.refresh_lifecycle.begin(
         sk_protocol::command_contract::CommandSource::Note,
-        cache.hits_by_query.contains_key(&search),
+        cache
+            .hits_by_query
+            .get(&search)
+            .is_some_and(|cached| cached.generation == cache_generation),
     )?;
     let flight = RootNotesSearchFlightKey {
         generation: cache_generation,
@@ -2022,10 +1872,73 @@ pub(crate) fn try_begin_root_notes_search_refresh(
 pub(crate) fn read_root_notes_search_snapshot(
     refresh: &RootNotesSearchRefresh,
 ) -> RootNotesSearchSnapshot {
+    assert!(
+        !crate::runtime_policy::is_owned_evaluation(),
+        "owned_source_snapshot_required"
+    );
     RootNotesSearchSnapshot {
         flight: refresh.flight.clone(),
-        hits: search_root_notes_meta(&refresh.flight.search.query, refresh.options),
+        hits: search_root_notes_meta_result(&refresh.flight.search.query, refresh.options),
     }
+}
+
+pub(crate) fn owned_root_notes_search_snapshot(
+    refresh: &RootNotesSearchRefresh,
+    result: Result<Vec<RootNoteSearchHit>>,
+) -> Result<RootNotesSearchSnapshot> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    Ok(RootNotesSearchSnapshot {
+        flight: refresh.flight.clone(),
+        hits: result,
+    })
+}
+
+pub(crate) fn reset_owned_root_notes_search() -> Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut cache = root_notes_search_cache().lock().map_err(db_lock_err)?;
+    let generation = cache
+        .refresh_lifecycle
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("notes_refresh_generation_exhausted"))?;
+    ROOT_NOTES_SEARCH_CACHE_GENERATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| anyhow::anyhow!("notes_cache_generation_exhausted"))?;
+    cache.refresh_lifecycle.next_generation = generation;
+    cache.refresh_lifecycle.in_flight = None;
+    cache.in_flight.clear();
+    cache.hits_by_query.clear();
+    Ok(())
+}
+
+pub(crate) fn invalidate_owned_root_notes_search_freshness() -> Result<()> {
+    anyhow::ensure!(
+        crate::runtime_policy::is_owned_evaluation(),
+        "owned_runtime_required"
+    );
+    let mut cache = root_notes_search_cache().lock().map_err(db_lock_err)?;
+    let generation = cache
+        .refresh_lifecycle
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("notes_refresh_generation_exhausted"))?;
+    ROOT_NOTES_SEARCH_CACHE_GENERATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| anyhow::anyhow!("notes_cache_generation_exhausted"))?;
+    cache.refresh_lifecycle.next_generation = generation;
+    cache.refresh_lifecycle.in_flight = None;
+    cache.in_flight.clear();
+    Ok(())
 }
 
 fn finish_root_notes_search_refresh_in_cache(
@@ -2037,6 +1950,7 @@ fn finish_root_notes_search_refresh_in_cache(
     if refresh.owner.source != sk_protocol::command_contract::CommandSource::Note
         || snapshot.flight != refresh.flight
         || cache.refresh_lifecycle.in_flight != Some(refresh.owner)
+        || !cache.in_flight.contains(&refresh.flight)
     {
         return false;
     }
@@ -2046,9 +1960,16 @@ fn finish_root_notes_search_refresh_in_cache(
     {
         return false;
     }
-    cache
-        .hits_by_query
-        .insert(refresh.flight.search, snapshot.hits);
+    let Ok(hits) = snapshot.hits else {
+        return false;
+    };
+    cache.hits_by_query.insert(
+        refresh.flight.search,
+        RootNotesCachedHits {
+            generation: refresh.flight.generation,
+            hits,
+        },
+    );
     true
 }
 
@@ -2070,7 +1991,8 @@ fn discard_root_notes_search_refresh_in_cache(
     cache: &mut RootNotesSearchCache,
     refresh: RootNotesSearchRefresh,
 ) -> bool {
-    if !cache.refresh_lifecycle.finish(refresh.owner) {
+    if !cache.in_flight.contains(&refresh.flight) || !cache.refresh_lifecycle.finish(refresh.owner)
+    {
         return false;
     }
     cache.in_flight.remove(&refresh.flight);
@@ -2547,6 +2469,25 @@ fn row_to_root_note_hit(row: &rusqlite::Row) -> rusqlite::Result<RootNoteSearchH
 pub(crate) fn notes_db_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+#[test]
+fn owned_note_snapshots_and_resets_require_runtime_authority() {
+    let mut cache = RootNotesSearchCache::default();
+    let refresh = try_begin_root_notes_search_refresh_in_cache(
+        &mut cache,
+        "fixture",
+        RootNotesSectionOptions {
+            enabled: true,
+            ..Default::default()
+        },
+        1,
+    )
+    .expect("eligible local refresh");
+    assert!(owned_root_notes_search_snapshot(&refresh, Ok(Vec::new())).is_err());
+    assert!(reset_owned_root_notes_search().is_err());
+    assert!(invalidate_owned_root_notes_search_freshness().is_err());
 }
 
 #[cfg(test)]

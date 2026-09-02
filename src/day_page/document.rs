@@ -168,6 +168,9 @@ impl DayPageDocumentSession {
         }
 
         let path = self.substrate.paths().day_page(date);
+        if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+            policy.require_owned_path(&path)?;
+        }
 
         // Create-if-missing + initial read under the process-wide brain write
         // lock. Without it, an external appender (`atomic_append_line`, which
@@ -207,6 +210,9 @@ impl DayPageDocumentSession {
 
     /// Bind the editor to a fragment file opened from today's day page.
     pub fn bind_fragment(&mut self, fragment_path: PathBuf, now: DateTime<Utc>) -> Result<String> {
+        if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+            policy.require_owned_path(&fragment_path)?;
+        }
         let fragments_dir = self.substrate.paths().fragments_dir();
         if !self.substrate.paths().contains(&fragment_path)
             || fragment_path.parent() != Some(fragments_dir.as_path())
@@ -290,6 +296,11 @@ impl DayPageDocumentSession {
         path: Option<PathBuf>,
         now: DateTime<Utc>,
     ) -> Result<String> {
+        if let (Some(policy), Some(path)) =
+            (crate::runtime_policy::owned_evaluation(), path.as_ref())
+        {
+            policy.require_owned_path(path)?;
+        }
         let (day_path, day_date) = self.return_day_anchor("note open")?;
 
         if self.dirty {
@@ -423,6 +434,9 @@ impl DayPageDocumentSession {
             .path
             .clone()
             .with_context(|| "day page save without bind")?;
+        if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+            policy.require_owned_path(&path)?;
+        }
 
         // Serialize the read-of-disk + write against background appenders
         // (`;todo`, clipboard sediment, dictation) that also mutate this file.
@@ -431,7 +445,13 @@ impl DayPageDocumentSession {
         // blindly overwriting, so a capture that landed during the autosave
         // debounce is never silently lost.
         let written = io::with_brain_write_lock(|| -> Result<Written> {
-            let disk_now = io::read_private_document_if_present(&path)?.unwrap_or_default();
+            let Some(disk_now) = io::read_private_document_if_present(&path)? else {
+                // A missing file has no conflicting bytes to preserve. Keep
+                // unsafe targets as errors rather than treating them as absent.
+                io::atomic_write(&path, content)
+                    .with_context(|| format!("recreating day page {}", path.display()))?;
+                return Ok(Written::clean(content.to_string()));
+            };
 
             if disk_now == self.base_disk_content {
                 io::atomic_write(&path, content)
@@ -486,7 +506,11 @@ impl DayPageDocumentSession {
         // Day Page edit is a capture and must be recallable without waiting for
         // the next indexer cycle. cfg(test) no-op; classifies days/ vs
         // fragments/ by the file's parent directory.
-        crate::brain::indexer::index_capture_after_write(&path);
+        if crate::runtime_policy::is_owned_evaluation() {
+            crate::runtime_policy::record_completed_fixture_effect();
+        } else {
+            crate::brain::indexer::index_capture_after_write(&path);
+        }
 
         let kind = match &self.binding {
             DayPageBinding::Fragment { .. } => "fragment",
@@ -499,6 +523,24 @@ impl DayPageDocumentSession {
             written.adopted,
         );
         let _ = now;
+        Ok(())
+    }
+
+    /// Verify a completed delivery against the actual bound canonical store.
+    pub fn verify_saved_content(&self, expected: &str) -> Result<()> {
+        if let DayPageBinding::Note { note_id, .. } = &self.binding {
+            let id = crate::notes::NoteId::parse(note_id).context("invalid bound Notes id")?;
+            return crate::notes::verify_saved_note_content(id, expected);
+        }
+        let path = self
+            .path
+            .as_ref()
+            .context("canonical verification without bound document")?;
+        let actual = io::read_private_document(path)?;
+        anyhow::ensure!(
+            actual == expected,
+            "saved Day canonical content differs from the editor"
+        );
         Ok(())
     }
 
@@ -596,6 +638,9 @@ impl DayPageDocumentSession {
             .path
             .clone()
             .with_context(|| "external append without bind")?;
+        if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+            policy.require_owned_path(&path)?;
+        }
         io::atomic_append_line(&path, line)
     }
 }
@@ -1301,6 +1346,52 @@ mod tests {
                 "external private rewrite 1".to_string(),
                 "external private rewrite 2".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn shelf_document_save_fragment_return_preserves_canonical_source() {
+        use crate::day_page::{join_day_page_clipboard_shelf, split_day_page_clipboard_shelf};
+        let (_dir, mut session) = test_session();
+        let now = utc("2026-08-28T12:00:00Z");
+        session.bind_today(now).expect("bind owned day");
+        let canonical = "# Today\n\n- [ ] Review\n09:20 [Clipboard entry](kit://clipboard-history?id=fixture-entry)\n";
+        session.apply_editor_content(canonical);
+        session
+            .save(now)
+            .expect("save seed through production session");
+        let (visible, shelf) = split_day_page_clipboard_shelf(session.disk_content());
+        assert_eq!(shelf.len(), 1);
+        assert!(!visible.contains("kit://clipboard-history"));
+        let edited = join_day_page_clipboard_shelf(&visible.replace("[ ]", "[x]"), &shelf);
+        session.apply_editor_content(&edited);
+        session.save(now).expect("save edited canonical content");
+        let day_path = session.path().unwrap().clone();
+        let fragment = session
+            .substrate()
+            .paths()
+            .fragments_dir()
+            .join("fixture.md");
+        io::atomic_write(&fragment, "# Fragment\n").expect("seed owned fragment");
+        session
+            .bind_fragment(fragment, now)
+            .expect("real fragment binding");
+        assert!(session.is_viewing_fragment());
+        assert_eq!(
+            session.return_to_day(now).expect("return to source"),
+            edited
+        );
+        assert_eq!(session.path(), Some(&day_path));
+        assert_eq!(io::read_private_document(&day_path).unwrap(), edited);
+        assert!(edited.contains("[x] Review"));
+        assert_eq!(split_day_page_clipboard_shelf(&edited).1, shelf);
+        session
+            .verify_saved_content(&edited)
+            .expect("canonical readback matches saved editor");
+        io::atomic_write(&day_path, "external change\n").unwrap();
+        assert!(
+            session.verify_saved_content(&edited).is_err(),
+            "readback must not trust the in-memory saved baseline"
         );
     }
 }

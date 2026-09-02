@@ -126,6 +126,7 @@ impl NotesApp {
 
         div()
             .id("notes-titlebar")
+            .debug_selector(|| "notes-titlebar".to_string())
             .flex()
             .items_center()
             .h(px(metrics.titlebar_height))

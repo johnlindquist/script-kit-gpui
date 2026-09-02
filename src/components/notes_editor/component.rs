@@ -38,6 +38,7 @@ pub struct NotesEditor {
     last_markdown_link_highlight_text: String,
     last_markdown_link_highlight_selection: Range<usize>,
     last_markdown_link_highlight_ranges: Vec<(Range<usize>, Hsla, String)>,
+    last_markdown_link_accent: Option<Hsla>,
 }
 
 impl NotesEditor {
@@ -87,7 +88,13 @@ impl NotesEditor {
             last_markdown_link_highlight_text: String::new(),
             last_markdown_link_highlight_selection: 0..0,
             last_markdown_link_highlight_ranges: Vec::new(),
+            last_markdown_link_accent: None,
         }
+    }
+
+    /// Authoritative source epoch for text, caret and selection transitions.
+    pub fn semantic_revision(&self, cx: &App) -> u64 {
+        self.input_state.read(cx).revision()
     }
 
     pub fn input_state(&self) -> Entity<InputState> {
@@ -282,7 +289,7 @@ impl NotesEditor {
         info
     }
 
-    fn markdown_link_highlight_runtime_info(&self, cx: &App) -> serde_json::Value {
+    pub(crate) fn markdown_link_highlight_runtime_info(&self, cx: &App) -> serde_json::Value {
         self.read_input(cx, |state| {
             let text = state.value();
             let roles = state.highlight_range_roles();
@@ -290,7 +297,7 @@ impl NotesEditor {
                 .highlight_ranges()
                 .iter()
                 .enumerate()
-                .filter_map(|(index, (range, _color))| {
+                .filter_map(|(index, (range, color))| {
                     let range_text = text.get(range.clone())?;
                     // Window-coordinate pixel bounds (when the range is laid
                     // out) so probes can mouseMove to a link center and
@@ -305,6 +312,7 @@ impl NotesEditor {
                     });
                     Some(serde_json::json!({
                         "range": [range.start, range.end],
+                        "color": { "h": color.h, "s": color.s, "l": color.l, "a": color.a },
                         "content": crate::protocol::RedactedElementContent::new(
                             crate::protocol::ElementContentKind::UserContent,
                             range_text,
@@ -343,13 +351,14 @@ impl NotesEditor {
             let state = self.input_state.read(cx);
             (state.value().to_string(), state.selection())
         };
-        if text == self.last_markdown_link_highlight_text
-            && selection == self.last_markdown_link_highlight_selection
-        {
+        let content_changed = text != self.last_markdown_link_highlight_text
+            || selection != self.last_markdown_link_highlight_selection;
+        let accent = cx.theme().accent;
+        if !content_changed && self.last_markdown_link_accent == Some(accent) {
             return;
         }
+        self.last_markdown_link_accent = Some(accent);
 
-        let accent = cx.theme().accent;
         let ranges = markdown_link_highlight_ranges(&text, accent, selection.clone());
         if ranges != self.last_markdown_link_highlight_ranges {
             self.input_state.update(cx, |state, _cx| {

@@ -31,13 +31,9 @@
   "- Editor 16 px mono, 20 px line" soft-wraps in the 350px window; the
   wrap point observed in the reference is encoded as two line boxes.
 
-  Unlike the main window: NO Starfield/fx shader layer, NO context zone,
-  and the footer is a GPUI strip INSIDE the window at the resolved 32px
-  band (--sk-notes-footer-height) — notes.footer.presentation
-  "inWindowGpui", not a native AppKit overlay. The layout model still
-  reserves only 28px (notes.layout.footerReservationHeight) — recorded as
-  the notesFooter.layoutReservationVsIntrinsicPaint conflict, deliberately
-  not "fixed" here.
+  Unlike the main window: no Starfield/fx layer, no context zone and no
+  footer. production_notes_footer_action_row() resolves absent with zero
+  reservation. Historical reference captures are not current runtime proof.
 -->
 <main class="stage" id="stage">
   <div class="sk-window sk-window--notes" id="window">
@@ -77,30 +73,6 @@
         <div class="sk-notes-editor__line" data-kind="list"><span class="sk-notes-markdown-list-marker">-</span><span> Footer buttons hug</span><span class="sk-notes-caret" data-component="gpui-component input caret (overlay quad)"></span></div>
       </section>
 
-      <footer class="sk-notes-footer" data-component="notes::render_editor_footer (rest opacity)">
-        <!-- Save status slot: empty at rest (post-autosave, flash elapsed);
-             min-width keeps geometry stable. -->
-        <span class="sk-notes-footer__status" data-component="notes-footer-save-status"></span>
-        <span class="sk-notes-footer__lane" data-component="mention preview lane (empty)"></span>
-        <!-- Same footer_chrome frames as the main window footer
-             (render_universal_footer_action_buttons, id_prefix "notes"):
-             Notes ⌘P · Actions ⌘K · Agent ⌘↵, one keycap per key. Band =
-             resolved.notes.footer.intrinsicHeight (32px). -->
-        <span class="sk-notes-footer__buttons" data-component="footer_chrome button frames">
-          <button class="sk-footer-action">
-            <span class="sk-footer-label">Notes</span>
-            <kbd class="sk-keycap">⌘</kbd><kbd class="sk-keycap">P</kbd>
-          </button>
-          <button class="sk-footer-action">
-            <span class="sk-footer-label">Actions</span>
-            <kbd class="sk-keycap">⌘</kbd><kbd class="sk-keycap">K</kbd>
-          </button>
-          <button class="sk-footer-action">
-            <span class="sk-footer-label">Agent</span>
-            <kbd class="sk-keycap">⌘</kbd><kbd class="sk-keycap">↵</kbd>
-          </button>
-        </span>
-      </footer>
     </div>
   </div>
 </main>

@@ -106,6 +106,13 @@ pub(crate) struct DayPageClipboardShelfEntry {
     pub(crate) preview: String,
 }
 
+pub(crate) struct DayPageInitialData {
+    pub session: DayPageDocumentSession,
+    pub now: Option<chrono::DateTime<chrono::Utc>>,
+    pub shelf_previews: Option<std::collections::HashMap<String, String>>,
+    pub host_policy: crate::runtime_policy::WindowHostPolicy,
+}
+
 /// Host for today's day page inside the main launcher window.
 pub struct DayPageView {
     pub(crate) app: WeakEntity<ScriptListApp>,
@@ -114,6 +121,11 @@ pub struct DayPageView {
     /// Monotonic host-return generation; delayed callbacks must match it.
     pub(crate) host_return_generation: u64,
     pub(crate) session: DayPageDocumentSession,
+    pub(crate) clock_now: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) fixture_shelf_previews: Option<std::collections::HashMap<String, String>>,
+    pub(crate) theme_revision_seen: u64,
+    pub(crate) document_revision: u64,
+    pub(crate) loaded_document: Option<(script_kit_gpui::day_page::DayPageBinding, Option<PathBuf>)>,
     pub(crate) notes_editor: Entity<NotesEditor>,
     pub(crate) editor_state: Entity<InputState>,
     pub(crate) editor_subscription: Subscription,

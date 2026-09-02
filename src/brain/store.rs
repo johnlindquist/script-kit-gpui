@@ -531,7 +531,7 @@ pub(crate) fn with_conn<T>(f: impl FnOnce(&Connection) -> Result<T>) -> Result<T
 /// same `busy_timeout` as the write connection; no schema/WAL pragmas because a
 /// read-only connection follows the WAL created by the write connection.
 fn open_read_conn() -> Result<Connection> {
-    let path = brain_db_path();
+    let path = crate::utils::db_permissions::private_sqlite_open_path(&brain_db_path())?;
     let conn = Connection::open_with_flags(
         &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -967,7 +967,9 @@ pub fn load_embeddings(model_id: &str) -> Result<Vec<(i64, Vec<f32>)>> {
             .into_iter()
             .map(|(id, bytes)| {
                 let vec = bytes
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect();
                 (id, vec)

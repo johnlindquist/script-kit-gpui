@@ -29,7 +29,6 @@ use tracing::{debug, info};
 // Use the unified ActionsDialog/CommandBar system
 use crate::actions::{get_notes_command_bar_actions, CommandBar, CommandBarConfig, NotesInfo};
 use crate::confirm;
-use crate::theme;
 
 use super::actions_panel::NotesAction;
 use super::markdown;
@@ -73,6 +72,8 @@ pub(crate) fn execute_notes_run_command_deeplink(
     command_id: &str,
     cx: &mut App,
 ) -> Result<bool, String> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::Process)
+        .map_err(|error| error.to_string())?;
     let Some(executor) = NOTES_RUN_COMMAND_EXECUTOR.get().copied() else {
         return Err("No Notes run command executor is registered".to_string());
     };
@@ -569,6 +570,13 @@ pub enum NotesSortMode {
 pub struct NotesApp {
     /// All notes (cached from storage)
     notes: Vec<Note>,
+    host_policy: crate::runtime_policy::WindowHostPolicy,
+    fixture_ghost_clipboard: Option<Vec<crate::notes::ghost::NotesGhostClipboardText>>,
+    automation_generation: Option<u64>,
+    clock_now: Option<chrono::DateTime<chrono::Utc>>,
+    document_revision: u64,
+    search_revision: u64,
+    autosave_flush_scheduled: bool,
 
     /// Deleted notes (for trash view)
     deleted_notes: Vec<Note>,
@@ -766,11 +774,13 @@ mod focus;
 pub(crate) mod layout;
 pub(crate) mod style;
 use focus::NotesFocusSurface;
-mod init;
+pub(crate) mod init;
 mod keyboard;
 mod navigation;
 mod notes;
 mod notes_actions;
+#[cfg(test)]
+mod owned_fixture_tests;
 mod panels;
 mod render;
 mod render_editor;
@@ -780,21 +790,20 @@ mod render_ui;
 mod resize;
 mod traits;
 mod vibrancy;
-mod window_ops;
+pub(crate) mod window_ops;
 
 pub use window_ops::{
     accept_notes_ghost_for_automation, apply_mcp_notes_mutation_on_main_thread,
     capture_notes_dictation_destination, close_notes_window, get_notes_app_entity_and_handle,
-    get_notes_editor_runtime_info, get_notes_editor_text, handle_notes_editor_key_for_automation,
-    handle_notes_ghost_key_for_automation, inject_text_into_frozen_notes, inject_text_into_notes,
-    is_notes_window, is_notes_window_open, open_day_note_in_notes_window,
-    open_note_in_notes_window, open_notes_search, open_notes_window,
+    handle_notes_editor_key_for_automation, handle_notes_ghost_key_for_automation,
+    inject_text_into_frozen_notes, inject_text_into_notes, is_notes_window, is_notes_window_open,
+    open_day_note_in_notes_window, open_note_in_notes_window, open_notes_search, open_notes_window,
     open_notes_window_without_launcher_restore, quick_capture, save_note_with_content,
     save_note_with_content_and_source, toggle_notes_popup_for_automation,
     NotesDictationDestinationSnapshot,
 };
 pub(crate) use window_ops::{
-    get_notes_document_identity_spec, get_notes_titlebar_action_descriptors,
+    close_owned_notes_window, get_notes_app_entity_and_handle_for_generation,
     update_notes_window_detached,
 };
 

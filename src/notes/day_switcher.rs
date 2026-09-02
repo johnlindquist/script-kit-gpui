@@ -76,7 +76,7 @@ pub(crate) fn load_day_note_switcher_entries_result(
         });
     }
 
-    entries.sort_by(|a, b| b.date.cmp(&a.date));
+    entries.sort_by_key(|a| std::cmp::Reverse(a.date));
     Ok(entries)
 }
 

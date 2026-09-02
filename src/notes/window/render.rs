@@ -5,7 +5,7 @@ impl NotesApp {
     /// change — native AppKit-tracked resizes never route through the custom
     /// bottom-resize observation, and stale automation bounds would poison
     /// every layout-based runtime proof.
-    fn sync_automation_bounds_on_change(&mut self, window: &Window) {
+    pub(super) fn sync_automation_bounds(&mut self, window: &Window) {
         let bounds = window.bounds();
         let tuple = [
             bounds.origin.x.as_f32(),
@@ -16,9 +16,12 @@ impl NotesApp {
         if self.last_automation_synced_bounds == Some(tuple) {
             return;
         }
-        self.last_automation_synced_bounds = Some(tuple);
-        crate::windows::set_automation_bounds(
+        let Some(generation) = self.automation_generation else {
+            return;
+        };
+        let updated = crate::windows::set_automation_bounds_if_generation(
             "notes",
+            generation,
             Some(crate::protocol::AutomationWindowBounds {
                 x: f64::from(tuple[0]),
                 y: f64::from(tuple[1]),
@@ -26,14 +29,17 @@ impl NotesApp {
                 height: f64::from(tuple[3]),
             }),
         );
+        if updated {
+            self.last_automation_synced_bounds = Some(tuple);
+        }
     }
 
     fn process_render_side_effects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.refresh_bottom_resize_observation(window);
         self.detect_manual_resize(window);
-        self.sync_automation_bounds_on_change(window);
+        self.sync_automation_bounds(window);
         self.drain_pending_focus(window, cx);
-        self.maybe_update_theme_cache();
+        self.maybe_update_theme_cache(cx);
         self.maybe_persist_bounds(window);
 
         if self.should_save_now() {
@@ -126,6 +132,7 @@ impl Render for NotesApp {
 
         div()
             .id("notes-window-root")
+            .debug_selector(|| "notes-window-root".to_string())
             .flex()
             .flex_col()
             .size_full()

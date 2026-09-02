@@ -6,6 +6,30 @@ use tracing::info;
 
 use super::NotesEditor;
 
+/// Prove a replacement from the observed buffer and caret, not requested length.
+pub(crate) fn observed_replacement_range(
+    before: &str,
+    after: &str,
+    replaced: Range<usize>,
+    inserted: &str,
+    selection: Range<usize>,
+) -> Option<Range<usize>> {
+    if replaced.start > replaced.end {
+        return None;
+    }
+    let prefix = before.get(..replaced.start)?;
+    let suffix = before.get(replaced.end..)?;
+    let observed_len = after
+        .len()
+        .checked_sub(prefix.len().checked_add(suffix.len())?)?;
+    let end = replaced.start.checked_add(observed_len)?;
+    (after.starts_with(prefix)
+        && after.ends_with(suffix)
+        && after.get(replaced.start..end)? == inserted
+        && selection == (end..end))
+        .then_some(replaced.start..end)
+}
+
 impl NotesEditor {
     pub fn toggle_checklist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.input_state.update(cx, |state, cx| {
@@ -49,8 +73,15 @@ impl NotesEditor {
         let mut toggled = false;
         self.input_state.update(cx, |state, cx| {
             let value = state.value().to_string();
-            let end = marker_range.end.min(value.len());
-            let start = marker_range.start.min(end);
+            if marker_range.start > marker_range.end
+                || marker_range.end > value.len()
+                || !value.is_char_boundary(marker_range.start)
+                || !value.is_char_boundary(marker_range.end)
+            {
+                return;
+            }
+            let start = marker_range.start;
+            let end = marker_range.end;
             let slice = &value[start..end];
 
             let needle = if currently_checked {
@@ -67,8 +98,18 @@ impl NotesEditor {
 
             let replacement = if currently_checked { "[ ]" } else { "[x]" };
             let abs = start + offset;
-            let new_value = format!("{}{}{}", &value[..abs], replacement, &value[abs + len..]);
-            state.set_value(&new_value, window, cx);
+            let selection = state.selection();
+            // Selection edits focus InputState, but preview replaces that input in
+            // the dispatch tree. Keep the caller's keyboard owner after the edit.
+            let focused = window.focused(cx);
+            state.set_selection(abs, abs + len, window, cx);
+            state.replace(replacement, window, cx);
+            state.set_selection(selection.start, selection.end, window, cx);
+            if let Some(focused) = focused {
+                focused.focus(window, cx);
+            } else {
+                window.blur();
+            }
             toggled = true;
         });
 
@@ -629,5 +670,38 @@ impl NotesEditor {
                 }
             })
             .join(" ")
+    }
+}
+
+#[cfg(test)]
+mod observed_replacement_tests {
+    use super::observed_replacement_range;
+
+    #[test]
+    fn observed_replacement_requires_actual_span_surroundings_and_caret() {
+        assert_eq!(
+            observed_replacement_range("café old!", "café new!", 6..9, "new", 9..9),
+            Some(6..9)
+        );
+        assert_eq!(
+            observed_replacement_range("café old!", "café old!", 6..9, "new", 9..9),
+            None
+        );
+        assert_eq!(
+            observed_replacement_range("café old!", "café new?", 6..9, "new", 9..9),
+            None
+        );
+        assert_eq!(
+            observed_replacement_range("café old!", "café new!", 6..9, "new", 6..6),
+            None
+        );
+        assert_eq!(
+            observed_replacement_range("café old!", "café new!", 4..9, "new", 9..9),
+            None
+        );
+        assert_eq!(
+            observed_replacement_range("before", "before", 3..usize::MAX, "", 3..3),
+            None
+        );
     }
 }

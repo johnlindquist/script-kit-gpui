@@ -506,9 +506,12 @@ impl NotesApp {
         });
 
         serde_json::json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "passive": true,
             "redacted": true,
+            "dataRevision": self.semantic_revision(cx),
+            "surfaceRevision": self.document_revision(),
+            "themeRevision": self.theme_rev_seen,
             "activeNoteId": active_notes_selection_id(
                 self.selected_note_id,
                 self.active_day_binding.as_ref().map(|binding| binding.date),
@@ -544,6 +547,7 @@ impl NotesApp {
                     "total": total,
                 })),
                 "lastLineCount": self.last_line_count,
+                "markdownLinkHighlights": self.notes_editor.read(cx).markdown_link_highlight_runtime_info(cx),
             },
             "draftSnapshot": self.automation_draft_snapshot(
                 &editor_text,
@@ -694,8 +698,8 @@ impl NotesApp {
                 "autosize": self.autosize_generation,
                 "storage": storage_identity.get("generation").and_then(serde_json::Value::as_u64),
                 "focus": self.focus_transition_generation,
-                "target": serde_json::Value::Null,
-                "surface": serde_json::Value::Null,
+                "target": self.automation_generation,
+                "surface": self.document_revision(),
             },
             "lastAutosizeTransition": last_autosize_transition,
             "commandBars": {

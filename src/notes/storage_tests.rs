@@ -59,14 +59,14 @@ mod tests {
             refresh,
             RootNotesSearchSnapshot {
                 flight: flight.clone(),
-                hits: Vec::new(),
+                hits: Ok(Vec::new()),
             },
             41,
         ));
         assert!(cache
             .hits_by_query
             .get(&flight.search)
-            .is_some_and(Vec::is_empty));
+            .is_some_and(|cached| cached.hits.is_empty()));
         assert!(cache.in_flight.is_empty());
         assert!(try_begin_root_notes_search_refresh_in_cache(
             &mut cache,
@@ -75,6 +75,54 @@ mod tests {
             41,
         )
         .is_none());
+    }
+
+    #[test]
+    fn fresh_notes_cache_proof_requires_exact_eligible_key_epoch_and_no_worker() {
+        let mut cache = RootNotesSearchCache::default();
+        let options = root_owned_notes_options();
+        assert!(fresh_root_notes_search_cache_status(&cache, "query", options, 7).is_none());
+        let refresh =
+            try_begin_root_notes_search_refresh_in_cache(&mut cache, "query", options, 7).unwrap();
+        let flight = refresh.flight.clone();
+        assert!(finish_root_notes_search_refresh_in_cache(
+            &mut cache,
+            refresh,
+            RootNotesSearchSnapshot {
+                flight,
+                hits: Ok(Vec::new())
+            },
+            7,
+        ));
+        assert_eq!(
+            fresh_root_notes_search_cache_status(&cache, "query", options, 7),
+            Some((7, 0))
+        );
+        assert!(fresh_root_notes_search_cache_status(&cache, "query", options, 8).is_none());
+        assert!(fresh_root_notes_search_cache_status(&cache, "other", options, 7).is_none());
+        assert!(fresh_root_notes_search_cache_status(
+            &cache,
+            "query",
+            RootNotesSectionOptions {
+                enabled: false,
+                ..options
+            },
+            7
+        )
+        .is_none());
+        assert!(fresh_root_notes_search_cache_status(
+            &cache,
+            "query",
+            RootNotesSectionOptions {
+                search_content: false,
+                ..options
+            },
+            7
+        )
+        .is_none());
+        let _worker =
+            try_begin_root_notes_search_refresh_in_cache(&mut cache, "other", options, 7).unwrap();
+        assert!(fresh_root_notes_search_cache_status(&cache, "query", options, 7).is_none());
     }
 
     #[test]
@@ -95,7 +143,7 @@ mod tests {
             refresh,
             RootNotesSearchSnapshot {
                 flight,
-                hits: vec![root_owned_note_hit("stale private note")],
+                hits: Ok(vec![root_owned_note_hit("stale private note")]),
             },
             8,
         ));
@@ -129,7 +177,7 @@ mod tests {
             foreign.clone(),
             RootNotesSearchSnapshot {
                 flight: foreign.flight.clone(),
-                hits: vec![root_owned_note_hit("foreign private note")],
+                hits: Ok(vec![root_owned_note_hit("foreign private note")]),
             },
             12,
         ));
@@ -144,7 +192,7 @@ mod tests {
             refresh.clone(),
             RootNotesSearchSnapshot {
                 flight: wrong_query,
-                hits: vec![root_owned_note_hit("wrong private note")],
+                hits: Ok(vec![root_owned_note_hit("wrong private note")]),
             },
             12,
         ));
@@ -153,6 +201,81 @@ mod tests {
         assert!(discard_root_notes_search_refresh_in_cache(
             &mut cache, refresh,
         ));
+    }
+
+    #[test]
+    fn root_notes_failed_read_is_not_empty_success_and_preserves_last_good_rows() {
+        let mut cache = RootNotesSearchCache::default();
+        let options = root_owned_notes_options();
+        let refresh =
+            try_begin_root_notes_search_refresh_in_cache(&mut cache, "query", options, 1).unwrap();
+        let key = refresh.flight.search.clone();
+        cache.hits_by_query.insert(
+            key.clone(),
+            RootNotesCachedHits {
+                generation: 1,
+                hits: vec![root_owned_note_hit("last good")],
+            },
+        );
+        let snapshot = RootNotesSearchSnapshot {
+            flight: refresh.flight.clone(),
+            hits: Err(anyhow::anyhow!("read failed")),
+        };
+        assert!(snapshot.read_outcome().is_err());
+        assert!(!finish_root_notes_search_refresh_in_cache(
+            &mut cache, refresh, snapshot, 1
+        ));
+        assert_eq!(cache.hits_by_query[&key].hits[0].title, "last good");
+        assert!(cache.refresh_lifecycle.in_flight.is_none());
+        assert!(cache.in_flight.is_empty());
+    }
+
+    #[test]
+    fn root_notes_stale_discard_cannot_release_replacement_worker() {
+        let mut cache = RootNotesSearchCache::default();
+        let options = root_owned_notes_options();
+        let stale =
+            try_begin_root_notes_search_refresh_in_cache(&mut cache, "query", options, 1).unwrap();
+        assert!(discard_root_notes_search_refresh_in_cache(
+            &mut cache,
+            stale.clone()
+        ));
+        let current =
+            try_begin_root_notes_search_refresh_in_cache(&mut cache, "query", options, 1).unwrap();
+        assert!(!discard_root_notes_search_refresh_in_cache(
+            &mut cache, stale
+        ));
+        assert_eq!(cache.refresh_lifecycle.in_flight, Some(current.owner));
+        assert!(cache.in_flight.contains(&current.flight));
+    }
+
+    #[test]
+    fn root_notes_freshness_generation_preserves_rows_until_replacement() {
+        let mut cache = RootNotesSearchCache::default();
+        let options = root_owned_notes_options();
+        let key = root_notes_search_cache_key("query", options);
+        cache.hits_by_query.insert(
+            key.clone(),
+            RootNotesCachedHits {
+                generation: 1,
+                hits: vec![root_owned_note_hit("old title")],
+            },
+        );
+        assert!(
+            try_begin_root_notes_search_refresh_in_cache(&mut cache, "query", options, 1).is_none()
+        );
+        let refresh =
+            try_begin_root_notes_search_refresh_in_cache(&mut cache, "query", options, 2).unwrap();
+        assert_eq!(cache.hits_by_query[&key].hits[0].title, "old title");
+        let snapshot = RootNotesSearchSnapshot {
+            flight: refresh.flight.clone(),
+            hits: Ok(Vec::new()),
+        };
+        assert!(finish_root_notes_search_refresh_in_cache(
+            &mut cache, refresh, snapshot, 2
+        ));
+        assert!(cache.hits_by_query[&key].hits.is_empty());
+        assert_eq!(cache.hits_by_query[&key].generation, 2);
     }
 
     #[test]

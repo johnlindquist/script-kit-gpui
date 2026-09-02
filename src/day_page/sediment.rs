@@ -224,12 +224,17 @@ pub fn join_day_page_clipboard_shelf(visible: &str, shelf: &[ClipboardShelfItem]
     if shelf.is_empty() {
         return visible.to_string();
     }
+    // Split projects the final line terminator back into the visible body.
+    // Preserve its presence instead of manufacturing a newline on reopen.
+    let trailing_newline = visible.is_empty() || visible.ends_with('\n');
     let mut out = visible.to_string();
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
     for item in shelf {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
         out.push_str(&item.line);
+    }
+    if trailing_newline {
         out.push('\n');
     }
     out
@@ -982,6 +987,27 @@ mod tests {
         assert_eq!(shelf[0].entry_id, "entry-1");
         assert_eq!(shelf[1].entry_id, "entry-2");
         assert_eq!(join_day_page_clipboard_shelf(&visible, &shelf), content);
+    }
+
+    #[test]
+    fn clipboard_shelf_preserves_visible_body_ending_across_repeated_round_trips() {
+        let (_, shelf) = split_day_page_clipboard_shelf(
+            "09:20 [Clipboard entry](kit://clipboard-history?id=entry-1)\n\
+             09:25 [Clipboard entry](kit://clipboard-history?id=entry-2)\n",
+        );
+        for items in [&shelf[..1], &shelf[..]] {
+            for visible in ["", "body", "body ", "body\n", "body\n\n"] {
+                let canonical = join_day_page_clipboard_shelf(visible, items);
+                let mut reloaded = canonical.clone();
+                for _ in 0..3 {
+                    let (body, reloaded_shelf) = split_day_page_clipboard_shelf(&reloaded);
+                    assert_eq!(body, visible);
+                    assert_eq!(reloaded_shelf, items);
+                    reloaded = join_day_page_clipboard_shelf(&body, &reloaded_shelf);
+                    assert_eq!(reloaded, canonical);
+                }
+            }
+        }
     }
 
     #[test]

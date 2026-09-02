@@ -74,6 +74,7 @@ impl NotesApp {
         let Some(dialog) = bar.dialog().cloned() else {
             return;
         };
+        let dialog_id = dialog.entity_id();
         let notes_app = cx.entity().downgrade();
         let notes_window = window.window_handle();
         let on_close_notes_app = notes_app.clone();
@@ -93,6 +94,14 @@ impl NotesApp {
                             return;
                         };
                         notes_app.update(cx, |app, cx| {
+                            let current = match role {
+                                NotesCommandBarRole::Actions => &app.command_bar,
+                                NotesCommandBarRole::NoteSwitcher => &app.note_switcher,
+                            };
+                            if current.dialog().map(|dialog| dialog.entity_id()) != Some(dialog_id)
+                            {
+                                return;
+                            }
                             app.handle_detached_popup_closed_externally(role, window, cx);
                         });
                     });
@@ -119,12 +128,23 @@ impl NotesApp {
                                 let Some(notes_app) = notes_app.upgrade() else {
                                     return;
                                 };
-                                notes_app.update(cx, |app, cx| match role {
-                                    NotesCommandBarRole::Actions => {
-                                        app.execute_action(&action_id, window, cx);
+                                notes_app.update(cx, |app, cx| {
+                                    let current = match role {
+                                        NotesCommandBarRole::Actions => &app.command_bar,
+                                        NotesCommandBarRole::NoteSwitcher => &app.note_switcher,
+                                    };
+                                    if current.dialog().map(|dialog| dialog.entity_id())
+                                        != Some(dialog_id)
+                                    {
+                                        return;
                                     }
-                                    NotesCommandBarRole::NoteSwitcher => {
-                                        app.execute_note_switcher_action(&action_id, window, cx);
+                                    match role {
+                                        NotesCommandBarRole::Actions => {
+                                            app.execute_action(&action_id, window, cx)
+                                        }
+                                        NotesCommandBarRole::NoteSwitcher => {
+                                            app.execute_note_switcher_action(&action_id, window, cx)
+                                        }
                                     }
                                 });
                             });
@@ -391,7 +411,7 @@ impl NotesApp {
 
     /// Open the browse panel (note switcher) with current notes
     /// Uses CommandBar for consistent theming with the Cmd+K actions dialog
-    pub(super) fn open_browse_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_browse_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let destination = crate::notes::search_model::NoteSearchDestination::OpenInNotes;
         let search_state = crate::notes::search_model::load_note_search_state(
             "",

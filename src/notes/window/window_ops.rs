@@ -75,297 +75,7 @@ fn hide_main_window_then_activate_notes(cx: &mut App, notes_handle: gpui::Window
     );
 }
 
-#[derive(Clone, Debug)]
-struct NotesNativeEntryConfig {
-    window_number: i64,
-    configured: bool,
-    backdrop_found_or_created: bool,
-    native_selectors_supported: bool,
-    style_applied: bool,
-    style_signature: String,
-    configured_at_monotonic_ns: u64,
-    configured_at_unix_ms: u64,
-    settle_duration_ms: u64,
-    settled_crossing_delay_ms: u64,
-    /// Material-safe reveal anchor: max(geometric crossing, alpha ramp).
-    content_reveal_delay_ms: u64,
-    morph_started: bool,
-    morph_start_alpha_bits: Option<u64>,
-}
-
-fn notes_entry_owner_is_current(
-    handle: gpui::WindowHandle<Root>,
-    notes_app: &Entity<NotesApp>,
-) -> bool {
-    let current_handle = NOTES_WINDOW
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|guard| *guard);
-    let current_entity = NOTES_APP_ENTITY
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone());
-    current_handle == Some(handle)
-        && current_entity
-            .as_ref()
-            .is_some_and(|current| current.entity_id() == notes_app.entity_id())
-}
-
-fn notes_entry_lifecycle_is_open() -> bool {
-    NOTES_EXIT_TICKET
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .is_none()
-}
-
-#[cfg(target_os = "macos")]
-fn notes_native_window_number(window: &gpui::Window) -> Option<i64> {
-    unsafe {
-        let handle = raw_window_handle::HasWindowHandle::window_handle(window).ok()?;
-        let raw_window_handle::RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
-            return None;
-        };
-        let ns_view = appkit.ns_view.as_ptr() as id;
-        let ns_window: id = msg_send![ns_view, window];
-        (ns_window != nil).then(|| msg_send![ns_window, windowNumber])
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn notes_native_window_number(_window: &gpui::Window) -> Option<i64> {
-    None
-}
-
-/// Schedule the native-resize unlock for the calibrated entry morph.
-///
-/// The unlock anchor is `configured_at + settle_duration_ms` — the FULL glass
-/// settle, deliberately later than the body-reveal crossing
-/// (`settled_crossing_delay_ms`) that `schedule_notes_entry_reveal` uses. The
-/// text reveal begins while the window is still compressing/rebounding;
-/// unlocking there would let a user drag fight the rebound. Stale generations,
-/// replaced windows, and active exit tickets are all rejected — both here and
-/// again by the phase transition table in `resize.rs`.
-fn schedule_notes_resize_unlock(
-    handle: gpui::WindowHandle<Root>,
-    notes_app: Entity<NotesApp>,
-    native: Option<&NotesNativeEntryConfig>,
-    cx: &mut App,
-) {
-    if !notes_entry_owner_is_current(handle, &notes_app) || !notes_entry_lifecycle_is_open() {
-        return;
-    }
-    let fallback_used = native.is_none_or(|config| !config.configured);
-    let settle_duration_ms = if fallback_used {
-        // Same bounded fallback delay the reveal path uses when native
-        // configuration failed.
-        250
-    } else {
-        native.map(|config| config.settle_duration_ms).unwrap_or(0)
-    };
-    let configured_at_monotonic_ns = native
-        .map(|config| config.configured_at_monotonic_ns)
-        .unwrap_or_else(crate::platform::host_clock::host_time_ns);
-    let unlock_target_ns =
-        resize::native_resize_unlock_target_ns(configured_at_monotonic_ns, settle_duration_ms);
-    let unlock_delay = std::time::Duration::from_nanos(
-        unlock_target_ns.saturating_sub(crate::platform::host_clock::host_time_ns()),
-    );
-    let owner = notes_app.clone();
-    let weak = notes_app.downgrade();
-    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-        cx.background_executor().timer(unlock_delay).await;
-        cx.update(|cx| {
-            if !notes_entry_owner_is_current(handle, &owner) || !notes_entry_lifecycle_is_open() {
-                return;
-            }
-            let _ = handle.update(cx, |_root, window, cx| {
-                let _ = weak.update(cx, |app, _cx| {
-                    app.unlock_native_resize_after_entry(window);
-                });
-            });
-        });
-    })
-    .detach();
-}
-
-fn schedule_notes_entry_reveal(
-    handle: gpui::WindowHandle<Root>,
-    notes_app: Entity<NotesApp>,
-    native: Option<NotesNativeEntryConfig>,
-    cx: &mut App,
-) {
-    if !notes_entry_owner_is_current(handle, &notes_app) || !notes_entry_lifecycle_is_open() {
-        return;
-    }
-    let fallback_used = native.as_ref().is_none_or(|config| !config.configured);
-    let expected_window_number = native.as_ref().map(|config| config.window_number);
-    let settle_duration_ms = if fallback_used {
-        250
-    } else {
-        native
-            .as_ref()
-            .map(|config| config.settle_duration_ms)
-            .unwrap_or(0)
-    };
-    let reveal_delay_ms = if fallback_used {
-        settle_duration_ms
-    } else {
-        native
-            .as_ref()
-            .map(|config| config.content_reveal_delay_ms)
-            .unwrap_or(0)
-    };
-    let configured_at_monotonic_ns = native
-        .as_ref()
-        .map(|config| config.configured_at_monotonic_ns)
-        .unwrap_or_else(crate::platform::host_clock::host_time_ns);
-    let generation = notes_app.update(cx, |app, cx| {
-        let generation = app.entry_reveal.generation;
-        if let Some(native) = native.as_ref() {
-            app.entry_reveal.record_native_configuration(
-                native.window_number,
-                native.configured,
-                native.backdrop_found_or_created,
-                native.native_selectors_supported,
-                native.style_applied,
-                fallback_used,
-                native.style_signature.clone(),
-                native.configured_at_monotonic_ns,
-                native.configured_at_unix_ms,
-                settle_duration_ms,
-                reveal_delay_ms,
-                native.morph_started,
-                native.morph_start_alpha_bits,
-            );
-        } else {
-            app.entry_reveal.record_native_configuration(
-                -1,
-                false,
-                false,
-                false,
-                false,
-                true,
-                "unavailable".to_string(),
-                crate::platform::host_clock::host_time_ns(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-                settle_duration_ms,
-                reveal_delay_ms,
-                false,
-                None,
-            );
-        }
-        let configured = app
-            .entry_reveal
-            .advance(generation, NotesEntryRevealPhase::AwaitingPostConfigFrame);
-        debug_assert!(configured, "Notes entry must begin hidden");
-        cx.notify();
-        generation
-    });
-    let weak = notes_app.downgrade();
-    let owner = notes_app.clone();
-    let _ = update_notes_window_detached(handle, cx, |window, _cx| {
-        window.on_next_frame(move |window, cx| {
-            if !notes_entry_owner_is_current(handle, &owner)
-                || !notes_entry_lifecycle_is_open()
-                || expected_window_number
-                    .filter(|number| *number > 0)
-                    .is_some_and(|number| notes_native_window_number(window) != Some(number))
-            {
-                return;
-            }
-            let should_settle = weak
-                .update(cx, |app, cx| {
-                    let first = app
-                        .entry_reveal
-                        .advance(generation, NotesEntryRevealPhase::Settling);
-                    if first {
-                        app.entry_reveal.completed_frame_count = 1;
-                        app.entry_reveal.first_frame_at_monotonic_ns =
-                            Some(crate::platform::host_clock::host_time_ns());
-                        cx.notify();
-                    }
-                    first
-                })
-                .unwrap_or(false);
-            if !should_settle {
-                return;
-            }
-            let weak = weak.clone();
-            let owner = owner.clone();
-            let any_handle = window.window_handle();
-            // The timer is anchored to native configuration, not this GPUI
-            // callback. That aligns body reveal with phase one's first crossing
-            // of the final window size even if the callback itself arrives late.
-            let reveal_target_ns = configured_at_monotonic_ns
-                .saturating_add(reveal_delay_ms.saturating_mul(1_000_000));
-            let reveal_delay = std::time::Duration::from_nanos(
-                reveal_target_ns.saturating_sub(crate::platform::host_clock::host_time_ns()),
-            );
-            cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-                cx.background_executor().timer(reveal_delay).await;
-                cx.update(|cx| {
-                    if !notes_entry_owner_is_current(handle, &owner)
-                        || !notes_entry_lifecycle_is_open()
-                    {
-                        return;
-                    }
-                    let awaiting_reveal = weak
-                        .update(cx, |app, cx| {
-                            if app
-                                .entry_reveal
-                                .advance(generation, NotesEntryRevealPhase::AwaitingRevealFrame)
-                            {
-                                let now = crate::platform::host_clock::host_time_ns();
-                                app.entry_reveal.reveal_anchor_at_monotonic_ns = Some(now);
-                                app.entry_reveal.reveal_requested_at_monotonic_ns = Some(now);
-                                cx.notify();
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .unwrap_or(false);
-                    if !awaiting_reveal {
-                        return;
-                    }
-                    let _ = any_handle.update(cx, |_root, window, _cx| {
-                        window.on_next_frame(move |_window, cx| {
-                            if !notes_entry_owner_is_current(handle, &owner)
-                                || !notes_entry_lifecycle_is_open()
-                                || expected_window_number
-                                    .filter(|number| *number > 0)
-                                    .is_some_and(|number| {
-                                        notes_native_window_number(_window) != Some(number)
-                                    })
-                            {
-                                return;
-                            }
-                            let _ = weak.update(cx, |app, cx| {
-                                if app
-                                    .entry_reveal
-                                    .advance(generation, NotesEntryRevealPhase::Visible)
-                                {
-                                    app.entry_reveal.completed_frame_count = 2;
-                                    app.entry_reveal.visible_at_monotonic_ns =
-                                        Some(crate::platform::host_clock::host_time_ns());
-                                    cx.notify();
-                                }
-                            });
-                        });
-                        window.request_animation_frame();
-                    });
-                });
-            })
-            .detach();
-        });
-        window.request_animation_frame();
-    });
-}
+include!("window_ops_entry.rs");
 
 /// Default Notes window bounds: top-right corner of the display the mouse
 /// cursor is on (falling back to the primary display). Geometry is owned by
@@ -452,6 +162,85 @@ where
 }
 
 /// Toggle the notes window (open if closed, close if open)
+/// The actual Notes shell options, without desktop-position discovery or reveal.
+pub(crate) fn notes_window_options(
+    bounds: gpui::Bounds<gpui::Pixels>,
+    policy: crate::runtime_policy::WindowHostPolicy,
+) -> Result<WindowOptions> {
+    policy.validate()?;
+    Ok(WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(gpui::TitlebarOptions {
+            title: Some("Notes".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(
+                px(super::contract::NOTES_TRAFFIC_LIGHT_ORIGIN_X),
+                px(super::contract::NOTES_TRAFFIC_LIGHT_ORIGIN_Y),
+            )),
+        }),
+        window_background: gpui::WindowBackgroundAppearance::Transparent,
+        focus: !policy.is_hidden(),
+        show: !policy.is_hidden(),
+        kind: gpui::WindowKind::PopUp,
+        is_resizable: false,
+        is_movable: !policy.is_hidden(),
+        is_minimizable: !policy.is_hidden(),
+        ..Default::default()
+    })
+}
+
+/// Bind the evaluator's exact, already-registered Root lifetime, then run the
+/// production two-frame reveal with the real unavailable-material fallback.
+pub(crate) fn bind_owned_notes_host(
+    handle: gpui::WindowHandle<Root>,
+    notes_app: Entity<NotesApp>,
+    generation: u64,
+    cx: &mut App,
+) -> Result<()> {
+    crate::runtime_policy::WindowHostPolicy::OwnedHidden.validate()?;
+    anyhow::ensure!(
+        notes_app.read(cx).host_policy.is_hidden(),
+        "notes_host_policy_mismatch"
+    );
+    anyhow::ensure!(generation > 0, "notes_generation_missing");
+    anyhow::ensure!(
+        crate::windows::get_runtime_window_handle_for_generation("notes", generation)
+            == Some(handle.into()),
+        "notes_registered_handle_mismatch"
+    );
+    anyhow::ensure!(
+        crate::windows::automation_window_by_id("notes")
+            .is_some_and(|info| info.generation == Some(generation)
+                && !info.visible
+                && !info.focused),
+        "notes_registered_metadata_mismatch"
+    );
+    let current = NOTES_WINDOW.get_or_init(|| std::sync::Mutex::new(None));
+    anyhow::ensure!(
+        current.lock().unwrap_or_else(|p| p.into_inner()).is_none(),
+        "notes_host_already_mounted"
+    );
+    update_notes_window_detached(handle, cx, |window, cx| {
+        notes_app.update(cx, |app, cx| {
+            app.notes_editor
+                .update(cx, |editor, cx| editor.focus(window, cx))
+        });
+    })?;
+    *current.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+    *NOTES_APP_ENTITY
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = Some(notes_app.clone());
+    *NOTES_CLOSE_BEHAVIOR
+        .get_or_init(|| std::sync::Mutex::new(NotesCloseBehavior::LeaveLauncherHidden))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = NotesCloseBehavior::LeaveLauncherHidden;
+    notes_app.update(cx, |app, _cx| app.automation_generation = Some(generation));
+    schedule_notes_resize_unlock(handle, notes_app.clone(), None, cx);
+    schedule_notes_entry_reveal(handle, notes_app, None, cx);
+    Ok(())
+}
+
 pub fn open_notes_window(cx: &mut App) -> Result<()> {
     open_notes_window_with_close_behavior(cx, NotesCloseBehavior::RestoreLauncher)
 }
@@ -632,6 +421,7 @@ fn open_notes_window_with_close_behavior(
     cx: &mut App,
     close_behavior: NotesCloseBehavior,
 ) -> Result<()> {
+    crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)?;
     use crate::logging;
 
     logging::log("PANEL", "open_notes_window called - checking toggle state");
@@ -679,32 +469,16 @@ fn open_notes_window_with_close_behavior(
                         slot.take()
                     };
                     debug_assert_eq!(removed_ticket, Some(ticket));
-                    crate::windows::upsert_automation_window(
-                        crate::protocol::AutomationWindowInfo {
-                            id: "notes".to_string(),
-                            kind: crate::protocol::AutomationWindowKind::Notes,
-                            title: Some("Notes".to_string()),
-                            focused: true,
-                            visible: true,
-                            semantic_surface: Some("notes".to_string()),
-                            bounds: None,
-                            parent_window_id: None,
-                            parent_kind: None,
-                            pid: Some(std::process::id()),
-                            generation: None,
-                        },
-                    );
-                    let generation = crate::windows::resolve_automation_window(Some(
-                        &crate::protocol::AutomationWindowTarget::Id {
-                            id: "notes".to_string(),
-                        },
-                    ))
-                    .ok()
-                    .and_then(|info| info.generation);
-                    crate::windows::upsert_runtime_window_handle_instance(
-                        "notes",
-                        handle.into(),
-                        generation,
+                    // Superseding an exit keeps the same real window lifetime.
+                    let generation = crate::windows::automation_window_by_id("notes")
+                        .and_then(|info| info.generation);
+                    anyhow::ensure!(
+                        generation.is_some_and(|generation| {
+                            crate::windows::get_runtime_window_handle_for_generation(
+                                "notes", generation,
+                            ) == Some(handle.into())
+                        }),
+                        "notes_reuse_registration_missing"
                     );
                     logging::log(
                         "PANEL",
@@ -716,6 +490,7 @@ fn open_notes_window_with_close_behavior(
                         .ok()
                         .and_then(|guard| guard.clone())
                     {
+                        notes_app.update(cx, |app, _cx| app.automation_generation = generation);
                         // User-visible contract (bug report 2026-07-26, "text
                         // fades in twice"): text that was still stably visible
                         // through the superseded exit must NOT vanish and
@@ -955,33 +730,9 @@ fn open_notes_window_with_close_behavior(
         gpui::WindowBackgroundAppearance::Opaque
     };
 
-    let window_options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(gpui::TitlebarOptions {
-            title: Some("Notes".into()),
-            appears_transparent: true,
-            // App-authored group origin, shared with the design-contract
-            // exporter. (NOTE: the y comment used to claim "centered in a
-            // 26px header" while the painted titlebar is 36px — the origin
-            // value itself is the contract, not that stale rationale.)
-            traffic_light_position: Some(gpui::Point {
-                x: px(super::contract::NOTES_TRAFFIC_LIGHT_ORIGIN_X),
-                y: px(super::contract::NOTES_TRAFFIC_LIGHT_ORIGIN_Y),
-            }),
-        }),
-        window_background,
-        focus: true,
-        show: true,
-        // Use PopUp for floating panel behavior - allows keyboard input without
-        // activating the app (Raycast-like). Creates NSPanel with NonactivatingPanel mask.
-        kind: gpui::WindowKind::PopUp,
-        // Notes owns a precise bottom-edge resize handoff so its floating
-        // footer buttons can remain protected. AppKit's ordinary resizable
-        // frame intercepts those overlapping button pixels before GPUI can
-        // classify them, so native frame resizing must stay disabled here.
-        is_resizable: false,
-        ..Default::default()
-    };
+    let mut window_options =
+        notes_window_options(bounds, crate::runtime_policy::WindowHostPolicy::Interactive)?;
+    window_options.window_background = window_background;
 
     // Store the NotesApp entity so we can focus it after window creation
     let notes_app_holder: std::sync::Arc<std::sync::Mutex<Option<Entity<NotesApp>>>> =
@@ -1031,27 +782,39 @@ fn open_notes_window_with_close_behavior(
     }
 
     let notes_any: gpui::AnyWindowHandle = handle.into();
-    crate::windows::upsert_automation_window(crate::protocol::AutomationWindowInfo {
-        id: "notes".to_string(),
-        kind: crate::protocol::AutomationWindowKind::Notes,
-        title: Some("Notes".to_string()),
-        focused: true,
-        visible: true,
-        semantic_surface: Some("notes".to_string()),
-        bounds: Some(notes_automation_bounds(bounds)),
-        parent_window_id: None,
-        parent_kind: None,
-        pid: Some(std::process::id()),
-        generation: None,
-    });
-    let generation = crate::windows::resolve_automation_window(Some(
-        &crate::protocol::AutomationWindowTarget::Id {
+    let registered = match crate::windows::register_runtime_window_instance(
+        crate::protocol::AutomationWindowInfo {
             id: "notes".to_string(),
+            kind: crate::protocol::AutomationWindowKind::Notes,
+            title: Some("Notes".to_string()),
+            focused: true,
+            visible: true,
+            semantic_surface: Some("notes".to_string()),
+            bounds: Some(notes_automation_bounds(bounds)),
+            parent_window_id: None,
+            parent_window_generation: None,
+            parent_kind: None,
+            pid: Some(std::process::id()),
+            generation: None,
         },
-    ))
-    .ok()
-    .and_then(|info| info.generation);
-    crate::windows::upsert_runtime_window_handle_instance("notes", notes_any, generation);
+        notes_any,
+        cx,
+    ) {
+        Ok(info) => info,
+        Err(error) => {
+            let _ = handle.update(cx, |_root, window, _cx| window.remove_window());
+            if let Ok(mut slot) = NOTES_WINDOW
+                .get_or_init(|| std::sync::Mutex::new(None))
+                .lock()
+            {
+                if *slot == Some(handle) {
+                    *slot = None;
+                }
+            }
+            return Err(error);
+        }
+    };
+    let generation = registered.generation;
 
     // Resolve and configure the exact GPUI-owned NSWindow before the body
     // reveal sequence begins. A title scan can select a stale tail window
@@ -1093,6 +856,7 @@ fn open_notes_window_with_close_behavior(
         );
     }
     if let Some(notes_app) = notes_app_entity {
+        notes_app.update(cx, |app, _cx| app.automation_generation = generation);
         // Store the entity globally for quick_capture access
         {
             let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
@@ -1379,33 +1143,22 @@ pub struct NotesDictationDestinationSnapshot {
     pub insertion_anchor: std::ops::Range<usize>,
 }
 
-fn notes_dictation_snapshot(app: &NotesApp, cx: &App) -> NotesDictationDestinationSnapshot {
-    let editor = app.editor_state.read(cx);
-    let content = editor.value().to_string();
-    let document_id = if let Some(note_id) = app.selected_note_id {
-        format!("note:{}", note_id.as_str())
-    } else if let Some(day) = app.active_day_binding.as_ref() {
-        format!("day:{}", day.date)
-    } else {
-        format!("draft:{}", app.instance_id)
-    };
-    NotesDictationDestinationSnapshot {
-        notes_instance_id: app.instance_id,
-        document_id,
-        editor_generation: super::ai_handoff::fnv1a64_fingerprint(&content),
-        insertion_anchor: editor.selection(),
-    }
-}
-
 pub fn capture_notes_dictation_destination(
     cx: &mut App,
 ) -> Result<NotesDictationDestinationSnapshot, String> {
-    let notes_app = {
-        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
-        slot.lock().ok().and_then(|guard| guard.clone())
-    }
-    .ok_or_else(|| "Notes window is not open".to_string())?;
-    Ok(notes_app.read_with(cx, notes_dictation_snapshot))
+    let notes_app = if crate::runtime_policy::is_owned_evaluation() {
+        let generation = crate::windows::automation_window_by_id("notes")
+            .and_then(|info| info.generation)
+            .ok_or_else(|| "stale_destination: Notes registration missing".to_string())?;
+        get_notes_app_entity_and_handle_for_generation(generation, cx)
+            .map(|(entity, _)| entity)
+            .ok_or_else(|| "stale_destination: Notes host changed".to_string())?
+    } else {
+        get_notes_app_entity_and_handle()
+            .map(|(entity, _)| entity)
+            .ok_or_else(|| "stale_destination: Notes window is not open".to_string())?
+    };
+    Ok(notes_app.read_with(cx, NotesApp::capture_dictation_destination))
 }
 
 pub fn inject_text_into_frozen_notes(
@@ -1413,32 +1166,22 @@ pub fn inject_text_into_frozen_notes(
     expected: &NotesDictationDestinationSnapshot,
     text: &str,
 ) -> Result<serde_json::Value, String> {
-    let handle = {
-        let slot = NOTES_WINDOW.get_or_init(|| std::sync::Mutex::new(None));
-        slot.lock().ok().and_then(|guard| *guard)
+    let (notes_app, handle) = if crate::runtime_policy::is_owned_evaluation() {
+        let generation = crate::windows::automation_window_by_id("notes")
+            .and_then(|info| info.generation)
+            .ok_or_else(|| "stale_destination: Notes registration missing".to_string())?;
+        get_notes_app_entity_and_handle_for_generation(generation, cx)
+            .ok_or_else(|| "stale_destination: Notes host changed".to_string())?
+    } else {
+        get_notes_app_entity_and_handle()
+            .ok_or_else(|| "stale_destination: Notes destination unavailable".to_string())?
     };
-    let notes_app = {
-        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
-        slot.lock().ok().and_then(|guard| guard.clone())
-    };
-    let (Some(handle), Some(notes_app)) = (handle, notes_app) else {
-        return Err("Notes destination is unavailable".to_string());
-    };
-    let current = notes_app.read_with(cx, notes_dictation_snapshot);
-    if &current != expected {
-        return Err("Notes destination changed while Dictation was active".to_string());
-    }
     update_notes_window_detached(handle, cx, |window, cx| {
         notes_app.update(cx, |app, cx| {
-            app.inject_dictation_text_at_frozen_anchor(
-                text,
-                expected.insertion_anchor.clone(),
-                window,
-                cx,
-            )
+            app.inject_dictation_text_into_snapshot(expected, text, window, cx)
         })
     })
-    .map_err(|error| format!("Failed to update frozen Notes destination: {error}"))?
+    .map_err(|error| format!("stale_destination: Notes host update failed: {error}"))?
 }
 
 /// Inject dictated text into the notes editor at the current cursor position.
@@ -1499,6 +1242,23 @@ const fn notes_window_close_transition(
 }
 
 fn retire_notes_window_registrations(transition: NotesWindowCloseTransition) {
+    let handle = NOTES_WINDOW
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|guard| *guard);
+    let generation = crate::windows::automation_window_by_id("notes")
+        .and_then(|info| info.generation)
+        .filter(|generation| {
+            handle.is_some()
+                && crate::windows::get_runtime_window_handle_for_generation("notes", *generation)
+                    == handle.map(gpui::AnyWindowHandle::from)
+        });
+    if transition.remove_automation_registration || transition.remove_runtime_handle {
+        if let Some(generation) = generation {
+            crate::windows::remove_runtime_window_instance("notes", generation);
+        }
+    }
     if transition.take_window_handle {
         let slot = NOTES_WINDOW.get_or_init(|| std::sync::Mutex::new(None));
         if let Ok(mut guard) = slot.lock() {
@@ -1513,12 +1273,6 @@ fn retire_notes_window_registrations(transition: NotesWindowCloseTransition) {
         // Release the slot lock before dropping the entity: NotesApp::drop
         // clears these same lifecycle globals when this is the current instance.
         drop(entity);
-    }
-    if transition.remove_automation_registration {
-        crate::windows::remove_automation_window("notes");
-    }
-    if transition.remove_runtime_handle {
-        crate::windows::remove_runtime_window_handle("notes");
     }
 }
 
@@ -1545,6 +1299,21 @@ fn run_current_notes_window_close_sequence(
 /// window once on the next frame. Removing it before the focus handoff makes
 /// GPUI's callback log `window not found`.
 pub(crate) fn close_current_notes_window(window: &mut Window, cx: &mut App) {
+    if crate::runtime_policy::is_owned_evaluation() {
+        let current = NOTES_WINDOW
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .ok()
+            .and_then(|guard| *guard);
+        if current.map(gpui::AnyWindowHandle::from) != Some(window.window_handle()) {
+            return;
+        }
+        retire_notes_window_registrations(notes_window_close_transition(
+            NotesWindowCloseOrigin::CurrentWindow,
+        ));
+        window.remove_window();
+        return;
+    }
     let transition = notes_window_close_transition(NotesWindowCloseOrigin::CurrentWindow);
     if let Some(ticket) =
         crate::platform::begin_gpui_window_exit_with_ticket(window, "PANEL", "Notes")
@@ -1600,6 +1369,16 @@ pub(crate) fn close_current_notes_window(window: &mut Window, cx: &mut App) {
 }
 
 pub fn close_notes_window(cx: &mut App) {
+    if crate::runtime_policy::is_owned_evaluation() {
+        if let Some(generation) =
+            crate::windows::automation_window_by_id("notes").and_then(|info| info.generation)
+        {
+            if let Err(error) = close_owned_notes_window(generation, cx) {
+                tracing::error!(%error, "Owned Notes close refused");
+            }
+        }
+        return;
+    }
     if let Some(notes_app) = NOTES_APP_ENTITY
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
@@ -1754,6 +1533,11 @@ pub(crate) fn restore_launcher_after_notes_close_if_needed(cx: &mut App) {
 /// preserved across the Notes session, so the user returns to the exact
 /// view they left (ScriptList, embedded Agent Chat, FileSearch, etc.).
 pub(crate) fn restore_launcher_after_notes_close(_cx: &mut App) {
+    if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)
+        .is_err()
+    {
+        return;
+    }
     // Only restore if the main window is currently hidden.
     // If it's already visible (e.g. Notes was opened without hiding it),
     // there's nothing to restore.
@@ -1810,6 +1594,11 @@ pub fn is_notes_window(window: &gpui::Window) -> bool {
 /// - Disabled window restoration - prevents macOS position caching
 #[cfg(target_os = "macos")]
 fn configure_notes_as_floating_panel(gpui_window: &gpui::Window) -> Option<NotesNativeEntryConfig> {
+    if crate::runtime_policy::check(crate::runtime_policy::ExternalEffect::NativeVisibility)
+        .is_err()
+    {
+        return None;
+    }
     use crate::logging;
 
     unsafe {
@@ -1881,77 +1670,6 @@ fn configure_notes_as_floating_panel(_window: &gpui::Window) -> Option<NotesNati
     None
 }
 
-/// Return the current editor text from the Notes window, if open.
-///
-/// Used by the automation surface collector to expose Notes state to
-/// `getElements` and `inspectAutomationWindow` without routing through
-/// the main window.
-pub fn get_notes_editor_text(cx: &gpui::App) -> Option<String> {
-    let entity = {
-        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
-        slot.lock().ok()?.clone()?
-    };
-    Some(entity.read(cx).editor_state.read(cx).value().to_string())
-}
-
-/// Return the mode-sensitive titlebar commands projected by the live Notes window.
-///
-/// The renderer and `getElements` both consume the same `NotesActionDescriptor`
-/// facts so automation never advertises a titlebar action that the current mode
-/// does not render or execute.
-pub(crate) fn get_notes_titlebar_action_descriptors(
-    cx: &gpui::App,
-) -> Option<Vec<crate::notes::NotesActionDescriptor>> {
-    let entity = {
-        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
-        slot.lock().ok()?.clone()?
-    };
-    let app = entity.read(cx);
-    let context = app.notes_action_context();
-    Some(
-        [
-            crate::notes::NotesAction::SendToAi,
-            crate::notes::NotesAction::RestoreNote,
-            crate::notes::NotesAction::PermanentlyDeleteNote,
-        ]
-        .into_iter()
-        .filter_map(|action| action.descriptor(context))
-        .collect(),
-    )
-}
-
-/// Return the semantic document identity for the live Notes window.
-pub(crate) fn get_notes_document_identity_spec(
-    cx: &gpui::App,
-) -> Option<crate::components::main_view_chrome::SemanticChipSpec> {
-    let entity = {
-        let slot = NOTES_APP_ENTITY.get_or_init(|| std::sync::Mutex::new(None));
-        slot.lock().ok()?.clone()?
-    };
-    let app = entity.read(cx);
-    let (semantic_id, label) = if let Some(binding) = app.active_day_binding.as_ref() {
-        (
-            format!("notes-document-day:{}", binding.date),
-            format!("Today · {}", binding.date),
-        )
-    } else if let Some(note_id) = app.selected_note_id {
-        (
-            format!("notes-document:{}", note_id.as_str()),
-            "Current Note".to_string(),
-        )
-    } else {
-        ("notes-document:draft".to_string(), "Draft Note".to_string())
-    };
-    Some(
-        crate::components::main_view_chrome::SemanticChipSpec::enabled_identity(
-            semantic_id,
-            label,
-            crate::components::main_view_chrome::SemanticChipAction::OpenDetails,
-            "⌘P",
-        ),
-    )
-}
-
 include!("window_ops_automation.rs");
 /// Return the live `NotesApp` entity and its window handle, if the Notes
 /// window is open.
@@ -1984,6 +1702,47 @@ pub fn get_notes_app_entity_and_handle() -> Option<(Entity<NotesApp>, gpui::Wind
             None
         }
     }
+}
+
+/// Resolve only the requested registered Notes lifetime; never return a replacement.
+pub(crate) fn get_notes_app_entity_and_handle_for_generation(
+    generation: u64,
+    cx: &App,
+) -> Option<(Entity<NotesApp>, gpui::WindowHandle<Root>)> {
+    let (entity, handle) = get_notes_app_entity_and_handle()?;
+    if generation == 0
+        || entity.read(cx).automation_generation != Some(generation)
+        || crate::windows::get_runtime_window_handle_for_generation("notes", generation)
+            != Some(handle.into())
+        || crate::windows::automation_window_by_id("notes").and_then(|info| info.generation)
+            != Some(generation)
+    {
+        return None;
+    }
+    Some((entity, handle))
+}
+
+/// Close exactly one owned Notes lifetime, reporting save and teardown failure.
+pub(crate) fn close_owned_notes_window(generation: u64, cx: &mut App) -> Result<(), String> {
+    crate::runtime_policy::WindowHostPolicy::OwnedHidden
+        .validate()
+        .map_err(|error| error.to_string())?;
+    let (entity, handle) = get_notes_app_entity_and_handle_for_generation(generation, cx)
+        .ok_or_else(|| "target_generation_stale".to_string())?;
+    let host_policy = crate::windows::runtime_window_host_policy("notes", generation)
+        .map_err(|error| error.to_string())?;
+    if !host_policy.is_hidden() || !entity.read(cx).host_policy.is_hidden() {
+        return Err("owned_host_policy_missing".to_string());
+    }
+    if !entity.update(cx, |app, _cx| app.save_current_note()) {
+        return Err("notes_draft_save_failed".to_string());
+    }
+    update_notes_window_detached(handle, cx, close_current_notes_window)
+        .map_err(|error| format!("notes_window_close_failed: {error}"))?;
+    if crate::windows::get_runtime_window_handle_for_generation("notes", generation).is_some() {
+        return Err("notes_window_retirement_failed".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

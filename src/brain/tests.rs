@@ -257,10 +257,9 @@ fn substring_search_proximity_requires_every_term() {
 /// Recall SELECTs route through a SEPARATE read-only connection so an in-flight
 /// indexer write (which holds the single write `Mutex<Connection>`) cannot stall
 /// a submit-path recall query. Proves both correctness (read path returns the
-/// seeded doc) and the regression the fix prevents (a thread holding the write
-/// lock for 500ms must not delay recall — pre-fix it shared that one Mutex and
-/// blocked). If the read connection silently fell back to the write connection,
-/// the timing assertion below would fail, so this also guards the open path.
+/// seeded doc) and lock independence: recall must complete while the test still
+/// owns the write mutex. A bounded channel wait releases the writer even on
+/// regression, so the worker can finish before the assertion fails.
 #[test]
 fn recall_uses_read_connection_and_does_not_queue_behind_writes() {
     let _db = init_test_db();
@@ -281,38 +280,27 @@ fn recall_uses_read_connection_and_does_not_queue_behind_writes() {
         "read-path recall must return the seeded doc"
     );
 
-    // Hold the WRITE connection Mutex for 2s in a background thread, then time a
-    // recall query on this thread. A separate read connection returns in
-    // single-digit ms; the pre-fix shared Mutex would make recall wait out the
-    // full 2s writer. The wide gap (recall well under 1s vs a 2s hold) keeps this
-    // robust under CI load while still catching a queue-behind-writes regression.
-    const WRITE_HOLD: std::time::Duration = std::time::Duration::from_millis(2000);
-    const RECALL_BUDGET: std::time::Duration = std::time::Duration::from_millis(1000);
     let (tx, rx) = std::sync::mpsc::channel();
-    let writer = std::thread::spawn(move || {
-        store::with_conn(|_conn| {
-            let _ = tx.send(());
-            std::thread::sleep(WRITE_HOLD);
-            Ok(())
-        })
-        .unwrap();
-    });
-    rx.recv().expect("writer acquired the write lock");
-
-    let started = std::time::Instant::now();
-    let under_contention = search::brain_search("quokka telemetry", None, None, 4).unwrap();
-    let elapsed = started.elapsed();
+    let (reader, result) = store::with_conn(|_conn| {
+        let reader = std::thread::spawn(move || {
+            let _ = tx.send(search::brain_search("quokka telemetry", None, None, 4));
+        });
+        let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+        Ok((reader, result))
+    })
+    .expect("hold write connection during recall");
+    reader
+        .join()
+        .expect("recall worker finished after releasing write lock");
+    let under_contention = result
+        .expect("recall must finish before the write lock is released")
+        .expect("recall under write contention");
     assert!(
         under_contention
             .iter()
             .any(|hit| hit.doc.source_id == "readconn-doc"),
         "read-path recall must still return the seeded doc under write contention"
     );
-    assert!(
-        elapsed < RECALL_BUDGET,
-        "recall must not queue behind the {WRITE_HOLD:?} write lock: took {elapsed:?}"
-    );
-    writer.join().expect("writer thread finished");
 }
 
 /// Regression: terms of 2-3 bytes ("git", "k8s", "ai") used to be dropped by

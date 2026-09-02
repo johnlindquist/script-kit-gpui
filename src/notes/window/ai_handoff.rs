@@ -116,14 +116,14 @@ pub(crate) struct NotesAiMainHandoffOutcome {
 #[derive(Debug, Clone)]
 pub(crate) struct NotesAiMainHandoffFailure {
     pub(crate) kind: NotesAiHandoffError,
-    pub(crate) failure: crate::ai::reliability::AppFailureRecord,
+    pub(crate) failure: Box<crate::ai::reliability::AppFailureRecord>,
 }
 
 impl NotesAiMainHandoffFailure {
     pub(crate) fn new(kind: NotesAiHandoffError, detail: &str) -> Self {
         Self {
             kind,
-            failure: crate::ai::reliability::context_unavailable_failure(detail),
+            failure: Box::new(crate::ai::reliability::context_unavailable_failure(detail)),
         }
     }
 }
@@ -849,20 +849,20 @@ impl NotesApp {
     fn dispatch_notes_ai_handoff_to_main(
         payload: NotesAiHandoffPayload,
         cx: &mut Context<Self>,
-    ) -> Result<NotesAiMainHandoffOutcome, Box<NotesAiMainHandoffFailure>> {
+    ) -> Result<NotesAiMainHandoffOutcome, NotesAiMainHandoffFailure> {
         if crate::get_main_window_handle().is_none() {
-            return Err(Box::new(NotesAiMainHandoffFailure::new(
+            return Err(NotesAiMainHandoffFailure::new(
                 NotesAiHandoffError::MainWindowUnavailable,
                 "notes_main_window_handle_missing",
-            )));
+            ));
         }
         let Some(hook) = NOTES_AI_MAIN_HANDOFF_HOOK.get() else {
-            return Err(Box::new(NotesAiMainHandoffFailure::new(
+            return Err(NotesAiMainHandoffFailure::new(
                 NotesAiHandoffError::MainStagingFailed,
                 "notes_ai_handoff_hook_unregistered",
-            )));
+            ));
         };
-        hook(payload, cx).map_err(Box::new)
+        hook(payload, cx)
     }
 
     /// Record the redacted receipt (also projected into devtools state).

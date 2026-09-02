@@ -331,7 +331,6 @@ fn resolve_helper_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
 
     fn write_fake_helper(dir: &Path, script: &str) -> PathBuf {

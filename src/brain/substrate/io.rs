@@ -38,6 +38,9 @@ pub fn with_brain_write_lock<T>(f: impl FnOnce() -> T) -> T {
 /// generic append helper also has isolated callers outside the substrate, so
 /// only recognized Brain child directories cause their parent to be hardened.
 fn prepare_private_document_directory(path: &Path) -> Result<&Path> {
+    if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+        policy.require_owned_path(path)?;
+    }
     let parent = path
         .parent()
         .with_context(|| format!("brain path has no parent: {}", path.display()))?;

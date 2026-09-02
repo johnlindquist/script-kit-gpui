@@ -94,6 +94,9 @@ impl NotesApp {
             .is_focused(window);
         let selection_before = self.selected_note_id.map(|id| id.as_str().to_string());
 
+        if self.search_query != query {
+            self.search_revision = self.search_revision.saturating_add(1);
+        }
         self.search_query = query.clone();
         let safe_query = crate::logging::log_private_user_value(&query);
 
@@ -313,7 +316,7 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let clipboard_content = Self::read_clipboard();
+        let clipboard_content = Self::read_clipboard(cx);
         if clipboard_content.is_empty() {
             // Nothing on clipboard, just create an empty note
             self.create_note(window, cx);
@@ -340,26 +343,10 @@ impl NotesApp {
     }
 
     /// Read text from system clipboard
-    pub(super) fn read_clipboard() -> String {
-        #[cfg(target_os = "macos")]
-        {
-            use std::process::Command;
-            Command::new("pbpaste")
-                .output()
-                .ok()
-                .and_then(|output| {
-                    if output.status.success() {
-                        String::from_utf8(output.stdout).ok()
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_default()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            String::new()
-        }
+    pub(super) fn read_clipboard(cx: &App) -> String {
+        cx.read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default()
     }
 
     /// Internal note selection with optional editor focus.
@@ -370,8 +357,13 @@ impl NotesApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Save any unsaved changes to the current note before switching
-        self.save_current_note();
+        // A failed save must not replace the active document or discard its draft.
+        if self.has_unsaved_changes && !self.save_current_note() {
+            return;
+        }
+        if self.selected_note_id != Some(id) || self.active_day_binding.is_some() {
+            self.document_revision = self.document_revision.saturating_add(1);
+        }
         self.active_day_binding = None;
 
         // Push current note onto history stack (unless navigating back/forward)
@@ -454,6 +446,9 @@ impl NotesApp {
             }
         };
 
+        if self.active_day_binding.as_ref().map(|day| day.date) != Some(date) {
+            self.document_revision = self.document_revision.saturating_add(1);
+        }
         self.view_mode = NotesViewMode::AllNotes;
         self.selected_note_id = None;
         self.active_day_binding = Some(NotesDayBinding {
@@ -954,22 +949,7 @@ impl NotesApp {
             }
         };
 
-        // Copy to clipboard
-        #[cfg(target_os = "macos")]
-        {
-            use std::process::Command;
-            let _ = Command::new("pbcopy")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .and_then(|mut child| {
-                    use std::io::Write;
-                    if let Some(stdin) = child.stdin.as_mut() {
-                        stdin.write_all(content.as_bytes())?;
-                    }
-                    child.wait()
-                });
-            info!(format = ?format, "Note exported to clipboard");
-        }
+        self.copy_text_to_clipboard(&content, "Copied", cx);
     }
 }
 

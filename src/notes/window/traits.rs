@@ -8,6 +8,11 @@ impl Focusable for NotesApp {
 
 impl Drop for NotesApp {
     fn drop(&mut self) {
+        if self.host_policy.is_hidden()
+            && CURRENT_NOTES_INSTANCE.load(std::sync::atomic::Ordering::SeqCst) != self.instance_id
+        {
+            return;
+        }
         // Save any unsaved changes before closing. Route through
         // save_current_note so the ACTIVE DAY BINDING is saved too — the macOS
         // traffic-light close only fires Drop (it bypasses the Escape/Cmd+W

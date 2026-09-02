@@ -22,6 +22,7 @@ use crate::components::notes_editor::spine::{
 pub(crate) struct DayPageHostReturnSnapshot {
     pub(crate) entity_id: u64,
     pub(crate) host_return_generation: u64,
+    pub(crate) document_revision: u64,
     pub(crate) document_id_fingerprint: String,
     pub(crate) document_generation: String,
     pub(crate) content_length: usize,
@@ -90,6 +91,7 @@ fn day_page_context_round_trip_receipt(
         "hostReturn": snapshot.map(|snapshot| serde_json::json!({
             "entityId": snapshot.entity_id,
             "generation": snapshot.host_return_generation,
+            "documentRevision": snapshot.document_revision,
             "documentIdFingerprint": snapshot.document_id_fingerprint,
             "documentGeneration": snapshot.document_generation,
             "contentLength": snapshot.content_length,
@@ -133,6 +135,7 @@ impl DayPageView {
         DayPageHostReturnSnapshot {
             entity_id: self.instance_id,
             host_return_generation: self.host_return_generation,
+            document_revision: self.document_revision,
             document_id_fingerprint: day_page_context_round_trip_fingerprint(&document_identity),
             document_generation: content_fingerprint.clone(),
             content_length: content.chars().count(),
@@ -188,8 +191,9 @@ impl DayPageView {
         let snapshot = self.capture_host_return_snapshot(cx);
         let entity = cx.entity();
         let id = format!(
-            "{}:{}:{}:{}",
-            chrono::Utc::now().timestamp_millis(),
+            "{}:{}:{}:{}:{}",
+            self.now().timestamp_millis(),
+            self.host_return_generation,
             request.line_range.start,
             request.segment_byte_range.start,
             day_page_context_round_trip_fingerprint(&request.segment_text)
@@ -236,7 +240,7 @@ impl DayPageView {
         alias: Option<crate::ai::message_parts::AiContextPart>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let content = self.notes_editor.read(cx).content(cx);
         let visible_reference = markdown_reference_for_day_page_context_part(token, alias.as_ref())
             .unwrap_or_else(|| token.to_string());
@@ -247,20 +251,8 @@ impl DayPageView {
             &visible_reference,
             true,
         );
-        let (new_content, cursor) = match spliced {
-            Some(done) => done,
-            None => {
-                // Ranges no longer fit (external edit while away) — append to
-                // the end rather than dropping the accepted context.
-                let trimmed = content.trim_end();
-                let new_content = if trimmed.is_empty() {
-                    format!("{visible_reference} ")
-                } else {
-                    format!("{trimmed} {visible_reference} ")
-                };
-                let cursor = new_content.len();
-                (new_content, cursor)
-            }
+        let Some((new_content, cursor)) = spliced else {
+            return false;
         };
         // The splice is not typing: pre-set the length so its Change event
         // cannot read as growth and immediately re-open the main-menu search.
@@ -269,7 +261,8 @@ impl DayPageView {
             editor.set_value(new_content.clone(), window, cx);
             editor.set_selection(cursor, cursor, window, cx);
         });
-        self.session.apply_editor_content(&new_content);
+        self.session
+            .apply_editor_content(&self.canonical_content_with_shelf(&new_content));
         self.refresh_fragment_open_targets(&new_content);
         if let Some(part) = alias {
             self.spine_handoff
@@ -280,6 +273,7 @@ impl DayPageView {
         self.schedule_autosave_flush(cx);
         self.sync_footer(window, cx);
         cx.notify();
+        true
     }
 }
 
@@ -287,8 +281,11 @@ fn day_page_host_return_is_current(
     snapshot: &DayPageHostReturnSnapshot,
     entity_id: u64,
     host_return_generation: u64,
+    document_revision: u64,
 ) -> bool {
-    snapshot.entity_id == entity_id && snapshot.host_return_generation == host_return_generation
+    snapshot.entity_id == entity_id
+        && snapshot.host_return_generation == host_return_generation
+        && snapshot.document_revision == document_revision
 }
 
 impl ScriptListApp {
@@ -345,6 +342,21 @@ impl ScriptListApp {
             self.day_page_context_return = Some(pending);
             return false;
         }
+        let current = pending.entity.read(cx);
+        if !day_page_host_return_is_current(
+            &pending.snapshot,
+            current.instance_id,
+            current.host_return_generation,
+            current.document_revision,
+        ) || day_page_context_round_trip_fingerprint(&current.notes_editor.read(cx).content(cx))
+            != pending.snapshot.content_fingerprint
+        {
+            tracing::warn!(
+                event = "day_page_context_return_refused",
+                reason = "staleDocument"
+            );
+            return false;
+        }
         let alias = alias.or_else(|| self.spine_mention_aliases.get(token).cloned());
         let has_alias = alias.is_some();
         let visible_reference = markdown_reference_for_day_page_context_part(token, alias.as_ref())
@@ -366,17 +378,23 @@ impl ScriptListApp {
         let entity = pending.entity.clone();
         let snapshot = pending.snapshot.clone();
         let completed_receipt = receipt.clone();
-        entity.update(cx, |view, cx| {
-            view.complete_context_round_trip(
+        let completed = entity.update(cx, |view, cx| {
+            if !view.complete_context_round_trip(
                 pending.line_range,
                 pending.segment_byte_range,
                 token,
                 alias,
                 window,
                 cx,
-            );
+            ) {
+                return false;
+            }
             view.record_context_round_trip_receipt(completed_receipt);
+            true
         });
+        if !completed {
+            return false;
+        }
         self.restore_day_page_view_after_round_trip(entity, snapshot, window, cx);
         tracing::info!(
             target: "script_kit::day_page",
@@ -456,6 +474,7 @@ impl ScriptListApp {
             &snapshot,
             current.instance_id,
             current.host_return_generation,
+            current.document_revision,
         ) {
             tracing::info!(
                 target: "script_kit::day_page",
@@ -467,10 +486,11 @@ impl ScriptListApp {
             return;
         }
 
-        self.set_filter_text_immediate(String::new(), window, cx);
         self.current_view = AppView::DayPage {
             entity: entity.clone(),
         };
+        self.note_main_route_changed();
+        self.set_filter_text_immediate(String::new(), window, cx);
         self.focused_input = FocusedInput::None;
         self.rekey_main_automation_surface_from_current_view();
         entity.update(cx, |view, cx| {
@@ -489,6 +509,7 @@ mod day_page_host_return_tests {
         DayPageHostReturnSnapshot {
             entity_id: 7,
             host_return_generation: 11,
+            document_revision: 3,
             document_id_fingerprint: "sha256:document".to_string(),
             document_generation: "sha256:generation".to_string(),
             content_length: 42,
@@ -505,8 +526,9 @@ mod day_page_host_return_tests {
     #[test]
     fn day_page_return_accepts_only_the_exact_entity_generation() {
         let snapshot = snapshot();
-        assert!(day_page_host_return_is_current(&snapshot, 7, 11));
-        assert!(!day_page_host_return_is_current(&snapshot, 8, 11));
-        assert!(!day_page_host_return_is_current(&snapshot, 7, 12));
+        assert!(day_page_host_return_is_current(&snapshot, 7, 11, 3));
+        assert!(!day_page_host_return_is_current(&snapshot, 8, 11, 3));
+        assert!(!day_page_host_return_is_current(&snapshot, 7, 12, 3));
+        assert!(!day_page_host_return_is_current(&snapshot, 7, 11, 4));
     }
 }

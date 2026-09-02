@@ -47,6 +47,7 @@ pub(crate) mod metadata;
 mod model;
 pub(crate) mod search_model;
 mod storage;
+pub(crate) use storage::verify_saved_note_content;
 pub(crate) mod window;
 
 // Re-export notes action catalog for CommandBar action builders
@@ -65,9 +66,11 @@ pub(crate) use storage::{
     delete_note_permanently, discard_root_notes_search_refresh, finish_root_notes_search_refresh,
     get_all_notes, get_deleted_notes, get_note, get_note_aliases, get_note_backlink_count,
     get_note_backlinks, get_note_outbound_link_count, get_note_tags, init_notes_db,
-    list_note_cart_items, list_note_cart_items_deduped, note_file_path, notes_brain_days_dir,
-    read_root_notes_search_snapshot, root_notes_query_is_eligible,
-    root_notes_search_cache_is_fresh, save_note, save_note_cart_item, search_notes,
+    invalidate_owned_root_notes_search_freshness, list_note_cart_items,
+    list_note_cart_items_deduped, note_file_path, notes_brain_days_dir,
+    owned_root_notes_search_snapshot, read_root_notes_search_snapshot,
+    reset_owned_root_notes_search, root_notes_query_is_eligible, root_notes_search_cache_is_fresh,
+    root_notes_search_fresh_cache_status, save_note, save_note_cart_item, search_notes,
     search_root_notes_meta, search_root_notes_meta_cached, search_root_notes_meta_direct,
     try_begin_root_notes_search_refresh, NoteBacklinkSummary, RootNoteSearchHit,
     RootNotesSearchRefresh, RootNotesSearchSnapshot, RootNotesSectionOptions,
@@ -97,16 +100,15 @@ pub fn agent_chat_thread_source(ui_thread_id: &str) -> String {
 pub use window::{
     accept_notes_ghost_for_automation, apply_mcp_notes_mutation_on_main_thread,
     capture_notes_dictation_destination, close_notes_window, get_notes_app_entity_and_handle,
-    get_notes_editor_runtime_info, get_notes_editor_text, handle_notes_editor_key_for_automation,
-    handle_notes_ghost_key_for_automation, inject_text_into_frozen_notes, inject_text_into_notes,
-    is_notes_window, is_notes_window_open, open_day_note_in_notes_window,
-    open_note_in_notes_window, open_notes_search, open_notes_window,
+    handle_notes_editor_key_for_automation, handle_notes_ghost_key_for_automation,
+    inject_text_into_frozen_notes, inject_text_into_notes, is_notes_window, is_notes_window_open,
+    open_day_note_in_notes_window, open_note_in_notes_window, open_notes_search, open_notes_window,
     open_notes_window_without_launcher_restore, quick_capture, register_notes_run_command_executor,
     save_note_with_content, save_note_with_content_and_source, toggle_notes_popup_for_automation,
     NotesApp, NotesDictationDestinationSnapshot, NotesRunCommandExecutor,
 };
 #[allow(unused_imports)]
 pub(crate) use window::{
-    get_notes_document_identity_spec, get_notes_titlebar_action_descriptors,
+    close_owned_notes_window, get_notes_app_entity_and_handle_for_generation,
     update_notes_window_detached,
 };

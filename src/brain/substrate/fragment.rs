@@ -65,6 +65,9 @@ pub fn write_fragment_with_why(
     // two concurrent fragment writers cannot pick the same slug and clobber each
     // other's file. `atomic_write` does not take the lock, so no re-entry.
     let fragment_id = with_brain_write_lock(|| -> Result<String> {
+        if let Some(policy) = crate::runtime_policy::owned_evaluation() {
+            policy.require_owned_path(&paths.fragments_dir())?;
+        }
         let fragment_id = dedupe_slug_in_dir(&paths.fragments_dir(), &base_id);
         atomic_write(&paths.fragment_file(&fragment_id), &document)?;
         Ok(fragment_id)
