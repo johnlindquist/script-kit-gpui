@@ -2,6 +2,12 @@ use std::ops::Range;
 
 const PASTED_IMAGE_LABEL_PREFIX: &str = "Pasted image #";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PastedImagePreparation {
+    Pending,
+    Failed,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PastedImageToken {
     pub(crate) token: String,
@@ -25,8 +31,9 @@ pub(crate) struct PreparedPastedImage {
 pub(crate) fn prepare_pasted_image(
     path: &str,
     existing_tokens: &[PastedImageToken],
+    input_text: &str,
 ) -> PreparedPastedImage {
-    let index = next_token_index(existing_tokens);
+    let index = next_token_index(existing_tokens, input_text);
     let label = build_pasted_image_label(index);
     let token = build_pasted_image_token(index);
 
@@ -40,15 +47,21 @@ pub(crate) fn prepare_pasted_image(
     }
 }
 
-pub(crate) fn write_png_bytes_to_temp_file(png_bytes: &[u8]) -> anyhow::Result<String> {
+pub(crate) fn reserve_png_temp_file() -> anyhow::Result<tempfile::NamedTempFile> {
     use anyhow::Context as _;
-    use std::io::Write as _;
-
-    let mut temp_file = tempfile::Builder::new()
+    tempfile::Builder::new()
         .prefix("script-kit-pasted-image-")
         .suffix(".png")
         .tempfile()
-        .context("Failed to create temp file for pasted image")?;
+        .context("Failed to create temp file for pasted image")
+}
+
+pub(crate) fn write_png_bytes_to_temp_file(
+    mut temp_file: tempfile::NamedTempFile,
+    png_bytes: &[u8],
+) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    use std::io::Write as _;
 
     temp_file
         .write_all(png_bytes)
@@ -170,8 +183,34 @@ fn build_pasted_image_token(index: usize) -> String {
     format!("@img:paste{index}")
 }
 
-fn next_token_index(existing_tokens: &[PastedImageToken]) -> usize {
-    existing_tokens.len() + 1
+fn next_token_index(existing_tokens: &[PastedImageToken], input_text: &str) -> usize {
+    // A switched/restored draft can contain tokens absent from the view cache.
+    // Never let a new paste overwrite one of those attachment aliases.
+    let mut used = std::collections::HashSet::new();
+    for source in
+        std::iter::once(input_text).chain(existing_tokens.iter().map(|token| token.token.as_str()))
+    {
+        let lower = source.to_ascii_lowercase();
+        for (start, _) in lower.match_indices("@img:paste") {
+            let digits = lower[start + "@img:paste".len()..]
+                .split(|ch: char| !ch.is_ascii_digit())
+                .next()
+                .unwrap_or_default();
+            if let Ok(index) = digits.parse::<usize>() {
+                used.insert(index);
+            }
+        }
+    }
+    used.iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .unwrap_or_else(|| {
+            (1..=used.len() + 1)
+                .find(|index| !used.contains(index))
+                .expect("a finite token set has a free index")
+        })
 }
 
 fn char_to_byte_offset(text: &str, char_idx: usize) -> usize {
@@ -190,12 +229,17 @@ mod tests {
 
     #[test]
     fn prepare_pasted_image_uses_stable_img_alias_tokens() {
-        let prepared = prepare_pasted_image("/tmp/pasted-image.png", &[]);
+        let prepared = prepare_pasted_image("/tmp/pasted-image.png", &[], "");
 
         assert_eq!(prepared.insertion_text, "@img:paste1 ");
         assert_eq!(prepared.token.token, "@img:paste1");
         assert_eq!(prepared.token.label, "Pasted image #1");
         assert_eq!(prepared.token.path, "/tmp/pasted-image.png");
+        let restored = prepare_pasted_image("/tmp/restored.png", &[], "@img:paste1 @img:paste2 ");
+        assert_eq!(restored.token.token, "@img:paste3");
+        let after_removal =
+            prepare_pasted_image("/tmp/next.png", &[restored.token], "@img:paste3 ");
+        assert_eq!(after_removal.token.token, "@img:paste4");
     }
 
     #[test]
@@ -214,7 +258,7 @@ mod tests {
 
     #[test]
     fn remove_pasted_image_token_at_cursor_deletes_whole_token_and_space() {
-        let prepared = prepare_pasted_image("/tmp/pasted-image.png", &[]);
+        let prepared = prepare_pasted_image("/tmp/pasted-image.png", &[], "");
         let mut tokens = vec![prepared.token];
         let input = format!("before {}after", prepared.insertion_text);
         let cursor = "before @img:paste1".chars().count();

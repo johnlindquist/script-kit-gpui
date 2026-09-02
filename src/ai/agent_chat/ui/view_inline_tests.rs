@@ -466,7 +466,9 @@ mod semantic_epoch_tests {
         cx.update(|cx| {
             gpui_component::init(cx);
             let (thread, _) = crate::ai::agent_chat::ui::mock_fixture::create_mock_fixture_thread(
-                "detached-epoch", AgentChatSessionPolicy::Full, cx,
+                "detached-epoch",
+                AgentChatSessionPolicy::Full,
+                cx,
             );
             let view = cx.new(|cx| AgentChatView::new(thread.clone(), cx));
             thread.update(cx, |thread, cx| thread.set_input("alpha", cx));
@@ -476,7 +478,12 @@ mod semantic_epoch_tests {
             let changed = frame_authority(view.read(cx).semantic_revision(cx));
             assert!(changed.data_generation > retained.data_generation);
             assert_eq!(changed.frame_generation, retained.frame_generation);
-            assert_eq!(validate_current_frame_identity(&changed, &retained).unwrap_err().to_string(), "capture_frame_identity_stale");
+            assert_eq!(
+                validate_current_frame_identity(&changed, &retained)
+                    .unwrap_err()
+                    .to_string(),
+                "capture_frame_identity_stale"
+            );
             thread.update(cx, |thread, cx| thread.set_input("alpha", cx));
             let aba = frame_authority(view.read(cx).semantic_revision(cx));
             assert!(aba.data_generation > changed.data_generation);
@@ -486,31 +493,167 @@ mod semantic_epoch_tests {
             let child_state = frame_authority(view.read(cx).semantic_revision(cx));
             assert!(child_state.data_generation > aba.data_generation);
             assert!(validate_current_frame_identity(&child_state, &aba).is_err());
-            assert_eq!(view.read(cx).semantic_revision(cx), child_state.data_generation);
+            assert_eq!(
+                view.read(cx).semantic_revision(cx),
+                child_state.data_generation
+            );
             // This is the production exact comparator, not native publication:
             // no frame or observer has been advanced within this app update.
             validate_current_frame_identity(&child_state, &child_state).unwrap();
         });
     }
 
+    /// Prevents paste loss or attachment to a different draft when encoding completes late.
     #[gpui::test]
-    fn transcript_child_toggle_aba_changes_view_authority_without_paint(cx: &mut gpui::TestAppContext) {
+    fn image_paste_preserves_origin_order_and_blocks_incomplete_submission(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct OwnedImages(Vec<String>);
+        impl Drop for OwnedImages {
+            fn drop(&mut self) {
+                for path in &self.0 {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+
+        let (view, origin, other, mut images, original_text) = cx.update(|cx| {
+            gpui_component::init(cx);
+            let (origin, _) = crate::ai::agent_chat::ui::mock_fixture::create_mock_fixture_thread(
+                "paste-origin",
+                AgentChatSessionPolicy::Full,
+                cx,
+            );
+            let (other, _) = crate::ai::agent_chat::ui::mock_fixture::create_mock_fixture_thread(
+                "paste-other",
+                AgentChatSessionPolicy::Full,
+                cx,
+            );
+            let view = cx.new(|cx| AgentChatView::new(origin.clone(), cx));
+            origin.update(cx, |thread, cx| {
+                thread.set_input("before after", cx);
+                thread.input.set_cursor(7);
+            });
+            other.update(cx, |thread, cx| thread.set_input("other draft", cx));
+            let paths = view.update(cx, |view, cx| {
+                for pixel in [[255, 0, 0, 255], [0, 255, 0, 255]] {
+                    assert!(view.prepare_clipboard_image(
+                        arboard::ImageData {
+                            width: 1,
+                            height: 1,
+                            bytes: std::borrow::Cow::Owned(pixel.to_vec()),
+                        },
+                        cx
+                    ));
+                }
+                assert!(view.is_context_capture_pending(cx));
+                assert!(view.conversation_command_facts(cx).context_preparing);
+                let before_submit = origin.read(cx).input.text().to_string();
+                view.submit_with_expanded_tokens(cx);
+                assert_eq!(origin.read(cx).input.text(), before_submit);
+                assert!(origin
+                    .update(cx, |thread, cx| thread.submit_input(cx))
+                    .is_err());
+                let paths = view
+                    .pasted_image_tokens
+                    .iter()
+                    .map(|token| token.path.clone())
+                    .collect::<Vec<_>>();
+                origin.update(cx, |thread, _| thread.input.insert_str("typed "));
+                view.activate_session_thread(other.clone(), cx);
+                assert!(!view.is_context_capture_pending(cx));
+                assert!(!view.conversation_command_facts(cx).context_preparing);
+                paths
+            });
+            let original_text = origin.read(cx).input.text().to_string();
+            assert_eq!(original_text, "before @img:paste1 @img:paste2 typed after");
+            (view, origin, other, OwnedImages(paths), original_text)
+        });
+
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(origin.read(cx).input.text(), original_text);
+            assert_eq!(other.read(cx).input.text(), "other draft");
+            assert!(origin.read(cx).pasted_image_preparation().is_none());
+            assert_eq!(view.read(cx).live_thread().entity_id(), other.entity_id());
+            for (path, expected) in images.0.iter().zip([[255, 0, 0, 255], [0, 255, 0, 255]]) {
+                assert_eq!(
+                    image::open(path).unwrap().to_rgba8().get_pixel(0, 0).0,
+                    expected
+                );
+            }
+            view.update(cx, |view, cx| {
+                view.activate_session_thread(origin.clone(), cx);
+                assert!(view.prepare_clipboard_image(
+                    arboard::ImageData {
+                        width: 1,
+                        height: 1,
+                        bytes: std::borrow::Cow::Owned(Vec::new()),
+                    },
+                    cx
+                ));
+                images
+                    .0
+                    .push(view.pasted_image_tokens.last().unwrap().path.clone());
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                origin.read(cx).pasted_image_preparation(),
+                Some(crate::pasted_image::PastedImagePreparation::Failed)
+            );
+            assert!(origin
+                .update(cx, |thread, cx| thread.submit_input(cx))
+                .is_err());
+            assert_eq!(
+                view.read(cx).footer_status_text(cx),
+                Some("Image paste failed")
+            );
+            assert!(view.read(cx).conversation_command_facts(cx).context_failed);
+            let buttons = view.read(cx).footer_buttons_for_thread(origin.read(cx));
+            let send = buttons
+                .iter()
+                .find(|button| matches!(button.action, crate::footer_popup::FooterAction::Run))
+                .expect("the nonempty draft exposes Send");
+            assert!(!send.enabled);
+            assert!(send.disabled_reason.is_some());
+            assert!(!std::path::Path::new(images.0.last().unwrap()).exists());
+            view.update(cx, |view, cx| {
+                origin.update(cx, |thread, cx| thread.set_input("kept draft", cx));
+                view.sync_pasted_clipboard_tokens(cx);
+                view.sync_inline_mentions(cx);
+            });
+            assert!(origin.read(cx).pasted_image_preparation().is_none());
+            assert_eq!(origin.read(cx).input.text(), "kept draft");
+        });
+    }
+
+    #[gpui::test]
+    fn transcript_child_toggle_aba_changes_view_authority_without_paint(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|cx| {
             gpui_component::init(cx);
             let (thread, _) = crate::ai::agent_chat::ui::mock_fixture::create_mock_fixture_thread(
-                "detached-child-epoch", AgentChatSessionPolicy::Full, cx,
+                "detached-child-epoch",
+                AgentChatSessionPolicy::Full,
+                cx,
             );
             let view = cx.new(|cx| AgentChatView::new(thread, cx));
-            let transcript = cx.new(|cx| AgentChatTranscript::new(vec![
-                AgentChatThreadMessage {
-                    id: 1,
-                    role: AgentChatThreadMessageRole::Thought,
-                    body: "Reasoning".into(),
-                    tool_call_id: None,
-                    tool_meta: None,
-                    attachments: Vec::new(),
-                },
-            ], cx));
+            let transcript = cx.new(|cx| {
+                AgentChatTranscript::new(
+                    vec![AgentChatThreadMessage {
+                        id: 1,
+                        role: AgentChatThreadMessageRole::Thought,
+                        body: "Reasoning".into(),
+                        tool_call_id: None,
+                        tool_meta: None,
+                        attachments: Vec::new(),
+                    }],
+                    cx,
+                )
+            });
             view.update(cx, |view, _| view.transcript = Some(transcript.clone()));
             let retained = frame_authority(view.read(cx).semantic_revision(cx));
             transcript.update(cx, |transcript, cx| transcript.toggle_collapsed(1, cx));

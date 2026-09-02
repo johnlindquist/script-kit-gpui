@@ -74,6 +74,7 @@ impl AgentChatThread {
                 },
             ),
             context_resolution_id: 0,
+            pasted_image_preparations: std::collections::HashMap::new(),
             pending_permission: None,
             pending_context_blocks: context_blocks,
             pending_context_consumed: false,

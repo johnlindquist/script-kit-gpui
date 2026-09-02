@@ -94,6 +94,7 @@ pub use database::{
 };
 
 // Image operations
+pub(crate) use image::encode_image_to_png_bytes;
 #[allow(unused_imports)]
 pub use image::{
     content_to_png_bytes, decode_to_render_image, decode_to_rgba_bytes, encode_image_as_png,

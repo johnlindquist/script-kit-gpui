@@ -67,6 +67,7 @@ pub(crate) enum ConfirmPolicy {
 pub(crate) enum ConversationCommandDisabledReason {
     TypeMessageFirst,
     ContextStillPreparing,
+    ContextPreparationFailed,
     ResponseInProgress,
     NoResponseRunning,
     WaitingForPermission,
@@ -80,6 +81,7 @@ impl ConversationCommandDisabledReason {
         match self {
             Self::TypeMessageFirst => "Type a message first.",
             Self::ContextStillPreparing => "Wait for context to finish loading.",
+            Self::ContextPreparationFailed => "This action is temporarily unavailable.",
             Self::ResponseInProgress => "Stop the current response first.",
             Self::NoResponseRunning => "No response is running.",
             Self::WaitingForPermission => "Resolve the permission request first.",
@@ -133,6 +135,9 @@ impl ConversationCommandAvailability {
                     }
                     ConversationCommandDisabledReason::ContextStillPreparing => {
                         CommandUnavailableReason::ContextPreparing
+                    }
+                    ConversationCommandDisabledReason::ContextPreparationFailed => {
+                        return CommandAvailability::TemporarilyUnavailable;
                     }
                     ConversationCommandDisabledReason::ResponseInProgress => {
                         CommandUnavailableReason::ResponseInProgress
@@ -449,6 +454,7 @@ pub(crate) struct AgentChatConversationCommandFacts {
     pub(crate) response_in_progress: bool,
     pub(crate) waiting_for_permission: bool,
     pub(crate) context_preparing: bool,
+    pub(crate) context_failed: bool,
     pub(crate) composer_has_text: bool,
     pub(crate) retry_available: bool,
     pub(crate) has_response: bool,
@@ -510,6 +516,8 @@ pub(crate) fn agent_chat_conversation_commands(
     } else {
         let send_availability = if facts.waiting_for_permission {
             Some(ConversationCommandDisabledReason::WaitingForPermission)
+        } else if facts.context_failed {
+            Some(ConversationCommandDisabledReason::ContextPreparationFailed)
         } else if facts.context_preparing {
             Some(ConversationCommandDisabledReason::ContextStillPreparing)
         } else if !facts.composer_has_text {
@@ -1175,6 +1183,7 @@ mod conversation_actions_tests {
         let reasons = [
             ConversationCommandDisabledReason::TypeMessageFirst,
             ConversationCommandDisabledReason::ContextStillPreparing,
+            ConversationCommandDisabledReason::ContextPreparationFailed,
             ConversationCommandDisabledReason::ResponseInProgress,
             ConversationCommandDisabledReason::NoResponseRunning,
             ConversationCommandDisabledReason::WaitingForPermission,
@@ -1223,6 +1232,7 @@ mod conversation_actions_tests {
             response_in_progress: true,
             waiting_for_permission: false,
             context_preparing: false,
+            context_failed: false,
             composer_has_text: true,
             retry_available: false,
             has_response: true,
@@ -1370,6 +1380,24 @@ mod conversation_actions_tests {
         assert!(commands
             .iter()
             .all(|command| command.handler != AgentChatConversationCommand::Stop));
+        let failed_image = agent_chat_conversation_commands(AgentChatConversationCommandFacts {
+            composer_has_text: true,
+            context_failed: true,
+            ..Default::default()
+        });
+        let send = failed_image
+            .iter()
+            .find(|command| command.handler == AgentChatConversationCommand::Send)
+            .unwrap();
+        assert_eq!(
+            send.descriptor.availability.disabled_reason(),
+            Some("This action is temporarily unavailable.")
+        );
+        assert!(!send
+            .descriptor
+            .command_action()
+            .availability
+            .is_executable());
     }
 
     #[test]

@@ -439,6 +439,9 @@ pub(crate) struct AgentChatThread {
     /// Monotonic identity for background submit preparation. A cancellation
     /// or newer submit invalidates any late resolution result.
     context_resolution_id: u64,
+    /// Exact temporary paths currently preparing, or requiring explicit removal after failure.
+    pasted_image_preparations:
+        std::collections::HashMap<String, crate::pasted_image::PastedImagePreparation>,
     /// Pending permission request awaiting user decision.
     pub(crate) pending_permission: Option<AgentChatApprovalRequest>,
 
@@ -1201,6 +1204,7 @@ impl AgentChatThread {
             status: AgentChatThreadStatus::Idle,
             reliability_state,
             context_resolution_id: 0,
+            pasted_image_preparations: std::collections::HashMap::new(),
             pending_permission: None,
             pending_context_blocks: Vec::new(),
             pending_context_consumed: false,
@@ -1611,6 +1615,57 @@ impl AgentChatThread {
         })
     }
 
+    pub(crate) fn begin_pasted_image_preparation(&mut self, path: String) {
+        self.pasted_image_preparations
+            .insert(path, crate::pasted_image::PastedImagePreparation::Pending);
+    }
+
+    pub(crate) fn finish_pasted_image_preparation(&mut self, path: &str, succeeded: bool) -> bool {
+        let Some(state) = self.pasted_image_preparations.get_mut(path) else {
+            return false;
+        };
+        if succeeded {
+            self.pasted_image_preparations.remove(path);
+        } else {
+            *state = crate::pasted_image::PastedImagePreparation::Failed;
+        }
+        self.pending_context_items.iter().any(|item| {
+            matches!(&item.part, crate::ai::message_parts::AiContextPart::FilePath { path: item_path, .. } if item_path == path)
+        })
+    }
+
+    pub(crate) fn pasted_image_preparation(
+        &self,
+    ) -> Option<crate::pasted_image::PastedImagePreparation> {
+        use crate::pasted_image::PastedImagePreparation;
+        let mut pending = false;
+        for item in &self.pending_context_items {
+            let crate::ai::message_parts::AiContextPart::FilePath { path, .. } = &item.part else {
+                continue;
+            };
+            match self.pasted_image_preparations.get(path) {
+                Some(PastedImagePreparation::Failed) => {
+                    return Some(PastedImagePreparation::Failed)
+                }
+                Some(PastedImagePreparation::Pending) => pending = true,
+                None => {}
+            }
+        }
+        pending.then_some(PastedImagePreparation::Pending)
+    }
+
+    fn ensure_pasted_images_ready(&self) -> Result<(), String> {
+        match self.pasted_image_preparation() {
+            Some(crate::pasted_image::PastedImagePreparation::Pending) => {
+                Err("Wait for the pasted image to finish preparing.".into())
+            }
+            Some(crate::pasted_image::PastedImagePreparation::Failed) => {
+                Err("Remove the failed image and paste it again.".into())
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Submit the current input as a new user turn.
     ///
     /// If context is still bootstrapping (`Preparing`), the submit is queued
@@ -1620,6 +1675,8 @@ impl AgentChatThread {
     /// Prepends staged context blocks on the first submit, then clears them.
     /// Starts streaming events from the Agent Chat agent.
     pub(crate) fn submit_input(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        // Do not consume, expand, queue, or submit a draft containing an unfinished image.
+        self.ensure_pasted_images_ready()?;
         let input = self.input.text().to_string();
         let trimmed = input.trim();
         if trimmed.is_empty() {

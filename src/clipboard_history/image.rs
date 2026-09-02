@@ -43,7 +43,7 @@ pub fn encode_image_as_png(image: &arboard::ImageData) -> Result<String> {
 }
 
 /// Internal helper to encode image to PNG bytes
-fn encode_image_to_png_bytes(image: &arboard::ImageData) -> Result<Vec<u8>> {
+pub(crate) fn encode_image_to_png_bytes(image: &arboard::ImageData) -> Result<Vec<u8>> {
     use std::io::Cursor;
 
     let width = u32::try_from(image.width).context("Clipboard image width exceeds u32")?;

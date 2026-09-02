@@ -2060,7 +2060,8 @@ text_style.text_inset_left,
                         thread.status,
                         AgentChatThreadStatus::WaitingForPermission
                     ),
-                    context_preparing: self.context_capture_pending,
+                    context_preparing: self.context_capture_pending_for_thread(thread),
+                    context_failed: thread.pasted_image_preparation() == Some(crate::pasted_image::PastedImagePreparation::Failed),
                     composer_has_text: !thread.input.text().trim().is_empty()
                         || !thread.pending_context_items().is_empty(),
                     retry_available: Self::retryable_recovery_active(thread),
@@ -2243,10 +2244,15 @@ text_style.text_inset_left,
                     label: "Send",
                     selected: false,
                     enabled: !thread.input.text().trim().is_empty()
-                        && !self.context_capture_pending,
+                        && !self.context_capture_pending_for_thread(thread)
+                        && thread.pasted_image_preparation().is_none(),
                     disabled_reason: if thread.input.text().trim().is_empty() {
                         Some("type_message_first")
-                    } else if self.context_capture_pending {
+                    } else if thread.pasted_image_preparation()
+                        == Some(crate::pasted_image::PastedImagePreparation::Failed)
+                    {
+                        Some("image_paste_failed")
+                    } else if self.context_capture_pending_for_thread(thread) {
                         Some("context_capture_pending")
                     } else {
                         None
@@ -3487,7 +3493,12 @@ text_style.text_inset_left,
             return FooterDotStatus::Hidden;
         }
 
-        if self.context_capture_pending {
+        if self.live_thread().read(cx).pasted_image_preparation()
+            == Some(crate::pasted_image::PastedImagePreparation::Failed)
+        {
+            return FooterDotStatus::Error;
+        }
+        if self.is_context_capture_pending(cx) {
             return FooterDotStatus::Streaming;
         }
 
@@ -3514,7 +3525,12 @@ text_style.text_inset_left,
             return Some(status);
         }
 
-        if self.context_capture_pending {
+        if self.live_thread().read(cx).pasted_image_preparation()
+            == Some(crate::pasted_image::PastedImagePreparation::Failed)
+        {
+            return Some("Image paste failed");
+        }
+        if self.is_context_capture_pending(cx) {
             return Some("Loading context...");
         }
 
@@ -3872,70 +3888,118 @@ text_style.text_inset_left,
     }
 
     fn paste_image_from_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
-        use crate::prompts::chat::MAX_IMAGE_BYTES;
-        use base64::Engine as _;
-
-        // WP3: Quick AI accepts ordinary text paste only — local image/file
-        // attachments are a context-bearing capability it does not carry.
         if !self.capabilities(cx).local_attachments {
             return false;
         }
-
         let Ok(mut clipboard) = arboard::Clipboard::new() else {
             return false;
         };
         let Ok(image_data) = clipboard.get_image() else {
             return false;
         };
+        self.prepare_clipboard_image(image_data, cx)
+    }
 
-        let Ok(encoded) = crate::clipboard_history::encode_image_as_png(&image_data) else {
-            return false;
-        };
-        let base64_data = encoded.strip_prefix("png:").unwrap_or(&encoded);
-        let Ok(png_bytes) = base64::engine::general_purpose::STANDARD.decode(base64_data) else {
-            return false;
-        };
-
-        if png_bytes.len() > MAX_IMAGE_BYTES {
-            tracing::warn!(
-                target: "script_kit::tab_ai",
-                event = "agent_chat_pasted_image_rejected_too_large",
-                size_bytes = png_bytes.len(),
-                max_bytes = MAX_IMAGE_BYTES,
-            );
+    fn prepare_clipboard_image(
+        &mut self,
+        image_data: arboard::ImageData<'_>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::prompts::chat::MAX_IMAGE_BYTES;
+        if !self.capabilities(cx).local_attachments {
             return false;
         }
-
-        let Ok(path) = crate::pasted_image::write_png_bytes_to_temp_file(&png_bytes) else {
+        let Ok(temp_file) = crate::pasted_image::reserve_png_temp_file() else {
             return false;
         };
-        let prepared = crate::pasted_image::prepare_pasted_image(&path, &self.pasted_image_tokens);
-        let token = prepared.token.clone();
-        let insertion_text = prepared.insertion_text;
+        let path = temp_file.path().to_string_lossy().into_owned();
+        let prepared = crate::pasted_image::prepare_pasted_image(
+            &path,
+            &self.pasted_image_tokens,
+            self.live_thread().read(cx).input.text(),
+        );
+        let token = prepared.token;
+        let label = token.label.clone();
+        let thread = self.live_thread().clone();
 
-        self.live_thread().update(cx, move |thread, cx| {
-            thread.input.insert_str(&insertion_text);
+        // Reserve the token at the original caret before yielding. Completion
+        // only updates this thread's readiness; it never inserts into a later draft.
+        thread.update(cx, |thread, cx| {
+            thread.begin_pasted_image_preparation(path.clone());
+            thread.input.insert_str(&prepared.insertion_text);
             thread.notify_semantic_change(cx);
         });
-
-        let part = crate::ai::message_parts::AiContextPart::FilePath {
-            path,
-            label: token.label.clone(),
-        };
-        self.pasted_image_tokens.push(token.clone());
-        self.typed_mention_aliases.insert(token.token, part);
-        let safe_label = crate::logging::log_private_user_value(&token.label);
-        tracing::info!(
-            target: "script_kit::tab_ai",
-            event = "agent_chat_clipboard_image_pasted",
-            label_bytes = safe_label.raw_bytes,
-            label_sha256 = %safe_label.sha256,
-            width = image_data.width,
-            height = image_data.height,
-            size_bytes = png_bytes.len(),
+        self.typed_mention_aliases.insert(
+            token.token.clone(),
+            crate::ai::message_parts::AiContextPart::FilePath {
+                path: path.clone(),
+                label: label.clone(),
+            },
         );
+        self.pasted_image_tokens.push(token);
         self.sync_inline_mentions(cx);
 
+        let width = image_data.width;
+        let height = image_data.height;
+        let image_data = arboard::ImageData {
+            width,
+            height,
+            bytes: std::borrow::Cow::Owned(image_data.bytes.into_owned()),
+        };
+        let preparation = cx.background_executor().spawn(async move {
+            let png_bytes = crate::clipboard_history::encode_image_to_png_bytes(&image_data)?;
+            anyhow::ensure!(
+                png_bytes.len() <= MAX_IMAGE_BYTES,
+                "Pasted image exceeds the attachment size limit"
+            );
+            let size_bytes = png_bytes.len();
+            crate::pasted_image::write_png_bytes_to_temp_file(temp_file, &png_bytes)?;
+            Ok::<_, anyhow::Error>(size_bytes)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = preparation.await;
+            let succeeded = result.is_ok();
+            let _ = thread.update(cx, |thread, cx| {
+                if thread.finish_pasted_image_preparation(&path, succeeded) {
+                    if !succeeded {
+                        thread.push_notice(
+                            "Image paste failed",
+                            "Remove the failed image and paste it again. Your message has not been sent.",
+                            cx,
+                        );
+                    }
+                    thread.notify_semantic_change(cx);
+                }
+            });
+            match result {
+                Ok(size_bytes) => {
+                    let safe_label = crate::logging::log_private_user_value(&label);
+                    tracing::info!(
+                        target: "script_kit::tab_ai",
+                        event = "agent_chat_clipboard_image_pasted",
+                        label_bytes = safe_label.raw_bytes,
+                        label_sha256 = %safe_label.sha256,
+                        width,
+                        height,
+                        size_bytes,
+                    );
+                }
+                Err(error) => {
+                    let safe_error = crate::logging::log_private_user_value(&error.to_string());
+                    tracing::warn!(
+                        target: "script_kit::tab_ai",
+                        event = "agent_chat_clipboard_image_prepare_failed",
+                        error_bytes = safe_error.raw_bytes,
+                        error_sha256 = %safe_error.sha256,
+                    );
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.advance_semantic_revision();
+                cx.notify();
+            });
+        })
+        .detach();
         true
     }
 
@@ -4050,6 +4114,15 @@ text_style.text_inset_left,
 
     /// Submit the current input, expanding typed display tokens to full paths first.
     pub(crate) fn submit_with_expanded_tokens(&mut self, cx: &mut Context<Self>) {
+        if self.is_context_capture_pending(cx)
+            || self
+                .live_thread()
+                .read(cx)
+                .pasted_image_preparation()
+                .is_some()
+        {
+            return;
+        }
         self.expand_typed_tokens_for_submit(cx);
         // A submit ends any prompt-history cycle: the next plain Up starts a
         // fresh cycle whose newest entry is the prompt just submitted.
@@ -5198,8 +5271,14 @@ text_style.text_inset_left,
     }
 
     /// Whether a deferred context capture is in-flight (drives footer loading dot).
-    pub(crate) fn is_context_capture_pending(&self) -> bool {
+    pub(crate) fn is_context_capture_pending(&self, cx: &App) -> bool {
+        self.context_capture_pending_for_thread(self.live_thread().read(cx))
+    }
+
+    fn context_capture_pending_for_thread(&self, thread: &AgentChatThread) -> bool {
         self.context_capture_pending
+            || thread.pasted_image_preparation()
+                == Some(crate::pasted_image::PastedImagePreparation::Pending)
     }
 
     /// Set the context capture pending state (drives footer loading dot).

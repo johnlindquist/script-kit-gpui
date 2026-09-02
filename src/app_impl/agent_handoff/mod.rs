@@ -1426,10 +1426,14 @@ impl ScriptListApp {
                 return false;
             }
 
-            let Ok(path) = crate::pasted_image::write_png_bytes_to_temp_file(&png_bytes) else {
+            let Ok(temp_file) = crate::pasted_image::reserve_png_temp_file() else {
                 return false;
             };
-            let prepared = crate::pasted_image::prepare_pasted_image(&path, &[]);
+            let Ok(path) = crate::pasted_image::write_png_bytes_to_temp_file(temp_file, &png_bytes)
+            else {
+                return false;
+            };
+            let prepared = crate::pasted_image::prepare_pasted_image(&path, &[], "");
             let label = prepared.token.label.clone();
             let part = crate::ai::message_parts::AiContextPart::FilePath {
                 path,

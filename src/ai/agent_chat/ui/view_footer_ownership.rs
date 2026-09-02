@@ -1,11 +1,18 @@
 impl AgentChatView {
     fn is_main_footer_host(window: &Window) -> bool {
         let handle = window.window_handle();
-        crate::windows::list_automation_windows().iter().any(|info| {
-            info.kind == crate::protocol::AutomationWindowKind::Main
-                && info.generation.is_some_and(|generation| crate::windows::get_runtime_window_handle_for_generation(&info.id, generation) == Some(handle))
-        }) || (!crate::runtime_policy::is_owned_evaluation()
-            && crate::get_main_window_handle().is_some_and(|main| main == handle))
+        crate::windows::list_automation_windows()
+            .iter()
+            .any(|info| {
+                info.kind == crate::protocol::AutomationWindowKind::Main
+                    && info.generation.is_some_and(|generation| {
+                        crate::windows::get_runtime_window_handle_for_generation(
+                            &info.id, generation,
+                        ) == Some(handle)
+                    })
+            })
+            || (!crate::runtime_policy::is_owned_evaluation()
+                && crate::get_main_window_handle().is_some_and(|main| main == handle))
     }
 
     /// The footer-owner decision inputs, resolved once from the live window and
@@ -154,7 +161,9 @@ impl AgentChatView {
             let _lifetime = lifetime;
             while let Ok(event) = rx.recv().await {
                 if let Err(error) = this.update_in(cx, |view, window, cx| {
-                    let Some(action) = event.accept(window) else { return; };
+                    let Some(action) = event.accept(window) else {
+                        return;
+                    };
                     view.dispatch_footer_button(action, window, cx);
                     event.complete(window);
                 }) {
@@ -201,7 +210,9 @@ impl AgentChatView {
                 thread.status,
                 AgentChatThreadStatus::WaitingForPermission
             ),
-            context_preparing: self.context_capture_pending,
+            context_preparing: self.context_capture_pending_for_thread(thread),
+            context_failed: thread.pasted_image_preparation()
+                == Some(crate::pasted_image::PastedImagePreparation::Failed),
             composer_has_text: !thread.input.text().trim().is_empty()
                 || !thread.pending_context_items().is_empty(),
             retry_available: Self::retryable_recovery_active(thread),
