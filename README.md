@@ -360,6 +360,8 @@ The managed lane disables incremental compilation authoritatively (`CARGO_INCREM
 
 The **40 GiB budget covers all of `target-agent/`**, including pools, exports, shared caches, pending publications, runtime, and quarantine. The **25 GiB free-space floor** and **two-worker ceiling** remain. Admission, sampled cancellation, and postflight checks stop growth on resource refusal; this is **not a filesystem-enforced hard quota**. Allocated-block accounting deduplicates hardlinks within the budget scope; unique APFS extent usage is unknown. External caches, `target/`, and evidence directories are separately reported, not silently charged to this budget.
 
+`SCRIPT_KIT_AGENT_INVENTORY_TIMEOUT_MS` optionally sets the complete-census deadline in integer milliseconds (default `8000`, range `1`–`300000`); incomplete measurements still refuse admission.
+
 No automatic eviction, budget increase, low-disk bypass, or shared-cache clear follows a refusal. Historical 65/66 GiB allowances are not reusable permission. Inspect storage and exact locks, then stop the batch until the resource or ownership issue is resolved.
 
 For reviewed noncompiler changes, inspect the route before running it; paths are explicit inputs, not an automatically discovered Git diff:

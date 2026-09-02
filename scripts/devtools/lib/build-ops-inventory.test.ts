@@ -286,7 +286,10 @@ test("free observation retries are bounded and do not retain stale available-spa
 
 test("a hung scan is cancelled on deadline, never overlapped by another allocation scan", async () => {
   const f = guardFixture(), guard = f.start();
-  await f.advance(9_000);
+  const deadline = Number(process.env.SCRIPT_KIT_AGENT_INVENTORY_TIMEOUT_MS ?? 8_000) + 1_000;
+  await f.advance(deadline - 1);
+  expect(f.refusals).toEqual([]); expect(f.worker.requests).toHaveLength(1);
+  await f.advance(1);
   expect(f.worker.requests).toHaveLength(1); expect(f.refusals.map(error => error.code)).toEqual(["resource_observation_incomplete"]);
   expect(await guard.stop()).toMatchObject({ complete: false, workerClosed: true }); expect(f.timers.size).toBe(0);
 });

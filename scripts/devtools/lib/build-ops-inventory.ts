@@ -14,7 +14,7 @@ export function allocation(path: string, excluded: readonly string[] = [], seen 
 }
 
 const ALLOCATION_ENTRY_LIMIT = 250_000;
-const ALLOCATION_TIMEOUT_MS = 8_000;
+const ALLOCATION_TIMEOUT_MS = positiveLimit("SCRIPT_KIT_AGENT_INVENTORY_TIMEOUT_MS", 8_000, 1, 300_000);
 
 function protectedOutputRoot(child: string): boolean {
   if (!child) return true;
@@ -79,11 +79,12 @@ function targetAgentAllocation(root: string): AllocationObservation {
     return { present: false, complete: false, logicalBytes: 0, allocatedBytes: 0, entries: 0, linksNotFollowed: 0, errors: [String(error)] };
   }
 }
-function positiveLimit(name: string, fallback: number): number {
+function positiveLimit(name: string, fallback: number, minimum = 0, maximum = Number.MAX_SAFE_INTEGER): number {
   const value = process.env[name];
   if (value === undefined) return fallback;
-  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`invalid_${name}`);
-  return Number(value);
+  const parsed = Number(value);
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) throw new Error(`invalid_${name}`);
+  return parsed;
 }
 function byteLimit(name: string, fallback: number): number {
   const bytes = positiveLimit(name, fallback) * 1024 ** 3;
