@@ -2425,13 +2425,9 @@ text_style.text_inset_left,
         ) {
             return false;
         }
-        self.live_thread()
-            .update(cx, |thread, cx| thread.clear_messages(cx));
-        if let Some(transcript) = &self.transcript {
-            transcript.update(cx, |transcript, cx| transcript.clear_collapsed_ids(cx));
-        }
-        self.notify_semantic_change(cx);
-        true
+        // Keep the current conversation bound unless a fresh connection and
+        // save identity have been created successfully.
+        self.start_new_thread(cx)
     }
 
     fn latest_assistant_response_text(thread: &AgentChatThread) -> Option<String> {
@@ -5450,7 +5446,7 @@ text_style.text_inset_left,
 
     /// Start a fresh thread on a new Pi connection. The current thread keeps
     /// streaming in the background and appears in the Cmd+K Threads section.
-    pub(crate) fn start_new_thread(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_new_thread(&mut self, cx: &mut Context<Self>) -> bool {
         // BC-1 (Oracle seat 3): `start_new_thread` RETAINS the current thread
         // (pushing it onto `retained_threads` via `activate_session_thread`) and
         // spins up a persistent multi-thread surface. Both are retained-thread
@@ -5468,10 +5464,10 @@ text_style.text_inset_left,
                 effective_session_policy = ?self.effective_session_policy(cx),
                 "Refused new-thread start: session policy has no retained-thread capability"
             );
-            return;
+            return false;
         }
         let AgentChatSession::Live(current) = &self.session else {
-            return;
+            return false;
         };
         let requirements = current.read(cx).current_setup_requirements();
         match super::hosted::spawn_hosted_thread(None, requirements, cx) {
@@ -5483,6 +5479,7 @@ text_style.text_inset_left,
                     event = "agent_chat_new_thread_started",
                     retained_count = self.retained_threads.len(),
                 );
+                true
             }
             Err(error) => {
                 tracing::warn!(
@@ -5490,6 +5487,7 @@ text_style.text_inset_left,
                     event = "agent_chat_new_thread_failed",
                     error = %error,
                 );
+                false
             }
         }
     }
