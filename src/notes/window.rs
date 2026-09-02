@@ -736,6 +736,8 @@ pub struct NotesApp {
     /// Bounded recent focus-owner transition timeline for runtime UX proof.
     focus_transition_log: Vec<NotesFocusTransition>,
 
+    /// Bounded parsed sources reused across keystrokes; invalidated by actual text.
+    notes_ghost_corpus: crate::notes::ghost::NotesGhostCorpus,
     /// Current deterministic ghost autocomplete prediction for the editor.
     notes_ghost_prediction: Option<crate::notes::ghost::NotesGhostPrediction>,
     /// Monotonic generation used to reject stale ghost autocomplete accepts.

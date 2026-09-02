@@ -88,14 +88,71 @@ struct NotesGhostCandidate {
 }
 
 #[derive(Clone, Debug)]
-struct ScoredCandidate {
-    candidate: NotesGhostCandidate,
+struct ScoredCandidate<'a> {
+    candidate: &'a NotesGhostCandidate,
     suffix: String,
     score: i32,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct NotesGhostCorpus {
+    sources: Vec<CachedGhostSource>,
+}
+
+#[derive(Debug)]
+struct CachedGhostSource {
+    text: String,
+    at_limit: bool,
+    source_kind: NotesGhostSourceKind,
+    source_rank: usize,
+    candidates: Vec<NotesGhostCandidate>,
+}
+
+impl NotesGhostCorpus {
+    fn update_source(
+        &mut self,
+        index: usize,
+        source_kind: NotesGhostSourceKind,
+        source_rank: usize,
+        text: &str,
+        max_chars: usize,
+    ) {
+        if self.sources.get(index).is_some_and(|source| {
+            source.source_kind == source_kind
+                && source.source_rank == source_rank
+                && if source.at_limit {
+                    text.starts_with(&source.text)
+                } else {
+                    text == source.text
+                }
+        }) {
+            return;
+        }
+
+        // Compare the actual bounded text, not timestamps: imported or externally
+        // edited notes can change content without advancing their stored revision.
+        let text = truncate_chars(text, max_chars);
+        let at_limit = text.chars().count() == max_chars;
+        let mut candidates = Vec::new();
+        collect_candidates_from_text(source_kind, source_rank, &text, &mut candidates);
+        let source = CachedGhostSource {
+            text,
+            at_limit,
+            source_kind,
+            source_rank,
+            candidates,
+        };
+        if let Some(slot) = self.sources.get_mut(index) {
+            *slot = source;
+        } else {
+            self.sources.push(source);
+        }
+    }
+}
+
 pub(crate) fn compute_notes_ghost_prediction(
     input: NotesGhostInput<'_>,
+    corpus: &mut NotesGhostCorpus,
 ) -> Option<NotesGhostPrediction> {
     let line = current_line_prefix(input.editor_text, input.selection.clone())?;
 
@@ -109,13 +166,14 @@ pub(crate) fn compute_notes_ghost_prediction(
         return None;
     }
 
-    let mut candidates = Vec::new();
-    collect_candidates_from_text(
+    corpus.update_source(
+        0,
         NotesGhostSourceKind::CurrentNote,
         0,
-        &truncate_chars(input.editor_text, MAX_SOURCE_CHARS_CURRENT_NOTE),
-        &mut candidates,
+        input.editor_text,
+        MAX_SOURCE_CHARS_CURRENT_NOTE,
     );
+    let mut source_count = 1;
 
     for (rank, note) in input
         .notes
@@ -125,12 +183,14 @@ pub(crate) fn compute_notes_ghost_prediction(
         .take(MAX_OTHER_NOTES)
         .enumerate()
     {
-        collect_candidates_from_text(
+        corpus.update_source(
+            source_count,
             NotesGhostSourceKind::OtherNote,
             rank,
-            &truncate_chars(&note.content, MAX_SOURCE_CHARS_OTHER_NOTE),
-            &mut candidates,
+            &note.content,
+            MAX_SOURCE_CHARS_OTHER_NOTE,
         );
+        source_count += 1;
     }
 
     for (rank, clip) in input
@@ -139,34 +199,35 @@ pub(crate) fn compute_notes_ghost_prediction(
         .take(MAX_CLIPBOARD_TEXTS)
         .enumerate()
     {
-        collect_candidates_from_text(
+        corpus.update_source(
+            source_count,
             NotesGhostSourceKind::Clipboard,
             rank,
-            &truncate_chars(&clip.text, MAX_SOURCE_CHARS_CLIPBOARD),
-            &mut candidates,
+            &clip.text,
+            MAX_SOURCE_CHARS_CLIPBOARD,
         );
+        source_count += 1;
     }
 
-    let mut scored = candidates
-        .into_iter()
+    corpus.sources.truncate(source_count);
+    let best = corpus
+        .sources
+        .iter()
+        .flat_map(|source| &source.candidates)
         .filter_map(|candidate| score_candidate(&line.text, candidate))
-        .collect::<Vec<_>>();
-
-    scored.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| {
-                b.candidate
-                    .source_kind
-                    .priority()
-                    .cmp(&a.candidate.source_kind.priority())
-            })
-            .then_with(|| a.candidate.source_rank.cmp(&b.candidate.source_rank))
-            .then_with(|| a.suffix.chars().count().cmp(&b.suffix.chars().count()))
-            .then_with(|| a.candidate.text.cmp(&b.candidate.text))
-    });
-
-    let best = scored.into_iter().next()?;
+        .min_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| {
+                    b.candidate
+                        .source_kind
+                        .priority()
+                        .cmp(&a.candidate.source_kind.priority())
+                })
+                .then_with(|| a.candidate.source_rank.cmp(&b.candidate.source_rank))
+                .then_with(|| a.suffix.chars().count().cmp(&b.suffix.chars().count()))
+                .then_with(|| a.candidate.text.cmp(&b.candidate.text))
+        })?;
     let confidence = (best.score as f32 / 1100.0).clamp(0.0, 1.0);
     if confidence < MIN_ACCEPT_CONFIDENCE {
         return None;
@@ -289,7 +350,10 @@ fn collect_candidates_from_text(
     }
 }
 
-fn score_candidate(prefix: &str, candidate: NotesGhostCandidate) -> Option<ScoredCandidate> {
+fn score_candidate<'a>(
+    prefix: &str,
+    candidate: &'a NotesGhostCandidate,
+) -> Option<ScoredCandidate<'a>> {
     let prefix = prefix.trim_start();
     let suffix = suffix_for_prefix(prefix, &candidate.text)?;
     if suffix.trim().is_empty() || looks_sensitive(&suffix) {
@@ -405,8 +469,11 @@ mod tests {
     fn notes_ghost_returns_current_note_suffix_for_matching_line_prefix() {
         let notes = vec![note("Call Alice about alpha launch blockers\n\nCall Al")];
         let text = notes[0].content.as_str();
-        let prediction = compute_notes_ghost_prediction(input(text, text.len(), &notes, &[]))
-            .expect("current note line should produce suffix");
+        let prediction = compute_notes_ghost_prediction(
+            input(text, text.len(), &notes, &[]),
+            &mut NotesGhostCorpus::default(),
+        )
+        .expect("current note line should produce suffix");
         assert_eq!(prediction.source_kind, NotesGhostSourceKind::CurrentNote);
         assert_eq!(prediction.suffix, "ice about alpha launch blockers");
         assert!(prediction.accepts_tab);
@@ -416,39 +483,85 @@ mod tests {
     fn notes_ghost_uses_other_note_when_current_note_has_no_candidate() {
         let current = note("Email Da");
         let other = note("Email Dana about beta launch blockers");
-        let notes = vec![current, other];
+        let mut notes = vec![current, other];
+        let mut corpus = NotesGhostCorpus::default();
         let text = notes[0].content.as_str();
-        let prediction = compute_notes_ghost_prediction(input(text, text.len(), &notes, &[]))
-            .expect("other note should produce suffix");
+        let prediction =
+            compute_notes_ghost_prediction(input(text, text.len(), &notes, &[]), &mut corpus)
+                .expect("other note should produce suffix");
         assert_eq!(prediction.source_kind, NotesGhostSourceKind::OtherNote);
         assert_eq!(prediction.suffix, "na about beta launch blockers");
+
+        let prediction =
+            compute_notes_ghost_prediction(input("Email D", 7, &notes, &[]), &mut corpus)
+                .expect("typing must reuse the other note with the new prefix");
+        assert_eq!(prediction.suffix, "ana about beta launch blockers");
+
+        // An external replacement need not change the note's timestamp.
+        notes[1].content = "Email David about release blockers".into();
+        let prediction =
+            compute_notes_ghost_prediction(input("Email Da", 8, &notes, &[]), &mut corpus)
+                .expect("changed source content must replace cached candidates");
+        assert_eq!(prediction.suffix, "vid about release blockers");
+
+        let mut selected_other = input("Email Da", 8, &notes, &[]);
+        selected_other.selected_note_id = Some(notes[1].id);
+        assert!(compute_notes_ghost_prediction(selected_other, &mut corpus).is_none());
+
+        notes[1].deleted_at = Some(chrono::Utc::now());
+        assert!(
+            compute_notes_ghost_prediction(input("Email Da", 8, &notes, &[]), &mut corpus)
+                .is_none()
+        );
+        notes.truncate(1);
+        assert!(
+            compute_notes_ghost_prediction(input("Email Da", 8, &notes, &[]), &mut corpus)
+                .is_none()
+        );
     }
 
     #[test]
     fn notes_ghost_uses_recent_clipboard_text_when_notes_have_no_candidate() {
         let notes = vec![note("Review pl")];
-        let clips = vec![NotesGhostClipboardText {
+        let mut clips = vec![NotesGhostClipboardText {
             text: "Review planning packet before launch".to_string(),
         }];
         let text = notes[0].content.as_str();
-        let prediction = compute_notes_ghost_prediction(input(text, text.len(), &notes, &clips))
-            .expect("clipboard text should produce suffix");
+        let mut corpus = NotesGhostCorpus::default();
+        let prediction =
+            compute_notes_ghost_prediction(input(text, text.len(), &notes, &clips), &mut corpus)
+                .expect("clipboard text should produce suffix");
         assert_eq!(prediction.source_kind, NotesGhostSourceKind::Clipboard);
         assert_eq!(prediction.suffix, "anning packet before launch");
+
+        clips[0].text = "Review platform changes before launch".into();
+        let prediction =
+            compute_notes_ghost_prediction(input(text, text.len(), &notes, &clips), &mut corpus)
+                .expect("clipboard changes must replace cached candidates");
+        assert_eq!(prediction.suffix, "atform changes before launch");
+        clips.clear();
+        assert!(compute_notes_ghost_prediction(
+            input(text, text.len(), &notes, &clips),
+            &mut corpus
+        )
+        .is_none());
     }
 
     #[test]
     fn notes_ghost_rejects_non_collapsed_selection() {
         let notes = vec![note("Call Alice\nCall Al")];
         let text = notes[0].content.as_str();
-        let prediction = compute_notes_ghost_prediction(NotesGhostInput {
-            editor_text: text,
-            selection: 0..4,
-            selected_note_id: Some(notes[0].id),
-            notes: &notes,
-            clipboard_texts: &[],
-            generation: 1,
-        });
+        let prediction = compute_notes_ghost_prediction(
+            NotesGhostInput {
+                editor_text: text,
+                selection: 0..4,
+                selected_note_id: Some(notes[0].id),
+                notes: &notes,
+                clipboard_texts: &[],
+                generation: 1,
+            },
+            &mut NotesGhostCorpus::default(),
+        );
         assert!(prediction.is_none());
     }
 
@@ -456,14 +569,22 @@ mod tests {
     fn notes_ghost_rejects_short_prefix() {
         let notes = vec![note("Call Alice\nC")];
         let text = notes[0].content.as_str();
-        assert!(compute_notes_ghost_prediction(input(text, text.len(), &notes, &[])).is_none());
+        assert!(compute_notes_ghost_prediction(
+            input(text, text.len(), &notes, &[]),
+            &mut NotesGhostCorpus::default()
+        )
+        .is_none());
     }
 
     #[test]
     fn notes_ghost_rejects_sensitive_candidates() {
         let notes = vec![note("token=secret-value\n\nTo")];
         let text = notes[0].content.as_str();
-        assert!(compute_notes_ghost_prediction(input(text, text.len(), &notes, &[])).is_none());
+        assert!(compute_notes_ghost_prediction(
+            input(text, text.len(), &notes, &[]),
+            &mut NotesGhostCorpus::default()
+        )
+        .is_none());
     }
 
     #[test]
@@ -472,8 +593,11 @@ mod tests {
         let other = note("Meeting Notes\n\nAgenda items");
         let notes = vec![current, other];
         let text = notes[0].content.as_str();
-        let prediction = compute_notes_ghost_prediction(input(text, text.len(), &notes, &[]))
-            .expect("open wiki link should complete from note title");
+        let prediction = compute_notes_ghost_prediction(
+            input(text, text.len(), &notes, &[]),
+            &mut NotesGhostCorpus::default(),
+        )
+        .expect("open wiki link should complete from note title");
         assert_eq!(prediction.source_kind, NotesGhostSourceKind::NoteTitle);
         assert_eq!(prediction.suffix, "ting Notes]]");
         assert!(prediction.accepts_tab);
@@ -486,8 +610,11 @@ mod tests {
         let shorter = note("Project Plan\n\nbody");
         let notes = vec![current, longer, shorter];
         let text = notes[0].content.as_str();
-        let prediction = compute_notes_ghost_prediction(input(text, text.len(), &notes, &[]))
-            .expect("open wiki link should complete");
+        let prediction = compute_notes_ghost_prediction(
+            input(text, text.len(), &notes, &[]),
+            &mut NotesGhostCorpus::default(),
+        )
+        .expect("open wiki link should complete");
         assert_eq!(prediction.suffix, "ject Plan]]");
     }
 
@@ -497,7 +624,10 @@ mod tests {
         let other = note("Done Link Extended\n\nbody");
         let notes = vec![current, other];
         let text = notes[0].content.as_str();
-        let prediction = compute_notes_ghost_prediction(input(text, text.len(), &notes, &[]));
+        let prediction = compute_notes_ghost_prediction(
+            input(text, text.len(), &notes, &[]),
+            &mut NotesGhostCorpus::default(),
+        );
         // No open `[[`; should not produce a NoteTitle prediction.
         assert!(prediction
             .map(|p| p.source_kind != NotesGhostSourceKind::NoteTitle)

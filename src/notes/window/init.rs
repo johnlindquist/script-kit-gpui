@@ -255,6 +255,7 @@ impl NotesApp {
             pending_focus_surface: None,
             focus_transition_generation: 0,
             focus_transition_log: Vec::new(),
+            notes_ghost_corpus: crate::notes::ghost::NotesGhostCorpus::default(),
             notes_ghost_prediction: None,
             notes_ghost_generation: 0,
             notes_ghost_last_action: None,
@@ -691,6 +692,7 @@ impl NotesApp {
                 clipboard_texts: &clipboard_texts,
                 generation: self.notes_ghost_generation,
             },
+            &mut self.notes_ghost_corpus,
         );
 
         if self.notes_ghost_prediction.is_some() {
