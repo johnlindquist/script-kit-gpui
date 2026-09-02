@@ -356,6 +356,12 @@ jobs:
         env:
           SCRIPT_KIT_NONINTERACTIVE: "0"
           PI_AGENT_RUST_TARGET_DIR: ${{ runner.temp }}/pi_agent_rust-target
+          # The pinned CLI needs a credential before entering its read-only model RPC.
+          # This synthetic fixture never sends an inference request or uses real secrets.
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-sidecar-health-agent
+          PI_PROVIDER: openai
+          PI_MODEL: gpt-5.4
+          OPENAI_API_KEY: script-kit-ci-metadata-only-fixture
         run: bash scripts/prepare-pi-sidecar.sh
 
       - name: Verify Pi sidecar
