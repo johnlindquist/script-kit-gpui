@@ -401,7 +401,8 @@ impl DayPageDocumentSession {
         if let Some(note_id_text) = note_binding_id {
             let note_id = crate::notes::NoteId::parse(&note_id_text)
                 .with_context(|| format!("parsing day page note id {note_id_text}"))?;
-            crate::notes::init_notes_db().context("initializing notes before day page save")?;
+            // The note switcher initializes storage before loading this binding.
+            // Saving must not repeat schema checks and whole-corpus metadata backfill.
             let mut note = crate::notes::get_note(note_id)?
                 .with_context(|| format!("loading note before day page save {note_id}"))?;
             note.set_content(content);
